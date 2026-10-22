@@ -117,6 +117,13 @@ export interface TaskContext {
    */
   autonomousBooking?: {
     settings: { enabled: boolean; threshold?: number };
+    /**
+     * `tenant_settings.owner_phone`, the number the owner UNDO SMS goes to.
+     * No number on file ⇒ the lane reports `owner_cell_missing`.
+     */
+    ownerPhone: string | null | undefined;
+    /** True only when the entry point can send the owner UNDO SMS. */
+    undoChannelAvailable: boolean;
     inboundReceptionistSource: boolean;
     pendingReferenceCount: number;
     platformDisabled?: boolean;
@@ -159,6 +166,56 @@ export interface TaskResult {
 export interface TaskHandler {
   taskType: ProposalType;
   handle(context: TaskContext): Promise<TaskResult>;
+}
+
+/**
+ * OBS-2 — the join keys every drafting handler passes on its
+ * `gateway.complete`, so the ai_runs row the completion writes can be found
+ * from the conversation it served: `ai_runs.correlation_id` is the
+ * conversation id (else, for a memo with none, the recording id) instead of
+ * a gateway-minted random uuid. `sessionId` groups the trace with the
+ * classifier's (which passes the conversation id as its session). No new
+ * column: correlation_id already exists. Spread into the request:
+ * `gateway.complete({ ..., ...draftingRunMetadata(context) })`.
+ */
+export function draftingRunMetadata(
+  context: Pick<TaskContext, 'conversationId' | 'recordingId'>,
+): { metadata?: Record<string, unknown> } {
+  const correlationId = context.conversationId ?? context.recordingId;
+  if (!correlationId) return {};
+  return {
+    metadata: {
+      correlationId,
+      ...(context.conversationId ? { sessionId: context.conversationId } : {}),
+    },
+  };
+}
+
+/**
+ * OBS-2 — link a proposal to the run that authored its payload: spread into
+ * the CreateProposalInput. Only when the gateway persisted a run
+ * (`proposals.ai_run_id` is an FK to `ai_runs(id)`, so never a made-up id).
+ */
+export function draftingRunLink(
+  response: { aiRunId?: string } | null | undefined,
+): { aiRunId?: string } {
+  return response?.aiRunId ? { aiRunId: response.aiRunId } : {};
+}
+
+/**
+ * OBS-2 — record which classifier run routed the turn to this drafting
+ * handler (`sourceContext.classifierAiRunId`). The proposal's own `aiRunId`
+ * is the DRAFTING run; this keeps the routing decision reachable too.
+ */
+export function withClassifierRun<P extends Pick<Proposal, 'sourceContext'>>(
+  proposal: P,
+  classifierAiRunId: string | undefined,
+): P {
+  if (!classifierAiRunId) return proposal;
+  return {
+    ...proposal,
+    sourceContext: { ...(proposal.sourceContext ?? {}), classifierAiRunId },
+  };
 }
 
 export class CreateCustomerTaskHandler implements TaskHandler {

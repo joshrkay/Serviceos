@@ -7,12 +7,17 @@ import { assertValidProposalPayload } from '../proposals/contracts';
 import { INTENT_TO_PROPOSAL_TYPE } from '../proposals/voice-intent-map';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
 import { routeUnsupervisedProposal, confidenceMetaBlocksAutoApprove } from '../proposals/auto-approve';
+import {
+  AUTO_APPROVE_DIRECT_PERMISSION,
+  holdIfCallerCannotApprove,
+} from '../proposals/caller-approval-gate';
+import type { Mode } from '../proposals/auto-approve';
 import { getSupervisorReviewGate } from '../ai/supervisor/review-gate';
 import {
   AUTONOMOUS_LANE_PROPOSAL_TYPES,
   autonomousLaneEvaluationFor,
 } from '../proposals/autonomous-lane';
-import { createOneTapUndoToken } from '../proposals/one-tap-undo';
+import { sendLaneUndoSms, type LaneUndoChannel } from '../proposals/lane-undo-sms';
 import { createAuditEvent } from '../audit/audit';
 import {
   askForExecutabilityGaps,
@@ -23,7 +28,11 @@ import { renderProposalSms, renderChainSms } from '../proposals/sms/render';
 import type { OutboundAnchorKind } from '../proposals/sms/sms-event';
 import type { RouteUnsupervisedProposalDeps } from '../proposals/auto-approve';
 import type { AuditRepository } from '../audit/audit';
-import type { SettingsRepository, UnsupervisedProposalRouting } from '../settings/settings';
+import type {
+  SettingsRepository,
+  TenantSettings,
+  UnsupervisedProposalRouting,
+} from '../settings/settings';
 import type { CurrentQuoteResolver } from '../conversations/negotiation/current-quote-resolver';
 import { ConflictError } from '../shared/errors';
 import { voiceProposalIdempotencyKey } from '../voice/voice-audit';
@@ -69,7 +78,7 @@ import {
   EntityResolver,
 } from '../ai/resolution/entity-resolver';
 import { resolveVoiceEntityReferences } from '../ai/agents/customer-calling/entity-resolution';
-import { TaskHandler, TaskContext, TaskResult } from '../ai/tasks/task-handlers';
+import { TaskHandler, TaskContext, TaskResult, withClassifierRun } from '../ai/tasks/task-handlers';
 import type { StandingInstruction } from '../instructions/standing-instructions';
 import { selectInjectedStandingInstructions } from '../ai/standing-instructions-context';
 // B5 — the "core" intent taxonomy's task handlers are now built by the
@@ -189,12 +198,41 @@ export interface UnsupervisedRoutingDeps extends RouteUnsupervisedProposalDeps {
     kind: OutboundAnchorKind;
   }) => Promise<void>;
   /**
-   * UB-D / D3 — builds the public one-tap UNDO URL for a lane-approved
-   * booking's owner SMS (mirrors `buildApproveUrl`; production wires
-   * `/public/proposals/one-tap-undo?token=…`). The undo token is minted
-   * with the same `secret` the approve tokens use.
+   * UB-D / D3 — the owner one-tap UNDO channel for a lane-approved booking,
+   * validated by `buildLaneUndoChannel` (sender, secret, public undo link)
+   * and checked per booking with `canDeliver()`. Absent or undeliverable,
+   * the lane reports `undo_channel_unavailable`.
    */
-  buildUndoUrl?: (token: string) => string;
+  laneUndo?: LaneUndoChannel;
+}
+
+/** The router's D-015 lane settings, read from one tenant_settings row. */
+export interface AutonomousBookingRouterSettings {
+  enabled: boolean;
+  threshold?: number;
+  ownerPhone?: string | null;
+}
+
+/**
+ * D-015 — the lane settings from a tenant_settings row. The owner cell is
+ * `owner_phone` only, never the backup supervisor's mobile (unlike the
+ * unsupervised-routing SMS, which falls back to it): the UNDO SMS must reach
+ * the owner.
+ */
+export function autonomousBookingSettingsFrom(
+  s: Pick<
+    TenantSettings,
+    'autonomousBookingEnabled' | 'autonomousBookingThreshold' | 'ownerPhone'
+  > | null | undefined,
+): AutonomousBookingRouterSettings | undefined {
+  if (!s) return undefined;
+  return {
+    enabled: s.autonomousBookingEnabled ?? false,
+    ...(s.autonomousBookingThreshold !== undefined
+      ? { threshold: s.autonomousBookingThreshold }
+      : {}),
+    ownerPhone: s.ownerPhone ?? null,
+  };
 }
 
 export interface VoiceActionRouterDeps {
@@ -305,7 +343,8 @@ export interface VoiceActionRouterDeps {
   >;
   /**
    * UB-D / D-015 — resolves the tenant's autonomous booking lane settings
-   * (tenant_settings.autonomous_booking_enabled / _threshold). Consulted
+   * (tenant_settings.autonomous_booking_enabled / _threshold, and owner_phone,
+   * the owner cell the lane requires and the UNDO SMS goes to). Consulted
    * once per segment and ONLY when the classified intent maps to
    * create_appointment, so non-booking segments never pay a settings read.
    * Optional, best-effort: absent or failing resolver ⇒ the lane never
@@ -313,7 +352,7 @@ export interface VoiceActionRouterDeps {
    */
   autonomousBookingResolver?: (
     tenantId: string,
-  ) => Promise<{ enabled: boolean; threshold?: number } | undefined>;
+  ) => Promise<AutonomousBookingRouterSettings | undefined>;
   /**
    * D-015 amendment — platform-wide kill switch for the autonomous booking
    * lane (config.AUTONOMOUS_BOOKING_DISABLED === 'true'). Threaded onto
@@ -452,6 +491,24 @@ export interface VoiceActionRouterDeps {
    * Optional: absent → no stamping (pre-U3 behavior; tests unaffected).
    */
   voiceRepo?: Pick<VoiceRepository, 'findById' | 'recordAnswer'>;
+  /**
+   * OVAS-02 — DB-authoritative role of the memo creator
+   * (voice_recordings.created_by, a Clerk subject), through the same
+   * membership loader the request path authorizes with (app.ts wires
+   * `resolveVoiceMemberRole`). An auto-approved proposal is held for review
+   * unless that role holds the type's direct permission
+   * (proposals/caller-approval-gate.ts). FAIL-CLOSED: absent, null or a
+   * throw → held, never self-executing.
+   */
+  resolveMemberRole?: (tenantId: string, userId: string) => Promise<string | null>;
+  /**
+   * OVAS-04 — the memo creator's `users.current_mode`, threaded as the
+   * proposal's supervisorMode so the per-mode thresholds and the tenant's
+   * per-mode override apply to memos exactly as they do to chat (which reads
+   * req.auth.mode). Absent / null / a throw → no mode; the resolver then
+   * applies the strictest defined override (never the bare legacy 0.9).
+   */
+  resolveMemberMode?: (tenantId: string, userId: string) => Promise<Mode | null>;
   /**
    * U3 — lookup-skill execution deps for E-lane answers (per-skill adapter
    * in workers/voice-lookup-answer.ts). Absent → lookup intents keep the
@@ -1159,6 +1216,11 @@ type SegmentOutcome =
       supervisorPresent: boolean;
       /** #1485 — what the executability check found missing (empty when none). */
       executabilityGaps: string[];
+      /**
+       * The owner cell the D-015 lane checked, so a lane-approved booking's
+       * UNDO SMS goes to exactly that number with no second lookup.
+       */
+      laneOwnerPhone?: string;
     }
   // The classifier could not route this segment — a voice_clarification
   // was emitted in its place (single path) or should be (chain path; see
@@ -1766,6 +1828,15 @@ async function processSegment(
     classification.intentType,
   );
 
+  // OVAS-02 / OVAS-04 — the memo creator, read once: its mode sets the
+  // auto-approve threshold below, its role gates an auto-approval after.
+  // Only an auto-approvable type ever needs either.
+  const memoCreator = memoCreatorResolver(deps, tenantId, recordingId, log);
+  const supervisorMode =
+    AUTO_APPROVE_DIRECT_PERMISSION[handler.taskType] !== undefined
+      ? await memoCreator.mode()
+      : undefined;
+
   const context: TaskContext = {
     tenantId,
     userId,
@@ -1823,6 +1894,11 @@ async function processSegment(
       ? {
           autonomousBooking: {
             settings: autonomousBookingSettings,
+            // The owner cell is tenant_settings.owner_phone only (never the
+            // backup supervisor's mobile), read from the same settings row.
+            ownerPhone: autonomousBookingSettings.ownerPhone,
+            // The lane is safe only if the owner UNDO SMS can go out now.
+            undoChannelAvailable: deps.unsupervisedRouting?.laneUndo?.canDeliver() === true,
             inboundReceptionistSource: Boolean(customerId),
             pendingReferenceCount: annotation.pendingReferences.length,
             ...(deps.autonomousBookingPlatformDisabled ? { platformDisabled: true } : {}),
@@ -1838,9 +1914,13 @@ async function processSegment(
     // `voice-hold:<recordingId>` so a concurrent redelivery can't double-book.
     ...(params.applyDedup && recordingId ? { recordingId } : {}),
     ...(tenantThresholdOverride ? { tenantThresholdOverride } : {}),
+    ...(supervisorMode ? { supervisorMode } : {}),
   };
 
-  const { proposal } = await handler.handle(context);
+  const { proposal: drafted } = await handler.handle(context);
+  // OBS-2 — the drafting run is the proposal's aiRunId; keep the classifier
+  // run that routed this segment reachable too.
+  const proposal = withClassifierRun(drafted, classification.aiRunId);
   // P8 — references that matched nothing are stamped on sourceContext so
   // the review UI prompts "pick from the list or create new" instead of
   // the operator discovering a dangling name at execution time.
@@ -1898,6 +1978,10 @@ async function processSegment(
   // past an unsupervised tenant. No-op in the normal case (the handler already
   // computed 'ready_for_review').
   //
+  // OVAS-02 — then the memo creator's role: an auto-approval may never grant
+  // the requester more than their role could do directly (the chat route's
+  // gate, shared). The D-015 lane keeps its own gate set.
+  //
   // U9 — the untrusted-source guard runs LAST so a voicemail-sourced
   // proposal can never leave here 'approved', including through the
   // autonomous-lane exception holdIfUnsupervised deliberately preserves.
@@ -1907,7 +1991,13 @@ async function processSegment(
   // an execution failure.
   const held = await holdForExecutability(
     tenantId,
-    holdIfUntrustedSource(holdIfUnsupervised(annotated, supervisorPresent), params.sourceChannel),
+    holdIfUntrustedSource(
+      await holdIfMemoCreatorCannotApprove(
+        holdIfUnsupervised(annotated, supervisorPresent),
+        memoCreator,
+      ),
+      params.sourceChannel,
+    ),
     deps.approvalReferenceChecks,
   );
   return {
@@ -1916,6 +2006,9 @@ async function processSegment(
     classification,
     supervisorPresent,
     executabilityGaps: held.gaps,
+    ...(autonomousBookingSettings?.ownerPhone
+      ? { laneOwnerPhone: autonomousBookingSettings.ownerPhone }
+      : {}),
   };
 }
 
@@ -1939,6 +2032,92 @@ export function holdIfUnsupervised(proposal: Proposal, supervisorPresent: boolea
     return proposal;
   }
   return { ...proposal, status: 'ready_for_review', approvedAt: undefined };
+}
+
+/**
+ * OVAS-02 — the memo creator, resolved lazily and at most once per segment:
+ * voice_recordings.created_by (the queue job's userId can be 'system', and is
+ * not what authorizes), then its DB-authoritative role. Every failure —
+ * no recording, no voiceRepo, no resolver, a lookup error — resolves to "no
+ * role", which the gate treats as "cannot approve".
+ */
+interface MemoCreator {
+  role(): Promise<string | null>;
+  /** OVAS-04 — users.current_mode; undefined when unresolvable. */
+  mode(): Promise<Mode | undefined>;
+}
+
+function memoCreatorResolver(
+  deps: Pick<VoiceActionRouterDeps, 'voiceRepo' | 'resolveMemberRole' | 'resolveMemberMode'>,
+  tenantId: string,
+  recordingId: string | undefined,
+  log: Logger,
+): MemoCreator {
+  let creatorId: Promise<string | undefined> | undefined;
+  const id = (): Promise<string | undefined> =>
+    (creatorId ??= (async () => {
+      if (!recordingId || !deps.voiceRepo) return undefined;
+      try {
+        const recording = await deps.voiceRepo.findById(tenantId, recordingId);
+        return recording?.createdBy || undefined;
+      } catch (err) {
+        log.warn('voice-action-router: memo creator lookup failed — auto-approval held', {
+          recordingId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return undefined;
+      }
+    })());
+  return {
+    async role() {
+      const userId = await id();
+      if (!userId || !deps.resolveMemberRole) return null;
+      try {
+        return await deps.resolveMemberRole(tenantId, userId);
+      } catch (err) {
+        log.warn('voice-action-router: memo creator role lookup failed — auto-approval held', {
+          recordingId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return null;
+      }
+    },
+    async mode() {
+      const userId = await id();
+      if (!userId || !deps.resolveMemberMode) return undefined;
+      try {
+        return (await deps.resolveMemberMode(tenantId, userId)) ?? undefined;
+      } catch (err) {
+        log.warn('voice-action-router: memo creator mode lookup failed — strictest tenant rule applies', {
+          recordingId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return undefined;
+      }
+    },
+  };
+}
+
+/**
+ * OVAS-02 — hold an auto-approved memo proposal unless the memo creator's
+ * role holds the type's direct permission (holdIfCallerCannotApprove). The
+ * role is only looked up when something was actually auto-approved.
+ *
+ * The D-015 autonomous booking lane is exempt, exactly as holdIfUnsupervised
+ * exempts it: a lane-eligible booking has no requesting member (it is an
+ * inbound caller's), carries its own gate set, and a blanket "no member role
+ * → hold" rule would silently disable it.
+ */
+async function holdIfMemoCreatorCannotApprove(
+  proposal: Proposal,
+  memoCreator: MemoCreator,
+): Promise<Proposal> {
+  if (proposal.status !== 'approved') return proposal;
+  const lane = autonomousLaneEvaluationFor(proposal);
+  if (lane?.eligible && AUTONOMOUS_LANE_PROPOSAL_TYPES.includes(proposal.proposalType)) {
+    return proposal;
+  }
+  return holdIfCallerCannotApprove(proposal, await memoCreator.role());
 }
 
 /**
@@ -2704,30 +2883,36 @@ export function createVoiceActionRouterWorker(
           outcome.proposal.status === 'approved' &&
           autonomousLaneEvaluationFor(outcome.proposal)?.eligible === true
         ) {
-          const ur = deps.unsupervisedRouting;
+          const laneUndo = deps.unsupervisedRouting.laneUndo;
           try {
-            if (ur.sendSms && ur.secret && ur.buildUndoUrl) {
-              const ownerPhone = await ur.resolveOwnerPhone?.(tenantId);
+            if (laneUndo) {
+              const ownerPhone = outcome.laneOwnerPhone;
               if (ownerPhone) {
-                const { token } = createOneTapUndoToken({
-                  proposalId: outcome.proposal.id,
-                  tenantId,
-                  secret: ur.secret,
-                });
                 // The summary is buildResolvedSummary's "{work} — {resolved
                 // time} ({arrival window})" — customer/what + when in one
                 // line. No recordSmsEvent: this SMS is not a reply anchor
                 // (the UNDO is the link, not a Y/N), and OutboundAnchorKind
                 // is a DB-CHECKed union that a new kind would re-migrate.
-                await ur.sendSms(
-                  ownerPhone,
-                  `Rivet booked: ${outcome.proposal.summary}. Tap to UNDO: ${ur.buildUndoUrl(token)}`,
+                await sendLaneUndoSms(
+                  laneUndo,
+                  {
+                    proposalId: outcome.proposal.id,
+                    tenantId,
+                    summary: outcome.proposal.summary,
+                    ownerPhone,
+                  },
                 );
               } else {
                 log.warn('voice-action-router: lane-approved booking has no owner phone for UNDO SMS', {
                   proposalId: outcome.proposal.id,
                 });
               }
+            } else {
+              // The lane refuses when the UNDO channel is unwired, so this is
+              // a tripwire, never a silent skip.
+              log.warn('voice-action-router: lane-approved booking but the UNDO channel is not wired', {
+                proposalId: outcome.proposal.id,
+              });
             }
           } catch (err) {
             log.warn('voice-action-router: autonomous lane undo SMS failed', {

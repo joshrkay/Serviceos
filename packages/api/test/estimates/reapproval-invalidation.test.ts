@@ -32,6 +32,7 @@ import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { ConflictError } from '../../src/shared/errors';
 import { buildLineItem, calculateDocumentTotals, LineItem } from '../../src/shared/billing-engine';
 import type { Proposal } from '../../src/proposals/proposal';
+import { ACCEPTANCE_VOID_MARKER } from '../../src/proposals/acceptance-void';
 
 const TENANT = 't-1';
 const ESTIMATE_ID = 'e1d4c1aa-0000-4000-8000-000000000001';
@@ -187,7 +188,10 @@ describe('RV-042 — acceptance invalidation via updateEstimate', () => {
 });
 
 describe('RV-042 — update_estimate proposal machinery end-to-end', () => {
-  it('an approved update_estimate against an ACCEPTED estimate succeeds and invalidates acceptance', async () => {
+  // OVAS-01 — the drafter stamps the `_acceptance` marker on every edit that
+  // targets an accepted estimate (and the executor voids an acceptance ONLY
+  // for a marked payload), so the machinery under test carries it here.
+  it('an approved, marker-bearing update_estimate against an ACCEPTED estimate succeeds and invalidates acceptance', async () => {
     const repo = new InMemoryEstimateRepository();
     const auditRepo = new InMemoryAuditRepository();
     await repo.create(makeAcceptedEstimate());
@@ -217,6 +221,7 @@ describe('RV-042 — update_estimate proposal machinery end-to-end', () => {
             lineItem: { description: 'Replace heater (revised)', quantity: 1, unitPrice: 110000 },
           },
         ],
+        _meta: { overallConfidence: 'high', markers: [ACCEPTANCE_VOID_MARKER] },
       },
       summary: 'Revise accepted estimate',
       createdBy: 'u-1',

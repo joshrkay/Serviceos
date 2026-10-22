@@ -29,6 +29,7 @@ import { MessageDeliveryFeedbackDispatcher } from '../../src/feedback/dispatcher
 import { TwilioDelayNotificationService } from '../../src/notifications/twilio-delay-notification-service';
 import { sendLifecycleEmail } from '../../src/notifications/lifecycle-email';
 import { sendCustomerMessage } from '../../src/notifications/customer-message-delivery';
+import { withOutbound } from '../helpers/outbound-messaging';
 
 const TENANT = '11111111-1111-1111-1111-111111111111';
 const CUST_PHONE = '+15551230000';
@@ -276,20 +277,20 @@ describe("production config: TELEPHONY_ENABLED=false + EMAIL_ENABLED=false", () 
     [
       "SendService.sendEstimate",
       (g) =>
-        new SendService({
+        new SendService(withOutbound({
           delivery: g, estimateRepo, invoiceRepo, jobRepo, customerRepo,
-          settingsRepo, dispatchRepo, publicBaseUrl: "https://app.invalid",
-        } as any)
+          settingsRepo, dispatchRepo, publicBaseUrl: "https://app.invalid", ensureInvoicePayLink: async () => undefined,
+        }) as any)
           .sendEstimate({ tenantId: TENANT, estimateId: estimate.id, channel: "both" } as any)
           .catch((e) => e),
     ],
     [
       "SendService.sendInvoice",
       (g) =>
-        new SendService({
+        new SendService(withOutbound({
           delivery: g, estimateRepo, invoiceRepo, jobRepo, customerRepo,
-          settingsRepo, dispatchRepo, publicBaseUrl: "https://app.invalid",
-        } as any)
+          settingsRepo, dispatchRepo, publicBaseUrl: "https://app.invalid", ensureInvoicePayLink: async () => undefined,
+        }) as any)
           .sendInvoice({ tenantId: TENANT, invoiceId: invoice.id, channel: "both" } as any)
           .catch((e) => e),
     ],

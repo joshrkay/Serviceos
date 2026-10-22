@@ -11,6 +11,7 @@ import type { EscalationSummary } from './escalation-summary-builder';
 import type { QuoteReadbackLine } from '../../voice-turn/quote-readback';
 import type { PendingEntityAmbiguity } from './entity-resolution';
 import type { EntityCandidate, EntityKind } from '../../resolution/entity-resolver';
+import type { ConfidenceSource } from '../../orchestration/intent-classifier';
 
 // ─── States ──────────────────────────────────────────────────────────────────
 
@@ -61,7 +62,7 @@ export type CallingAgentEvent =
   // guard forwards it so severity detection sees the caller's actual words
   // ("refund", "my lawyer"), not just whatever entities the classifier
   // happened to extract (#846 review fix).
-  | { type: 'intent_classified'; intentType: string; entities: Record<string, unknown>; confidence: number; aiRunId?: string; utterance?: string }
+  | { type: 'intent_classified'; intentType: string; entities: Record<string, unknown>; confidence: number; aiRunId?: string; utterance?: string; confidenceSource?: ConfidenceSource }
   | { type: 'entity_resolved'; refs: Record<string, string> }
   | {
       type: 'entity_ambiguous';
@@ -291,6 +292,14 @@ export interface CallingAgentContext {
    * draft guard landed.
    */
   lastIntentConfidence?: number;
+  /**
+   * D-015 — where `lastIntentConfidence` came from: the primary model
+   * ('model'), a failover model ('fallback_model'), or a deterministic
+   * short-circuit or post-gateway override's pinned value ('rule'); see
+   * IntentClassification.confidenceSource. The live-call autonomous booking
+   * lane trusts only 'model'.
+   */
+  lastIntentConfidenceSource?: ConfidenceSource;
   /**
    * The persisted `ai_runs` id of the classify call that produced the current
    * intent (from the `intent_classified` event's `aiRunId`). Captured at

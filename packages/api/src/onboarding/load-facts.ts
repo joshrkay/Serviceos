@@ -1,8 +1,9 @@
 import type { Pool } from 'pg';
 import type { SettingsRepository } from '../settings/settings';
-import type { OnboardingFacts } from './derive-status';
+import type { DraftProposalsFact, OnboardingFacts } from './derive-status';
 import { currentTenantContext } from '../middleware/tenant-context';
 import { toPhoneLineView, type TwilioIntegrationRow } from './phone-line';
+import { classifyProvisioningFailure } from './provisioning-failure';
 import { effectiveBufferMinutes } from '../scheduling/booking-availability';
 
 const VALID_SUBSCRIPTION_STATUSES = new Set(['trialing', 'active', 'past_due', 'canceled', 'incomplete']);
@@ -26,7 +27,7 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
   // tenant transaction (e.g. tests, background contexts).
   const db = currentTenantContext()?.client ?? pool;
 
-  const [settings, integRes, tenantRes, callsRes, tsRes, packsRes] = await Promise.all([
+  const [settings, integRes, tenantRes, callsRes, tsRes, packsRes, draftRes] = await Promise.all([
     settingsRepo.findByTenant(tenantId),
     db.query<TwilioIntegrationRow>(
       `SELECT status, last_error, provider_data
@@ -72,14 +73,43 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
          WHERE tenant_id=$1 AND status='active'`,
       [tenantId]
     ),
+    // "Pick, don't build" (migration 311) — one draft per tenant, or none.
+    db.query<{ status: 'draft' | 'approved'; version: number; n: number; expected: number }>(
+      `SELECT status, version, (SELECT COUNT(*)::int FROM jsonb_object_keys(choices)) AS n,
+              jsonb_array_length(proposal_ids)::int AS expected
+         FROM onboarding_drafts WHERE tenant_id=$1`,
+      [tenantId]
+    ),
   ]);
+  const draftRow = draftRes.rows[0];
+
+  // Execution state of an approved draft: the status of each proposal it lists.
+  // One extra query, and only once the draft is approved, so the polled status
+  // endpoint stays cheap for every tenant that is still choosing (or has no draft).
+  // `approved_at` rides beside the status so the undo-window hints (undoable,
+  // recovery) can be derived; neither ever leaves the server raw.
+  let draftProposals: DraftProposalsFact | undefined;
+  if (draftRow?.status === 'approved' && draftRow.expected > 0) {
+    const proposalsRes = await db.query<{ status: string; approved_at: Date | null }>(
+      `SELECT p.status, p.approved_at FROM proposals p
+         WHERE p.tenant_id=$1
+           AND p.id IN (SELECT jsonb_array_elements_text(d.proposal_ids)::uuid
+                          FROM onboarding_drafts d WHERE d.tenant_id=$1)`,
+      [tenantId]
+    );
+    draftProposals = {
+      expected: draftRow.expected,
+      members: proposalsRes.rows.map((r) => ({ status: r.status, approvedAt: r.approved_at })),
+    };
+  }
 
   const tenant = tenantRes.rows[0];
   const ts = tsRes.rows[0];
   const activePackCount = packsRes.rows[0]?.n ?? 0;
   const settingsPacks = settings?.activeVerticalPacks?.length ?? 0;
 
-  const twilioLine = toPhoneLineView(integRes.rows[0]);
+  const twilioRow = integRes.rows[0];
+  const twilioLine = toPhoneLineView(twilioRow);
   return {
     tenantId,
     tenantExists: !!tenant,
@@ -98,10 +128,20 @@ export async function loadOnboardingFacts(deps: LoadFactsDeps, tenantId: string)
       timezone: ts?.timezone ?? null,
     },
     packActivated: activePackCount > 0 || settingsPacks > 0,
+    draft: draftRow
+      ? {
+          status: draftRow.status,
+          choicesAnswered: draftRow.n,
+          version: draftRow.version,
+          ...(draftProposals ? { proposals: draftProposals } : {}),
+        }
+      : null,
     twilioStatus: integRes.rows[0]?.status ?? null,
     twilioPhoneNumber: twilioLine.phoneNumber,
     twilioLineState: integRes.rows[0] ? twilioLine.state : null,
     twilioPendingNumber: twilioLine.pendingNumber,
+    // The status carries the code, never the recorded text.
+    twilioFailureCode: twilioRow?.status === 'failed' ? classifyProvisioningFailure(twilioRow.last_error) : null,
     subscription: {
       stripeSubscriptionId: tenant?.stripe_subscription_id ?? null,
       status: normalizeSubscriptionStatus(tenant?.subscription_status),

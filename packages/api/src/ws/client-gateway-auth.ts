@@ -15,6 +15,7 @@ import type { IncomingMessage } from 'http';
 import {
   decodeClerkToken,
   isHmacDevModeEnabled,
+  parseAuthorizedParties,
   verifyRs256Token,
   type ClerkTokenPayload,
 } from '../auth/clerk';
@@ -30,7 +31,10 @@ const logger = createLogger({
 export interface ClientGatewayAuthDeps {
   /** Env snapshot (CLERK_* / NODE_ENV). Defaults to `process.env`. */
   env?: NodeJS.ProcessEnv;
-  verifyRs256?: (token: string, opts: { pubKey: string }) => Promise<ClerkTokenPayload>;
+  verifyRs256?: (
+    token: string,
+    opts: { pubKey: string; authorizedParties?: readonly string[] },
+  ) => Promise<ClerkTokenPayload>;
   decodeHmac?: (token: string, secretKey: string) => ClerkTokenPayload;
   decide?: typeof decideMembership;
 }
@@ -67,7 +71,10 @@ export function createClientGatewayAuth(deps: ClientGatewayAuthDeps = {}): Requi
     if (isHmacDevModeEnabled(env) && hmacSecret) {
       return decodeHmac(token, hmacSecret);
     }
-    return verifyRs256(token, { pubKey: env.CLERK_PUBLISHABLE_KEY ?? '' });
+    return verifyRs256(token, {
+      pubKey: env.CLERK_PUBLISHABLE_KEY ?? '',
+      authorizedParties: parseAuthorizedParties(env.CLERK_AUTHORIZED_PARTIES),
+    });
   };
 
   return {

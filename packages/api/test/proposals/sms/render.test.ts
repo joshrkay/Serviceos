@@ -16,6 +16,7 @@ import {
   PROPOSAL_SMS_MAX_CHARS,
 } from '../../../src/proposals/sms/render';
 import { VALID_PROPOSAL_TYPES, actionClassForProposalType } from '../../../src/proposals/proposal';
+import { ACCEPTANCE_VOID_MARKER } from '../../../src/proposals/acceptance-void';
 
 const URL = 'https://api.example.com/public/proposals/one-tap-approve?token=abc123';
 
@@ -848,5 +849,62 @@ describe('#1485 — a proposal that cannot execute yet renders the ask, never an
     expect(body).toContain('reply N to reject');
     expect(body).not.toMatch(/Reply Y/);
     expect(body).not.toContain(URL);
+  });
+});
+
+// OVAS-01 — the RV-042 acceptance-void warning used to print only on a
+// 'medium' render, so a 'high' acceptance-voiding card texted the owner a bare
+// "Reply Y" with no hint that approving deletes the customer's signature.
+describe('OVAS-01 — the acceptance-void warning always prints', () => {
+  const editPayload = {
+    estimateId: '5d2f7c1e-9a4b-4c3d-8e2f-1a2b3c4d5e6f',
+    editActions: [{ type: 'remove_line_item', description: 'disposal fee' }],
+  };
+
+  for (const level of [undefined, 'high', 'medium'] as const) {
+    it(`prints the warning at overallConfidence=${level ?? 'absent'}`, () => {
+      const body = renderProposalSms(
+        {
+          proposalType: 'update_estimate',
+          summary: 'Take the disposal fee off the Garcia estimate',
+          payload: {
+            ...editPayload,
+            _meta: { ...(level ? { overallConfidence: level } : {}), markers: [ACCEPTANCE_VOID_MARKER] },
+          },
+        },
+        { approveUrl: URL },
+      );
+      expect(body).toContain(`Check: ${ACCEPTANCE_VOID_MARKER.reason}`);
+      expect(body.length - ` Or tap (30 min): ${URL}`.length).toBeLessThanOrEqual(PROPOSAL_SMS_MAX_CHARS);
+    });
+  }
+
+  it('a high-confidence card WITHOUT the marker stays byte-identical (no Check line)', () => {
+    const body = renderProposalSms(
+      {
+        proposalType: 'update_estimate',
+        summary: 'Take the disposal fee off the Garcia estimate',
+        payload: { ...editPayload, _meta: { overallConfidence: 'high', markers: [{ path: 'x', reason: 'other' }] } },
+      },
+      { approveUrl: URL },
+    );
+    expect(body).not.toContain('Check:');
+  });
+
+  it('a chain names the warning and flags a non-head acceptance-voiding member as separate', () => {
+    const body = renderChainSms(
+      [
+        { proposalType: 'create_customer', summary: 'Add Jane Garcia', payload: {} },
+        {
+          proposalType: 'update_estimate',
+          summary: 'Drop the disposal fee',
+          payload: { ...editPayload, _meta: { overallConfidence: 'high', markers: [ACCEPTANCE_VOID_MARKER] } },
+        },
+      ],
+      { approveUrl: URL },
+    );
+    expect(body).toContain('2) Drop the disposal fee*');
+    expect(body).toContain('*Approval follows separately.');
+    expect(body).toContain(`Check: ${ACCEPTANCE_VOID_MARKER.reason}`);
   });
 });

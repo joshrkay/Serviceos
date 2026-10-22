@@ -23,6 +23,11 @@ vi.mock('../../components/customers/CommunicationTimeline', () => ({
 vi.mock('../../components/customers/CustomerProfitCard', () => ({
   CustomerProfitCard: () => <div>Profit</div>,
 }));
+// D-045 status bubble fetches its own message record; mock it like the other
+// self-contained cards so its request doesn't consume this suite's mocks.
+vi.mock('../../components/interactions/LatestTextStatus', () => ({
+  LatestTextStatus: () => null,
+}));
 // U1/U2 panels are self-contained (they fetch their own data); mock them here
 // so this suite stays focused on CustomerDetail and its locations fetch order.
 vi.mock('../../components/customers/ContactsPanel', () => ({

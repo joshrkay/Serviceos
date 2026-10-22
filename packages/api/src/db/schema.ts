@@ -7660,6 +7660,595 @@ export const MIGRATIONS = {
 
     ALTER TABLE users ALTER COLUMN can_field_serve DROP DEFAULT;
   `,
+
+  // "Pick, don't build" onboarding (docs/plans/2026-10-18-001). Platform-owned,
+  // founder-curated typical prices per (trade, metro) that the price choice
+  // shows the owner; metro_code 'US' is the national fallback. No tenant_id
+  // and no RLS on purpose: this is reference data like `tenants`, written by
+  // admins and seeds only, read by every tenant's onboarding.
+  '310_regional_price_tiers': `
+    CREATE TABLE IF NOT EXISTS regional_price_tiers (
+      trade TEXT NOT NULL,
+      metro_code TEXT NOT NULL,
+      tier JSONB NOT NULL,
+      source TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (trade, metro_code)
+    );
+  `,
+
+  // The owner's pre-approval onboarding draft: the assembled typical shop plus
+  // the choices they have staged. One row per tenant. Nothing here reaches
+  // tenant_settings until POST /api/onboarding/draft/approve turns it into
+  // onboarding_* proposals and approves them; `version` is the compare-and-swap
+  // guard against two tabs staging at once. RLS like onboarding_session (195).
+  '311_onboarding_drafts': `
+    CREATE TABLE IF NOT EXISTS onboarding_drafts (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      pack_id TEXT NOT NULL,
+      trade TEXT NOT NULL,
+      metro_code TEXT,
+      metro_name TEXT,
+      business_name TEXT NOT NULL,
+      owner_first_name TEXT,
+      client_timezone TEXT,
+      assembled JSONB NOT NULL,
+      choices JSONB NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'draft' CHECK (status IN ('draft', 'approved')),
+      version INTEGER NOT NULL DEFAULT 1,
+      proposal_ids JSONB NOT NULL DEFAULT '[]',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      approved_at TIMESTAMPTZ
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_onboarding_drafts_tenant
+      ON onboarding_drafts (tenant_id);
+    ALTER TABLE onboarding_drafts ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE onboarding_drafts FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_onboarding_drafts ON onboarding_drafts;
+    CREATE POLICY tenant_isolation_onboarding_drafts ON onboarding_drafts
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // "Pick, don't build" onboarding — how the owner collects payment when a
+  // job is marked done. Nullable: unset until the owner chooses. Written by
+  // the onboarding_voice_policy proposal handler and the settings PUT.
+  '312_tenant_settings_payment_collection_mode': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS payment_collection_mode TEXT
+        CHECK (payment_collection_mode IS NULL OR payment_collection_mode IN ('pay_link', 'collect_on_site'));
+  `,
+
+  // "Pick, don't build" onboarding — the owner's cell on the draft, E.164.
+  // Nullable until the owner gives one; carried on the onboarding_tenant_settings
+  // proposal at approval and written to tenant_settings.owner_phone by its
+  // handler. RLS (311) is inherited by the new column. `[+]` rather than an
+  // escaped plus: inside this template literal a backslash-plus loses its
+  // backslash.
+  '313_onboarding_drafts_owner_phone': `
+    ALTER TABLE onboarding_drafts
+      ADD COLUMN IF NOT EXISTS owner_phone TEXT
+        CHECK (owner_phone IS NULL OR owner_phone ~ '^[+][1-9][0-9]{7,14}$');
+  `,
+
+  // "Pick, don't build" onboarding, U7: the pre-signup demo call
+  // (docs/plans/2026-10-18-001, Approach + deferred findings D1, D2, D4, D10,
+  // D11). Platform tables with the same posture as `tenants`: no RLS,
+  // admin-write, read as the connection principal. `demo_tenant_leases`,
+  // `demo_inflight_jobs` and `signup_handoffs` carry a tenant_id that only
+  // NAMES the demo tenant a call, a running job or a signup holds; they are
+  // read before and across tenant contexts (the reaper, the reset, the queue
+  // front door), so they are RLS-exempt on purpose and listed in
+  // test/db/schema.test.ts and test/integration/rls-runtime-audit.test.ts.
+  // Migration 219 (replayed every boot) revokes rls_app_runtime on them, but
+  // it runs BEFORE this one in corpus order and 217's default privileges
+  // grant the role on every new table, so the first boot would leave the
+  // role granted until the next replay: the guarded REVOKE at the end closes
+  // that window (same exception handling as 219).
+  //
+  // `tenants.demo` marks a pool tenant (`demo_trade` names its pack);
+  // `tenants.platform` marks the one durable hidden tenant (D1) that owns
+  // the demo visitor's phone_rate_limits, leads and platform-level audit
+  // rows (all NOT NULL FKs to tenants). Every tenant lister excludes both
+  // flags (tenants/list-tenant-ids.ts and the direct SELECTs under workers/,
+  // billing/ and admin/; pinned by test/integration/demo-tenants-excluded.test.ts).
+  // The platform tenant's uuid is fixed (demo/platform-tenant.ts) and
+  // immutable once applied anywhere.
+  '317_demo_calls': `
+    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS demo BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS platform BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE tenants ADD COLUMN IF NOT EXISTS demo_trade TEXT;
+    CREATE INDEX IF NOT EXISTS idx_tenants_demo_trade ON tenants (demo_trade) WHERE demo = true;
+
+    INSERT INTO tenants (id, owner_id, owner_email, name, platform)
+    VALUES (
+      '00000000-0000-4000-8000-00000000d3a0',
+      'platform:demo',
+      'platform-demo@invalid.rivet.local',
+      'Rivet demo platform',
+      true
+    )
+    ON CONFLICT (id) DO NOTHING;
+
+    CREATE SEQUENCE IF NOT EXISTS demo_lease_generation_seq;
+
+    CREATE TABLE IF NOT EXISTS demo_tenant_leases (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      visitor_phone_hash TEXT NOT NULL,
+      call_sid TEXT,
+      leased_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ NOT NULL,
+      state TEXT NOT NULL DEFAULT 'active',
+      reset_started_at TIMESTAMPTZ,
+      reset_heartbeat_at TIMESTAMPTZ,
+      reset_token UUID,
+      generation BIGINT NOT NULL DEFAULT nextval('demo_lease_generation_seq'),
+      released_at TIMESTAMPTZ,
+      renewed_at TIMESTAMPTZ
+    );
+    ALTER TABLE demo_tenant_leases
+      ADD CONSTRAINT demo_tenant_leases_state_check
+      CHECK (state IN ('active', 'resetting', 'released')) NOT VALID;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_demo_tenant_leases_open_tenant
+      ON demo_tenant_leases (tenant_id) WHERE released_at IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_demo_tenant_leases_open_visitor
+      ON demo_tenant_leases (visitor_phone_hash) WHERE released_at IS NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_demo_tenant_leases_call_sid
+      ON demo_tenant_leases (call_sid) WHERE call_sid IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_demo_tenant_leases_active_expiry
+      ON demo_tenant_leases (expires_at) WHERE state = 'active';
+    CREATE INDEX IF NOT EXISTS idx_demo_tenant_leases_resetting_heartbeat
+      ON demo_tenant_leases (reset_heartbeat_at) WHERE state = 'resetting';
+    COMMENT ON TABLE demo_tenant_leases IS
+      'Platform table (U7): tenant_id names the demo tenant a call holds. RLS-exempt on purpose: read by the reaper, the reset and the queue front door with no tenant context.';
+
+    CREATE TABLE IF NOT EXISTS demo_calls (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      phone_hash TEXT NOT NULL,
+      trade TEXT NOT NULL,
+      business_name TEXT NOT NULL,
+      metro_code TEXT,
+      metro_name TEXT,
+      lease_id UUID NOT NULL REFERENCES demo_tenant_leases(id),
+      call_sid TEXT,
+      status TEXT NOT NULL DEFAULT 'initiating',
+      lead_id UUID NOT NULL REFERENCES leads(id),
+      callback_deadline_at TIMESTAMPTZ NOT NULL,
+      budget_day DATE NOT NULL,
+      reserved_cents INTEGER NOT NULL,
+      budget_released_at TIMESTAMPTZ,
+      allowance_window_start TIMESTAMPTZ NOT NULL,
+      allowance_released_at TIMESTAMPTZ,
+      correlation_id TEXT NOT NULL UNIQUE,
+      result JSONB,
+      result_written_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE demo_calls
+      ADD CONSTRAINT demo_calls_status_check
+      CHECK (status IN ('initiating', 'unconfirmed', 'queued', 'ringing', 'in-progress', 'completed', 'failed', 'busy', 'no-answer', 'canceled')) NOT VALID;
+    ALTER TABLE demo_calls
+      ADD CONSTRAINT demo_calls_reserved_cents_check
+      CHECK (reserved_cents >= 0) NOT VALID;
+    CREATE INDEX IF NOT EXISTS idx_demo_calls_lease ON demo_calls (lease_id);
+    CREATE INDEX IF NOT EXISTS idx_demo_calls_call_sid ON demo_calls (call_sid) WHERE call_sid IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_demo_calls_unconfirmed_deadline
+      ON demo_calls (callback_deadline_at) WHERE status = 'unconfirmed';
+    CREATE INDEX IF NOT EXISTS idx_demo_calls_phone_day ON demo_calls (phone_hash, budget_day);
+
+    CREATE TABLE IF NOT EXISTS demo_inflight_jobs (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      lease_id UUID NOT NULL REFERENCES demo_tenant_leases(id),
+      generation BIGINT NOT NULL,
+      message_id TEXT NOT NULL,
+      attempt INTEGER NOT NULL DEFAULT 0,
+      claimed_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      heartbeat_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (message_id, attempt)
+    );
+    CREATE INDEX IF NOT EXISTS idx_demo_inflight_jobs_tenant ON demo_inflight_jobs (tenant_id);
+    CREATE INDEX IF NOT EXISTS idx_demo_inflight_jobs_heartbeat ON demo_inflight_jobs (heartbeat_at);
+    COMMENT ON TABLE demo_inflight_jobs IS
+      'Platform table (U7): the in-flight registry the reset drain waits on. tenant_id names the demo tenant a running job holds; RLS-exempt on purpose.';
+
+    CREATE TABLE IF NOT EXISTS demo_call_budget (
+      day DATE PRIMARY KEY,
+      calls_reserved INTEGER NOT NULL DEFAULT 0,
+      calls_cap INTEGER NOT NULL,
+      est_cost_cents INTEGER NOT NULL DEFAULT 0,
+      cost_cap_cents INTEGER NOT NULL
+    );
+    ALTER TABLE demo_call_budget
+      ADD CONSTRAINT demo_call_budget_non_negative_check
+      CHECK (calls_reserved >= 0 AND calls_cap >= 0 AND est_cost_cents >= 0 AND cost_cap_cents >= 0) NOT VALID;
+
+    CREATE TABLE IF NOT EXISTS demo_handoff_outbox (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      demo_call_id UUID NOT NULL UNIQUE REFERENCES demo_calls(id),
+      lead_id UUID NOT NULL REFERENCES leads(id),
+      idempotency_key TEXT NOT NULL UNIQUE,
+      handoff_expires_at TIMESTAMPTZ NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      sent_at TIMESTAMPTZ,
+      retired_at TIMESTAMPTZ,
+      send_claimed_at TIMESTAMPTZ,
+      attempts INTEGER NOT NULL DEFAULT 0
+    );
+    CREATE INDEX IF NOT EXISTS idx_demo_handoff_outbox_pending
+      ON demo_handoff_outbox (handoff_expires_at) WHERE sent_at IS NULL AND retired_at IS NULL;
+
+    CREATE TABLE IF NOT EXISTS signup_handoffs (
+      token_hash TEXT PRIMARY KEY,
+      lead_id UUID NOT NULL REFERENCES leads(id),
+      tenant_id UUID REFERENCES tenants(id),
+      expires_at TIMESTAMPTZ NOT NULL,
+      consumed_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    COMMENT ON TABLE signup_handoffs IS
+      'Platform table (U7): the signup handoff token ledger. tenant_id is NULL until a signup binds it and only names that tenant; RLS-exempt on purpose, read before any tenant context exists.';
+
+    -- 249_backfill_owner_memberships replays every boot, BEFORE this, and
+    -- inserts an owner users row for every tenant without one: demo and
+    -- platform tenants included. They must have none (no owner can sign in
+    -- to one, and every surface that reads users would see it), so remove
+    -- exactly those rows here, in the same corpus statement, so no committed
+    -- state ever holds one. Guarded so it can never block a deploy.
+    DO $demo_owner_rows$
+    BEGIN
+      DELETE FROM users u
+       USING tenants t
+       WHERE u.tenant_id = t.id
+         AND (t.demo = true OR t.platform = true);
+    EXCEPTION
+      WHEN foreign_key_violation THEN
+        RAISE NOTICE 'a demo or platform tenant users row is still referenced; left in place';
+      WHEN insufficient_privilege OR undefined_object THEN
+        RAISE NOTICE 'cannot remove demo or platform tenant users rows here; skipping';
+    END
+    $demo_owner_rows$;
+
+    DO $demo_revoke$
+    BEGIN
+      REVOKE ALL ON demo_tenant_leases, demo_inflight_jobs, signup_handoffs FROM rls_app_runtime;
+    EXCEPTION
+      WHEN undefined_object THEN
+        RAISE NOTICE 'rls_app_runtime role absent; nothing to revoke';
+      WHEN insufficient_privilege THEN
+        RAISE NOTICE 'insufficient privilege to REVOKE from rls_app_runtime; skipping';
+    END
+    $demo_revoke$;
+  `,
+
+  // PRIV-3 — a caller recited a card number on this recording. The stored
+  // transcript only ever carries the `[card number]` marker
+  // (callerTranscriptText / sanitizeTranscript), but the audio still holds
+  // the digits. `pci_detected` is set by the recording webhook's transcript
+  // hook (or the transcription worker for a voicemail) when the marker is
+  // seen; the retention sweep then deletes the stored audio promptly, long
+  // before the tenant's horizon, and stamps `audio_purged_at`. The row, the
+  // scrubbed transcript and the horizon tombstone (`purged_at`) are kept.
+  // The partial index serves the sweep's due-query. RLS rides the existing
+  // voice_recordings policy (migration 007). Additive and idempotent.
+  '314_voice_recordings_card_number_detected': `
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS pci_detected BOOLEAN NOT NULL DEFAULT false;
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS audio_purged_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_voice_recordings_card_number_audio_due
+      ON voice_recordings (created_at)
+      WHERE pci_detected AND audio_purged_at IS NULL AND purged_at IS NULL AND legal_hold = false;
+  `,
+
+  // "Pick, don't build" onboarding (S5a / U8) — the durable per-link claim of
+  // the payment-mode cleanup: when a cleanup claimed the invoice's CURRENT
+  // pay link for deactivation. Nullable; every write of the link columns sets
+  // it back to NULL, so it never outlives the link it claimed. The partial
+  // index serves the cleanup and the daily sweep, which page through a
+  // tenant's invoices that can still capture money through a hosted link.
+  // RLS on invoices (025) covers the new column.
+  '325_invoices_cleanup_claimed_at': `
+    ALTER TABLE invoices ADD COLUMN IF NOT EXISTS cleanup_claimed_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_invoices_live_payment_link
+      ON invoices (tenant_id, id)
+      WHERE stripe_payment_link_id IS NOT NULL AND status IN ('open', 'partially_paid');
+  `,
+  // PRIV-2 — the Twilio-hosted copy of each inbound recording. The recording
+  // webhook and the voicemail route delete it once our storage and our row
+  // hold the audio, stamping `twilio_deleted_at`; the retention sweep retries
+  // every copy not yet confirmed gone (legacy rows, failed deletes) and stamps
+  // `twilio_delete_attempted_at` on a failure so it backs off instead of
+  // stalling the drain. `recording_url` is kept (the idempotency key in
+  // recordInboundCall). The partial index serves the sweep's retry query.
+  // RLS rides the existing voice_recordings policy (migration 007). Additive
+  // and idempotent.
+  '315_voice_recordings_twilio_copy_deleted': `
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS twilio_deleted_at TIMESTAMPTZ;
+    ALTER TABLE voice_recordings
+      ADD COLUMN IF NOT EXISTS twilio_delete_attempted_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_voice_recordings_twilio_copy_due
+      ON voice_recordings (twilio_delete_attempted_at NULLS FIRST, created_at)
+      WHERE twilio_deleted_at IS NULL AND recording_url IS NOT NULL AND legal_hold = false;
+  `,
+
+  // PRIV-1 — the retention sweep strips the prompt and reply content from an
+  // ai_runs row once it is past the tenant's recording_retention_days, and
+  // stamps `content_purged_at`. The row is kept (proposals, supervisor_reviews,
+  // document_revisions and estimate_provenance FK it; the spend report reads
+  // its model, tokens and cost). The partial index keeps the sweep's per-tenant
+  // (tenant_id, created_at) probe off the rows already purged, so its cost does
+  // not grow with history. RLS rides the existing ai_runs policy (migration
+  // 008). Additive and idempotent; nullable with no default, so the ALTER is
+  // metadata-only.
+  '316_ai_runs_content_purged_at': `
+    ALTER TABLE ai_runs
+      ADD COLUMN IF NOT EXISTS content_purged_at TIMESTAMPTZ;
+    CREATE INDEX IF NOT EXISTS idx_ai_runs_content_purge_due
+      ON ai_runs (tenant_id, created_at)
+      WHERE content_purged_at IS NULL;
+  `,
+
+
+  // "Pick, don't build" onboarding, re-run pricing (U6). Positive, per-row
+  // provenance for what a setup re-run may reprice: the pack seeder stamps
+  // its two headline items with seed_key ('<packId>:visit' | '<packId>:labor',
+  // so a renamed item is still found by its role) and the baseline price it
+  // wrote, in the same INSERT as the row; any later price write clears the
+  // baseline in the same UPDATE as the price (PgCatalogItemRepository.update).
+  // A NULL baseline is the owner's. NO backfill: rows seeded before this
+  // migration have no proof of who set their price and stay the owner's.
+  // The template-line half (seededUnitPriceCents, seededCatalogItemId) is
+  // two keys inside estimate_templates.line_item_templates, no DDL.
+  // The same migration adds the tenant_settings forwarding columns (the
+  // owner's existing business line and its confirm/probe stamps, bound to
+  // the line by forwarding_generation); the CHECK is NOT VALID per
+  // docs/solutions/database-issues/replay-migrations-check-constraints-not-valid.md.
+  '318_seeded_price_baseline': `
+    ALTER TABLE catalog_items
+      ADD COLUMN IF NOT EXISTS seed_key TEXT,
+      ADD COLUMN IF NOT EXISTS seeded_unit_price_cents INTEGER;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_catalog_items_tenant_seed_key
+      ON catalog_items (tenant_id, seed_key)
+      WHERE seed_key IS NOT NULL AND archived_at IS NULL;
+
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS forwarding_confirmed_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS forwarding_verified_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS forwarding_source_number TEXT,
+      ADD COLUMN IF NOT EXISTS forwarding_carrier TEXT,
+      ADD COLUMN IF NOT EXISTS forwarding_generation INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS forwarding_probe_generation INTEGER,
+      ADD COLUMN IF NOT EXISTS forwarding_probe_at TIMESTAMPTZ;
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_forwarding_carrier_check,
+      ADD CONSTRAINT tenant_settings_forwarding_carrier_check
+        CHECK (forwarding_carrier IS NULL
+               OR forwarding_carrier IN ('verizon', 'att', 'tmobile', 'other')) NOT VALID;
+  `,
+  // PRIV-1 (review round 2) — the ai_runs content purge honours legal hold:
+  // a run within a day of a same-tenant held recording is kept. This partial
+  // index serves that probe (tenant, time window over the few held rows), so
+  // the per-run NOT EXISTS stays an index lookup. RLS rides the existing
+  // voice_recordings policy (migration 007). Additive and idempotent.
+  '321_voice_recordings_legal_hold_index': `
+    CREATE INDEX IF NOT EXISTS idx_voice_recordings_legal_hold
+      ON voice_recordings (tenant_id, created_at)
+      WHERE legal_hold;
+  `,
+
+  // "Pick, don't build" onboarding, re-run pricing (U6). Positive, per-row
+  // provenance for what a setup re-run may reprice: the pack seeder stamps
+  // its two headline items with seed_key ('<packId>:visit' | '<packId>:labor',
+  // so a renamed item is still found by its role) and the baseline price it
+  // wrote, in the same INSERT as the row; any later price write clears the
+  // baseline in the same UPDATE as the price (PgCatalogItemRepository.update).
+  // A NULL baseline is the owner's. NO backfill: rows seeded before this
+  // migration have no proof of who set their price and stay the owner's.
+  // The template-line half (seededUnitPriceCents, seededCatalogItemId) is
+  // two keys inside estimate_templates.line_item_templates, no DDL.
+  // The same migration adds the tenant_settings forwarding columns (the
+  // owner's existing business line and its confirm/probe stamps, bound to
+  // the line by forwarding_generation); the CHECK is NOT VALID per
+  // docs/solutions/database-issues/replay-migrations-check-constraints-not-valid.md.
+  '324_seeded_price_baseline': `
+    ALTER TABLE catalog_items
+      ADD COLUMN IF NOT EXISTS seed_key TEXT,
+      ADD COLUMN IF NOT EXISTS seeded_unit_price_cents INTEGER;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_catalog_items_tenant_seed_key
+      ON catalog_items (tenant_id, seed_key)
+      WHERE seed_key IS NOT NULL AND archived_at IS NULL;
+
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS forwarding_confirmed_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS forwarding_verified_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS forwarding_source_number TEXT,
+      ADD COLUMN IF NOT EXISTS forwarding_carrier TEXT,
+      ADD COLUMN IF NOT EXISTS forwarding_generation INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS forwarding_probe_generation INTEGER,
+      ADD COLUMN IF NOT EXISTS forwarding_probe_at TIMESTAMPTZ;
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_forwarding_carrier_check,
+      ADD CONSTRAINT tenant_settings_forwarding_carrier_check
+        CHECK (forwarding_carrier IS NULL
+               OR forwarding_carrier IN ('verizon', 'att', 'tmobile', 'other')) NOT VALID;
+  `,
+
+  // Voice parity U1 (docs/plans/2026-10-16-001) — the reply gap, measured and
+  // stored per caller turn. `started_at`/`completed_at` are set when the text
+  // is appended (before synthesis), so the caller-perceived gap cannot be
+  // reconstructed from them; these columns hold it:
+  //   last_word_at            — when the caller stopped speaking (Deepgram
+  //                             word timing anchored to wall clock; realtime)
+  //   stt_final_at            — when the recogniser finalised (realtime) or the
+  //                             Gather webhook was received
+  //   first_audio_enqueued_at — first REAL frame enqueued (transport diagnostics)
+  //   first_audio_at          — first REAL frame as Twilio ACKED the mark behind
+  //                             it, i.e. when the caller heard it
+  //   first_audible_at        — filler or real, whichever played first
+  //   reply_gap_ms            — first_audio_at − last_word_at (the SLO)
+  //   endpoint_delay_ms       — stt_final_at − last_word_at (what U2 changes)
+  //   reply_unacked_reason    — a real frame was enqueued but never acked;
+  //                             counted, never estimated
+  //   transport               — 'gather' | 'realtime'; Gather turns leave the
+  //                             audio stamps null (TwiML is not audio)
+  // All nullable: rows from before this migration are excluded from the
+  // percentiles, never counted as zero. CHECKs are NOT VALID per
+  // docs/solutions/database-issues/replay-migrations-check-constraints-not-valid.md.
+  // The partial index serves the 7-day per-tenant percentile query.
+  '326_call_transcript_turns_reply_timing': `
+    ALTER TABLE call_transcript_turns
+      ADD COLUMN IF NOT EXISTS last_word_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS stt_final_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS first_audio_enqueued_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS first_audio_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS first_audible_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS reply_gap_ms INTEGER,
+      ADD COLUMN IF NOT EXISTS endpoint_delay_ms INTEGER,
+      ADD COLUMN IF NOT EXISTS reply_unacked_reason TEXT,
+      ADD COLUMN IF NOT EXISTS transport TEXT;
+    ALTER TABLE call_transcript_turns
+      DROP CONSTRAINT IF EXISTS call_transcript_turns_transport_check,
+      ADD CONSTRAINT call_transcript_turns_transport_check
+        CHECK (transport IS NULL OR transport IN ('gather', 'realtime')) NOT VALID;
+    ALTER TABLE call_transcript_turns
+      DROP CONSTRAINT IF EXISTS call_transcript_turns_reply_unacked_reason_check,
+      ADD CONSTRAINT call_transcript_turns_reply_unacked_reason_check
+        CHECK (reply_unacked_reason IS NULL
+               OR reply_unacked_reason IN ('clear_echo', 'ack_timeout', 'stream_closed')) NOT VALID;
+    CREATE INDEX IF NOT EXISTS idx_call_transcript_turns_tenant_transport_started
+      ON call_transcript_turns (tenant_id, started_at DESC)
+      WHERE transport IS NOT NULL;
+  `,
+
+  // Dispatch FR-2 phase 1 — geocoding state for service locations. latitude/
+  // longitude existed since 015 but nothing ever wrote them, so every
+  // travel-time feasibility check ended in 'missing_coords'. The geocode
+  // sweep (workers/geocode-locations-sweep.ts) fills them:
+  //   geocode_status   — 'pending' (needs a lookup), 'ok' (coords present),
+  //                      'failed' (the provider answered: no such address)
+  //   geocode_attempts — transient-failure count (never terminal; orders the
+  //                      sweep least-retried first); resets on address change
+  //   geocoded_at      — when the last terminal outcome was written
+  // Rows that already carry coordinates are 'ok' (idempotent on replay: it
+  // only touches pending rows that have both coordinates). CHECK is NOT VALID
+  // per docs/solutions/database-issues/replay-migrations-check-constraints-not-valid.md.
+  // The partial index serves the sweep's pending-row scan.
+  '327_service_locations_geocode_status': `
+    ALTER TABLE service_locations
+      ADD COLUMN IF NOT EXISTS geocode_status TEXT NOT NULL DEFAULT 'pending',
+      ADD COLUMN IF NOT EXISTS geocode_attempts INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS geocoded_at TIMESTAMPTZ;
+    ALTER TABLE service_locations
+      DROP CONSTRAINT IF EXISTS service_locations_geocode_status_check,
+      ADD CONSTRAINT service_locations_geocode_status_check
+        CHECK (geocode_status IN ('pending', 'ok', 'failed')) NOT VALID;
+    UPDATE service_locations
+       SET geocode_status = 'ok'
+     WHERE geocode_status = 'pending'
+       AND latitude IS NOT NULL
+       AND longitude IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_service_locations_geocode_pending
+      ON service_locations (geocode_attempts, updated_at)
+      WHERE geocode_status = 'pending' AND is_archived = false;
+  `,
+
+  // Dispatch FR-2 phase 2 — skill tags, so the feasibility skill gate
+  // (scheduling/feasibility.ts) has something to compare. Until now the wired
+  // SkillMatcher was a stub and every check read 'none_configured'.
+  //   users.skills         — tags a technician holds (owner-edited)
+  //   jobs.required_skills — tags a job needs (owner/dispatcher-edited)
+  // Both hold canonical tags (@ai-service-os/shared skill-tags); empty = none. No
+  // CHECK: shape and count are enforced at the request boundary.
+  '328_skill_tags': `
+    ALTER TABLE users
+      ADD COLUMN IF NOT EXISTS skills TEXT[] NOT NULL DEFAULT '{}';
+    ALTER TABLE jobs
+      ADD COLUMN IF NOT EXISTS required_skills TEXT[] NOT NULL DEFAULT '{}';
+  `,
+  // D-045 item 2 — one record per message. Outbound messaging records every
+  // send outcome here, not only sends that reached a provider: a text held
+  // for the customer's daytime window is 'scheduled' (scheduled_for = when the
+  // window opens), a refused one is 'blocked' (block_reason, and whether it
+  // clears on its own). The record links the customer and, when there is one,
+  // the job, so the job and customer screens can show a status bubble and the
+  // owner can see blocked messages. `sent_at` stays the time of the latest
+  // outcome. A blocked text may have no number yet: recipient is '' then.
+  // 'thank_you' — the after-job thank-you text (entity_id = jobs.id).
+  // Readers that ask "did this go out?" (`findByEntity`) only see rows that
+  // reached a provider: sent, delivered, failed, bounced.
+  '329_message_dispatch_outcomes': `
+    ALTER TABLE message_dispatches
+      ADD COLUMN IF NOT EXISTS customer_id UUID,
+      ADD COLUMN IF NOT EXISTS job_id UUID,
+      ADD COLUMN IF NOT EXISTS purpose TEXT,
+      ADD COLUMN IF NOT EXISTS scheduled_for TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS block_reason TEXT,
+      ADD COLUMN IF NOT EXISTS block_permanent BOOLEAN;
+    ALTER TABLE message_dispatches
+      DROP CONSTRAINT IF EXISTS message_dispatches_status_check;
+    ALTER TABLE message_dispatches
+      ADD CONSTRAINT message_dispatches_status_check
+        CHECK (status IN ('sent', 'delivered', 'failed', 'bounced', 'scheduled', 'blocked')) NOT VALID;
+    ALTER TABLE message_dispatches
+      DROP CONSTRAINT IF EXISTS message_dispatches_purpose_check;
+    ALTER TABLE message_dispatches
+      ADD CONSTRAINT message_dispatches_purpose_check
+        CHECK (purpose IS NULL OR purpose IN ('transactional', 'reply', 'automated_nudge', 'marketing')) NOT VALID;
+    ALTER TABLE message_dispatches
+      DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
+    ALTER TABLE message_dispatches
+      ADD CONSTRAINT message_dispatches_entity_type_check
+        CHECK (entity_type IN (
+          'estimate', 'invoice', 'appointment_confirmation',
+          'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
+          'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route',
+          'daily_digest', 'conversation_reply', 'portal_session', 'custom_message',
+          'thank_you'
+        )) NOT VALID;
+    CREATE INDEX IF NOT EXISTS idx_dispatches_tenant_customer
+      ON message_dispatches (tenant_id, customer_id, sent_at DESC) WHERE customer_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_dispatches_tenant_job
+      ON message_dispatches (tenant_id, job_id, sent_at DESC) WHERE job_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_dispatches_tenant_blocked
+      ON message_dispatches (tenant_id, sent_at DESC) WHERE status = 'blocked';
+  `,
+  // D-045 — the owner's own wording for the texts customers get, one row per
+  // text (notifications/customer-text-wording.ts). No row means our wording.
+  '330_customer_text_wording': `
+    CREATE TABLE IF NOT EXISTS customer_text_wording (
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      purpose TEXT NOT NULL CHECK (purpose IN ('estimate_text', 'invoice_text', 'portal_link_text', 'thank_you_text')),
+      body TEXT NOT NULL CHECK (length(body) BETWEEN 1 AND 480),
+      language TEXT NOT NULL CHECK (language IN ('en', 'es')),
+      updated_by TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (tenant_id, purpose)
+    );
+    ALTER TABLE customer_text_wording ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE customer_text_wording FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_customer_text_wording ON customer_text_wording;
+    CREATE POLICY tenant_isolation_customer_text_wording ON customer_text_wording
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+  // D-044 / #1763 — the owner dismissed the "Get found online" home
+  // checklist once every item was done. The card reappears while any item is
+  // open again, so a reopened item is never hidden by an old dismissal.
+  '331_get_found_online': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS get_found_online_dismissed_at TIMESTAMPTZ;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS google_review_url_derived TEXT;
+    ALTER TABLE review_poll_state
+      ADD COLUMN IF NOT EXISTS backoff_reason TEXT
+        CHECK (backoff_reason IN ('quota', 'auth'));
+    ALTER TABLE review_poll_state
+      ADD COLUMN IF NOT EXISTS auth_generation INTEGER NOT NULL DEFAULT 0;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

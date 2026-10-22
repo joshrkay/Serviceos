@@ -18,6 +18,10 @@ export const es: Record<keyof EnglishCatalog, string> = {
     'Su próxima cita es el {{when}} para {{summary}}. También tiene una más el {{others}}.',
   'lookup.appointments.multiple_many':
     'Su próxima cita es el {{when}} para {{summary}}. También tiene citas el {{others}}.',
+  'lookup.appointments.this_visit_upcoming': 'Esta visita es el {{when}} para {{summary}}.',
+  'lookup.appointments.this_visit_past': 'Esta visita fue el {{when}} para {{summary}}.',
+  'lookup.appointments.this_visit_canceled': 'Esta visita, el {{when}} para {{summary}}, fue cancelada.',
+  'lookup.appointments.this_visit_missing': 'No encontré la visita que estaba viendo.',
 
   // ── Lookup: balance ──────────────────────────────────────────────────
   'lookup.balance.error':

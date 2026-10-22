@@ -1,0 +1,125 @@
+import { forwardRef, type ReactNode } from 'react';
+import { Volume2 } from 'lucide-react';
+import { useRivetSpeaking } from '../../../hooks/useRivetVoice';
+import { cn } from '../../ui/utils';
+
+export interface TurnFrameProps {
+  /** Absent on a screen that is not part of setup (a removed teammate's dead end): no countdown to show. */
+  minutesLeft?: number;
+  /** Right-hand header text: what is true about the owner's answers right now. */
+  statusLabel?: string;
+  /** 0 to 1. Only ever moves forward. */
+  progress: number;
+  /**
+   * A way out that is always in the header: on a choice turn, "Keep the rest as
+   * is". It takes the right-hand slot, and the status label moves under the
+   * minutes so both stay on screen without a taller header.
+   */
+  escape?: {
+    label: string;
+    onSelect: () => void;
+    /** The request behind the tap is in flight: the button says so and ignores further taps. */
+    busy?: boolean;
+  };
+  children: ReactNode;
+}
+
+function minutesLeftLabel(minutes: number): string {
+  return `About ${minutes} ${minutes === 1 ? 'minute' : 'minutes'} left`;
+}
+
+/**
+ * The one surface every turn renders into: a thin header, a 3px progress line,
+ * then the turn. Phone-first at 390px; centred at 480px on a desktop. No
+ * sidebar, no step list.
+ */
+export function TurnFrame({ minutesLeft, statusLabel, progress, escape, children }: TurnFrameProps) {
+  const percent = Math.round(Math.min(1, Math.max(0, progress)) * 100);
+  return (
+    <main className="mx-auto flex min-h-dvh w-full max-w-[480px] flex-col px-5 pb-7 pt-6 text-foreground">
+      <header className="flex flex-col gap-2.5">
+        <div className="flex items-center justify-between gap-3 text-sm text-muted-foreground">
+          {escape ? (
+            <>
+              <div className="flex min-w-0 flex-col">
+                {minutesLeft === undefined ? null : <span>{minutesLeftLabel(minutesLeft)}</span>}
+                {statusLabel ? <span>{statusLabel}</span> : null}
+              </div>
+              <button
+                type="button"
+                onClick={escape.onSelect}
+                disabled={escape.busy}
+                aria-busy={escape.busy || undefined}
+                className="min-h-11 min-w-11 shrink-0 rounded-lg px-1 text-right text-sm font-medium text-foreground underline disabled:opacity-60 underline-offset-2 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+              >
+                {escape.busy ? 'One moment…' : escape.label}
+              </button>
+            </>
+          ) : (
+            <>
+              {minutesLeft === undefined ? null : <span>{minutesLeftLabel(minutesLeft)}</span>}
+              {statusLabel ? <span className="flex min-h-11 items-center text-right">{statusLabel}</span> : null}
+            </>
+          )}
+        </div>
+        <div
+          role="progressbar"
+          aria-label="Setup progress"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={percent}
+          className="h-[3px] rounded-full bg-border"
+        >
+          <div className="h-[3px] rounded-full bg-primary" style={{ width: `${percent}%` }} />
+        </div>
+      </header>
+      {children}
+    </main>
+  );
+}
+
+/**
+ * Blue dot and "Rivet": who is speaking. While Rivet's line is playing, a small
+ * sound mark and the word "Speaking" follow, in a polite live region so a
+ * screen reader hears it too (never the mark alone). Not a control.
+ */
+export function SpeakerLine() {
+  const speaking = useRivetSpeaking();
+  return (
+    <div className="mt-7 flex min-w-0 flex-wrap items-center gap-2">
+      <span aria-hidden="true" className="inline-block size-2.5 rounded-full bg-primary" />
+      <span className="text-sm font-semibold text-primary">Rivet</span>
+      <span aria-live="polite" className="inline-flex items-center gap-1 text-xs text-muted-foreground">
+        {speaking ? (
+          <>
+            <Volume2 aria-hidden="true" size={14} className="text-primary" />
+            <span>Speaking</span>
+          </>
+        ) : null}
+      </span>
+    </div>
+  );
+}
+
+/**
+ * What Rivet is saying. Under twenty words, first person. It can take focus
+ * (not a tab stop) so a turn that replaces the one before it can move a
+ * keyboard or screen-reader owner onto the new question.
+ */
+export const RivetHeading = forwardRef<HTMLHeadingElement, { children: ReactNode; className?: string }>(function RivetHeading(
+  { children, className },
+  ref,
+) {
+  return (
+    <h1
+      ref={ref}
+      tabIndex={-1}
+      className={cn(
+        'mt-2.5 break-words font-display text-[30px] font-semibold leading-[1.1] tracking-[-0.02em] outline-none',
+        className,
+      )}
+    >
+      {children}
+    </h1>
+  );
+});

@@ -188,3 +188,126 @@ describe('CallQualityCard', () => {
     }
   });
 });
+
+const LATENCY = {
+  p50ReplyGapMs: 850,
+  p95ReplyGapMs: 1400,
+  p95EndpointDelayMs: 1000,
+  p95FirstAudibleMs: 600,
+  unacked: { rate: 0.0476, total: 2, byReason: { clear_echo: 1, ack_timeout: 1, stream_closed: 0 } },
+  gatherShare: { calls: 0.25 },
+  enough: true,
+};
+
+describe('CallQualityCard reply gap row (U1)', () => {
+  it('shows p50 / p95 reply gap, endpoint delay, unacked % and the degraded-call share', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ ...QUALITY, latency: LATENCY }));
+    render(<CallQualityCard />);
+
+    expect(await screen.findByTestId('reply-gap-row')).toBeInTheDocument();
+    expect(screen.getByTestId('reply-gap-p50')).toHaveTextContent('Typical reply850 ms');
+    expect(screen.getByTestId('reply-gap-p95')).toHaveTextContent('Slowest 1 in 201.4 s');
+    expect(screen.getByTestId('reply-gap-endpoint')).toHaveTextContent('1.0 s');
+    expect(screen.getByTestId('reply-gap-first-audible')).toHaveTextContent('First sound (filler counts)600 ms');
+    expect(screen.getByTestId('reply-gap-unacked')).toHaveTextContent('Replies that never played5%');
+    // The per-reason split sits under the tile.
+    expect(screen.getByTestId('reply-gap-unacked')).toHaveTextContent('timed out 1 · cleared 1 · call ended 0');
+    // The call share is the figure shown.
+    expect(screen.getByTestId('reply-gap-degraded')).toHaveTextContent('Unmeasured on 25% of calls');
+    expect(screen.queryByTestId('reply-gap-not-enough')).not.toBeInTheDocument();
+  });
+
+  it('says "Not enough calls yet" instead of numbers below the sample, but still states degradation', async () => {
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        ...QUALITY,
+        latency: {
+          ...LATENCY,
+          p50ReplyGapMs: 900,
+          p95ReplyGapMs: 900,
+          enough: false,
+        },
+      }),
+    );
+    render(<CallQualityCard />);
+
+    expect(await screen.findByTestId('reply-gap-not-enough')).toHaveTextContent('Not enough calls yet');
+    expect(screen.queryByTestId('reply-gap-p50')).not.toBeInTheDocument();
+    expect(screen.getByTestId('reply-gap-degraded')).toBeInTheDocument();
+  });
+
+  it('shows a dash for a missing number and omits the degraded note when no call ran on Gather', async () => {
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        ...QUALITY,
+        latency: {
+          ...LATENCY,
+          p95EndpointDelayMs: null,
+          unacked: { rate: null, total: 0, byReason: { clear_echo: 0, ack_timeout: 0, stream_closed: 0 } },
+          gatherShare: { calls: 0 },
+        },
+      }),
+    );
+    render(<CallQualityCard />);
+
+    expect(await screen.findByTestId('reply-gap-endpoint')).toHaveTextContent('Wait before the AI starts—');
+    expect(screen.getByTestId('reply-gap-unacked')).toHaveTextContent('—');
+    // No unacked replies: no per-reason split under the tile.
+    expect(screen.getByTestId('reply-gap-unacked')).not.toHaveTextContent('timed out');
+    expect(screen.queryByTestId('reply-gap-degraded')).not.toBeInTheDocument();
+    expect(screen.queryByTestId('reply-gap-no-calls')).not.toBeInTheDocument();
+  });
+
+  it('a null Gather share is "no calls", stated rather than left blank', async () => {
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse({ ...QUALITY, latency: { ...LATENCY, gatherShare: { calls: null }, enough: false } }),
+    );
+    render(<CallQualityCard />);
+
+    expect(await screen.findByTestId('reply-gap-no-calls')).toHaveTextContent('No calls in the last 7 days');
+    expect(screen.queryByTestId('reply-gap-degraded')).not.toBeInTheDocument();
+  });
+
+  it('a window where every reply went unacked still shows its tiles: dashes for the percentiles, 100% for the rate', async () => {
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        ...QUALITY,
+        latency: {
+          ...LATENCY,
+          p50ReplyGapMs: null,
+          p95ReplyGapMs: null,
+          p95FirstAudibleMs: null,
+          unacked: { rate: 1, total: 12, byReason: { clear_echo: 2, ack_timeout: 10, stream_closed: 0 } },
+        },
+      }),
+    );
+    render(<CallQualityCard />);
+
+    expect(await screen.findByTestId('reply-gap-p50')).toHaveTextContent('Typical reply—');
+    expect(screen.getByTestId('reply-gap-first-audible')).toHaveTextContent('—');
+    expect(screen.getByTestId('reply-gap-unacked')).toHaveTextContent('Replies that never played100%');
+    expect(screen.getByTestId('reply-gap-unacked')).toHaveTextContent('timed out 10 · cleared 2 · call ended 0');
+    expect(screen.queryByTestId('reply-gap-not-enough')).not.toBeInTheDocument();
+  });
+
+  it('hides the row when latency is null or absent, leaving the rest of the card intact', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ ...QUALITY, latency: null }));
+    const { unmount } = render(<CallQualityCard />);
+    expect(await screen.findByText('9 of 10 graded calls passed in the last 7 days (90%)')).toBeInTheDocument();
+    expect(screen.queryByTestId('reply-gap-row')).not.toBeInTheDocument();
+    unmount();
+
+    apiFetchMock.mockResolvedValueOnce(jsonResponse(QUALITY));
+    render(<CallQualityCard />);
+    expect(await screen.findByText('9 of 10 graded calls passed in the last 7 days (90%)')).toBeInTheDocument();
+    expect(screen.queryByTestId('reply-gap-row')).not.toBeInTheDocument();
+  });
+
+  it('lays the tiles out two-up with shrinkable text so nothing scrolls sideways at 320px', async () => {
+    apiFetchMock.mockResolvedValueOnce(jsonResponse({ ...QUALITY, latency: LATENCY }));
+    render(<CallQualityCard />);
+    const p50 = await screen.findByTestId('reply-gap-p50');
+    expect(p50).toHaveClass('min-w-0');
+    expect(p50.parentElement).toHaveClass('grid', 'grid-cols-2');
+  });
+});

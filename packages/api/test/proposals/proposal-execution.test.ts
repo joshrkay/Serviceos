@@ -111,6 +111,21 @@ describe('InMemoryProposalExecutionRepository', () => {
       expect(second.executedPayload).toEqual({ v: 1 });
     });
 
+    it('with idempotencyKey: a prior failed attempt is replaced by the retry\'s outcome (matches the Pg upsert)', async () => {
+      const repo = new InMemoryProposalExecutionRepository();
+      const base = { tenantId: TENANT_A, proposalId: PROPOSAL_1, executedBy: 'user-1', idempotencyKey: 'k-retry' };
+      const failed = await repo.recordExecution({ ...base, executedPayload: { v: 1 }, status: 'failed', errorMessage: 'boom' });
+      const refailed = await repo.recordExecution({ ...base, executedPayload: { v: 2 }, status: 'failed', errorMessage: 'boom again' });
+      expect(refailed).toMatchObject({ id: failed.id, status: 'failed', errorMessage: 'boom again' });
+      const ok = await repo.recordExecution({ ...base, executedPayload: { v: 3 }, status: 'succeeded' });
+      expect(ok).toMatchObject({ id: failed.id, status: 'succeeded', executedPayload: { v: 3 } });
+      expect(ok.errorMessage).toBeUndefined();
+      expect(await repo.listByProposal(TENANT_A, PROPOSAL_1)).toHaveLength(1);
+      // A succeeded row is final.
+      const late = await repo.recordExecution({ ...base, executedPayload: { v: 4 }, status: 'failed', errorMessage: 'late' });
+      expect(late).toMatchObject({ status: 'succeeded', executedPayload: { v: 3 } });
+    });
+
     it('without idempotencyKey: each call inserts a new row (retry / undo / redo)', async () => {
       const repo = new InMemoryProposalExecutionRepository();
       const a = await repo.recordExecution({

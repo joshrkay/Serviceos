@@ -23,7 +23,7 @@ import { PgWorkingHoursRepository } from '../../src/availability/pg-working-hour
 import { PgUnavailableBlockRepository } from '../../src/availability/pg-unavailable-block';
 import { assignTechnician } from '../../src/appointments/assignment';
 import { FeasibilityDependencies } from '../../src/scheduling/feasibility-types';
-import { StubSkillMatcher } from '../../src/scheduling/skill-matcher';
+import { noSkillConstraints } from '../helpers/no-skill-constraints';
 import { TravelTimeProvider } from '../../src/scheduling/travel-time/provider';
 import { CreateAppointmentAITaskHandler } from '../../src/ai/tasks/create-appointment-task';
 import type { LLMGateway } from '../../src/ai/gateway/gateway';
@@ -69,7 +69,7 @@ describe('Postgres integration — the non-held create_appointment draft is feas
       workingHoursRepo: new PgWorkingHoursRepository(pool),
       unavailableBlockRepo: new PgUnavailableBlockRepository(pool),
       travelTimeProvider,
-      skillMatcher: new StubSkillMatcher(),
+      skillMatcher: noSkillConstraints(),
     };
   }
 

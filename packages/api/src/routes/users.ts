@@ -1,6 +1,7 @@
 import type { SeatUsageReader } from '../users/seat-limit';
 import { Router, Response } from 'express';
 import { z } from 'zod';
+import { skillTagsSchema } from '@ai-service-os/shared';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
@@ -24,12 +25,15 @@ import { inviteTeamMember } from '../users/invite-team-member';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { normalizeMobileE164 } from '../shared/phone/normalize';
 import { routeParam } from '../shared/route-params';
+import { SkillEditGuardDeps, assertTechnicianSkillEditKeepsVisitsQualified } from '../scheduling/skill-edit-guard';
 
 const updateUserSchema = z.object({
   role: z.enum(['owner', 'dispatcher', 'technician']).optional(),
   firstName: z.string().trim().max(200).optional(),
   lastName: z.string().trim().max(200).optional(),
   canFieldServe: z.boolean().optional(),
+  // Dispatch FR-2 phase 2 — the tags the feasibility skill gate checks.
+  skills: skillTagsSchema.optional(),
 });
 
 const inviteUserSchema = z.object({
@@ -61,6 +65,8 @@ export interface UsersRouteDeps {
    * client's own sign-out cleanup can't run once its credentials are dead.
    */
   deviceTokenRepo?: { removeAllForUser(tenantId: string, userId: string): Promise<number> };
+  /** Dispatch FR-2 — refuse a skills edit that would strand an active visit. */
+  skillEditGuard?: SkillEditGuardDeps;
 }
 
 /**
@@ -145,6 +151,14 @@ export function createUsersRouter(
     async (req: AuthenticatedRequest, res: Response) => {
       try {
         const parsed = updateUserSchema.parse(req.body ?? {});
+        if (parsed.skills !== undefined && deps.skillEditGuard) {
+          await assertTechnicianSkillEditKeepsVisitsQualified(
+            deps.skillEditGuard,
+            req.auth!.tenantId,
+            routeParam(req, 'id'),
+            parsed.skills,
+          );
+        }
         const updated = await updateUser(
           req.auth!.tenantId,
           routeParam(req, 'id'),

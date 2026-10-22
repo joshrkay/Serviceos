@@ -154,7 +154,7 @@ describe('WS2 (D-019) — one-tap UNDO no longer runs close-chain compensation',
       tenantId: TENANT,
       secret: SECRET,
     });
-    const res = await request(h.app).get(`/public/proposals/one-tap-undo?token=${encodeURIComponent(token)}`);
+    const res = await request(h.app).post('/public/proposals/one-tap-undo').type('form').send({ token });
     expect(res.status).toBe(200);
     expect(res.text).toContain('Booking undone');
     // The generic copy — never the D-018 "quote can't be recalled" line.
@@ -207,7 +207,7 @@ describe('WS2 (D-019) — one-tap UNDO no longer runs close-chain compensation',
       createOneTapUndoRouter({ proposalRepo, appointmentRepo, auditRepo, secret: SECRET, consumeNonce: () => true }),
     );
     const { token } = createOneTapUndoToken({ proposalId: proposal.id, tenantId: TENANT, secret: SECRET });
-    const res = await request(app).get(`/public/proposals/one-tap-undo?token=${encodeURIComponent(token)}`);
+    const res = await request(app).post('/public/proposals/one-tap-undo').type('form').send({ token });
     expect(res.status).toBe(200);
     expect(res.text).not.toContain('can’t be recalled');
     expect((await appointmentRepo.findById(TENANT, appointment.id))!.status).toBe('canceled');

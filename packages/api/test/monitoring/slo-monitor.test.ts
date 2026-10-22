@@ -3,18 +3,22 @@
  * runSloMonitor tick (breach → alert; no breach → silent; failure-soft reads).
  */
 import { describe, it, expect, vi } from 'vitest';
-import { Histogram, Registry } from 'prom-client';
+import { Counter, Histogram, Registry } from 'prom-client';
 import {
   evaluateCallCompletion,
   evaluateQueueStaleness,
   evaluateSweepLag,
   evaluateTurnLatency,
   evaluateGradedPassRate,
+  evaluateReplyGap,
+  evaluateReplyUnackedRate,
   estimateTurnLatencyP95,
+  snapshotReplyGap,
   runSloMonitor,
   type SloThresholds,
   type SloMonitorDeps,
   type TurnLatencySnapshot,
+  type ReplyGapSnapshot,
 } from '../../src/workers/slo-monitor';
 import type { Logger } from '../../src/logging/logger';
 
@@ -27,6 +31,9 @@ const thresholds: SloThresholds = {
   turnLatencyMinSample: 30,
   gradedPassRateMin: 0.85,
   gradedPassRateMinSample: 10,
+  replyGapP95Ms: 1500,
+  replyUnackedRateMax: 0.01,
+  replyGapMinSample: 30,
 };
 
 const noopLogger: Logger = {
@@ -189,6 +196,131 @@ describe('evaluateTurnLatency', () => {
   });
 });
 
+/**
+ * U1 — build the snapshot from REAL prom-client metrics (the actual `.get()`
+ * export shape, labels included), not a hand-faked one.
+ */
+async function replyGapSnapshotFrom(opts: {
+  lastWordMs?: number[];
+  sttFinalMs?: number[];
+  unacked?: Partial<Record<'clear_echo' | 'ack_timeout' | 'stream_closed', number>>;
+}): Promise<ReplyGapSnapshot> {
+  const reg = new Registry();
+  const gap = new Histogram({
+    name: 'voice_reply_gap_ms',
+    help: 'test',
+    labelNames: ['anchor'] as const,
+    buckets: [250, 500, 1000, 1500, 2000, 2500, 3000, 3500, 5000, 7500, 10_000],
+    registers: [reg],
+  });
+  const unacked = new Counter({
+    name: 'voice_reply_unacked_total',
+    help: 'test',
+    labelNames: ['reason'] as const,
+    registers: [reg],
+  });
+  for (const ms of opts.lastWordMs ?? []) gap.observe({ anchor: 'last_word' }, ms);
+  for (const ms of opts.sttFinalMs ?? []) gap.observe({ anchor: 'stt_final' }, ms);
+  for (const [reason, n] of Object.entries(opts.unacked ?? {})) {
+    unacked.inc({ reason }, n);
+  }
+  return snapshotReplyGap((await gap.get()).values, (await unacked.get()).values);
+}
+
+describe('snapshotReplyGap / evaluateReplyGap (U1 — voice_reply_gap_p95)', () => {
+  it('p95 is computed from last_word observations only; stt_final is ignored', async () => {
+    // 40 healthy last-word replies, plus 100 slow stt_final fallbacks that
+    // would drag the p95 well above the threshold if they were mixed in.
+    const snap = await replyGapSnapshotFrom({
+      lastWordMs: Array.from({ length: 40 }, () => 900),
+      sttFinalMs: Array.from({ length: 100 }, () => 7000),
+    });
+    expect(snap.lastWordCount).toBe(40);
+    expect(snap.ackedCount).toBe(140);
+    expect(snap.p95Ms).toBeLessThanOrEqual(1000);
+    const r = evaluateReplyGap(snap, thresholds)!;
+    expect(r.breached).toBe(false);
+  });
+
+  it('stays silent below the min sample, even when the p95 is terrible', async () => {
+    const snap = await replyGapSnapshotFrom({ lastWordMs: Array.from({ length: 29 }, () => 6000) });
+    expect(evaluateReplyGap(snap, thresholds)).toBeNull();
+  });
+
+  it('stt_final observations do not count toward the last-word sample floor', async () => {
+    const snap = await replyGapSnapshotFrom({
+      lastWordMs: Array.from({ length: 10 }, () => 6000),
+      sttFinalMs: Array.from({ length: 100 }, () => 6000),
+    });
+    expect(evaluateReplyGap(snap, thresholds)).toBeNull();
+  });
+
+  it('warns with the measured p95 once above threshold at the sample floor', async () => {
+    const snap = await replyGapSnapshotFrom({ lastWordMs: Array.from({ length: 30 }, () => 2200) });
+    const r = evaluateReplyGap(snap, thresholds)!;
+    expect(r.rule).toBe('voice_reply_gap_p95');
+    expect(r.breached).toBe(true);
+    expect(r.severity).toBe('warning');
+    expect(r.value).toBeGreaterThan(1500);
+    expect(r.details).toMatchObject({
+      p95Ms: Math.round(snap.p95Ms),
+      sampleCount: 30,
+      thresholdMs: 1500,
+    });
+    expect(r.summary).toContain(`${Math.round(snap.p95Ms)}ms`);
+  });
+
+  it('does not breach exactly at the threshold, and null snapshot is not evaluated', () => {
+    const at: ReplyGapSnapshot = { p95Ms: 1500, lastWordCount: 50, ackedCount: 50, unackedCount: 0 };
+    expect(evaluateReplyGap(at, thresholds)!.breached).toBe(false);
+    expect(evaluateReplyGap(null, thresholds)).toBeNull();
+  });
+
+  it('an empty metric set yields a zeroed snapshot', async () => {
+    const snap = await replyGapSnapshotFrom({});
+    expect(snap).toEqual({ p95Ms: 0, lastWordCount: 0, ackedCount: 0, unackedCount: 0 });
+  });
+});
+
+describe('evaluateReplyUnackedRate (U1 — voice_reply_unacked_rate)', () => {
+  it('sums unacked across reasons and warns above 1 %', async () => {
+    const snap = await replyGapSnapshotFrom({
+      lastWordMs: Array.from({ length: 96 }, () => 800),
+      unacked: { clear_echo: 1, ack_timeout: 2, stream_closed: 1 },
+    });
+    expect(snap.unackedCount).toBe(4);
+    const r = evaluateReplyUnackedRate(snap, thresholds)!;
+    expect(r.rule).toBe('voice_reply_unacked_rate');
+    expect(r.breached).toBe(true);
+    expect(r.severity).toBe('warning');
+    expect(r.value).toBeCloseTo(0.04, 5);
+    expect(r.details).toMatchObject({ unacked: 4, total: 100, thresholdRate: 0.01 });
+  });
+
+  it('counts stt_final-anchored acked replies in the denominator', async () => {
+    const snap = await replyGapSnapshotFrom({
+      lastWordMs: Array.from({ length: 50 }, () => 800),
+      sttFinalMs: Array.from({ length: 50 }, () => 800),
+      unacked: { ack_timeout: 1 },
+    });
+    // 1 / 101 is under 1 %.
+    const r = evaluateReplyUnackedRate(snap, thresholds)!;
+    expect(r.breached).toBe(false);
+    expect(r.details).toMatchObject({ unacked: 1, total: 101 });
+  });
+
+  it('stays silent below the min sample of replies that enqueued a real frame', () => {
+    const snap: ReplyGapSnapshot = { p95Ms: 0, lastWordCount: 0, ackedCount: 20, unackedCount: 9 };
+    expect(evaluateReplyUnackedRate(snap, thresholds)).toBeNull();
+    expect(evaluateReplyUnackedRate(null, thresholds)).toBeNull();
+  });
+
+  it('does not breach exactly at the maximum rate', () => {
+    const snap: ReplyGapSnapshot = { p95Ms: 0, lastWordCount: 99, ackedCount: 99, unackedCount: 1 };
+    expect(evaluateReplyUnackedRate(snap, thresholds)!.breached).toBe(false);
+  });
+});
+
 describe('evaluateGradedPassRate (#1602 — 7-day production graded pass rate vs the Layer 2 gate)', () => {
   it('breaches when fewer than 85% of graded calls passed, with enough graded calls', () => {
     const r = evaluateGradedPassRate({ total: 20, passed: 16 }, thresholds);
@@ -222,6 +354,7 @@ describe('runSloMonitor', () => {
       getSweepLastSuccessMs: () => Date.now() - 15_000,
       processRole: 'worker',
       getTurnLatencySnapshot: vi.fn().mockResolvedValue(null),
+      getReplyGapSnapshot: vi.fn().mockResolvedValue(null),
       getGradedPassRate: vi.fn().mockResolvedValue({ total: 0, passed: 0 }),
       alert,
       thresholds,
@@ -310,6 +443,49 @@ describe('runSloMonitor', () => {
     const result = await runSloMonitor(deps);
     expect(result.breached).toEqual([]);
     expect(deps.alert).not.toHaveBeenCalled();
+  });
+
+  // ── U1 — reply-gap rules (D-043), same in-process role gate as rule 4 ──────
+  it('U1 role guard: reply-gap rules are not evaluated or read in a non-all role', async () => {
+    const getReplyGapSnapshot = vi
+      .fn()
+      .mockResolvedValue({ p95Ms: 9000, lastWordCount: 100, ackedCount: 100, unackedCount: 50 });
+    const result = await runSloMonitor(buildDeps({ processRole: 'worker', getReplyGapSnapshot }));
+    expect(result.evaluated).not.toContain('voice_reply_gap_p95');
+    expect(result.evaluated).not.toContain('voice_reply_unacked_rate');
+    expect(getReplyGapSnapshot).not.toHaveBeenCalled();
+  });
+
+  it('U1: under PROCESS_ROLE=all both reply-gap rules page beside the untouched turn-latency rule', async () => {
+    const deps = buildDeps({
+      processRole: 'all',
+      getTurnLatencySnapshot: vi.fn().mockResolvedValue({ p95Ms: 1200, sampleCount: 100 }),
+      getReplyGapSnapshot: vi
+        .fn()
+        .mockResolvedValue({ p95Ms: 2600, lastWordCount: 100, ackedCount: 100, unackedCount: 5 }),
+    });
+    const result = await runSloMonitor(deps);
+    expect(result.evaluated).toEqual(
+      expect.arrayContaining([
+        'voice_turn_latency_p95',
+        'voice_reply_gap_p95',
+        'voice_reply_unacked_rate',
+      ]),
+    );
+    expect(result.breached).toEqual(['voice_reply_gap_p95', 'voice_reply_unacked_rate']);
+    expect(deps.alert).toHaveBeenCalledWith(
+      expect.objectContaining({ rule: 'voice_reply_gap_p95', severity: 'warning' }),
+    );
+  });
+
+  it('U1: a failing reply-gap read is logged and does not abort later rules', async () => {
+    const deps = buildDeps({
+      processRole: 'all',
+      getReplyGapSnapshot: vi.fn().mockRejectedValue(new Error('prom down')),
+    });
+    const result = await runSloMonitor(deps);
+    expect(result.evaluated).toContain('voice_graded_pass_rate_7d');
+    expect(result.evaluated).not.toContain('voice_reply_gap_p95');
   });
 
   // ── WS26 — voice turn-latency rule + its cross-process role guard ──────────

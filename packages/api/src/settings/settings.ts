@@ -1,4 +1,7 @@
 import { v4 as uuidv4 } from 'uuid';
+import type { PoolClient } from 'pg';
+import type { Queue } from '../queues/queue';
+import { paymentModeChangeHook } from '../invoices/payment-mode-change';
 import { ValidationError } from '../shared/errors';
 
 import { isValidTimezone } from '../shared/timezone';
@@ -32,6 +35,21 @@ export function normalizeReminderOffsets(input: unknown): number[] {
 }
 
 /**
+ * Canonical enums for the "pick, don't build" onboarding settings. Declared
+ * once here; the settings PUT contract, the onboarding_voice_policy proposal
+ * and the choice registry all build their Zod enums from these arrays.
+ * (SQL migration literals stay as written — they cannot import.)
+ */
+/** How the owner wants to be paid when a job is marked done. */
+export const PAYMENT_COLLECTION_MODES = ['pay_link', 'collect_on_site'] as const;
+export type PaymentCollectionMode = (typeof PAYMENT_COLLECTION_MODES)[number];
+/** Who the agent reaches first on an emergency call. */
+export const EMERGENCY_TARGETS = ['owner_cell', 'owner_cell_then_text'] as const;
+export type EmergencyTarget = (typeof EMERGENCY_TARGETS)[number];
+/** Inbound behavior outside business hours. */
+export const AFTER_HOURS_VOICE_MODES = ['voicemail', 'ai_answering'] as const;
+
+/**
  * F8 — per-tenant escalation channel + trigger flags.
  *
  * Stored as a JSON column on tenant_settings (migration deferred to the
@@ -60,7 +78,14 @@ export interface EscalationSettings {
    * tenant never saved the Call Routing sheet, so only an owner's own choice
    * survives as a stored value.
    */
-  after_hours_voice_mode?: 'voicemail' | 'ai_answering';
+  after_hours_voice_mode?: (typeof AFTER_HOURS_VOICE_MODES)[number];
+  /**
+   * "Pick, don't build" onboarding — who the agent reaches first on an
+   * emergency call: the owner's cell, or the owner's cell with an SMS page
+   * if unanswered. Chosen on the emergency card; consumed by the hand-off
+   * path. Absent means owner_cell.
+   */
+  emergency_target?: EmergencyTarget;
   /**
    * RV-071 — spoken challenge (e.g. a PIN like "4271") required before a
    * money-class or irreversible-class proposal can be APPROVED BY VOICE on
@@ -512,6 +537,13 @@ export interface TenantSettings {
   googleReviewUrl?: string | null;
   yelpReviewUrl?: string | null;
   /**
+   * D-044 — the review link the app last filled in from a connected
+   * Google listing. Lives here, not on the integration row, so a later
+   * listing can still replace it after a disconnect. Not owner-editable
+   * (absent from updateSettingsSchema). Migration 330.
+   */
+  googleReviewUrlDerived?: string | null;
+  /**
    * P11-002 — tenant language stack (columns on tenant_settings:
    * default_language, auto_detect_language, tts_voice_en/es,
    * spanish_dispatcher_user_ids). Resolves EN/ES for the voice agent
@@ -601,6 +633,8 @@ export interface TenantSettings {
    * rows / legacy fixtures read as "off" via `?? false`.
    */
   autonomousBookingEnabled?: boolean;
+  /** Migration 312 — how the owner collects payment at job completion; null/undefined = not chosen yet. */
+  paymentCollectionMode?: PaymentCollectionMode | null;
   /**
    * UB-D / D-015 — the lane's dedicated confidence threshold. NUMERIC(3,2)
    * with DB CHECK 0.90–0.99 (default 0.95); the evaluator
@@ -741,6 +775,8 @@ export interface UpdateSettingsInput {
   /** Public review links (4★+ feedback page); null clears the field. */
   googleReviewUrl?: string | null;
   yelpReviewUrl?: string | null;
+  /** D-044 — see TenantSettings.googleReviewUrlDerived. */
+  googleReviewUrlDerived?: string | null;
   /** P11-002 — tenant language stack. */
   defaultLanguage?: Language;
   autoDetectLanguage?: boolean;
@@ -771,6 +807,8 @@ export interface UpdateSettingsInput {
   weeklyFeedbackEnabled?: boolean;
   /** UB-D / D-015 — opt into the autonomous booking lane (column default false). */
   autonomousBookingEnabled?: boolean;
+  /** Migration 312 — how the owner collects payment at job completion; null/undefined = not chosen yet. */
+  paymentCollectionMode?: PaymentCollectionMode | null;
   /** UB-D / D-015 — lane confidence threshold, 0.90–0.99 (column default 0.95). */
   autonomousBookingThreshold?: number;
   /** D-018 — opt into the autonomous close lane (column default false). */
@@ -902,9 +940,33 @@ export const VOICE_APPROVAL_PIN_CREDENTIAL_KEYS = [
   'voice_approval_challenge',
 ] as const;
 
+/**
+ * S5a-4 (U8) — what an `afterWrite` hook sees: the transaction's own client
+ * (null on the in-memory repository, which has no transaction to join), and
+ * the row before and after the write, both read inside the transaction.
+ * When the patch names `paymentCollectionMode`, both are read under the
+ * EXCLUSIVE payment-mode lock (`paymentModeLockKey`), the only ordering that
+ * exists for a tenant with no settings row yet. In Postgres `before` is the
+ * row after the minimal seed insert, so a first write sees an unset key
+ * (the default), never null.
+ */
+export interface SettingsWriteContext {
+  client: PoolClient | null;
+  tenantId: string;
+  before: TenantSettings | null;
+  after: TenantSettings;
+}
+
 export interface SettingsUpdateOptions {
   /** See SettingsRepository.update. */
   preserveVoiceApprovalPin?: boolean;
+  /**
+   * S5a-4 (U8) — runs inside `update`'s transaction after the row write and
+   * before commit (on the HTTP path the commit is the request's, at response
+   * end). A throw rolls the write back and propagates. Never make a network
+   * call here: the payment-mode lock and the row lock are held.
+   */
+  afterWrite?: (ctx: SettingsWriteContext) => Promise<void>;
 }
 
 export interface ActiveVerticalPackValidationOptions {
@@ -1234,11 +1296,21 @@ export function liveE1Script(
   return missingE1ReviewerKinds(settings).length === 0 ? script : null;
 }
 
+/**
+ * S5a-5 (U8) — pass the app queue and a write that names
+ * `paymentCollectionMode` enqueues the pay-link cleanup in its own
+ * transaction (`onPaymentCollectionModeChanged`). The hook is attached here,
+ * not by each route, so a caller only has to pass the queue.
+ */
+export interface UpdateSettingsPaymentModeOptions {
+  paymentModeQueue?: Queue;
+}
+
 export async function updateSettings(
   tenantId: string,
   input: UpdateSettingsInput,
   repository: SettingsRepository,
-  options?: ActiveVerticalPackValidationOptions & SettingsUpdateOptions
+  options?: ActiveVerticalPackValidationOptions & SettingsUpdateOptions & UpdateSettingsPaymentModeOptions
 ): Promise<TenantSettings | null> {
   // Sweep-2 S1: only touch `activeVerticalPacks` when the caller actually
   // provided a value. Unconditionally spreading a normalized `undefined`
@@ -1266,10 +1338,28 @@ export async function updateSettings(
   // stores the null). The type cast bridges the gap without widening
   // every TenantSettings consumer to handle null reads — those still
   // see undefined because mapRow normalizes NULL → undefined.
+  // Options are passed only when one is set, so a plain save keeps its
+  // two-argument repository call.
+  const callerHook = options?.afterWrite;
+  const modeHook =
+    options?.paymentModeQueue && normalizedInput.paymentCollectionMode !== undefined
+      ? paymentModeChangeHook(options.paymentModeQueue)
+      : undefined;
+  const afterWrite: SettingsUpdateOptions['afterWrite'] =
+    callerHook && modeHook
+      ? async (ctx) => {
+          await callerHook(ctx);
+          await modeHook(ctx);
+        }
+      : (callerHook ?? modeHook);
+  const repoOptions: SettingsUpdateOptions = {
+    ...(options?.preserveVoiceApprovalPin ? { preserveVoiceApprovalPin: true } : {}),
+    ...(afterWrite ? { afterWrite } : {}),
+  };
   return repository.update(
     tenantId,
     { ...normalizedInput, updatedAt: new Date() } as Partial<TenantSettings>,
-    ...(options?.preserveVoiceApprovalPin ? [{ preserveVoiceApprovalPin: true }] : []),
+    ...(Object.keys(repoOptions).length > 0 ? [repoOptions] : []),
   );
 }
 
@@ -1473,9 +1563,45 @@ export class InMemorySettingsRepository implements SettingsRepository {
     for (const key of Object.keys(safeUpdates) as (keyof typeof safeUpdates)[]) {
       if (safeUpdates[key] === undefined) delete safeUpdates[key];
     }
+    // D-044 parity with Pg: an owner's review-link edit drops the
+    // "app filled this" marker unless the link still equals it.
+    if (
+      safeUpdates.googleReviewUrl !== undefined &&
+      safeUpdates.googleReviewUrlDerived === undefined &&
+      s.googleReviewUrlDerived !== (safeUpdates.googleReviewUrl ?? null)
+    ) {
+      safeUpdates.googleReviewUrlDerived = null;
+    }
+    // S5a-4 parity with Pg: a payment-mode write always moves updatedAt.
+    if (safeUpdates.paymentCollectionMode !== undefined && safeUpdates.updatedAt === undefined) {
+      safeUpdates.updatedAt = new Date();
+    }
     const updated = { ...s, ...safeUpdates };
     this.settings.set(tenantId, updated);
+    if (options?.afterWrite) {
+      // Parity with the Pg transaction: a throwing hook undoes the write.
+      try {
+        await options.afterWrite({ client: null, tenantId, before: { ...s }, after: { ...updated } });
+      } catch (err) {
+        this.settings.set(tenantId, s);
+        throw err;
+      }
+    }
     return { ...updated };
+  }
+
+  /**
+   * S5a-6 (U8) — the in-memory twin of the reconciliation sweep's Postgres
+   * enumerator (`listCollectOnSiteTenantIds`): the tenants whose STORED
+   * choice is `mode`, sorted by tenant id. An unset key is not listed under
+   * either mode (D-039/D-040: unset means the `pay_link` default, and a
+   * tenant that never chose holds nothing for the sweep to retire).
+   */
+  async listTenantIdsByPaymentCollectionMode(mode: PaymentCollectionMode): Promise<string[]> {
+    return Array.from(this.settings.values())
+      .filter((s) => s.paymentCollectionMode === mode)
+      .map((s) => s.tenantId)
+      .sort();
   }
 
   async incrementEstimateNumber(tenantId: string): Promise<number> {

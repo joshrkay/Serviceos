@@ -3,6 +3,62 @@ import { Pool, PoolConfig } from 'pg';
 const isProd = process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'prod';
 
 /**
+ * Hardening sweep 2026-10 (audit T4-F13) — TLS settings for every pool.
+ *
+ * `DB_SSL=false` keeps plain TCP (local Postgres, testcontainers). Otherwise
+ * TLS is on, and the certificate is VERIFIED when `DB_SSL_CA` holds the
+ * provider's CA certificate (PEM; newlines may be escaped as `\n` the way
+ * Railway's variable editor stores them). Without a CA we keep the historic
+ * `rejectUnauthorized: false` so an existing deploy does not break, but warn
+ * once so the gap is visible instead of silent.
+ */
+export type PgSslSetting = false | { rejectUnauthorized: boolean; ca?: string };
+
+let warnedUnverifiedTls = false;
+
+export function buildPgSsl(
+  env: { DB_SSL?: string; DB_SSL_CA?: string } = process.env,
+  warn: (message: string) => void = (m) => process.stderr.write(`${m}\n`),
+): PgSslSetting {
+  if (env.DB_SSL === 'false') return false;
+  const ca = env.DB_SSL_CA?.replace(/\\n/g, '\n').trim();
+  if (ca) return { rejectUnauthorized: true, ca };
+  if (!warnedUnverifiedTls) {
+    warnedUnverifiedTls = true;
+    warn('pg: TLS certificate verification is OFF (set DB_SSL_CA to the provider CA to enable it)');
+  }
+  return { rejectUnauthorized: false };
+}
+
+/** Test-only: let the one-shot warning fire again. */
+export function resetPgSslWarningForTests(): void {
+  warnedUnverifiedTls = false;
+}
+
+/**
+ * DSN query keys that pg-connection-string turns into an `ssl` value. pg builds
+ * its parameters as `Object.assign({}, config, parse(connectionString))`
+ * (pg/lib/connection-parameters.js), so any of these in `DATABASE_URL` would
+ * silently REPLACE the `ssl` object from `buildPgSsl()` — e.g. `?sslmode=require`
+ * downgrades a verified connection to `{ rejectUnauthorized: false }` even with
+ * `DB_SSL_CA` set, and `?sslmode=disable` would turn it into plaintext.
+ * `prepareDsn` strips them all so the env contract (`DB_SSL`, `DB_SSL_CA`) is
+ * the only thing that decides TLS; plaintext is `DB_SSL=false`, nothing else.
+ */
+const DSN_SSL_KEYS = ['ssl', 'sslmode', 'sslrootcert', 'sslcert', 'sslkey'] as const;
+
+export function prepareDsn(url: string): string {
+  const qIdx = url.indexOf('?');
+  if (qIdx === -1) return url;
+
+  const params = new URLSearchParams(url.slice(qIdx + 1));
+  for (const key of DSN_SSL_KEYS) params.delete(key);
+
+  const query = params.toString();
+  return query ? `${url.slice(0, qIdx)}?${query}` : url.slice(0, qIdx);
+}
+
+/**
  * #1090 — keep a server-side connection kill off `uncaughtException`.
  *
  * `pool.on('error')` below only covers clients that are IDLE IN THE POOL:
@@ -49,8 +105,8 @@ export function createPool(): Pool {
 
   if (databaseUrl) {
     config = {
-      connectionString: databaseUrl,
-      ssl: process.env.DB_SSL === 'false' ? false : { rejectUnauthorized: false },
+      connectionString: prepareDsn(databaseUrl),
+      ssl: buildPgSsl(),
       max: parseInt(process.env.DB_MAX_CONNECTIONS || '20', 10),
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 5000,
@@ -64,7 +120,7 @@ export function createPool(): Pool {
       database: process.env.DB_NAME || (isProd ? undefined : 'serviceos_dev'),
       user: process.env.DB_USER || (isProd ? undefined : 'serviceos'),
       password: process.env.DB_PASSWORD || (isProd ? undefined : ''),
-      ssl: isProd ? { rejectUnauthorized: false } : false,
+      ssl: isProd ? buildPgSsl() : false,
       max: parseInt(process.env.DB_MAX_CONNECTIONS || '10', 10),
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 5000,
@@ -101,8 +157,8 @@ export function createDirectPool(): Pool | null {
   if (!url) return null;
 
   const pool = new Pool({
-    connectionString: url,
-    ssl: process.env.DB_SSL === 'false' ? false : { rejectUnauthorized: false },
+    connectionString: prepareDsn(url),
+    ssl: buildPgSsl(),
     // Small — only the session-lock holders and the LISTEN client use it.
     max: parseInt(process.env.DB_DIRECT_MAX_CONNECTIONS || '10', 10),
     idleTimeoutMillis: 30000,

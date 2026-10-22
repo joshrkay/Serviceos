@@ -48,7 +48,7 @@ import type { FeasibilityDependencies } from '../../../src/scheduling/feasibilit
 import { InMemoryAssignmentRepository } from '../../../src/appointments/assignment';
 import { InMemoryWorkingHoursRepository } from '../../../src/availability/working-hours';
 import { InMemoryUnavailableBlockRepository } from '../../../src/availability/unavailable-block';
-import { StubSkillMatcher } from '../../../src/scheduling/skill-matcher';
+import { noSkillConstraints } from '../../helpers/no-skill-constraints';
 
 const TENANT = 'tenant-close';
 const JOB_ID = '22222222-2222-4222-8222-222222222222';
@@ -469,7 +469,7 @@ describe('#1045 — live-call close carries the hold feasibility onto the staged
       travelTimeProvider: {
         estimateDriveTime: async () => ({ seconds: 60, source: 'haversine', degraded: false }),
       },
-      skillMatcher: new StubSkillMatcher(),
+      skillMatcher: noSkillConstraints(),
     };
     const booking = await stagedBooking(feasibilityDeps);
     expect(booking.sourceContext?.holdFeasibility).toEqual({ checked: true, warnings: [] });

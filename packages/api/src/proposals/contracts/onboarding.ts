@@ -1,8 +1,19 @@
 import { z } from 'zod';
 import { isRuntimeTimezone } from '../../shared/timezone';
+import { isSeedablePackId } from '../../packs/seed-pack-defaults';
+import { isCanonicalOwnerPhone } from '../../onboarding/draft/owner-phone';
+import { ChoiceWritesSchema, type ChoiceWrites } from '../../onboarding/choices/schema';
 
 // Electrical and painting are accepted as basic second-class verticals; rich defaults are added separately.
 const verticalTypeSchema = z.enum(['hvac', 'plumbing', 'electrical', 'painting']);
+
+/**
+ * A pack the seeder knows: the four rich verticals plus the generic trades the
+ * form wizard already activates (roofing, gc_remodel, landscaping, concrete,
+ * other). "Pick, don't build" onboarding mints onboarding_tenant_settings for
+ * every trade, so the pack list must accept what POST /api/onboarding/pack does.
+ */
+const seedablePackIdSchema = z.string().min(1).refine(isSeedablePackId, { message: 'unknown pack id' });
 
 const lineItemCategorySchema = z.enum(['labor', 'material', 'equipment', 'other']);
 
@@ -10,12 +21,19 @@ export const onboardingTenantSettingsPayloadSchema = z.object({
   businessName: z.string().min(1),
   city: z.string().optional(),
   state: z.string().optional(),
-  verticalPacks: z.array(verticalTypeSchema).min(1),
+  verticalPacks: z.array(seedablePackIdSchema).min(1),
   // B1.20 — the owner's hourly rate, when the pricing capture state
   // extracted one (price_type: 'hourly_rate'). Integer cents, per the
   // repo's money invariant. Optional/absent when no hourly rate was
   // spoken — never fabricated (see tenant-settings-proposer.ts).
   hourlyRateCents: z.number().int().min(0).optional(),
+  /**
+   * "Pick, don't build" onboarding — the trip (visit) fee the owner chose,
+   * integer cents. Only meaningful with hourlyRateCents: together they are
+   * the chosen pricing the pack seeder lands on the headline items. Never
+   * fabricated; absent when the owner did not choose a price.
+   */
+  tripFeeCents: z.number().int().min(0).optional(),
   /**
    * The tenant's IANA zone. Optional HERE (a voice capture cannot produce
    * one, so the proposal is emitted GATED on this key and the operator
@@ -43,6 +61,17 @@ export const onboardingTenantSettingsPayloadSchema = z.object({
     .refine(isRuntimeTimezone, {
       message: 'must be a recognized IANA timezone (e.g. "America/Phoenix")',
     })
+    .optional(),
+  /**
+   * The owner's cell from the onboarding draft, written to
+   * tenant_settings.owner_phone (the number emergency calls ring). ABSENT
+   * means untouched, never null. Canonical E.164 only, as defined by the same
+   * normaliser the identity step uses.
+   */
+  ownerPhone: z
+    .string()
+    .trim()
+    .refine(isCanonicalOwnerPhone, { message: 'must be a US phone number in E.164 form (e.g. "+15551234567")' })
     .optional(),
 });
 
@@ -106,3 +135,55 @@ export const onboardingSchedulePayloadSchema = z.object({
     })
     .optional(),
 });
+
+// ─── onboarding_voice_policy ─────────────────────────────────────────────────
+//
+// "Pick, don't build" onboarding (docs/plans/2026-10-18-001). One proposal for
+// the choices the five proposals above do not cover. Every key is optional and
+// at least one must be present; the handler writes exactly the keys carried.
+
+export type BookingHoursPreset = NonNullable<ChoiceWrites['bookingHoursPreset']>;
+
+/**
+ * Derived from the choice registry's writes so the two cannot drift: every
+ * key a choice can write is a key this proposal carries. `hasExistingBusinessNumber`
+ * is the one choice write that is NOT a tenant setting (the v3 shell reads it
+ * from the draft to pick the day-one branch), so it is omitted. Still
+ * strip-mode like every proposal schema (contracts.test.ts forbids `.strict()`):
+ * unknown keys are dropped at the boundary, never a reason to reject an
+ * owner's approval.
+ */
+export const onboardingVoicePolicyPayloadSchema = z
+  .object(ChoiceWritesSchema.omit({ hasExistingBusinessNumber: true }).shape)
+  .refine((p) => Object.values(p).some((v) => v !== undefined), {
+    message: 'onboarding_voice_policy must carry at least one setting',
+  });
+export type OnboardingVoicePolicyPayload = z.infer<typeof onboardingVoicePolicyPayloadSchema>;
+
+const WEEK = ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'] as const;
+
+/**
+ * The business_hours map a booking-hours preset stands for. Same shape the
+ * onboarding_schedule handler writes (day abbreviation → open/close, null =
+ * closed), so Settings and the booking lane read one format.
+ */
+export function bookingHoursFromPreset(
+  preset: BookingHoursPreset,
+): Record<string, { open: string; close: string } | null> {
+  const open = (o: string, c: string) => ({ open: o, close: c });
+  const out: Record<string, { open: string; close: string } | null> = {};
+  for (const d of WEEK) {
+    switch (preset) {
+      case 'weekdays_7_5':
+        out[d] = d === 'sat' || d === 'sun' ? null : open('07:00', '17:00');
+        break;
+      case 'mon_sat_7_5':
+        out[d] = d === 'sun' ? null : open('07:00', '17:00');
+        break;
+      case 'any_time':
+        out[d] = open('00:00', '23:59');
+        break;
+    }
+  }
+  return out;
+}

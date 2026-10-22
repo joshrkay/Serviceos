@@ -21,6 +21,8 @@ function mapRow(row: Record<string, unknown>): VoiceRecording {
     outcome: (row.outcome as CallOutcome | null) ?? undefined,
     detectedLanguage: (row.detected_language as string | null) ?? undefined,
     purgedAt: row.purged_at ? new Date(row.purged_at as string) : undefined,
+    // PRIV-3 — audio deleted early: a card number was said (migration 314).
+    audioPurgedAt: row.audio_purged_at ? new Date(row.audio_purged_at as string) : undefined,
     // U3 — routed-outcome back-channel (migration 259). NULL for legacy /
     // telephony rows maps to undefined so the JSON response stays additive.
     answerStatus: (row.answer_status as VoiceAnswerStatus | null) ?? undefined,
@@ -180,6 +182,18 @@ export class PgVoiceRepository extends PgBaseRepository implements VoiceReposito
       );
       if (result.rows.length === 0) return null;
       return mapRow(result.rows[0]);
+    });
+  }
+
+  async markCardNumberDetected(tenantId: string, id: string): Promise<boolean> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE voice_recordings
+            SET pci_detected = true, updated_at = NOW()
+          WHERE id = $1 AND tenant_id = $2 AND pci_detected = false`,
+        [id, tenantId],
+      );
+      return (result.rowCount ?? 0) > 0;
     });
   }
 

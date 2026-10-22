@@ -13,7 +13,7 @@ import {
 } from '@ai-service-os/shared';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import { hasPermission, isValidRole, type Permission, type Role } from '../auth/rbac';
+import { holdIfCallerCannotApprove } from '../proposals/caller-approval-gate';
 import { toErrorResponse } from '../shared/errors';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { Proposal, ProposalRepository, ProposalType, missingFieldsFor } from '../proposals/proposal';
@@ -95,6 +95,7 @@ import {
 } from '../ai/orchestration/assistant-honesty-guard';
 import { chatBulkMoneyRefusal, chatLifeSafetyReply } from '../ai/orchestration/chat-safety-guards';
 import type { TaskHandler } from '../ai/tasks/task-handlers';
+import { withClassifierRun } from '../ai/tasks/task-handlers';
 // Money/edit/send handlers are no longer constructed inline here — both
 // dispatch maps resolve them from the shared handler-registry below.
 // B5 — the scheduling-family / create_job / invoice-follow-up intents this
@@ -143,6 +144,18 @@ import {
 // loop, and the answer turn's re-resolve fallback — asks the question and
 // matches the answer with the address on it, with no per-call-site change.
 import { withCustomerAddressHints } from '../ai/resolution/customer-address-hint';
+import {
+  pageContextSchema,
+  loadPageContext,
+  pointsAtPageRecord,
+  pageUnavailableReply,
+  pageNoteTargetKind,
+  mergePageContextIds,
+  pageLookupIds,
+  pageContextNote,
+  type PageContext,
+  type LoadedPageContext,
+} from '../ai/resolution/page-context';
 // Phase 12 supervisor gate (commit 1 of the followup-autoapprove-default
 // fix) — mirrors workers/voice-action-router.ts's use of the SAME function:
 // resolve tenant-wide supervisor presence once per turn and thread it onto
@@ -405,6 +418,14 @@ const assistantChatRequestSchema = z.object({
   // resolved tenant-scoped (files/chat-image-attachments.ts) and handed to
   // the draft_estimate handler as image parts.
   attachments: z.array(z.object({ fileId: z.string() })).optional(),
+  // The detail page the turn started on, so "this job" / "her" resolve to it.
+  // Re-read tenant-scoped before use — see ai/resolution/page-context.ts. A
+  // malformed one is dropped, never a reason to refuse the operator's turn.
+  pageContext: pageContextSchema.optional().catch(undefined),
+  // The technician job screen sets status with its own buttons (and its
+  // confirm card's tick box). A turn from there never drafts a job edit, so
+  // an unticked "mark it complete" stays unticked.
+  jobStatusHandled: z.boolean().optional().catch(undefined),
 });
 
 /**
@@ -1165,6 +1186,20 @@ export function contractGateMissingFields(
 }
 
 /**
+ * The technician job screen sets status with its own buttons
+ * (`jobStatusHandled`), so a job edit drafted from that screen must not
+ * re-apply a status the tech left unticked. Strips `status` from an
+ * `update_job` draft, in place, and keeps every other edit (priority, title,
+ * description). Returns true when nothing is left to change, so the caller
+ * drops the draft instead of persisting an empty edit.
+ */
+export function dropHandledJobStatus(proposal: Proposal): boolean {
+  if (proposal.proposalType !== 'update_job') return false;
+  delete proposal.payload.status;
+  return !CHAT_JOB_EDIT_FIELDS.some((f) => proposal.payload[f] !== undefined);
+}
+
+/**
  * Apply the gate to a freshly drafted proposal, in place.
  *
  * Two effects, both load-bearing:
@@ -1270,6 +1305,10 @@ interface PreDraftResolution {
    * loop that already knows how to ask ONE question and match the answer.
    */
   ambiguousRefKeys: string[];
+  /** The keys the operator's open page filled (`mergePageContextIds`). */
+  pageFilledKeys?: string[];
+  /** Entities the open page implies, e.g. a note's target kind (`pageNoteTargetKind`). */
+  pageEntities?: Record<string, string>;
 }
 
 const NO_PRE_DRAFT_RESOLUTION: PreDraftResolution = { ids: {}, ambiguousRefKeys: [] };
@@ -1513,7 +1552,7 @@ const SEND_IT_CLAUSE_RE = /^(send|text|email)\s+(?:it|that|this|them|her|him|the
 /**
  * The channel the operator NAMED for "send it": text → sms, email → email.
  * #1524 — a bare "send" names none (undefined): the send_invoice drafter then
- * writes 'auto' (the customer's email, else a text), never an invented
+ * writes 'auto' (a text when the customer can be texted, else their email), never an invented
  * 'email' a phone-only customer can't receive.
  */
 function sendChannelFor(verb: string, clause: string): 'email' | 'sms' | undefined {
@@ -1762,6 +1801,34 @@ async function findJobByLiteralNumber(
  * rather than drafting a job for one customer onto another's estimate.
  */
 async function resolvePreDraftIds(
+  deps: Pick<AssistantRouterDeps, 'entityResolver' | 'jobRepo' | 'invoiceRepo'>,
+  tenantId: string,
+  intent: string,
+  registryKey: string | undefined,
+  entities: Record<string, unknown> | undefined,
+  operatorText: string,
+  page?: LoadedPageContext,
+): Promise<PreDraftResolution> {
+  const fromWords = await resolvePreDraftIdsFromWords(deps, tenantId, intent, registryKey, entities, operatorText);
+  if (!page) return fromWords;
+  const merged = mergePageContextIds({
+    intent,
+    entities,
+    text: operatorText,
+    resolvedIds: fromWords.ids,
+    ambiguousRefKeys: fromWords.ambiguousRefKeys,
+    page,
+  });
+  const noteTargetKind = pageNoteTargetKind({ intent, entities, text: operatorText, page, filledKeys: merged.filledKeys });
+  return {
+    ids: merged.ids,
+    ambiguousRefKeys: merged.ambiguousRefKeys,
+    pageFilledKeys: merged.filledKeys,
+    ...(noteTargetKind ? { pageEntities: { noteTargetKind } } : {}),
+  };
+}
+
+async function resolvePreDraftIdsFromWords(
   deps: Pick<AssistantRouterDeps, 'entityResolver' | 'jobRepo' | 'invoiceRepo'>,
   tenantId: string,
   intent: string,
@@ -2968,51 +3035,6 @@ async function answerUnpaidInvoicesQuery(
 }
 
 /**
- * Permission a proposal type needs before it may EXECUTE without a human
- * approval tap.
- *
- * Most drafting handlers pass no `sourceTrustTier`, so their proposals always
- * land in 'draft' → 'ready_for_review' and a permission holder approves them.
- * `create_appointment` is the exception: it carries
- * `sourceTrustTier: 'autonomous'` and is capture-class, so for a supervised,
- * high-confidence tenant `decideInitialStatus` returns 'approved' and the
- * worker executes it — and the execution layer performs NO permission check of
- * its own (verified: no `hasPermission` anywhere under proposals/execution/).
- *
- * Granting technicians `ai:run` therefore has to not become a back door around
- * `appointments:create`, which they deliberately lack (the day-view reschedule
- * flow routes through the proposal path precisely so `proposals:create` stays
- * the low-privilege action). A caller who lacks the direct permission still
- * gets their draft — it just waits for the approval tap instead of
- * self-executing. Fails closed: an unknown/invalid role gets the downgrade.
- */
-const DIRECT_EXECUTION_PERMISSION: Partial<Record<ProposalType, Permission>> = {
-  create_appointment: 'appointments:create',
-  create_booking: 'appointments:create',
-};
-
-/**
- * Downgrade an auto-approved proposal to 'ready_for_review' when the caller
- * lacks the permission the equivalent direct route would demand. Returns true
- * when a downgrade was applied. No-op for every proposal that was not
- * auto-approved, so existing owner/dispatcher behavior is byte-identical.
- */
-function downgradeIfCallerLacksDirectPermission(
-  proposal: { proposalType: ProposalType; status: string; approvedAt?: Date | undefined },
-  callerRole: string | undefined,
-): boolean {
-  if (proposal.status !== 'approved') return false;
-  const required = DIRECT_EXECUTION_PERMISSION[proposal.proposalType];
-  if (!required) return false;
-  const permitted =
-    !!callerRole && isValidRole(callerRole) && hasPermission(callerRole as Role, required);
-  if (permitted) return false;
-  proposal.status = 'ready_for_review';
-  proposal.approvedAt = undefined;
-  return true;
-}
-
-/**
  * Task 15 (2026-08-07 tradesperson plan) — quality-review fix. Single source
  * of truth for which classifier intents this route can dispatch to a
  * drafting handler, mapping the intent (classifier output) to the PROPOSAL
@@ -3257,10 +3279,10 @@ async function generateAssistantReply(
   // to resolve against yet, so that ordering is never a gap.
   conversationId?: string,
   // The caller's DB-authoritative role (middleware/auth overwrites
-  // req.auth.role with the membership row's role on every request). Used only
-  // by downgradeIfCallerLacksDirectPermission to keep an auto-approving
-  // proposal from executing for a caller who lacks the direct permission.
-  // Undefined → treated as "lacks it" (fails closed).
+  // req.auth.role with the membership row's role on every request). Used by
+  // holdIfCallerCannotApprove (OVAS-02) to keep an auto-approving proposal
+  // from executing for a caller who lacks the direct permission, and by the
+  // lookup gate below. Undefined → treated as "lacks it" (fails closed).
   callerRole?: string,
   // P12-001/P12-004 wiring gap (commit 1) — `req.auth.mode` has been
   // populated by `requireTenant` on every authenticated request since
@@ -3280,6 +3302,8 @@ async function generateAssistantReply(
   // #1173 — the turn's photo attachments (`assistantChatRequestSchema
   // .attachments`, #1144), resolved tenant-scoped below.
   attachments?: ReadonlyArray<{ fileId: string }>,
+  pageContext?: PageContext,
+  jobStatusHandled?: boolean,
 ) {
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
   // #1201 — an API caller can send a photo with BLANK text (the web client
@@ -3385,6 +3409,31 @@ async function generateAssistantReply(
       }
       const timezoneContext = tenantTimezone ? { timezone: tenantTimezone } : {};
 
+      // The page the operator spoke from, re-read tenant-scoped. The drafting
+      // paths consult it in resolvePreDraftIds and the lookup path through
+      // pageLookupIds; undefined when the client sent none or the record is
+      // not this tenant's.
+      const openPage = pageContext ? await loadPageContext(deps, tenantId, pageContext) : undefined;
+      if (pageContext && !openPage) {
+        logger.warn('assistant/chat: the page record could not be loaded', {
+          tenantId,
+          entityType: pageContext.entityType,
+          entityId: pageContext.entityId,
+        });
+        if (pointsAtPageRecord(pageContext.entityType, lastUserText)) {
+          return {
+            taskType: 'assistant.page_context.unavailable',
+            model: 'page-context',
+            usage: { input: 0, output: 0, total: 0 },
+            message: {
+              role: 'assistant' as const,
+              content: pageUnavailableReply(pageContext.entityType),
+              reasoning: 'The words point at the record on screen, which could not be read; asking instead of guessing.',
+            },
+          };
+        }
+      }
+
       // Phase 12 supervisor gate — mirrors workers/voice-action-router.ts's
       // identical call, but LAZY (minor fix, post-C1 review): read-only
       // paths below (the deterministic unpaid-invoices query, `lookup_*`
@@ -3423,7 +3472,17 @@ async function generateAssistantReply(
       // QA-2026-06-05 (AST-05): deterministic read-only query — answer from
       // data, never propose. Runs before classification so phrasing variance
       // in the classifier can't turn a question into a mutation proposal.
-      if (deps.invoiceRepo && UNPAID_QUERY_RE.test(lastUserText)) {
+      //
+      // "Which invoices for this customer are unpaid?" on a customer page is
+      // about that customer, and this tenant-wide answer cannot scope to one.
+      // A question pointing at the record on screen goes on to the classifier
+      // and the lookup path, which reads the page (pageLookupIds).
+      const pointsAtPage =
+        !!openPage &&
+        Object.keys(
+          pageLookupIds({ intent: 'lookup_invoices', entities: {}, text: lastUserText, page: openPage }),
+        ).length > 0;
+      if (deps.invoiceRepo && UNPAID_QUERY_RE.test(lastUserText) && !pointsAtPage) {
         const content = await answerUnpaidInvoicesQuery(deps.invoiceRepo, tenantId, lastUserText);
         return {
           taskType: 'assistant.query.unpaid_invoices',
@@ -3601,6 +3660,16 @@ async function generateAssistantReply(
             message: lastUserText,
             ...(classification.extractedEntities
               ? { extractedEntities: classification.extractedEntities as Record<string, unknown> }
+              : {}),
+            ...(openPage
+              ? {
+                  page: pageLookupIds({
+                    intent: classification.intentType,
+                    entities: classification.extractedEntities as Record<string, unknown> | undefined,
+                    text: lastUserText,
+                    page: openPage,
+                  }),
+                }
               : {}),
           },
           deps.lookups,
@@ -3852,6 +3921,8 @@ async function generateAssistantReply(
         // format, so switching it is safe.
         const chainId = uuidv4();
         const chainCards: AssistantProposal[] = [];
+        // Set when the open page filled an id on any step, for the reply note.
+        let chainUsedPage = false;
         // #1499 — every step the operator asked for that produced no card.
         // The reply names each one; a silent drop reads as "done".
         const undraftedSegments: string[] = [];
@@ -3867,7 +3938,7 @@ async function generateAssistantReply(
           const segment = step.text;
           // "…and send it": the invoice it sends is the one this turn drafts.
           const tailParentIndex = step.sendInvoiceTail ? chainTypes.lastIndexOf('draft_invoice') : -1;
-          let segClass: Pick<IntentClassification, 'intentType' | 'extractedEntities' | 'tokenUsage'>;
+          let segClass: Pick<IntentClassification, 'intentType' | 'extractedEntities' | 'tokenUsage' | 'aiRunId'>;
           if (step.sendInvoiceTail) {
             if (tailParentIndex < 0) {
               // The invoice half became a send of an invoice that already
@@ -3955,16 +4026,18 @@ async function generateAssistantReply(
           // literal job UUID in THIS segment names that job and its customer
           // (#1276B). Keyed on the segment's own text, not the whole turn: a
           // UUID in the other half of "X, then Y" is not this step's job.
+          const segPreDraft = await resolvePreDraftIds(
+            deps,
+            tenantId,
+            segClass.intentType,
+            registryKey,
+            segEntities,
+            segment,
+            openPage,
+          );
           const segVerifiedIds = {
             ...(segCreateAndSend?.job ?? {}),
-            ...(await resolvePreDraftIds(
-              deps,
-              tenantId,
-              segClass.intentType,
-              registryKey,
-              segEntities,
-              segment,
-            )).ids,
+            ...segPreDraft.ids,
           };
           // I3 — resolved once (memoized) and reused across every segment.
           const segTenantThresholdOverride = await getTenantThresholdOverride();
@@ -3982,7 +4055,7 @@ async function generateAssistantReply(
             // log_mileage would have silently drafted a plain, wrong-
             // category log_expense once dispatched.
             intent: segClass.intentType,
-            existingEntities: { ...segEntities, ...segVerifiedIds },
+            existingEntities: { ...segEntities, ...segPreDraft.pageEntities, ...segVerifiedIds },
             // Task 15 quality-review fix (C1/C2) — `context.customerId` is
             // threaded ONLY for the CHAT_CONTEXT_CUSTOMER_ID_INTENTS
             // allowlist (see that constant's doc comment for why this is
@@ -4024,9 +4097,13 @@ async function generateAssistantReply(
             undraftedSegments.push(segment);
             continue;
           }
+          // OBS-2 — the classifier run that routed this segment.
+          Object.assign(proposal, withClassifierRun(proposal, segClass.aiRunId));
           stampVerifiedIds(proposal, segVerifiedIds);
           applyVerifiedIdsToPayload(proposal, segVerifiedIds);
           dropUnverifiedIds(proposal.payload, segment, segEntities, proposal.sourceContext);
+          // Same rule as the single-intent path: the job screen owns status.
+          if (jobStatusHandled && dropHandledJobStatus(proposal)) continue;
           // Same contract gate the single-intent path applies — a chained
           // step is no more approvable than a standalone one.
           applyContractGate(proposal);
@@ -4058,7 +4135,13 @@ async function generateAssistantReply(
           proposal.sourceContext = {
             ...(proposal.sourceContext ?? {}),
             chainStep: chainCards.length + 1,
+            // Same provenance the single-intent path records: which ids this
+            // step took from the page the operator spoke on.
+            ...(openPage && segPreDraft.pageFilledKeys?.length
+              ? { pageContext: { ...openPage.context, filledKeys: segPreDraft.pageFilledKeys } }
+              : {}),
           };
+          if (segPreDraft.pageFilledKeys?.length) chainUsedPage = true;
           // #909 — the same post-draft resolution the single-intent path
           // runs, so a chained "reschedule the Miller job, then text them"
           // gets its ids resolved too and the two halves of THIS route can't
@@ -4111,9 +4194,9 @@ async function generateAssistantReply(
           // (the normal case). Already resolved (memoized) by the dispatch
           // call above, so this await is free.
           Object.assign(proposal, holdIfUnsupervised(proposal, await getSupervisorPresent()));
-          // A caller without the direct permission never gets a self-executing
-          // proposal — their draft waits for the approval tap instead.
-          downgradeIfCallerLacksDirectPermission(proposal, callerRole);
+          // OVAS-02 — a caller without the type's direct permission never gets
+          // a self-executing proposal; their draft waits for the approval tap.
+          Object.assign(proposal, holdIfCallerCannotApprove(proposal, callerRole));
           // #1480 — the same executability check a tap runs.
           Object.assign(
             proposal,
@@ -4134,6 +4217,7 @@ async function generateAssistantReply(
           chainTypes.push(proposal.proposalType);
           chainVerifiedCustomers.push(verifiedCustomerOf(proposal));
         }
+        const chainPageNote = chainUsedPage && openPage ? `\n\n${pageContextNote(openPage)}` : '';
         if (chainCards.length === 1) {
           // Only one segment produced a proposal — return it directly so the
           // single-intent path doesn't mint a duplicate.
@@ -4145,7 +4229,8 @@ async function generateAssistantReply(
               role: 'assistant' as const,
               content:
                 `${chainCards[0].title}. ${proposalReplySuffix(chainCards[0].status)}` +
-                undraftedStepsNote(undraftedSegments),
+                undraftedStepsNote(undraftedSegments) +
+                chainPageNote,
               proposal: chainCards[0],
             },
           };
@@ -4162,7 +4247,8 @@ async function generateAssistantReply(
                 chainCards.map((c, i) => `${i + 1}) ${c.title}`).join('; ') +
                 '. Capture steps run after approval windows; money steps wait for your approval.' +
                 (chainTypes.includes('send_invoice') ? LINKED_SEND_UNLOCK_NOTE : '') +
-                undraftedStepsNote(undraftedSegments),
+                undraftedStepsNote(undraftedSegments) +
+                chainPageNote,
               proposal: chainCards[0],
             },
           };
@@ -4224,7 +4310,12 @@ async function generateAssistantReply(
           registryKey,
           extractedEntities,
           lastUserText,
+          openPage,
         );
+        // Said out loud whenever the open page filled a reference, so a wrong
+        // pick is visible on the card's own turn.
+        const usedPage = openPage && preDraft.pageFilledKeys?.length ? openPage : undefined;
+        const pageNote = usedPage ? `\n\n${pageContextNote(usedPage)}` : '';
         // #1499 — a create-and-send reroute that named its job by NUMBER
         // bills that job; a name the resolver verified still wins.
         const verifiedIds = { ...(createAndSend?.job ?? {}), ...preDraft.ids };
@@ -4260,7 +4351,7 @@ async function generateAssistantReply(
           // Task 15 (2026-08-07 tradesperson plan) / Task 11 parity — see the
           // identical comment on the chain-segment `.handle()` call above.
           intent: classification.intentType,
-          existingEntities: { ...extractedEntities, ...verifiedIds },
+          existingEntities: { ...extractedEntities, ...preDraft.pageEntities, ...verifiedIds },
           // Task 15 quality-review fix (C1/C2) — see the identical comment +
           // CHAT_CONTEXT_CUSTOMER_ID_INTENTS doc comment on the
           // chain-segment `.handle()` call above: this is an explicit
@@ -4286,7 +4377,16 @@ async function generateAssistantReply(
             ? { images: chatImages }
             : {}),
         });
+        // OBS-2 — the classifier run that routed this turn (aiRunId is the
+        // drafting run's).
+        Object.assign(proposal, withClassifierRun(proposal, classification.aiRunId));
         stampVerifiedIds(proposal, verifiedIds);
+        if (usedPage) {
+          proposal.sourceContext = {
+            ...(proposal.sourceContext ?? {}),
+            pageContext: { ...usedPage.context, filledKeys: preDraft.pageFilledKeys },
+          };
+        }
         applyVerifiedIdsToPayload(proposal, verifiedIds);
         dropUnverifiedIds(
           proposal.payload,
@@ -4294,6 +4394,18 @@ async function generateAssistantReply(
           extractedEntities,
           proposal.sourceContext,
         );
+        if (jobStatusHandled && dropHandledJobStatus(proposal)) {
+          return {
+            taskType: 'assistant.update_job.status_handled',
+            model: 'intent-classifier',
+            usage: classifierUsage,
+            message: {
+              role: 'assistant' as const,
+              content: "Your status buttons set the job's status, so I left it as it is.",
+              reasoning: 'The technician job screen sets status itself; nothing else on the job was asked to change.',
+            },
+          };
+        }
         // The contract gate, BEFORE the resolution loop below on purpose: the
         // gate is what tells that loop which references to go and resolve, so
         // gating a booking on `customerId` here is exactly what lets the
@@ -4384,9 +4496,9 @@ async function generateAssistantReply(
         // comment on the chain-segment path above. Already resolved
         // (memoized) by the dispatch call above.
         Object.assign(proposal, holdIfUnsupervised(proposal, await getSupervisorPresent()));
-        // A caller without the direct permission never gets a self-executing
-        // proposal — their draft waits for the approval tap instead.
-        downgradeIfCallerLacksDirectPermission(proposal, callerRole);
+        // OVAS-02 — a caller without the type's direct permission never gets
+        // a self-executing proposal; their draft waits for the approval tap.
+        Object.assign(proposal, holdIfCallerCannotApprove(proposal, callerRole));
         // #1480 — the ONE executability check a human tap runs
         // (approveProposal), run here too, so a card that cannot execute is
         // never "approved automatically" and the reply asks for what is missing.
@@ -4408,15 +4520,19 @@ async function generateAssistantReply(
           ? await findReplaceableDraft(deps, tenantId, conversationId, proposal.proposalType)
           : undefined;
         if (corrected) {
-          const rewritten = await deps.proposalRepo.update(tenantId, corrected.id, {
+          let rewritten = await deps.proposalRepo.update(tenantId, corrected.id, {
             payload: proposal.payload,
             sourceContext: proposal.sourceContext,
             summary: proposal.summary,
             ...(proposal.confidenceScore !== undefined
               ? { confidenceScore: proposal.confidenceScore }
               : {}),
-            status: proposal.status === 'draft' ? 'ready_for_review' : proposal.status,
           });
+          // Status never rides the generic update (the pg repo has no status
+          // column in it); a draft is surfaced for review like a fresh card.
+          if (rewritten?.status === 'draft') {
+            rewritten = (await deps.proposalRepo.updateStatus(tenantId, corrected.id, 'ready_for_review')) ?? rewritten;
+          }
           const card = proposalToUI(rewritten ?? { ...corrected, ...proposal, id: corrected.id }, lastUserText);
           return {
             taskType: `assistant.${handler.taskType}`,
@@ -4424,9 +4540,10 @@ async function generateAssistantReply(
             usage: { input: 0, output: 0, total: 0 },
             message: {
               role: 'assistant' as const,
-              content: clarification
-                ? `Updated — ${card.title}.\n\n${clarification}`
-                : `Updated — ${card.title}. ${proposalReplySuffix(card.status)}`,
+              content:
+                (clarification
+                  ? `Updated — ${card.title}.\n\n${clarification}`
+                  : `Updated — ${card.title}. ${proposalReplySuffix(card.status)}`) + pageNote,
               reasoning:
                 'Correction of the draft still awaiting review on this thread — rewrote it in place rather than leaving two approvable cards for one job.',
               proposal: card,
@@ -4466,7 +4583,8 @@ async function generateAssistantReply(
                 undraftedCompoundSteps(lastUserText, [proposal.proposalType], {
                   skipFamilies: createAndSend ? ['send'] : [],
                 }),
-              ),
+              ) +
+              pageNote,
             reasoning: classification.reasoning,
             proposal: uiProposal,
           },
@@ -4950,6 +5068,8 @@ export function createAssistantRouter(rawDeps: AssistantRouterDeps): Router {
           (req.auth as { mode?: Mode } | undefined)?.mode,
           // #1173 — the turn's photo references, resolved tenant-scoped inside.
           parsed.attachments,
+          parsed.pageContext,
+          parsed.jobStatusHandled,
         );
 
         // Story 3.11 — persist the turn so the conversation survives reload and

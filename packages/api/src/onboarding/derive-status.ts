@@ -1,8 +1,12 @@
 import type { PhoneLineState } from './phone-line';
+import type { ProvisioningFailureCode } from './provisioning-failure';
+import { isInUndoWindow } from '../proposals/lifecycle';
 import type {
+  DraftExecution,
+  DraftRecovery,
   OnboardingStatusResponse,
+  OnboardingStep,
   OnboardingStepId,
-  OnboardingStepStatus,
 } from './contracts';
 
 export interface OnboardingFacts {
@@ -38,6 +42,10 @@ export interface OnboardingFacts {
   twilioLineState?: PhoneLineState | null;
   /** #1563 — the number an in-flight pick is claiming (null for auto-pick). */
   twilioPendingNumber?: string | null;
+  /** Why the twilio row failed, classified from its `last_error`
+   * (provisioning-failure.ts); null unless the row is `failed`. Optional so
+   * older fixtures compile: a failed row without one reads as `unknown`. */
+  twilioFailureCode?: ProvisioningFailureCode | null;
   subscription: {
     stripeSubscriptionId: string | null;
     status: 'trialing' | 'active' | 'past_due' | 'canceled' | 'incomplete' | null;
@@ -59,6 +67,200 @@ export interface OnboardingFacts {
   /** When the tenant skipped the AI check (escape hatch — completes the step,
    * verification stays retryable from Settings). */
   aiVerificationSkippedAt: Date | null;
+  /**
+   * "Pick, don't build" onboarding — the tenant's pre-approval draft, when one
+   * exists. Additive: the seven steps are unchanged (the status contract pins
+   * `.length(7)` and mobile consumes it); the v3 shell derives its turns from
+   * this plus the draft itself.
+   */
+  draft?: {
+    status: 'draft' | 'approved';
+    choicesAnswered: number;
+    version: number;
+    /** Present only for an approved draft: what the listed proposals look like right now. */
+    proposals?: DraftProposalsFact;
+  } | null;
+}
+
+/** One listed proposal that still exists: its status and, once approved, when its undo window opened. */
+export interface DraftProposalMember {
+  status: string;
+  /** proposals.approved_at; null when never stamped (an approved row with no stamp is outside its window). */
+  approvedAt: Date | null;
+}
+
+/**
+ * The approved draft's proposals, as read: how many ids the draft lists and one
+ * member per listed proposal that still exists (a missing row is
+ * `expected - members.length`). The status read (load-facts.ts) and the retry's
+ * locked read (draft/retry.ts) build the same shape.
+ */
+export interface DraftProposalsFact {
+  expected: number;
+  members: DraftProposalMember[];
+}
+
+/**
+ * How far ahead of the status read's clock the undo window is evaluated for the
+ * hints below. A hint read at `now` is acted on a round trip later; evaluating
+ * the window one second early means `undoable: true` and `recovery: 'reset'`
+ * never promise a window the endpoint has already closed.
+ */
+const DRAFT_HINT_MARGIN_MS = 1000;
+
+/**
+ * The only statuses a member of the approved set may hold while POST /draft/retry
+ * is allowed to touch the set: still on its way (`approved`, `executing`),
+ * finished (`executed`), or the failure retry exists for (`execution_failed`).
+ * Anything else (`undone`, `rejected`, `expired`, `draft`, `ready_for_review`, ...)
+ * is a member that will never run again and that retry cannot bring back
+ * (`undone` is terminal in lifecycle.ts).
+ */
+const RETRY_SAFE_STATUSES = new Set(['approved', 'executing', 'executed', 'execution_failed']);
+
+/** Stands in for a listed proposal whose row no longer exists. */
+export const MISSING_PROPOSAL = 'missing';
+
+/**
+ * Why POST /draft/retry must not touch this approved set: one entry per listed
+ * proposal that is outside {approved, executing, executed, execution_failed}
+ * (its status), plus one `missing` per listed proposal with no row. Empty means
+ * the set is whole and retry can complete it.
+ *
+ * The single source of truth for both the derived `stopped` state below and the
+ * guard inside `retryFailedDraftProposals`, so the status can never invite a
+ * retry the endpoint refuses (or the reverse).
+ */
+export function retryBlockingStatuses(tracked: DraftProposalsFact): string[] {
+  const missing = Math.max(0, tracked.expected - tracked.members.length);
+  return [
+    ...tracked.members.map((m) => m.status).filter((s) => !RETRY_SAFE_STATUSES.has(s)),
+    ...Array<string>(missing).fill(MISSING_PROPOSAL),
+  ];
+}
+
+/**
+ * Derived execution state of an approved draft's proposals. Order matters:
+ * `stopped` is decided BEFORE `failed`.
+ *
+ * - `stopped`: some listed proposal is outside approved/executing/executed/
+ *   execution_failed (undone or rejected from the inbox, expired, a stuck
+ *   pre-approval status) or no longer exists, WHETHER OR NOT another proposal
+ *   failed. Retry re-queues only the failed proposal, so with a sibling that can
+ *   never run it would execute that one alone after its fresh undo window:
+ *   half the approved configuration live ("executed + undone") with Settings as
+ *   the only way back. Retry therefore refuses such a set
+ *   (`DRAFT_RETRY_UNSAFE`) and the shell must not offer it; it also never waits
+ *   forever. The whole-draft undo cannot help either: it wants EVERY member
+ *   `approved` inside its window, and this set has one that is not. The way
+ *   out is the whole-draft reset (plan U9, the shell's Start over), which
+ *   reverts what is still reversible and returns the draft to editing;
+ *   `deriveDraftRecovery` says whether it can run (`'reset'`) or only Settings
+ *   can finish the set (`'settings'`).
+ * - `failed`: the set is whole (every listed proposal is approved/executing/
+ *   executed/execution_failed) and at least one is `execution_failed`. POST
+ *   /draft/retry re-queues exactly those rows, which completes the pair, so the
+ *   shell offers a retry instead of waiting forever. `failed + executed` and
+ *   `failed + approved` are this case.
+ * - `executed`: every listed proposal executed.
+ * - `executing`: any executing, or some executed while others still wait for
+ *   the worker (work is in flight, so the shell keeps saying "Saving").
+ * - `pending`: all approved, none picked up yet.
+ *
+ * `null` while the draft is still being edited, and when there is nothing to
+ * track: a vacuous "executed" must never open billing.
+ */
+export function deriveDraftExecution(
+  draftStatus: 'draft' | 'approved',
+  tracked?: DraftProposalsFact,
+): DraftExecution | null {
+  if (draftStatus !== 'approved') return null;
+  if (!tracked || tracked.expected <= 0) return null;
+  const statuses = tracked.members.map((m) => m.status);
+  if (retryBlockingStatuses(tracked).length > 0) return 'stopped';
+  if (statuses.some((s) => s === 'execution_failed')) return 'failed';
+  if (statuses.every((s) => s === 'executed')) return 'executed';
+  if (statuses.some((s) => s === 'executing' || s === 'executed')) return 'executing';
+  return 'pending';
+}
+
+/**
+ * Whether the whole-draft undo can still take back EVERY listed proposal: the
+ * draft is approved, every listed proposal still exists, and each is `approved`
+ * inside its undo window (`isInUndoWindow`, the undo endpoint's own predicate),
+ * evaluated `DRAFT_HINT_MARGIN_MS` ahead of `now`. After a partial retry only the
+ * retried member has a fresh window, so this is false and the shell offers no
+ * Undo the endpoint would refuse.
+ *
+ * A hint, never a guard: the undo endpoint keeps its locked check. `undefined`
+ * (absent on the wire) while the draft is still being edited; `false` for an
+ * approved draft with nothing listed or a listed proposal whose row is gone.
+ */
+export function deriveDraftUndoable(
+  draftStatus: 'draft' | 'approved',
+  tracked: DraftProposalsFact | undefined,
+  now: Date,
+): boolean | undefined {
+  if (draftStatus !== 'approved') return undefined;
+  if (!tracked || tracked.expected <= 0 || tracked.members.length < tracked.expected) return false;
+  const at = now.getTime() + DRAFT_HINT_MARGIN_MS;
+  return tracked.members.every((m) => isInUndoWindow(m, at));
+}
+
+/** Why POST /draft/reset must refuse a set (see `resetBlocker`). */
+export type DraftResetBlocker = 'applied' | 'executing' | 'window_closed';
+
+/**
+ * The whole-draft reset's acceptance rule, shared by the endpoint
+ * (draft/reset.ts, over the LOCKED set at its own clock, no margin) and the
+ * status hint below (`deriveDraftRecovery`, `DRAFT_HINT_MARGIN_MS` ahead), so
+ * the hint can never promise a Start over the endpoint refuses (the same
+ * pairing as `retryBlockingStatuses`). Most final blocker first:
+ *
+ * - `'applied'`: a listed proposal is `executed`; that work is live, and only
+ *   the inbox's undo of executed work or the Settings page reverses it.
+ * - `'executing'`: one is landing right now; the next read shows it `executed`
+ *   (then `'applied'`) or `execution_failed` (then not applied, and reset runs).
+ * - `'window_closed'`: an `approved` one is past its undo window at `atMs` (an
+ *   unstamped one counts as past); the worker is about to run it, and reset
+ *   never undoes past the window the inbox undo and the whole-draft undo enforce.
+ *
+ * `null` means reset accepts: every member is `approved` inside its window or
+ * not applied (`undone`, `rejected`, `expired`, `execution_failed`, a
+ * pre-approval `draft` / `ready_for_review`, or a listed id with no row).
+ */
+export function resetBlocker(tracked: DraftProposalsFact | undefined, atMs: number): DraftResetBlocker | null {
+  const members = tracked?.members ?? [];
+  if (members.some((m) => m.status === 'executed')) return 'applied';
+  if (members.some((m) => m.status === 'executing')) return 'executing';
+  if (members.some((m) => m.status === 'approved' && !isInUndoWindow(m, atMs))) return 'window_closed';
+  return null;
+}
+
+/**
+ * Which way out the shell may offer for a set that will not finish on its own
+ * (`execution` is `failed` or `stopped`): the whole-draft reset's own rule
+ * (`resetBlocker`), evaluated `DRAFT_HINT_MARGIN_MS` ahead of `now` so the hint
+ * expires a second before the endpoint's window does.
+ *
+ * - `'reset'`: nothing ran, and every approved member can still be undone, so
+ *   the shell offers Start over (POST /draft/reset returns the draft to editing).
+ * - `'settings'`: part of the setup is live or landing (`executed`,
+ *   `executing`), or an `approved` member is past its window and will run on its
+ *   own. Reset refuses that set, so the shell points at Settings and offers no
+ *   Start over.
+ *
+ * The same rule for `failed` and `stopped`: for `failed` it only decides whether
+ * Start over is shown (Retry stays). `undefined` (absent on the wire) for every
+ * other execution state, including a draft still being edited.
+ */
+function deriveDraftRecovery(
+  execution: DraftExecution | null,
+  tracked: DraftProposalsFact | undefined,
+  now: Date,
+): DraftRecovery | undefined {
+  if (execution !== 'failed' && execution !== 'stopped') return undefined;
+  return resetBlocker(tracked, now.getTime() + DRAFT_HINT_MARGIN_MS) ? 'settings' : 'reset';
 }
 
 /**
@@ -86,11 +288,33 @@ const isIdentityDone = (i: OnboardingFacts['identity']): boolean =>
 const isBillingDone = (s: OnboardingFacts['subscription']): boolean =>
   !!s.stripeSubscriptionId && (s.status === 'trialing' || s.status === 'active');
 
+/**
+ * The phone step's blocker for each failure code, listed BEFORE the generic
+ * `twilio_provisioning_failed` (kept on every failure, and alone for
+ * `unknown`, so existing readers of that blocker keep working).
+ */
+const PHONE_FAILURE_BLOCKER: Record<ProvisioningFailureCode, string | null> = {
+  area_code_unavailable: 'area_code_unavailable',
+  credentials_missing: 'twilio_credentials_missing',
+  provider_error: 'twilio_provider_error',
+  unknown: null,
+};
+
+function phoneFailureBlockers(code: ProvisioningFailureCode): string[] {
+  const specific = PHONE_FAILURE_BLOCKER[code];
+  return specific ? [specific, 'twilio_provisioning_failed'] : ['twilio_provisioning_failed'];
+}
+
 const isTestCallDone = (f: OnboardingFacts): boolean => f.inboundCallCount > 0;
 const isTestCallSkipped = (f: OnboardingFacts): boolean =>
   f.testCallSkippedAt !== null && f.inboundCallCount === 0;
 
-export function deriveOnboardingStatus(f: OnboardingFacts): OnboardingStatusResponse {
+/**
+ * `now` is the status read's clock. It is injected (and defaults to this
+ * instant) so the undo-window hints on the draft block stay a pure function of
+ * the facts and the clock.
+ */
+export function deriveOnboardingStatus(f: OnboardingFacts, now: Date = new Date()): OnboardingStatusResponse {
   const done: Record<OnboardingStepId, boolean> = {
     signup:    f.tenantExists,
     identity:  isIdentityDone(f.identity),
@@ -116,9 +340,16 @@ export function deriveOnboardingStatus(f: OnboardingFacts): OnboardingStatusResp
   };
   const phoneMetadata = Object.keys(phoneMetadataFields).length > 0 ? phoneMetadataFields : undefined;
 
-  const steps = order.map((id): { id: OnboardingStepId; status: OnboardingStepStatus; blockers?: string[]; metadata?: Record<string, unknown> } => {
+  const steps = order.map((id): OnboardingStep => {
     if (id === 'phone' && f.twilioStatus === 'failed') {
-      return { id, status: 'error', blockers: ['twilio_provisioning_failed'], ...(phoneMetadata ? { metadata: phoneMetadata } : {}) };
+      const failureCode = f.twilioFailureCode ?? 'unknown';
+      return {
+        id,
+        status: 'error',
+        failureCode,
+        blockers: phoneFailureBlockers(failureCode),
+        ...(phoneMetadata ? { metadata: phoneMetadata } : {}),
+      };
     }
     if (id === 'ai_check') {
       if (f.aiVerificationStatus === 'passed') {
@@ -168,5 +399,23 @@ export function deriveOnboardingStatus(f: OnboardingFacts): OnboardingStatusResp
       : {}),
     ...(f.activatedAt ? { activatedAt: f.activatedAt.toISOString() } : {}),
     ...(f.tenantCreatedAt ? { accountCreatedAt: f.tenantCreatedAt.toISOString() } : {}),
+    ...(f.draft ? { draft: toDraftStatus(f.draft, now) } : {}),
+  };
+}
+
+/**
+ * The status response's draft block: the raw proposal statuses and approval
+ * stamps never leave the server, only what is derived from them.
+ */
+function toDraftStatus(draft: NonNullable<OnboardingFacts['draft']>, now: Date): NonNullable<OnboardingStatusResponse['draft']> {
+  const { proposals, ...rest } = draft;
+  const execution = deriveDraftExecution(draft.status, proposals);
+  const undoable = deriveDraftUndoable(draft.status, proposals, now);
+  const recovery = deriveDraftRecovery(execution, proposals, now);
+  return {
+    ...rest,
+    execution,
+    ...(undoable === undefined ? {} : { undoable }),
+    ...(recovery === undefined ? {} : { recovery }),
   };
 }

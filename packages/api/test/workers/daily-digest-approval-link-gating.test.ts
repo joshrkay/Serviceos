@@ -99,3 +99,22 @@ describe('batchApprovableProposalIds — APPROVE ALL set', () => {
     expect(batchApprovableProposalIds(payloadWithTop(top))).toEqual(['complete']);
   });
 });
+
+// OVAS-01 — an edit that voids a customer's signed acceptance is capture-class
+// and usually not 'low', so it passed every digest gate and could be approved
+// by the "APPROVE ALL" reply or a single one-tap link with no warning shown.
+describe('acceptance-voiding proposals never ride a digest shortcut', () => {
+  const top: DigestPendingApproval[] = [
+    { proposalId: 'voids', proposalType: 'update_estimate', summary: 'Edit accepted estimate', voidsAcceptance: true },
+    { proposalId: 'plain', proposalType: 'update_estimate', summary: 'Edit draft estimate' },
+  ];
+
+  it('mints no one-tap link for it', () => {
+    const links = buildApprovalLinks('tenant-1', payloadWithTop(top), deps);
+    expect(links.map((l) => l.approval.proposalId)).toEqual(['plain']);
+  });
+
+  it('excludes it from the APPROVE ALL set', () => {
+    expect(batchApprovableProposalIds(payloadWithTop(top))).toEqual(['plain']);
+  });
+});

@@ -24,18 +24,22 @@ import type { Pool } from 'pg';
 import { Proposal, ProposalType } from '../proposal';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
 import { AuditRepository, createAuditEvent } from '../../audit/audit';
-import { SettingsRepository, resolveBootstrapAiModel } from '../../settings/settings';
+import { SettingsRepository, resolveBootstrapAiModel, type TenantSettings, type EscalationSettings } from '../../settings/settings';
+import { onboardingVoicePolicyPayloadSchema, bookingHoursFromPreset } from '../contracts/onboarding';
+import type { Queue } from '../../queues/queue';
+import { paymentModeChangeHook } from '../../invoices/payment-mode-change';
 import { PackActivationRepository } from '../../settings/pack-activation';
 import {
   activatePackWithSeed,
   ActivatePackWithSeedDeps,
 } from '../../onboarding/activate-pack-with-seed';
-import { SeedPackDefaultsDeps } from '../../packs/seed-pack-defaults';
+import { SeedPackDefaultsDeps, isSeedablePackId, type ChosenPricing } from '../../packs/seed-pack-defaults';
 import {
   EstimateTemplateRepository,
   LineItemTemplate,
   createTemplate,
 } from '../../templates/estimate-template';
+import { normalizeMobileE164 } from '../../shared/phone/normalize';
 import { VALID_VERTICAL_TYPES, VerticalType } from '../../shared/vertical-types';
 import { isRuntimeTimezone } from '../../shared/timezone';
 import type { PendingInvitationRepository } from '../../users/pending-invitation';
@@ -94,6 +98,9 @@ function isVerticalType(v: unknown): v is VerticalType {
 //     explicit 30 did — but the tenant is no longer recorded as having
 //     chosen a buffer it was never asked about. An owner who later sets one
 //     (Settings / PUT /identity) stores a real choice.
+//   - ownerPhone: OPTIONAL canonical E.164 cell from the "pick, don't build"
+//     draft, written to tenant_settings.owner_phone. Absent means the column is
+//     left untouched (the key is not passed at all); it is never defaulted.
 //   - timezone: REQUIRED, and gated at draft time by
 //     tenant-settings-proposer.ts so it is always supplied by the time the
 //     card is approvable. This handler previously omitted the key entirely,
@@ -133,7 +140,7 @@ export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandle
       return { success: false, error: 'Payload must include a non-empty businessName' };
     }
     const verticalPacks = payload.verticalPacks;
-    if (!Array.isArray(verticalPacks) || verticalPacks.length === 0 || !verticalPacks.every(isVerticalType)) {
+    if (!Array.isArray(verticalPacks) || verticalPacks.length === 0 || !verticalPacks.every((v) => typeof v === 'string' && isSeedablePackId(v))) {
       return { success: false, error: 'Payload must include at least one valid verticalPacks entry' };
     }
     const city = typeof payload.city === 'string' ? payload.city.trim() : '';
@@ -156,6 +163,20 @@ export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandle
       hourlyRateCents = payload.hourlyRateCents;
     }
 
+    // "Pick, don't build" — a chosen trip fee rides with the hourly rate so the
+    // pack seeder lands both on the headline items exactly. Same integer-cents
+    // guard; a trip fee without a rate is a malformed payload, not a default.
+    let pricing: ChosenPricing | undefined;
+    if (payload.tripFeeCents !== undefined) {
+      if (typeof payload.tripFeeCents !== 'number' || !Number.isInteger(payload.tripFeeCents) || payload.tripFeeCents < 0) {
+        return { success: false, error: 'tripFeeCents must be a non-negative integer (cents)' };
+      }
+      if (hourlyRateCents === undefined) {
+        return { success: false, error: 'tripFeeCents requires hourlyRateCents' };
+      }
+      pricing = { tripFeeCents: payload.tripFeeCents, hourlyRateCents };
+    }
+
     // Gated at draft time (tenant-settings-proposer.ts). Refuse rather than
     // substitute a zone: writing a guess is the Phoenix mis-booking defect,
     // and writing nothing is the silent one this gate closes. Validated with
@@ -175,6 +196,19 @@ export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandle
       return { success: false, error: `timezone is not a recognized IANA zone: ${timezone}` };
     }
 
+    // The owner's cell from the draft. Absent means untouched; a present value
+    // is re-normalised (idempotent on canonical input) so a bad payload fails
+    // before anything is written.
+    let ownerPhone: string | undefined;
+    if (payload.ownerPhone !== undefined) {
+      try {
+        if (typeof payload.ownerPhone !== 'string') throw new Error('not a string');
+        ownerPhone = normalizeMobileE164(payload.ownerPhone);
+      } catch {
+        return { success: false, error: 'ownerPhone must be a valid US phone number' };
+      }
+    }
+
     if (!this.settingsRepo || !this.packActivationRepo) {
       // WS3 — no synthetic success: fail before writing anything so a
       // partially-wired registry can't leave the tenant half-configured.
@@ -191,6 +225,10 @@ export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandle
         // #1201 — no jobBufferMinutes: never asked, so never written (see above).
         ...(hourlyRateCents !== undefined ? { hourlyRateCents } : {}),
         timezone,
+        // Load-bearing conditional spread: upsertIdentityFields treats the
+        // KEY'S PRESENCE as "write this value", so `ownerPhone: undefined`
+        // would write NULL and clear a number the owner already has.
+        ...(ownerPhone !== undefined ? { ownerPhone } : {}),
         bootstrapAiModel: resolveBootstrapAiModel(),
       });
       await this.auditRepo.create(
@@ -205,6 +243,8 @@ export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandle
             businessName: payload.businessName,
             ...(hourlyRateCents !== undefined ? { hourlyRateCents } : {}),
             timezone,
+            // Never the number itself.
+            ...(ownerPhone !== undefined ? { ownerPhoneSet: true } : {}),
             source: 'onboarding_conversation',
           },
         }),
@@ -216,7 +256,7 @@ export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandle
         auditRepo: this.auditRepo,
         packSeedDeps: this.packSeedDeps,
       };
-      for (const packId of verticalPacks as VerticalType[]) {
+      for (const packId of verticalPacks as string[]) {
         // No lockClient — the executor doesn't run inside an HTTP request's
         // tenant transaction, so an xact lock can't be used here. lockPool
         // (review finding #3) is the session-level fallback that actually
@@ -224,7 +264,7 @@ export class OnboardingTenantSettingsExecutionHandler implements ExecutionHandle
         // execution (or a form-wizard POST /pack) for the same pack; see
         // activatePackWithSeed's lockPool doc.
         const result = await activatePackWithSeed(
-          { tenantId: context.tenantId, packId, actorId: context.executedBy, lockPool: this.pool },
+          { tenantId: context.tenantId, packId, actorId: context.executedBy, lockPool: this.pool, ...(pricing ? { pricing } : {}) },
           activateDeps,
         );
         if (result.status === 'locked') {
@@ -662,6 +702,86 @@ export class OnboardingScheduleExecutionHandler implements ExecutionHandler {
         success: false,
         error: err instanceof Error ? err.message : 'Schedule onboarding failed',
       };
+    }
+  }
+}
+
+// ─── onboarding_voice_policy ─────────────────────────────────────────────────
+//
+// "Pick, don't build" onboarding. Writes the choices the five handlers above do
+// not cover, through the same SettingsRepository.update path the Settings
+// screen uses. Escalation settings are read-merge-written so a partial choice
+// never clears the owner's other routing keys; the PIN credential keys are
+// preserved atomically by the repository option.
+
+export class OnboardingVoicePolicyExecutionHandler implements ExecutionHandler {
+  proposalType: ProposalType = 'onboarding_voice_policy';
+
+  constructor(
+    private readonly settingsRepo: SettingsRepository | undefined,
+    private readonly auditRepo: AuditRepository,
+    /**
+     * S5a-5 (U8) — the app queue: a switch to "Collect on the spot" enqueues
+     * the pay-link cleanup in the settings write's own transaction. Absent →
+     * the write still lands; the daily reconciliation sweep is the backstop.
+     */
+    private readonly queue?: Queue,
+  ) {}
+
+  isFullyWired(): boolean {
+    return Boolean(this.settingsRepo);
+  }
+
+  async execute(proposal: Proposal, context: ExecutionContext): Promise<ExecutionResult> {
+    const parsed = onboardingVoicePolicyPayloadSchema.safeParse(proposal.payload);
+    if (!parsed.success) {
+      const detail = parsed.error.issues.map((i) => `${i.path.join('.') || '(root)'}: ${i.message}`).join('; ');
+      return { success: false, error: `INVALID_PAYLOAD: ${detail}` };
+    }
+    if (!this.settingsRepo) {
+      return { success: false, error: 'handler_not_wired:settingsRepo' };
+    }
+    const p = parsed.data;
+
+    try {
+      const updates: Partial<TenantSettings> = {};
+      if (p.voiceGreeting !== undefined) updates.voiceGreeting = p.voiceGreeting;
+      if (p.autonomousBookingEnabled !== undefined) updates.autonomousBookingEnabled = p.autonomousBookingEnabled;
+      if (p.paymentCollectionMode !== undefined) updates.paymentCollectionMode = p.paymentCollectionMode;
+      if (p.bookingHoursPreset !== undefined) updates.businessHours = bookingHoursFromPreset(p.bookingHoursPreset);
+      if (p.afterHoursVoiceMode !== undefined || p.emergencyTarget !== undefined) {
+        const current = await this.settingsRepo.findByTenant(context.tenantId);
+        // The stored JSON is partial by design (D-040: an absent key means
+        // "use the default", and migration 304 stripped materialised
+        // defaults), so merge onto what is stored, never onto the defaults.
+        const stored: Partial<EscalationSettings> = current?.escalationSettings ?? {};
+        updates.escalationSettings = {
+          ...stored,
+          ...(p.afterHoursVoiceMode !== undefined ? { after_hours_voice_mode: p.afterHoursVoiceMode } : {}),
+          ...(p.emergencyTarget !== undefined ? { emergency_target: p.emergencyTarget } : {}),
+        } as EscalationSettings;
+      }
+
+      await this.settingsRepo.update(context.tenantId, updates, {
+        preserveVoiceApprovalPin: true,
+        ...(this.queue && updates.paymentCollectionMode !== undefined
+          ? { afterWrite: paymentModeChangeHook(this.queue) }
+          : {}),
+      });
+      await this.auditRepo.create(
+        createAuditEvent({
+          tenantId: context.tenantId,
+          actorId: context.executedBy,
+          actorRole: actorRoleFor(context),
+          eventType: 'tenant.voice_policy_set',
+          entityType: 'tenant_settings',
+          entityId: context.tenantId,
+          metadata: { ...p, source: 'onboarding_readback' },
+        }),
+      );
+      return { success: true, resultEntityId: context.tenantId };
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err.message : 'Voice policy onboarding failed' };
     }
   }
 }

@@ -205,7 +205,7 @@ const CLASSIFIED: ReadonlyArray<{ at: string; as: Classification; why: string }>
     why: 'inapp-50 eval world seeding a fixture line item; not a caller-facing path (same exemption as I1′).',
   },
   {
-    at: 'src/ai/skills/lookup-estimates.ts:190',
+    at: 'src/ai/skills/lookup-estimates.ts:193',
     as: 'cross-document-aggregate',
     why: 'Sums the engine-produced total of N estimates for a spoken "you have 3 estimates totaling $X". A report over documents, not a document\'s total.',
   },
@@ -220,7 +220,7 @@ const CLASSIFIED: ReadonlyArray<{ at: string; as: Classification; why: string }>
     why: 'Averages `e.totals.totalCents` across similar estimates for AI context.',
   },
   {
-    at: 'src/digest/digest-service.ts:968',
+    at: 'src/digest/digest-service.ts:985',
     as: 'cross-document-aggregate',
     why: 'Pipeline value for the daily digest — sums `e.totals.totalCents` across sent estimates.',
   },

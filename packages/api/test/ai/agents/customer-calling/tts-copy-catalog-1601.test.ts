@@ -53,6 +53,20 @@ const SNAPSHOT: Record<string, Pinned> = {
     en: "I'm sorry, I wasn't able to connect you to a team member. Please try calling again in a few minutes.",
     es: 'Lo siento, no pude comunicarle con un miembro del equipo. Por favor, vuelva a llamar en unos minutos.',
   },
+  // LCR-02 — new copy: the silence cap (voicemail / closing line) and the
+  // low-confidence cap when nothing could be dialed.
+  silence_voicemail: {
+    en: "I haven't been able to hear you. If you still need help, please leave a message after the tone.",
+    es: 'No he podido escucharle. Si todavía necesita ayuda, por favor deje un mensaje después del tono.',
+  },
+  silence_closing: {
+    en: "I haven't been able to hear you, so I'll end the call here. Please call us back when you're ready.",
+    es: 'No he podido escucharle, así que voy a terminar la llamada. Por favor, llámenos de nuevo cuando pueda.',
+  },
+  handoff_unavailable_voicemail: {
+    en: "I'm sorry, I wasn't able to connect you to a team member. Please leave a message after the tone.",
+    es: 'Lo siento, no pude comunicarle con un miembro del equipo. Por favor, deje un mensaje después del tono.',
+  },
   low_stt_confidence_reprompt: {
     en: "I didn't quite catch that — could you say that again?",
     es: 'No alcancé a escuchar bien eso — ¿podría repetirlo, por favor?',

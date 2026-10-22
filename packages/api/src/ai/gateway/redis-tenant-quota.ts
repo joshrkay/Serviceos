@@ -29,6 +29,7 @@
 import { randomUUID } from 'crypto';
 import type { Redis } from 'ioredis';
 import { createRedisClient, registerRedisClientForShutdown } from '../../redis/redis-client';
+import { MAX_GATEWAY_DEADLINE_MS } from './deadline';
 import {
   tenantConcurrencyInFlight,
   tenantConcurrencyRejectTotal,
@@ -100,7 +101,9 @@ return {1, 0, 0, inFlight + 1}`;
  *       5=estimatedTokens 6=actualTokens 7=hashIdleMs
  * Removes the lease (frees the concurrency slot + reservation) and reconciles the
  * bucket against actual usage. Refills to now first so the delta lands on a
- * current bucket value (the canonical token-bucket update).
+ * current bucket value (the canonical token-bucket update). An underestimate is
+ * carried as debt down to -bucketCapacity (GATEWAY-05), same as the in-memory
+ * registry; ACQUIRE_LUA's `est > tokens` check then waits it out.
  */
 const RELEASE_LUA = `
 redis.call('ZREM', KEYS[1], ARGV[1])
@@ -115,7 +118,7 @@ ${NOW_MS_LUA}
   local elapsed = (now - lastMs) / 1000
   if elapsed > 0 then tokens = math.min(cap, tokens + elapsed * refill) end
   local delta = tonumber(ARGV[6]) - tonumber(ARGV[5])
-  if delta > 0 then tokens = math.max(0, tokens - delta)
+  if delta > 0 then tokens = math.max(-cap, tokens - delta)
   elseif delta < 0 then tokens = math.min(cap, tokens - delta) end
   redis.call('HSET', KEYS[2], 'tokens', tokens, 'refillMs', now)
   redis.call('PEXPIRE', KEYS[2], tonumber(ARGV[7]))
@@ -125,8 +128,17 @@ return 1`;
 /** Hash idle TTL — an idle tenant's bucket is evicted; a fresh key starts full
  *  (lenient, matches the in-memory state-pruning behavior). */
 const HASH_IDLE_MS = 30 * 60 * 1000;
-/** Lease TTL — a request that never releases (crash) frees its slot after this. */
-const DEFAULT_QUOTA_LEASE_TTL_MS = 5 * 60 * 1000;
+/** Slack on top of the longest hold: abort propagation + the release round-trip. */
+const QUOTA_LEASE_TTL_MARGIN_MS = 5_000;
+/**
+ * Lease TTL — a request that never releases (replica crash, or a release lost
+ * to a Redis blip) frees its slot after this. Just above the longest a lease
+ * can legitimately be held: the failover chain inside the lease is clamped to
+ * and settles by MAX_GATEWAY_DEADLINE_MS. It was 5 minutes, so two leaked
+ * leases blocked a tenant's (then 2-slot) classifier for that long
+ * (GATEWAY-01).
+ */
+export const DEFAULT_QUOTA_LEASE_TTL_MS = MAX_GATEWAY_DEADLINE_MS + QUOTA_LEASE_TTL_MARGIN_MS;
 
 export class RedisTenantQuotaStore implements QuotaStore {
   /** Per-replica fallback used when Redis is unavailable (fail-open-to-local). */

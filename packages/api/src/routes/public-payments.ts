@@ -26,6 +26,14 @@ import {
 } from '../payments/stripe-payment-intent';
 import { asyncRoute } from '../middleware/async-route';
 import { routeParam } from '../shared/route-params';
+import type { SettingsRepository } from '../settings/settings';
+import type { AuditRepository } from '../audit/audit';
+import {
+  auditPaymentModeUnavailable,
+  CollectOnSiteError,
+  PaymentModeUnavailableError,
+  readPaymentCollectionMode,
+} from '../invoices/payment-collection-mode';
 
 const requestSchema = z.object({
   invoiceId: z.string().min(1, 'invoiceId is required'),
@@ -34,6 +42,15 @@ const requestSchema = z.object({
 
 export interface PublicPaymentsDeps {
   invoiceRepo: InvoiceRepository;
+  /**
+   * S5a-1 (U8) — `payment_collection_mode` is read before any PaymentIntent
+   * is minted: "Collect on the spot" answers 409 `COLLECT_ON_SITE`, and a
+   * policy that cannot be read answers 503 `PAYMENT_MODE_UNAVAILABLE`
+   * (retryable) rather than defaulting to a charge.
+   */
+  settingsRepo: SettingsRepository;
+  /** Records `invoice.payment_mode_unavailable` (surface `payment_intent`). */
+  auditRepo?: AuditRepository;
   stripeConfig: StripePaymentIntentConfig | null;
   /**
    * ISO 4217 currency code (lowercase per Stripe convention) used when
@@ -84,6 +101,22 @@ export function createPublicPaymentsRouter(deps: PublicPaymentsDeps): Router {
         message: 'Invoice not found',
       });
       return;
+    }
+
+    // S5a-1 (U8) — policy before state (after the 404 so the token stays
+    // the only thing that reveals an invoice exists).
+    const mode = await readPaymentCollectionMode(deps.settingsRepo, invoice.tenantId);
+    if (!mode.ok) {
+      await auditPaymentModeUnavailable(deps.auditRepo, {
+        tenantId: invoice.tenantId,
+        invoiceId: invoice.id,
+        surface: 'payment_intent',
+        error: mode.error,
+      });
+      throw new PaymentModeUnavailableError();
+    }
+    if (mode.mode === 'collect_on_site') {
+      throw new CollectOnSiteError();
     }
 
     // Reject already-paid / voided / canceled invoices so we don't create

@@ -120,6 +120,19 @@ describe('PhoneStep — number picker', () => {
     expect(screen.getByRole('heading', { name: /pick your own number/i })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: /let us pick a number for you/i })).toBeInTheDocument();
   });
+
+  // The status now puts the failure's own blocker first, so the credentials
+  // line reaches owners on this wizard: it must be plain words.
+  it('says a credentials failure in plain words, naming no vendor or system', () => {
+    render(
+      <PhoneStep
+        status={makeStatus({ status: 'error', blockers: ['twilio_credentials_missing', 'twilio_provisioning_failed'] })}
+        onAdvance={() => {}}
+      />,
+    );
+    const line = screen.getByText("We can't set up phone numbers on your account yet. Please contact support.");
+    expect(line.textContent).not.toMatch(/twilio|provision|configured|environment/i);
+  });
 });
 
 // #1563 — checkout no longer buys a number: once the subaccount is ready the

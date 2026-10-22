@@ -12,6 +12,8 @@ const configSchema = z.object({
     }),
   PORT: z.coerce.number().int().positive().default(3000),
   DATABASE_URL: z.string().min(1).optional(),
+  /** PEM CA certificate for Postgres TLS; when set, server certs are verified (T4-F13). */
+  DB_SSL_CA: z.string().min(1).optional(),
   DB_HOST: z.string().default('localhost'),
   DB_PORT: z.coerce.number().int().positive().default(5432),
   DB_NAME: z.string().optional(),
@@ -19,6 +21,8 @@ const configSchema = z.object({
   DB_PASSWORD: z.string().optional(),
   CLERK_SECRET_KEY: z.string().min(1).optional(),
   CLERK_PUBLISHABLE_KEY: z.string().min(1).optional(),
+  /** Comma-separated `azp` allowlist for Clerk session tokens; unset = not enforced. */
+  CLERK_AUTHORIZED_PARTIES: z.string().min(1).optional(),
   CLERK_WEBHOOK_SECRET: z.string().optional(),
   CLERK_JWKS_URL: z.string().url().optional(),
   // P0-033 — gate for the legacy HMAC-SHA256 dev path in `verifyClerkSession`.
@@ -164,6 +168,15 @@ const configSchema = z.object({
   SLO_TURN_LATENCY_P95_MS: z.coerce.number().positive().default(3500),
   // WS26 — minimum recorded turns before the turn-latency rule can breach.
   SLO_TURN_LATENCY_MIN_SAMPLE: z.coerce.number().int().positive().default(30),
+  // Voice parity U1 (D-043) — reply gap: caller's last word → first reply frame
+  // Twilio acked (voice_reply_gap_ms{anchor="last_word"}), P95 breach threshold
+  // (ms). Runs beside the STT-final-anchored SLO_TURN_LATENCY_P95_MS rule.
+  SLO_REPLY_GAP_P95_MS: z.coerce.number().positive().default(1500),
+  // U1 — max share of replies whose first real frame was enqueued but never
+  // acked (voice_reply_unacked_total over acked + unacked), 0..1.
+  SLO_REPLY_UNACKED_RATE_MAX: z.coerce.number().min(0).max(1).default(0.01),
+  // U1 — minimum recorded replies before either reply-gap rule can breach.
+  SLO_REPLY_GAP_MIN_SAMPLE: z.coerce.number().int().positive().default(30),
   // #1602 — minimum 7-day PRODUCTION graded pass rate (voice_session_grades,
   // cross-tenant). Default 0.85 = the Layer 2 launch gate the CI harness enforces.
   SLO_VOICE_GRADED_PASS_MIN: z.coerce.number().min(0).max(1).default(0.85),
@@ -212,6 +225,22 @@ const configSchema = z.object({
   // Lookback (hours) for proposals that reached `execution_failed` with a
   // NULL `execution_error` — a terminal failure state carrying no reason.
   FAILURE_MONITOR_PROPOSAL_LOOKBACK_HOURS: z.coerce.number().positive().default(24),
+  // OBS-4 — volume floor for the PER-TENANT non-completion rule
+  // (ai_task_failure_rate:<task>:<tenant>). Lower than FAILURE_MONITOR_MIN_RUNS
+  // because one tenant's volume is a fraction of the platform's; the platform
+  // floor would silence exactly the diluted outage this rule exists for.
+  FAILURE_MONITOR_TENANT_MIN_RUNS: z.coerce.number().int().positive().default(10),
+  // OBS-4 — platform-wide ai_runs spend (integer cents) over one window above
+  // which `ai_spend_window` pages. Catches a loop that re-calls the model and
+  // COMPLETES every call (invisible to every failure-rate rule). 0 turns the
+  // rule off. Default 200 ($2 per 30-minute window), derived from the bucket
+  // math (review round 1): one tenant saturating its standard +
+  // classifier_standard buckets for a window spends ~3.55M tokens, ~53 cents
+  // on gpt-4o-mini, so 200 pages when about four tenants are driven to their
+  // ceiling at once — reachable at today's tenant count. The old 2000 needed
+  // ~38 saturated tenants and could never fire. Pinned in
+  // test/workers/failure-rate-monitor.test.ts; raise it as tenants grow.
+  FAILURE_MONITOR_SPEND_MAX_CENTS: z.coerce.number().int().min(0).default(200),
   // QUALITY-2026-07-12 WS5 — Microsoft Presidio PII redaction backend for
   // training-asset ingestion. Two separate REST services (matching Presidio's
   // standard deployment): the Analyzer detects PII spans, the Anonymizer
@@ -643,6 +672,27 @@ function validateFeatureRequiredConfig(env: Record<string, string | undefined>):
     );
   }
 
+  // LCR-05 — a live call's session lives in the memory of the process that
+  // answered it (VoiceSessionStore is a per-process Map; Redis only mirrors its
+  // events). With more than one replica the media-stream upgrade and every
+  // /gather turn are separate requests the load balancer may hand to a replica
+  // without that session: the stream upgrade is refused (403) and a Gather
+  // turn starts the call over. So REDIS_URL alone must not unlock a scale-out
+  // of any process that answers calls: every role but worker mounts the
+  // telephony routes and the stream upgrade (app.ts), whatever
+  // TELEPHONY_ENABLED says (that flag only stops outbound SMS). Unset
+  // PROCESS_ROLE is 'all'.
+  const processRole = env.PROCESS_ROLE ?? 'all';
+  if (Number.isFinite(numReplicas) && numReplicas > 1 && processRole !== 'worker') {
+    missing.push(
+      `NUM_REPLICAS=${numReplicas} on PROCESS_ROLE=${processRole} is not supported: this ` +
+        'process answers phone calls, and a call stays in the memory of the replica that ' +
+        'took it, so a second replica drops calls at the stream connect or on the next ' +
+        'turn. Run one replica of every process that answers calls (only PROCESS_ROLE=worker ' +
+        'may scale out) until call state is shared across replicas'
+    );
+  }
+
   // T4-F06 — TENANT_ENCRYPTION_KEY/TRANSCRIPT_ENCRYPTION_KEY are load-bearing
   // for tenant credential (integrations/credentials.ts, calendar-integration.ts,
   // accounting/token-crypto.ts, workers/provision-twilio.ts) and transcript-at-
@@ -829,6 +879,16 @@ const prodEnvSchema = z
       .refine((v) => v !== 'true', {
         message:
           "DEV_AUTH_BYPASS=true is forbidden in production. Unset or set to 'false' before starting.",
+      }),
+    // The e2e lane's scripted transcription (voice/deepgram-token.ts): a
+    // production browser would get a token no real Deepgram accepts, and
+    // every spoken answer would fail. Refused at boot, like TTS_PROVIDER=fixture.
+    STT_PROVIDER: z
+      .string()
+      .optional()
+      .refine((v) => v !== 'fixture', {
+        message:
+          "STT_PROVIDER=fixture is forbidden in production: it hands browsers a token Deepgram refuses. Unset it.",
       }),
   });
 

@@ -1,11 +1,13 @@
 /**
  * FM-03 — factory wires AI_FALLBACK_PROVIDER_* into the resilience stack.
  */
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   buildFallbackProvidersFromEnv,
   createLLMGateway,
+  resolveFallbackReserveMsFromEnv,
 } from '../../../src/ai/gateway/factory';
+import { DEFAULT_FALLBACK_RESERVE_MS } from '../../../src/ai/gateway/compose-resilience';
 import { FallbackModelMapProvider } from '../../../src/ai/gateway/fallback-model-map';
 import type { AppConfig } from '../../../src/shared/config';
 import type { LLMProvider, LLMRequest, LLMResponse } from '../../../src/ai/gateway/gateway';
@@ -80,6 +82,35 @@ describe('buildFallbackProvidersFromEnv', () => {
     expect(providers).toHaveLength(1);
     expect(providers[0]).toBeInstanceOf(FallbackModelMapProvider);
     expect(providers[0].name).toBe('openrouter.ai');
+  });
+});
+
+describe('resolveFallbackReserveMsFromEnv (GATEWAY-03)', () => {
+  it('defaults when unset or blank', () => {
+    expect(resolveFallbackReserveMsFromEnv({})).toBe(DEFAULT_FALLBACK_RESERVE_MS);
+    expect(resolveFallbackReserveMsFromEnv({ AI_FALLBACK_RESERVE_MS: '  ' })).toBe(
+      DEFAULT_FALLBACK_RESERVE_MS,
+    );
+  });
+
+  it('accepts a non-negative integer, including 0 (reserve disabled)', () => {
+    expect(resolveFallbackReserveMsFromEnv({ AI_FALLBACK_RESERVE_MS: '4000' })).toBe(4_000);
+    expect(resolveFallbackReserveMsFromEnv({ AI_FALLBACK_RESERVE_MS: '0' })).toBe(0);
+  });
+
+  it('keeps the default for an invalid value', () => {
+    const write = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      expect(resolveFallbackReserveMsFromEnv({ AI_FALLBACK_RESERVE_MS: '-5' })).toBe(
+        DEFAULT_FALLBACK_RESERVE_MS,
+      );
+      expect(resolveFallbackReserveMsFromEnv({ AI_FALLBACK_RESERVE_MS: '2.5s' })).toBe(
+        DEFAULT_FALLBACK_RESERVE_MS,
+      );
+      expect(write).toHaveBeenCalled();
+    } finally {
+      write.mockRestore();
+    }
   });
 });
 

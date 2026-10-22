@@ -47,7 +47,6 @@ function referencedAssetPaths(app) {
   /** @type {string[]} */
   const paths = [];
   if (typeof app.icon === 'string') paths.push(app.icon);
-  if (app.splash && typeof app.splash.image === 'string') paths.push(app.splash.image);
   if (app.android?.adaptiveIcon?.foregroundImage) {
     paths.push(app.android.adaptiveIcon.foregroundImage);
   }
@@ -56,6 +55,11 @@ function referencedAssetPaths(app) {
     const [name, opts] = plugin;
     if (name === 'expo-notifications' && opts && typeof opts.icon === 'string') {
       paths.push(opts.icon);
+    }
+    // SDK 57 dropped the top-level `splash` key; the launch image lives on the
+    // expo-splash-screen plugin.
+    if (name === 'expo-splash-screen' && opts && typeof opts.image === 'string') {
+      paths.push(opts.image);
     }
   }
   return [...new Set(paths)];

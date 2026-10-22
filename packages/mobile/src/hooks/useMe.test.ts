@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { MeResponse } from '@ai-service-os/shared';
 
 // Rendered via @testing-library/react under jsdom (root devDeps) so this runs
-// in the root-only CI lane; @clerk/clerk-expo + the api/me + useApiClient
+// in the root-only CI lane; @clerk/expo + the api/me + useApiClient
 // modules are mocked, so their mobile-only transitive deps never load.
 const h = vi.hoisted(() => ({
   auth: {
@@ -17,7 +17,7 @@ const h = vi.hoisted(() => ({
   apiFn: vi.fn(),
 }));
 
-vi.mock('@clerk/clerk-expo', () => ({ useAuth: () => h.auth }));
+vi.mock('@clerk/expo', () => ({ useAuth: () => h.auth }));
 vi.mock('../lib/useApiClient', () => ({ useApiClient: () => h.apiFn }));
 vi.mock('../api/me', () => ({ fetchMe: h.fetchMe, postModeSwitch: h.postModeSwitch }));
 

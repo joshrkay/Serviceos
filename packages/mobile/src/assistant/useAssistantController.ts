@@ -8,7 +8,7 @@
  */
 
 import { useMemo } from 'react';
-import { useAuth } from '@clerk/clerk-expo';
+import { useAuth } from '@clerk/expo';
 import { useApiClient } from '../lib/useApiClient';
 import { API_BASE_URL } from '../lib/env';
 import { createAssistantTransport } from './expoFetchTransport';

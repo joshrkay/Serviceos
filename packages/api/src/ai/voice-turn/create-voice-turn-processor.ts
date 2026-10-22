@@ -53,9 +53,10 @@ import {
   PgTenantTransactionRunner,
   type TenantTransactionRunner,
 } from '../../db/tenant-transaction';
-import { tenantContextStore } from '../../middleware/tenant-context';
+import { currentTenantContext } from '../../middleware/tenant-context';
 import type { ApprovalReferenceCheck } from '../../proposals/approval-reference-checks';
 import { appendAgentTts, callerTranscriptText } from './transcript-append';
+import { redactCardNumbers } from '../privacy/pan-redact';
 import {
   classifyIntent,
   isLookupIntent,
@@ -173,6 +174,10 @@ import {
   type AutonomousCloseEvaluation,
   type AutonomousCloseIneligibleReason,
 } from '../../proposals/autonomous-close-lane';
+import { sendLaneUndoSms, type LaneUndoChannel } from '../../proposals/lane-undo-sms';
+import { autonomousLaneEvaluationFor } from '../../proposals/autonomous-lane';
+import { isOwnerLineAttested } from '../../telephony/stir-attestation';
+import type { SlotConflictChecker } from '../tasks/slot-conflict-checker';
 import {
   queueCloseFallbackChain,
   AUTONOMOUS_CLOSE_ACTOR,
@@ -328,12 +333,14 @@ import {
   type SpeechTurnHandler,
 } from '../../telephony/media-streams/mediastream-adapter';
 import {
-  LOW_STT_LADDER_TERMINAL_REASON,
   createLowSttStreak,
   clearLowSttStreak,
   isLowSttConfidence,
   runLowSttConfidenceLadder as sharedLowSttLadder,
   recordLowSttLadderError,
+  parkedHandoffKind,
+  noHandoffCloseEffects,
+  type LowSttStrikeCause,
 } from './shared/low-stt-ladder';
 import { createLogger } from '../../logging/logger';
 import {
@@ -864,6 +871,19 @@ export interface VoiceTurnProcessorDeps {
     oneTapSecret?: string;
     buildApproveUrl?: (token: string) => string;
   };
+  /**
+   * D-015 — the owner one-tap UNDO SMS for a lane-approved live-call booking
+   * (sender, one-tap secret, undo link). Absent ⇒ the live lane refuses
+   * autonomy (`undo_channel_unavailable`): a booking is never auto-approved
+   * without the owner's UNDO.
+   */
+  laneUndo?: LaneUndoChannel;
+  /**
+   * D-015 — the P0-035 slot-conflict check run before a live-call hold. A
+   * busy slot gets no hold; without the check the live lane never
+   * auto-approves (`conflict_check_unavailable`).
+   */
+  slotConflictChecker?: SlotConflictChecker;
   verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
   callerPlanResolver?: (
     tenantId: string,
@@ -1308,7 +1328,7 @@ export interface VoiceTurnProcessor {
   maybeHandleLowSttConfidence(
     session: VoiceSession,
     confidence: number | undefined,
-  ): SideEffect[] | null;
+  ): Promise<SideEffect[] | null>;
 }
 
 export function createVoiceTurnProcessor(
@@ -2747,6 +2767,16 @@ export function createVoiceTurnProcessor(
       let autonomousLaneForCreate:
         | { eligible: true; threshold: number }
         | undefined;
+      // The model confidence the lane judged; stored as the lane-approved
+      // booking's score (no other live proposal carries one).
+      let laneConfidenceForCreate: number | undefined;
+      // The owner cell the lane checked: the UNDO SMS goes to exactly it.
+      let laneOwnerPhone: string | undefined;
+      // The held time as the caller heard it, for the owner's UNDO text.
+      let laneUndoWhen: string | undefined;
+      // The honest pending line, spoken instead of "you're booked" when the
+      // stored booking did not end up approved (supervisor cap, held gap).
+      let bookingPendingUtterance: string | undefined;
       let laneSourceStamp: Record<string, unknown> | undefined;
       // #1045 — the held slot's back-to-back drivability result.
       let holdFeasibilityStamp: HoldFeasibility | undefined;
@@ -2792,6 +2822,9 @@ export function createVoiceTurnProcessor(
                 appointmentRepo: deps.appointmentRepo,
                 ...(deps.jobRepo ? { jobRepo: deps.jobRepo } : {}),
                 ...(deps.feasibilityDeps ? { feasibility: deps.feasibilityDeps } : {}),
+                ...(deps.slotConflictChecker
+                  ? { slotConflictChecker: deps.slotConflictChecker }
+                  : {}),
               },
               {
                 tenantId,
@@ -2821,6 +2854,25 @@ export function createVoiceTurnProcessor(
                   ? { _meta: { overallConfidence: getConfidenceLevel(payloadConfidence) } }
                   : {}),
               };
+              // D-015 — autonomy needs an identity nobody can fake on this
+              // call: the caller-ID match on an A-attested call, not created
+              // on this call and not rejected by the identity check. A
+              // customer resolved from spoken words books only as a draft.
+              const laneCustomerId =
+                session.customerId &&
+                customerId === session.customerId &&
+                isOwnerLineAttested(session.stirVerstat) &&
+                !session.callerCreatedThisCall &&
+                session.callerIdentity !== 'rejected'
+                  ? session.customerId
+                  : undefined;
+              // Only a model's confidence counts: a deterministic phrase match
+              // pins a constant that would always clear the threshold.
+              const laneConfidence =
+                fx.payload.confidenceSource === 'model' &&
+                typeof fx.payload.confidence === 'number'
+                  ? fx.payload.confidence
+                  : undefined;
               const laneEval = buildLaneInputFromSettings({
                 platformDisabled: process.env.AUTONOMOUS_BOOKING_DISABLED === 'true',
                 settings: {
@@ -2829,29 +2881,37 @@ export function createVoiceTurnProcessor(
                     ? { threshold: settings.autonomousBookingThreshold }
                     : {}),
                 },
-                confidenceScore: payloadConfidence,
-                customerId,
+                ownerPhone: settings?.ownerPhone,
+                undoChannelAvailable: deps.laneUndo?.canDeliver() === true,
+                slotConflictFree: hold.conflictChecked,
+                callerLanguageSupported: sessionLanguage(session) === 'en',
+                confidenceScore: laneConfidence,
+                customerId: laneCustomerId,
                 holdExpiryAt: hold.holdExpiryAt,
                 now: new Date(),
                 slotWithinBusinessHours,
                 pendingReferenceCount: 0,
                 negotiationFlagged:
                   session.machine.currentContext.negotiationFlagged === true,
+                injectionFlagged: session.machine.currentContext.injectionFlagged === true,
                 payload: bookingPayload,
               });
               laneSourceStamp = laneStampIfPresent(laneEval) as
                 | Record<string, unknown>
                 | undefined;
               bookingUtterance = bookingSpeechForLane(laneEval, timeReadback);
+              bookingPendingUtterance = bookingSpeechForLane(undefined, timeReadback);
               payloadProposalType = 'create_booking';
               payload = bookingPayload;
               holdFeasibilityStamp = hold.feasibility;
               if (laneEval.eligible) {
                 autonomousLaneForCreate = laneEval;
-              } else if (!laneEval.eligible) {
-                // Hold stays for owner confirmation window (24h); ineligible
-                // lane means draft create_booking, not auto-approve.
+                laneConfidenceForCreate = laneConfidence;
+                laneOwnerPhone = settings?.ownerPhone ?? undefined;
+                laneUndoWhen = timeReadback;
               }
+              // Otherwise the hold stays for the owner's confirmation window
+              // (24h): a draft create_booking, never an auto-approval.
             } else {
               bookingUtterance = await draftOnlySpeech();
             }
@@ -2925,9 +2985,11 @@ export function createVoiceTurnProcessor(
         // uncatalogued-capped score `groundVoiceQuote` produced; a degraded
         // clarification carries neither it nor the quote's missingFields,
         // because there is no quote on that payload to qualify.
-        ...(!degradedFromContract && payloadConfidence !== undefined
-          ? { confidenceScore: payloadConfidence }
-          : {}),
+        ...(autonomousLaneForCreate && laneConfidenceForCreate !== undefined
+          ? { confidenceScore: laneConfidenceForCreate }
+          : !degradedFromContract && payloadConfidence !== undefined
+            ? { confidenceScore: payloadConfidence }
+            : {}),
         // Ambiguous catalog lines AND unmet contract keys both land here:
         // `approveProposal` refuses a proposal with unfilled missingFields, so
         // this is the gate that keeps a contract-incomplete voice draft out of
@@ -2983,6 +3045,84 @@ export function createVoiceTurnProcessor(
       const held = await holdForExecutability(tenantId, proposal, deps.approvalReferenceChecks);
       const stored = await deps.proposalRepo.create(held.proposal);
       session.proposalIds.push(stored.id);
+      if (autonomousLaneForCreate && stored.status !== 'approved' && bookingPendingUtterance) {
+        // The lane said yes but the booking was stored for review (the
+        // supervisor's cap, an executability hold): never "you're booked".
+        bookingUtterance = bookingPendingUtterance;
+      }
+      // D-015 — every live lane verdict is audited, as the router does. A
+      // slot the conflict check found busy never reaches the lane: its hold
+      // is refused and the booking is drafted without a verdict.
+      const laneVerdict = autonomousLaneEvaluationFor(stored);
+      if (laneVerdict && deps.auditRepo) {
+        await deps.auditRepo
+          .create(
+            createAuditEvent({
+              tenantId,
+              actorId: deps.systemActorId ?? 'calling-agent',
+              actorRole: 'system',
+              eventType: 'autonomous_booking_lane_evaluated',
+              entityType: 'proposal',
+              entityId: stored.id,
+              metadata: {
+                proposalType: stored.proposalType,
+                channel: 'telephony',
+                eligible: laneVerdict.eligible,
+                ...(laneVerdict.eligible
+                  ? { threshold: laneVerdict.threshold }
+                  : { reason: laneVerdict.reason }),
+              },
+            }),
+          )
+          .catch(() => undefined);
+      }
+      // D-015 — a lane-approved booking texts the owner the one-tap UNDO at
+      // the cell the lane checked, naming the customer on record and the held
+      // time (never caller-spoken text). Fire-and-forget so the caller's
+      // confirmation never waits on the SMS provider; the outcome is audited.
+      if (
+        stored.status === 'approved' &&
+        autonomousLaneForCreate &&
+        deps.laneUndo &&
+        laneOwnerPhone &&
+        laneUndoWhen
+      ) {
+        const laneUndo = deps.laneUndo;
+        const ownerPhone = laneOwnerPhone;
+        const when = laneUndoWhen;
+        const customerId = session.customerId;
+        const auditUndoSms = (status: 'sent' | 'failed', error?: string) =>
+          deps.auditRepo
+            ?.create(
+              createAuditEvent({
+                tenantId,
+                actorId: deps.systemActorId ?? 'calling-agent',
+                actorRole: 'system',
+                eventType: 'autonomous_booking_undo_sms',
+                entityType: 'proposal',
+                entityId: stored.id,
+                metadata: { status, ...(error ? { error } : {}) },
+              }),
+            )
+            .catch(() => undefined);
+        void (async () => {
+          const customer =
+            customerId && deps.customerRepo
+              ? await deps.customerRepo.findById(tenantId, customerId).catch(() => null)
+              : null;
+          await sendLaneUndoSms(laneUndo, {
+            proposalId: stored.id,
+            tenantId,
+            summary: customer?.displayName ? `${customer.displayName} — ${when}` : when,
+            ownerPhone,
+          });
+          await auditUndoSms('sent');
+        })().catch(async (err) => {
+          const error = err instanceof Error ? err.message : String(err);
+          logger.warn('live-call lane undo SMS failed', { proposalId: stored.id, error });
+          await auditUndoSms('failed', error);
+        });
+      }
       // #1600 (2) — a request that was read back, confirmed and drafted is a
       // completed request, not a repeat: its count starts over, so a caller
       // booking five visits (or correcting a mis-heard readback) on one call
@@ -3438,7 +3578,7 @@ export function createVoiceTurnProcessor(
     : new InMemoryTransactionRunner();
   const revocationTx: Pick<TenantTransactionRunner, 'run'> = {
     run: (tenantId, fn) =>
-      tenantContextStore.getStore()?.tenantId === tenantId
+      currentTenantContext()?.tenantId === tenantId
         ? new InMemoryTransactionRunner().run(tenantId, fn)
         : ownRevocationTx.run(tenantId, fn),
   };
@@ -4999,6 +5139,9 @@ export function createVoiceTurnProcessor(
         entities: { ...pending.entities },
         confidence: pending.confidence,
         utterance: pending.heldUtterance,
+        // No confidenceSource: this confidence scored a move/cancel/confirm
+        // request, not a booking, so the D-015 lane never trusts it — a
+        // rebook is always a draft for the owner.
       };
       effects.push(...session.machine.dispatch(booking));
       if (session.machine.currentState === 'entity_resolution') {
@@ -5439,22 +5582,41 @@ export function createVoiceTurnProcessor(
    * inside `speechTurn`) and low acoustic confidence (via
    * `maybeHandleLowSttConfidence`). One streak for both, so a caller
    * alternating silence and mumbling still terminates at
-   * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS}. At the cap this path
-   * never touches the FSM, so the terminated-session finalize is called
-   * explicitly here (the same pattern Gather's ladder uses). The
+   * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS}. LCR-02: the cap is split
+   * on the capping strike's cause — silence closes with a call-us-back line
+   * and pages nobody; low confidence dispatches the FSM's system_failure.
+   * The FSM never reaches `terminated` here, so the terminal finalize is
+   * called explicitly (the same pattern Gather's ladder uses). The
    * `recordVoiceError` channel stays 'gather' — the only surface whose cell
    * declares this branch today.
    */
-  function runLowSttConfidenceLadder(session: VoiceSession): SideEffect[] {
+  async function runLowSttConfidenceLadder(
+    session: VoiceSession,
+    cause: LowSttStrikeCause,
+    tenantId: string,
+  ): Promise<SideEffect[]> {
     // #1601 step 2 — the rules are the shared ladder's; this owns the
     // processor's streak map and the terminal finalize.
-    const { effects, step } = sharedLowSttLadder(session, lowConfidenceStreak);
-    if (step.escalate && !session.ended) {
+    const { effects, step } = sharedLowSttLadder(session, lowConfidenceStreak, cause);
+    let out = effects;
+    let terminalReason: string | undefined = step.kind === 'silence_close' ? step.reason : undefined;
+    if (step.kind === 'system_failure') {
+      // LCR-02 — page through the FSM's own escalation. A parked <Dial> is
+      // handed back by the transport in place of the "connect you" line; a
+      // parked no-one-available message ends the call; with nothing parked
+      // the caller hears that nobody could be reached (this host builds no
+      // voicemail TwiML), never a transfer promise.
+      await executeSideEffects(session, effects, tenantId);
+      const parked = parkedHandoffKind(pendingTransferTwiml.get(session.id));
+      if (parked === 'none') out = noHandoffCloseEffects(session, step.reason);
+      if (parked !== 'dial') terminalReason = step.reason;
+    }
+    if (terminalReason !== undefined) {
       session.ended = true;
-      finalizeTerminatedSession(session, effects, LOW_STT_LADDER_TERMINAL_REASON);
+      finalizeTerminatedSession(session, [{ type: 'end_session', payload: { reason: terminalReason } }], terminalReason);
     }
     recordLowSttLadderError(step, 'gather', { callSid: session.callSid, tenantId: session.tenantId });
-    return effects;
+    return out;
   }
 
   /**
@@ -5464,10 +5626,10 @@ export function createVoiceTurnProcessor(
    * surface whose ladder lives elsewhere (media-streams' adapter-side A3)
    * is never double-gated.
    */
-  function maybeHandleLowSttConfidence(
+  async function maybeHandleLowSttConfidence(
     session: VoiceSession,
     confidence: number | undefined,
-  ): SideEffect[] | null {
+  ): Promise<SideEffect[] | null> {
     if (!servesFamilyHere('silence_low_stt_ladder')) return null;
     if (!isLowSttConfidence(confidence)) {
       // High confidence (or no signal at all) clears the streak so a later
@@ -5476,7 +5638,7 @@ export function createVoiceTurnProcessor(
       return null;
     }
 
-    return runLowSttConfidenceLadder(session);
+    return runLowSttConfidenceLadder(session, 'low_confidence', session.tenantId);
   }
 
   /**
@@ -5663,6 +5825,13 @@ export function createVoiceTurnProcessor(
     tenantId,
     transcriptAppended = false,
   }): Promise<SideEffect[]> => {
+    // PRIV-3 — a recited card number is scrubbed where the caller's words
+    // enter the turn: the FSM events built from `speechResult` (their
+    // `utterance` feeds the complaint callback transcript, lastUtterance and
+    // the proposal payload fallbacks), held utterances and every task handler
+    // see `[card number]`, never the digits. A voice-approval challenge is a
+    // short code, never a 13–19 digit run, so its comparison is unaffected.
+    speechResult = redactCardNumbers(speechResult);
     // Note: `processCallerUtterance` historically took `sessionId` and
     // looked up the session via the store. The mediastream adapter
     // already resolves the session before invoking us, so we accept it
@@ -5749,7 +5918,7 @@ export function createVoiceTurnProcessor(
       // keeps today's `confidence_low` dispatch (media-streams' own ladder
       // is adapter-side).
       if (servesFamilyHere('silence_low_stt_ladder')) {
-        const ladderFx = runLowSttConfidenceLadder(session);
+        const ladderFx = await runLowSttConfidenceLadder(session, 'silence', tenantId);
         appendAgentTts(deps.store, session.id, ladderFx);
         return ladderFx;
       }
@@ -5992,6 +6161,9 @@ export function createVoiceTurnProcessor(
             // Thread the classify call's REAL ai_runs id so a proposal born
             // from this intent links to its run row (proposals.ai_run_id FK).
             ...(classification.aiRunId ? { aiRunId: classification.aiRunId } : {}),
+            ...(classification.confidenceSource
+              ? { confidenceSource: classification.confidenceSource }
+              : {}),
           };
         } else {
           // Low / unknown intent → intent_classified so FSM uses

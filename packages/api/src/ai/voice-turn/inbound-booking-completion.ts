@@ -58,6 +58,14 @@ export function bookingSpeechForLane(
 export function buildLaneInputFromSettings(opts: {
   platformDisabled?: boolean;
   settings?: AutonomousLaneSettings;
+  /** `tenant_settings.owner_phone` — no cell, no autonomous booking. */
+  ownerPhone: string | null | undefined;
+  /** False when the live path cannot send the owner UNDO SMS. */
+  undoChannelAvailable: boolean;
+  /** True only when the slot-conflict check ran before the hold (and found it free). */
+  slotConflictFree: boolean;
+  /** False when the caller's language has no localized booking copy. */
+  callerLanguageSupported?: boolean;
   confidenceScore?: number;
   customerId?: string;
   holdExpiryAt: Date;
@@ -65,11 +73,17 @@ export function buildLaneInputFromSettings(opts: {
   slotWithinBusinessHours: boolean;
   pendingReferenceCount?: number;
   negotiationFlagged?: boolean;
+  /** The prompt-injection guard flagged this session. */
+  injectionFlagged?: boolean;
   payload: Record<string, unknown>;
 }): AutonomousLaneEvaluation {
   return evaluateAutonomousBookingLane({
     platformDisabled: opts.platformDisabled === true,
     settings: opts.settings,
+    ownerPhone: opts.ownerPhone,
+    undoChannelAvailable: opts.undoChannelAvailable,
+    slotConflictFree: opts.slotConflictFree,
+    callerLanguageSupported: opts.callerLanguageSupported,
     proposalType: 'create_booking',
     inboundReceptionistSource: true,
     confidenceScore: opts.confidenceScore,
@@ -82,6 +96,7 @@ export function buildLaneInputFromSettings(opts: {
     slotWithinBusinessHours: opts.slotWithinBusinessHours,
     flags: {
       negotiation: opts.negotiationFlagged === true,
+      injection: opts.injectionFlagged === true,
     },
   });
 }

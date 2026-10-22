@@ -40,5 +40,5 @@ const IS_DEV = typeof __DEV__ !== 'undefined' ? __DEV__ : true;
 /** Absolute base URL of the ServiceOS API (the RN app is not same-origin). */
 export const API_BASE_URL = resolveApiBaseUrl(process.env.EXPO_PUBLIC_API_URL, IS_DEV);
 
-/** Clerk publishable key for `@clerk/clerk-expo`. */
+/** Clerk publishable key for `@clerk/expo`. */
 export const CLERK_PUBLISHABLE_KEY = process.env.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY ?? '';

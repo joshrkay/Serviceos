@@ -33,6 +33,16 @@ export interface LineItemTemplate {
   taxable: boolean;
   sortOrder: number;
   isOptional: boolean;
+  /**
+   * U6 seeded-price baseline: written by the pack seeder, together or not at
+   * all, only on a line priced at one of the pack's headline prices. The
+   * baseline price and the id of the headline catalog item the line follows
+   * on a setup re-run. `lineItemTemplateSchema` (shared/contracts.ts) does not
+   * know these keys on purpose: a template the owner saves comes back without
+   * them, which makes every line of it the owner's.
+   */
+  seededUnitPriceCents?: number;
+  seededCatalogItemId?: string;
 }
 
 export interface CreateTemplateInput {

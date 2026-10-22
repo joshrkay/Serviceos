@@ -45,12 +45,12 @@ describe('RepoBackedTimeGivenBackReporter', () => {
       summary: 's',
       createdBy: 'u1',
     });
-    await proposalRepo.create(p);
     // currentWeekWindow returns [NOW - 7d, NOW) — exclusive upper bound — so
     // executedAt must be strictly less than NOW to land inside the window.
-    await proposalRepo.updateStatus('t1', p.id, 'executed', {
-      executedAt: new Date(NOW.getTime() - 1000),
-    });
+    // Seeded executed: the status-write gate refuses draft → executed.
+    p.status = 'executed';
+    p.executedAt = new Date(NOW.getTime() - 1000);
+    await proposalRepo.create(p);
 
     const voiceRepo = new StubVoiceSessionRepo([
       { tenantId: 't1', endedAt: new Date('2026-05-13') },

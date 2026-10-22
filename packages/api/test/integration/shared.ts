@@ -81,6 +81,25 @@ export async function createTestTenant(pool: Pool): Promise<TestTenant> {
   return { tenantId, userId };
 }
 
+/**
+ * Delete the `_queue_messages` rows a file enqueued for its own tenants.
+ *
+ * Every integration file shares one database within a `vitest run`, and
+ * `PgQueue.receive()` claims the oldest visible message of ANY type. A row a
+ * booted-app test leaves behind is therefore handed to the next file that
+ * receives from the queue — unknown-parent-id-404's legit photo attach left
+ * an `image_post_process` row that voice-recording-provenance's redelivery
+ * test then received in place of its own transcription job. Scoped to the
+ * caller's tenants (`payload->>'tenantId'`) so it never touches another
+ * file's rows. `_queue_messages` is created lazily by PgQueue, so a file
+ * that never enqueued anything may find no table.
+ */
+export async function deleteTenantQueueMessages(pool: Pool, tenantIds: string[]): Promise<void> {
+  const { rows } = await pool.query(`SELECT to_regclass('_queue_messages') IS NOT NULL AS present`);
+  if (!rows[0]?.present) return;
+  await pool.query(`DELETE FROM _queue_messages WHERE payload->>'tenantId' = ANY($1::text[])`, [tenantIds]);
+}
+
 export async function setTenantContext(pool: Pool, tenantId: string): Promise<PoolClient> {
   const client = await pool.connect();
   await client.query(`SET LOCAL app.current_tenant_id = '${tenantId}'`);

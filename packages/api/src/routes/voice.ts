@@ -30,6 +30,11 @@ import { Logger } from '../logging/logger';
 import type { FileRepository, StorageProvider } from '../files/file-service';
 import type { JobRepository } from '../jobs/job';
 import type { TtsProvider } from '../ai/tts/tts-provider';
+import { hashOf, type TtsClipCache } from '../ai/tts/clip-cache';
+import { createTtsClipBudget, ttsClipsPerMinFromEnv } from '../ai/tts/tts-clip-budget';
+import { TTS_BATCH_BODY_SCHEMA } from '../ai/tts/tts-batch';
+import { resolveTtsVoice, TTS_VOICE_PRESET_SCHEMA, type ResolvedTtsVoice } from '../ai/tts/resolve-voice';
+import type { SettingsRepository } from '../settings/settings';
 import { routeParam } from '../shared/route-params';
 
 interface CreateVoiceRecordingBody {
@@ -55,11 +60,27 @@ interface CreateVoiceRecordingBody {
 const MAX_IDEMPOTENCY_KEY_LENGTH = 255;
 
 const MAX_AUDIO_SIZE = 25 * 1024 * 1024; // 25 MB
+
+/** PRIV-3 — the 410 copy for a recording whose audio was deleted early. */
+const CARD_NUMBER_AUDIO_DELETED_MESSAGE =
+  "This recording's audio was deleted because a card number was said on it. " +
+  'The transcript, with the card number removed, is still available.';
 const JOB_ID_SCHEMA = z.guid();
 /** H2 review — files.id is uuid: a malformed fileId is a 400, not a Postgres 22P02 → 500. */
 const FILE_ID_SCHEMA = z.guid();
-/** #1603 — one spoken clip's text; same ceiling as a voice-session turn. */
-const TTS_BODY_SCHEMA = z.object({ text: z.string().trim().min(1).max(2000) });
+/**
+ * #1603 — one spoken clip's text; same ceiling as a voice-session turn.
+ * S3-1 — `voice` names a tenant voice preset to speak in instead of the
+ * tenant's stored choice; vendor voice ids are never accepted.
+ */
+const TTS_BODY_SCHEMA = z.object({
+  text: z.string().trim().min(1).max(2000),
+  voice: TTS_VOICE_PRESET_SCHEMA.optional(),
+});
+/** S3-2 — a clip read may name a preset, as the POST body may. */
+const TTS_CLIP_READ_QUERY_SCHEMA = z.object({ voice: TTS_VOICE_PRESET_SCHEMA.optional() });
+/** S3-2 — a clip hash is sha256 hex exactly as `hashOf` emits it; anything else is a miss. */
+const CLIP_HASH = /^[0-9a-f]{64}$/;
 
 const ALLOWED_MIME_TYPES = new Set([
   'audio/webm', 'audio/ogg', 'audio/wav', 'audio/mpeg',
@@ -92,6 +113,18 @@ export interface VoiceRouterOpts {
    * device keeps the answer on screen only.
    */
   tts?: TtsProvider;
+  /**
+   * S3-1 — the tenant's chosen voice (`tenant_settings.voice_id`, a preset
+   * key) for POST /tts. Optional: absent → every clip is spoken in the
+   * default preset.
+   */
+  settingsRepo?: Pick<SettingsRepository, 'findByTenant'>;
+  /**
+   * S3-1 — clips keyed by (provider voice id, sha256(text)); the onboarding
+   * lines are static per trade and voice, so the second owner on a voice
+   * pays nothing. Optional: absent → every request synthesizes.
+   */
+  clipCache?: TtsClipCache;
 }
 
 export function createVoiceRouter(
@@ -188,7 +221,11 @@ export function createVoiceRouter(
       }
 
       try {
-        const minted = await mintDeepgramStreamToken({ apiKey: process.env.DEEPGRAM_API_KEY });
+        const minted = await mintDeepgramStreamToken({
+          apiKey: process.env.DEEPGRAM_API_KEY,
+          sttProvider: process.env.STT_PROVIDER,
+          nodeEnv: process.env.NODE_ENV,
+        });
         await auditMint('voice.stream_token_minted', {
           model: minted.model,
           expiresInSeconds: minted.expiresInSeconds,
@@ -243,28 +280,37 @@ export function createVoiceRouter(
     }),
   );
 
-  // #1603 — dedicated per-USER clip limiter for POST /tts. Every role holds
+  // #1603 — dedicated per-USER clip budget for POST /tts. Every role holds
   // `ai:run`, and each clip bills the tenant's TTS key, so one account must
   // not be able to turn the route into a free-text TTS proxy under the much
   // looser global per-tenant /api limiter. A memo answer every 3 s is plenty.
-  const ttsLimitPerMin = Math.max(1, Number(process.env.VOICE_TTS_PER_MIN) || 20);
-  const ttsLimiter = rateLimit({
-    windowMs: 60 * 1000,
-    max: ttsLimitPerMin,
-    standardHeaders: true,
-    legacyHeaders: false,
-    keyGenerator: (req) => {
-      const auth = (req as AuthenticatedRequest).auth;
-      return auth ? `${auth.tenantId}:${auth.userId}` : ipKeyGenerator(req.ip ?? '');
-    },
-    handler: (_req, res) => {
-      res.status(429).json({
-        error: 'RATE_LIMITED',
-        message: 'Too many spoken answers in a row. The answer is still on screen.',
-      });
-    },
+  //
+  // S3-2 — the budget is charged per clip actually synthesized, never per
+  // request: the batch route below draws up to three units from the same
+  // per-user budget, a cache hit costs nothing on either route, and a turn
+  // that does not fit in what is left is refused whole. express-rate-limit's
+  // middleware charges one hit per request, so the cap lives in
+  // ai/tts/tts-clip-budget.ts over the same store family instead.
+  const ttsClipBudget = createTtsClipBudget({
+    max: ttsClipsPerMinFromEnv(process.env),
     store: createRateLimitStore(process.env.REDIS_URL, 'voice-tts:'),
   });
+
+  /**
+   * Takes `units` clips out of the caller's budget. On refusal answers the
+   * #1603 429 (same body and `Retry-After`) and returns false; the caller
+   * then synthesizes nothing.
+   */
+  async function chargeTtsClips(req: AuthenticatedRequest, res: Response, units: number): Promise<boolean> {
+    const charge = await ttsClipBudget.charge(`${req.auth!.tenantId}:${req.auth!.userId}`, units);
+    if (charge.ok) return true;
+    res.setHeader('Retry-After', String(Math.max(1, Math.ceil(charge.retryAfterMs / 1000))));
+    res.status(429).json({
+      error: 'RATE_LIMITED',
+      message: 'Too many spoken answers in a row. The answer is still on screen.',
+    });
+    return false;
+  }
 
   /**
    * POST /tts — #1603: synthesize one spoken clip for the device.
@@ -276,65 +322,262 @@ export function createVoiceRouter(
    * everyone else who reaches the Assistant. Nothing is persisted; the clip
    * is billable, so every success is audited to the actor (chars, provider).
    * Absent provider → 501 (mirrors /transcribe).
+   *
+   * S3-1 — the clip is spoken in the tenant's chosen voice (or the preset
+   * the body names) and cached by (voice, sha256(text)): a hit answers with
+   * the stored bytes, no provider call and no audit, since nothing was
+   * billed. The response gains `clipHash` and `cached`; `{ audio,
+   * contentType }` is unchanged for the mobile consumer.
+   *
+   * S3-2 — the per-user cap is charged after the cache lookup, one unit per
+   * clip synthesized, from the budget the batch route shares.
    */
   router.post(
     '/tts',
     requireAuth,
     requireTenant,
     requirePermission('ai:run'),
-    ttsLimiter,
     asyncRoute(async (req: Request, res: Response) => {
       // Validate first: a client bug is a 400 even in a keyless environment,
       // not a misleading "not configured".
-      const { text } = TTS_BODY_SCHEMA.parse(req.body ?? {});
+      const { text, voice: requestedPresetId } = TTS_BODY_SCHEMA.parse(req.body ?? {});
       const tts = opts?.tts;
       if (!tts) {
         res.status(501).json({ error: 'NOT_CONFIGURED', message: 'Speech synthesis is not configured' });
         return;
       }
       const authReq = req as AuthenticatedRequest;
+      const tenantId = authReq.auth!.tenantId;
+      const voice = await resolveTtsVoice({
+        tenantId,
+        requestedPresetId,
+        settingsRepo: opts?.settingsRepo,
+        provider: tts,
+      });
+      const clipHash = hashOf(text);
+      const cached = opts?.clipCache?.get(voice.providerVoiceId, clipHash);
+      if (cached) {
+        res.json({
+          audio: cached.audio.toString('base64'),
+          contentType: cached.contentType,
+          clipHash,
+          cached: true,
+        });
+        return;
+      }
+      // S3-2 — one unit for the one clip about to be billed; a hit above
+      // and a 400 before it cost nothing.
+      if (!(await chargeTtsClips(authReq, res, 1))) return;
       try {
-        const result = await tts.synthesize({ text, tenantId: authReq.auth!.tenantId });
-        res.json({ audio: result.audio.toString('base64'), contentType: result.contentType });
-        // Cost attribution: who had how many characters spoken by which
-        // provider. Failure-soft like /transcribe's audit — never blocks the
-        // clip, but a broken sink is logged rather than swallowed.
-        if (auditRepo) {
-          try {
-            await auditRepo.create(createAuditEvent({
-              tenantId: authReq.auth!.tenantId,
-              actorId: authReq.auth!.userId,
-              actorRole: 'user',
-              eventType: 'voice.tts.synthesized',
-              entityType: 'voice_tts',
-              entityId: `tts-${Date.now()}`,
-              metadata: {
-                chars: text.length,
-                provider: result.provider,
-                ...(result.durationMs !== undefined ? { durationMs: result.durationMs } : {}),
-              },
-            }));
-          } catch (auditErr) {
-            logger?.warn('voice.tts: audit write failed', {
-              route: 'POST /api/voice/tts',
-              tenantId: authReq.auth!.tenantId,
-              error: auditErr instanceof Error ? auditErr.message : String(auditErr),
-            });
-          }
+        const result = await synthesizeClip(tts, voice, text, tenantId);
+        res.json({
+          audio: result.audio.toString('base64'),
+          contentType: result.contentType,
+          clipHash,
+          cached: false,
+        });
+        await auditSynthesizedClip(authReq, 'POST /api/voice/tts', text, voice, result);
+      } catch (err) {
+        answerTtsFailed(authReq, res, 'POST /api/voice/tts', err);
+      }
+    }),
+  );
+
+  /**
+   * One billable clip: synthesize in the resolved voice and store it. A
+   * provider with no catalogue for the presets speaks its own default, so
+   * the cache-key placeholder is never passed as a voice name.
+   */
+  async function synthesizeClip(tts: TtsProvider, voice: ResolvedTtsVoice, text: string, tenantId: string) {
+    const result = await tts.synthesize({
+      text,
+      tenantId,
+      ...(tts.voiceForPreset ? { voice: voice.providerVoiceId } : {}),
+    });
+    opts?.clipCache?.set(voice.providerVoiceId, hashOf(text), {
+      audio: result.audio,
+      contentType: result.contentType,
+    });
+    return result;
+  }
+
+  /**
+   * Cost attribution: who had how many characters spoken by which provider,
+   * in which preset (never the vendor voice id). Failure-soft like
+   * /transcribe's audit — never blocks the clip, but a broken sink is logged
+   * rather than swallowed.
+   */
+  async function auditSynthesizedClip(
+    authReq: AuthenticatedRequest,
+    route: string,
+    text: string,
+    voice: ResolvedTtsVoice,
+    result: Awaited<ReturnType<TtsProvider['synthesize']>>,
+  ): Promise<void> {
+    if (!auditRepo) return;
+    try {
+      await auditRepo.create(createAuditEvent({
+        tenantId: authReq.auth!.tenantId,
+        actorId: authReq.auth!.userId,
+        actorRole: 'user',
+        eventType: 'voice.tts.synthesized',
+        entityType: 'voice_tts',
+        entityId: `tts-${Date.now()}`,
+        metadata: {
+          chars: text.length,
+          provider: result.provider,
+          voice: voice.presetId,
+          ...(result.durationMs !== undefined ? { durationMs: result.durationMs } : {}),
+        },
+      }));
+    } catch (auditErr) {
+      logger?.warn('voice.tts: audit write failed', {
+        route,
+        tenantId: authReq.auth!.tenantId,
+        error: auditErr instanceof Error ? auditErr.message : String(auditErr),
+      });
+    }
+  }
+
+  /**
+   * The raw provider text (quota/request ids) is logged, never sent — same
+   * posture as /transcribe's honest failures (#1497).
+   */
+  function answerTtsFailed(authReq: AuthenticatedRequest, res: Response, route: string, err: unknown): void {
+    logger?.error('voice.tts: synthesis failed', {
+      route,
+      tenantId: authReq.auth!.tenantId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    res.status(502).json({
+      error: 'TTS_FAILED',
+      message: "Couldn't speak that answer right now — it's still on screen.",
+    });
+  }
+
+  /**
+   * POST /tts/batch — S3-2: one onboarding turn's clips in one request.
+   *
+   * The v3 shell prefetches the next turn (the question plus two option
+   * lines) while the current one plays; three single requests every few
+   * seconds would meet the per-user cap for a fast owner, so a turn is one
+   * request. The batch is not a way around the cap: it is bounded to one
+   * turn (ai/tts/tts-batch.ts — at most four items, 320 characters each,
+   * 900 in all, a 400 otherwise before anything is charged or looked up),
+   * cache hits are resolved first and cost nothing, the misses are charged
+   * in one go from the same per-user budget as POST /tts (a turn that does
+   * not fit is a 429 and nothing is synthesized), and each synthesized clip
+   * is audited on its own. A provider failure on any clip is a 502 for the
+   * whole turn (the client degrades the turn); clips already made stay
+   * cached, and the units already taken are not refunded, since the
+   * provider may have billed the failed call.
+   */
+  router.post(
+    '/tts/batch',
+    requireAuth,
+    requireTenant,
+    requirePermission('ai:run'),
+    asyncRoute(async (req: Request, res: Response) => {
+      const { items, voice: requestedPresetId } = TTS_BATCH_BODY_SCHEMA.parse(req.body ?? {});
+      const tts = opts?.tts;
+      if (!tts) {
+        res.status(501).json({ error: 'NOT_CONFIGURED', message: 'Speech synthesis is not configured' });
+        return;
+      }
+      const authReq = req as AuthenticatedRequest;
+      const tenantId = authReq.auth!.tenantId;
+      const voice = await resolveTtsVoice({
+        tenantId,
+        requestedPresetId,
+        settingsRepo: opts?.settingsRepo,
+        provider: tts,
+      });
+
+      type Clip = { text: string; clipHash: string; audio: string; contentType: string; cached: boolean };
+      const clips: Array<Clip | null> = items.map((text) => {
+        const clipHash = hashOf(text);
+        const hit = opts?.clipCache?.get(voice.providerVoiceId, clipHash);
+        return hit
+          ? { text, clipHash, audio: hit.audio.toString('base64'), contentType: hit.contentType, cached: true }
+          : null;
+      });
+      // A line repeated within the turn is one clip: charged, spoken and
+      // audited once, and the repeat is served the bytes just made.
+      const misses = new Set(items.filter((_, i) => clips[i] === null));
+      if (!(await chargeTtsClips(authReq, res, misses.size))) return;
+
+      const spoken: Array<{ text: string; result: Awaited<ReturnType<TtsProvider['synthesize']>> }> = [];
+      try {
+        for (const text of misses) {
+          const result = await synthesizeClip(tts, voice, text, tenantId);
+          spoken.push({ text, result });
+          const clip: Clip = {
+            text,
+            clipHash: hashOf(text),
+            audio: result.audio.toString('base64'),
+            contentType: result.contentType,
+            cached: false,
+          };
+          items.forEach((item, i) => {
+            if (item === text) clips[i] = clip;
+          });
         }
       } catch (err) {
-        // The raw provider text (quota/request ids) is logged, never sent —
-        // same posture as /transcribe's honest failures (#1497).
-        logger?.error('voice.tts: synthesis failed', {
-          route: 'POST /api/voice/tts',
-          tenantId: authReq.auth!.tenantId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-        res.status(502).json({
-          error: 'TTS_FAILED',
-          message: "Couldn't speak that answer right now — it's still on screen.",
-        });
+        answerTtsFailed(authReq, res, 'POST /api/voice/tts/batch', err);
+        // What was synthesized before the failure was billed: audit it.
+        for (const { text, result } of spoken) {
+          await auditSynthesizedClip(authReq, 'POST /api/voice/tts/batch', text, voice, result);
+        }
+        return;
       }
+      res.json({ clips });
+      for (const { text, result } of spoken) {
+        await auditSynthesizedClip(authReq, 'POST /api/voice/tts/batch', text, voice, result);
+      }
+    }),
+  );
+
+  /**
+   * GET /tts/clip/:hash — S3-2: a cached clip by content hash.
+   *
+   * Replays and reloads of a line the client already heard (it knows the
+   * hash from an earlier POST) read the stored bytes straight back: never
+   * charged, never synthesized, never audited, since nothing is billed. A
+   * miss — an unknown hash, a malformed one, another replica's cache — is a
+   * 404 and the client falls back to the charged POST. The voice is the
+   * tenant's, or the preset `?voice` names (a 400 otherwise, as on the POST).
+   */
+  router.get(
+    '/tts/clip/:hash',
+    requireAuth,
+    requireTenant,
+    requirePermission('ai:run'),
+    asyncRoute(async (req: Request, res: Response) => {
+      const hash = routeParam(req, 'hash');
+      const requestedPresetId = TTS_CLIP_READ_QUERY_SCHEMA.parse(req.query ?? {}).voice;
+      const tts = opts?.tts;
+      const cached =
+        tts && CLIP_HASH.test(hash)
+          ? opts?.clipCache?.get(
+              (
+                await resolveTtsVoice({
+                  tenantId: (req as AuthenticatedRequest).auth!.tenantId,
+                  requestedPresetId,
+                  settingsRepo: opts?.settingsRepo,
+                  provider: tts,
+                })
+              ).providerVoiceId,
+              hash,
+            )
+          : undefined;
+      if (!cached) {
+        res.status(404).json({ error: 'NOT_CACHED', message: 'That clip is not cached here' });
+        return;
+      }
+      res.setHeader('Content-Type', cached.contentType);
+      res.setHeader('Cache-Control', 'private, max-age=3600');
+      res.setHeader('ETag', `"${hash}"`);
+      res.send(cached.audio);
     }),
   );
 
@@ -734,6 +977,15 @@ export function createVoiceRouter(
         });
         return;
       }
+      // PRIV-3 — audio deleted early because a card number was said on it.
+      if (recording.audioPurgedAt) {
+        res.status(410).json({
+          error: 'RECORDING_PURGED',
+          message: CARD_NUMBER_AUDIO_DELETED_MESSAGE,
+          purgedAt: recording.audioPurgedAt.toISOString(),
+        });
+        return;
+      }
       if (!opts?.fileRepo || !opts?.storage) {
         res.status(501).json({ error: 'NOT_CONFIGURED', message: 'Audio download is not configured' });
         return;
@@ -820,6 +1072,15 @@ export function createVoiceRouter(
           message:
             'This recording\'s audio was purged under the tenant retention policy and cannot be re-transcribed.',
           purgedAt: existing.purgedAt.toISOString(),
+        });
+        return;
+      }
+      // PRIV-3 — same for audio deleted early because a card number was said.
+      if (existing.audioPurgedAt) {
+        res.status(410).json({
+          error: 'RECORDING_PURGED',
+          message: CARD_NUMBER_AUDIO_DELETED_MESSAGE,
+          purgedAt: existing.audioPurgedAt.toISOString(),
         });
         return;
       }

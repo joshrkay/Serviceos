@@ -15,6 +15,7 @@
 import { TRIAL_MINUTE_LIMITS } from '../voice/trial-limits';
 import { tn } from './i18n';
 import type { Language } from '../ai/i18n/i18n';
+import type { PaymentCollectionModeView } from '../invoices/payment-collection-mode';
 import { formatUsdCentsPlain } from '@ai-service-os/shared';
 
 export interface EstimateMessageContext {
@@ -36,6 +37,18 @@ export interface InvoiceMessageContext {
   dueDateIso?: string;
   customMessage?: string;
   language?: Language;
+  /**
+   * S5a-1 (U8) — the payment policy the SEND applied (read through
+   * `invoices/payment-collection-mode.ts`). `pay_link` (and, for callers
+   * that pre-date the key, undefined) renders the pay CTA; `collect_on_site`
+   * and `unavailable` render the view-only CTA plus the in-person note. The
+   * fail-closed decision is the caller's: this only renders what it was told.
+   */
+  paymentCollectionMode?: PaymentCollectionModeView;
+}
+
+function rendersPayCta(mode: PaymentCollectionModeView | undefined): boolean {
+  return mode === undefined || mode === 'pay_link';
 }
 
 export interface RenderedSms {
@@ -126,6 +139,19 @@ export function renderEstimateEmail(ctx: EstimateMessageContext): RenderedEmail 
   return { subject, text, html };
 }
 
+/**
+ * The "we collect payment in person" line an invoice text ends with when its
+ * payment policy has no pay link; none otherwise. Shared with the owner's own
+ * invoice wording (notifications/customer-text-wording.ts), which can't know.
+ */
+export function smsInvoiceCollectOnSiteLine(
+  ctx: Pick<InvoiceMessageContext, 'businessName' | 'language' | 'paymentCollectionMode'>,
+): string[] {
+  return rendersPayCta(ctx.paymentCollectionMode)
+    ? []
+    : [tn('sms.invoice.collect_on_site', ctx.language ?? 'en', { business: ctx.businessName })];
+}
+
 export function renderInvoiceSms(ctx: InvoiceMessageContext): RenderedSms {
   const lang = ctx.language ?? 'en';
   const lines = [
@@ -135,7 +161,10 @@ export function renderInvoiceSms(ctx: InvoiceMessageContext): RenderedSms {
       total: formatMoney(ctx.totalCents),
     }),
     ctx.dueDateIso ? tn('sms.invoice.due', lang, { date: ctx.dueDateIso.slice(0, 10) }) : null,
-    tn('sms.invoice.cta', lang, { url: ctx.viewUrl }),
+    rendersPayCta(ctx.paymentCollectionMode)
+      ? tn('sms.invoice.cta', lang, { url: ctx.viewUrl })
+      : tn('sms.invoice.cta_view', lang, { url: ctx.viewUrl }),
+    ...smsInvoiceCollectOnSiteLine(ctx),
   ].filter((line): line is string => line !== null);
   if (ctx.customMessage && ctx.customMessage.trim().length > 0) {
     lines.splice(2, 0, ctx.customMessage.trim());
@@ -155,8 +184,16 @@ export function renderInvoiceEmail(ctx: InvoiceMessageContext): RenderedEmail {
   const total = tn('email.invoice.total', lang, { total: formatMoney(ctx.totalCents) });
   const numberLine = tn('email.invoice.number', lang, { number: ctx.invoiceNumber });
   const due = ctx.dueDateIso ? tn('email.invoice.due', lang, { date: ctx.dueDateIso.slice(0, 10) }) : '';
-  const ctaText = tn('email.invoice.cta_text', lang, { url: ctx.viewUrl });
-  const buttonLabel = tn('email.invoice.button', lang);
+  const payCta = rendersPayCta(ctx.paymentCollectionMode);
+  const ctaText = payCta
+    ? tn('email.invoice.cta_text', lang, { url: ctx.viewUrl })
+    : tn('email.invoice.cta_view_text', lang, { url: ctx.viewUrl });
+  const buttonLabel = payCta
+    ? tn('email.invoice.button', lang)
+    : tn('email.invoice.button_view', lang);
+  const collectOnSite = payCta
+    ? ''
+    : tn('email.invoice.collect_on_site', lang, { business: ctx.businessName });
   const signature = tn('email.common.signature', lang, { business: ctx.businessName });
   const note = ctx.customMessage?.trim();
 
@@ -170,6 +207,7 @@ export function renderInvoiceEmail(ctx: InvoiceMessageContext): RenderedEmail {
     due,
     '',
     note ? `${note}\n` : '',
+    collectOnSite,
     ctaText,
     '',
     signature,
@@ -187,6 +225,7 @@ export function renderInvoiceEmail(ctx: InvoiceMessageContext): RenderedEmail {
     ${note ? `<p style="margin: 0 0 16px 0; padding: 12px; background: #f3f4f6; border-radius: 6px;">${escapeHtml(note)}</p>` : ''}
     <p style="margin: 0 0 4px 0; font-size: 18px;"><strong>${escapeHtml(total)}</strong></p>
     ${due ? `<p style="margin: 0 0 24px 0; color: #6b7280;">${escapeHtml(due)}</p>` : ''}
+    ${collectOnSite ? `<p style="margin: 0 0 16px 0;">${escapeHtml(collectOnSite)}</p>` : ''}
     <p style="margin: 0 0 24px 0;">
       <a href="${escapeHtml(ctx.viewUrl)}" style="display: inline-block; padding: 12px 24px; background: #16a34a; color: #ffffff; text-decoration: none; border-radius: 6px; font-weight: 500;">${escapeHtml(buttonLabel)}</a>
     </p>

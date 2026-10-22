@@ -110,7 +110,18 @@ const INVENTORY_PATH = path.resolve(REPO_ROOT, 'docs/reference/owner-daily-actio
 const OWNER_REQUIRED_DAILY_WEB_ACTIONS = 1;
 // #1564: +1 (PUT /api/settings/texting-registration — one-time A2P 10DLC
 // registration; reviewed exemption in the doc).
-const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 7;
+// "Pick, don't build" onboarding (docs/plans/2026-10-18-001, slice S1): +4
+// onboarding — the draft create/read, one choice stage, and the read-back
+// approval. Each is a one-time activation act on the setup surface itself.
+// U10 (S1 follow-ups): +1 onboarding — PUT /api/onboarding/draft/owner-phone,
+// one-time, the owner's own cell on the setup draft.
+// U9x (S1 follow-ups): +1 onboarding — POST /api/onboarding/draft/retry, the
+// setup surface's "Something didn't save. Try again." after a failed execution.
+// U5 metro (slice S4): +1 onboarding — PUT /api/onboarding/draft/metro, the
+// Ready screen's "Not Cleveland?" re-price before any choice is staged.
+// U9 undo/reset (slice S4): +2 onboarding — POST /api/onboarding/draft/undo and
+// POST /api/onboarding/draft/reset, the saving screen's Undo and Start over.
+const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 16;
 // #1386: +2 (PUT/DELETE /api/settings/e1-script — occasional, reviewed E1 script).
 // #1402 §13: +1 (POST /api/users/:id/deactivate — occasional, offboarding).
 // #1563: +1 (POST /api/onboarding/phone/change — occasional, Settings → Phone).
@@ -119,7 +130,12 @@ const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 7;
 // Hardening: +7 occasional (QuickBooks connect/disconnect/sync + Google
 // Business connect/delete now require settings:update; operator-hours PUT +
 // phone/retry now require owner — previously open to any member).
-const OWNER_ONLY_ROUTES = 72;
+// "Pick, don't build" S4: +1 onboarding (PUT /api/onboarding/draft/metro).
+// "Pick, don't build" S4: +2 onboarding (POST /api/onboarding/draft/undo, /reset).
+// D-044 (#1762, #1763): +4 occasional (Google listing picker GET/PUT, get-found-online GET + dismiss).
+const OWNER_ONLY_ROUTES = 85;
+// D-045: +2 occasional (PUT/DELETE /api/settings/text-wording/:purpose — owner's text wording).
+const OWNER_ONLY_ROUTES = 83;
 
 // ── Derivation ──────────────────────────────────────────────────────────────
 
@@ -745,6 +761,9 @@ describe('I18: owner daily actions ↔ code contract', () => {
       // only when it is tagged life-safety/operator — a message attribute, not a
       // caller role.
       "packages/api/src/notifications/gated-message-delivery.ts :: message.recipientClass === 'owner' &&",
+      // Recipient KIND on an outbound text (D-045) — who the message is to, not
+      // a caller role.
+      "packages/api/src/notifications/outbound-messaging.ts :: if (recipient.kind === 'owner') {",
       // Proposal-level gate for the `adopt_entity_alias` manual type (§5.2),
       // enforced in the approval path, not on an HTTP route.
       "packages/api/src/proposals/actions.ts :: if (proposal.proposalType === 'adopt_entity_alias' && actorRole !== 'owner') {",

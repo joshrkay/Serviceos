@@ -607,6 +607,35 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['308_oauth_states_google_business_provider', '79915b29a7a0fe83f95f798f21646cccf3ea6c50ce323b5bdb4106a0b36eb3a1'],
   // New owners default field-capable at INSERT now that 066's backfill is one-shot.
   ['309_users_owner_can_field_serve_default', 'e84f9ebc0b7ca4f2bd596006e3c4a2d9394be92fc18732cc405c95a4f6372a33'],
+  ['310_regional_price_tiers', 'cc7cc980e77d57f58c5a3b595c5db8ce9a94764363f44ef38add18d114659795'],
+  ['311_onboarding_drafts', '355ea643b690822e5416a147d3836a7d768fb069e2b5aa238b045498a4715e39'],
+  ['312_tenant_settings_payment_collection_mode', '81ef124ca22d0db44e0744a24c2c41680cd644e7b5bffd57ddaaabb85c8bbc9e'],
+  ['313_onboarding_drafts_owner_phone', '56e08bca72775fcf3d39b5a00e87270a8a18f3ef64f7dbcaa91c8d90e4b65ca2'],
+  ['317_demo_calls', '1f2e2793272ab397224a1feb5307f583c121d5c138d06ed7fb533d6c698045de'],
+  // PRIV-3 — voice_recordings.pci_detected + audio_purged_at (card number said on the call).
+  ['314_voice_recordings_card_number_detected', '648f2696cce7ed17700f8b2d3b826ce8eb61987af91f7cbeed58c82ce01b0ce3'],
+  // S5a (U8) — durable per-link cleanup claim + live-payment-link partial index.
+  ['325_invoices_cleanup_claimed_at', 'e8643fd8984b82bdf4a081da109d699b96467a1ce71d6e8f249ca6d7bf3f5735'],
+  // PRIV-2 — voice_recordings.twilio_deleted_at + twilio_delete_attempted_at (Twilio copy deleted).
+  ['315_voice_recordings_twilio_copy_deleted', '02163cc28f90807433f2526555aaee5cc60ab3c36c5b5c60833c81084a73d1b9'],
+  // PRIV-1 — ai_runs.content_purged_at + partial due-index (prompt/reply content purged past retention).
+  ['316_ai_runs_content_purged_at', '9d5dedac62a55a87f961fb97814dc3e899ccc3a09a15c57ec9548ead00001b7a'],
+  // PRIV-1 (review round 2) — partial index on held voice_recordings (ai_runs purge legal-hold probe).
+  ['318_seeded_price_baseline', '19a3806bcb2f0be4cc31345f6c06d8a2b2a780da20afc3535c4243d7907ca628'],
+  ['321_voice_recordings_legal_hold_index', 'd76d4dfc8b243cbb41c97635409f9d53c076d1f5b59110141a9f767e4a9c9952'],
+  ['324_seeded_price_baseline', '19a3806bcb2f0be4cc31345f6c06d8a2b2a780da20afc3535c4243d7907ca628'],
+  // U1 reply-gap — call_transcript_turns.transport / reply timing columns + 2 NOT VALID CHECKs + partial index.
+  ['326_call_transcript_turns_reply_timing', 'bad452623ef0091588b40ccd2f8408de9935ee9ceb5d1fdae8386ef11acfe65b'],
+  // Dispatch FR-2 phase 1 — service_locations geocode status/attempts/geocoded_at + 1 NOT VALID CHECK + partial index.
+  ['327_service_locations_geocode_status', '8de7949551f27df07e557b82ce08edab52d318b0034fe46fce0230330c248c78'],
+  // Dispatch FR-2 phase 2 — users.skills + jobs.required_skills (TEXT[], no CHECK).
+  ['328_skill_tags', '7b58a5e30ea28966566996c314b41b155333fe55ce687e8463eabf92ad7261ea'],
+  // D-045 — message_dispatches outcome columns (scheduled/blocked) + 3 NOT VALID CHECKs + 3 partial indexes.
+  ['329_message_dispatch_outcomes', '928d38a17d9f73b2175b5a0d71557b8fbb15719bec0f0415d007b15731ef3ea4'],
+  // D-045 — customer_text_wording (owner's own wording per customer text), RLS, inline CHECKs only.
+  ['330_customer_text_wording', 'cb3931893bf7d7fdf018c8fb546cd0d0b15fbf8823a4ce1dbfd67e86195df1b7'],
+  // D-044 / #1763 — tenant_settings.get_found_online_dismissed_at, google_review_url_derived; review_poll_state.backoff_reason, auth_generation.
+  ['331_get_found_online', 'eb7e83e23154cb56342b21f1b83c90733349f649215af5206885b77bb3a639ca'],
 ];
 
 function hashMigration(value: string): string {

@@ -1,6 +1,6 @@
 import { useLocalSearchParams } from 'expo-router';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ActivityIndicator, Image, Linking, Pressable, Text, View } from 'react-native';
 import { ScreenShell } from '../../../src/components/ScreenShell';
@@ -67,8 +67,8 @@ export default function JobPhotos() {
       const shot = await cameraRef.current?.takePictureAsync();
       if (!shot?.uri) throw new Error('Capture failed. Please retry.');
       // expo-camera writes a JPEG; size it from the filesystem for the presign.
-      const info = await FileSystem.getInfoAsync(shot.uri, { size: true });
-      const sizeBytes = (info as { size?: number }).size ?? 0;
+      const info = await FileSystem.getInfoAsync(shot.uri);
+      const sizeBytes = info.exists ? info.size : 0;
       await uploadJobPhoto(
         id,
         { fileUri: shot.uri, contentType: 'image/jpeg', sizeBytes },

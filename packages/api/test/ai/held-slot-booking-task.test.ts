@@ -7,7 +7,7 @@ import type { JobRepository } from '../../src/jobs/job';
 import { InMemoryAssignmentRepository } from '../../src/appointments/assignment';
 import { InMemoryWorkingHoursRepository } from '../../src/availability/working-hours';
 import { InMemoryUnavailableBlockRepository } from '../../src/availability/unavailable-block';
-import { StubSkillMatcher } from '../../src/scheduling/skill-matcher';
+import { noSkillConstraints } from '../helpers/no-skill-constraints';
 import type { FeasibilityDependencies } from '../../src/scheduling/feasibility-types';
 
 const tenantA = '00000000-0000-4000-8000-00000000000a';
@@ -268,7 +268,7 @@ describe('CreateAppointmentAITaskHandler — held-slot feasibility (#1045)', () 
       travelTimeProvider: {
         estimateDriveTime: async () => ({ seconds: 1200, source: 'haversine', degraded: false }),
       },
-      skillMatcher: new StubSkillMatcher(),
+      skillMatcher: noSkillConstraints(),
     };
   }
 

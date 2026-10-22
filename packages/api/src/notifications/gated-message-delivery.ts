@@ -323,7 +323,7 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
 
     // Owner / operator sends bypass the gate entirely.
     if (message.recipientClass === 'owner') {
-      return this.deps.base.sendSms(message);
+      return this.dispatch(message);
     }
 
     // Customer send. 'off' preserves legacy behavior exactly — no gate, no audit.
@@ -394,7 +394,7 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
     await this.deferOutsideSendWindow(message);
     const cap = this.deps.recipientVolumeCap;
     if (!cap || cap.maxPerWindow <= 0 || !message.tenantId) {
-      return this.deps.base.sendSms(message);
+      return this.dispatch(message);
     }
     const reservation = await cap.ledger.reserve(message.tenantId, normalizePhone(message.to), {
       maxPerWindow: cap.maxPerWindow,
@@ -409,7 +409,7 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
       throw new SmsSuppressedError('recipient_volume_cap', message.recipientClass);
     }
     try {
-      return await this.deps.base.sendSms(message);
+      return await this.dispatch(message);
     } catch (err) {
       // Nothing went out — give the slot back so a carrier error does not
       // burn the customer's allowance. Best-effort: the send error wins.
@@ -420,6 +420,17 @@ export class GatedMessageDelivery implements MessageDeliveryProvider {
       }
       throw err;
     }
+  }
+
+  /**
+   * Hand the message to the provider: every check has passed. Runs the
+   * caller's `onProviderStarting` hook first (see `SmsMessage`) and strips it,
+   * so the provider never receives a function.
+   */
+  private async dispatch(message: SmsMessage): Promise<DeliveryResult> {
+    const { onProviderStarting, ...toProvider } = message;
+    await onProviderStarting?.();
+    return this.deps.base.sendSms(toProvider);
   }
 
   /**
