@@ -1693,9 +1693,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       })
     : null;
   const publicBaseUrl = config.publicOrigins.web;
-  const sendService = messageDelivery
+  const sendService = messageDelivery && outboundMessaging
     ? new SendService({
         delivery: messageDelivery,
+        outbound: outboundMessaging,
         estimateRepo,
         invoiceRepo,
         jobRepo,

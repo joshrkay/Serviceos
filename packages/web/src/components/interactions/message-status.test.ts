@@ -65,7 +65,7 @@ describe('blockReasonLabel', () => {
   it('names every reason outbound messaging can block with', () => {
     for (const reason of [
       'no_consent', 'revoked', 'dnc', 'missing_consent_context', 'channel_disabled',
-      'recipient_volume_cap', 'customer_not_found', 'no_phone', 'no_marketing_consent', 'send_failed',
+      'recipient_volume_cap', 'customer_not_found', 'no_phone', 'no_marketing_consent', 'send_failed', 'lookup_failed',
     ]) {
       expect(blockReasonLabel(reason)).not.toContain('_');
     }

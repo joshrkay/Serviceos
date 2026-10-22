@@ -32,6 +32,7 @@ import { SendService } from '../../src/notifications/send-service';
 import { buildLineItem } from '../../src/shared/billing-engine';
 import { createEstimate } from '../../src/estimates/estimate';
 import { dispatchEstimateNudge } from '../../src/estimates/estimate-nudge';
+import { withOutbound } from '../helpers/outbound-messaging';
 
 describe('Postgres integration — #1145 dispatch idempotency key collision', () => {
   let pool: Pool;
@@ -103,7 +104,7 @@ describe('Postgres integration — #1145 dispatch idempotency key collision', ()
     });
 
     delivery = new InMemoryDeliveryProvider();
-    sendService = new SendService({
+    sendService = new SendService(withOutbound({
       delivery,
       estimateRepo,
       invoiceRepo: new InMemoryInvoiceRepository(),
@@ -113,7 +114,7 @@ describe('Postgres integration — #1145 dispatch idempotency key collision', ()
       dispatchRepo,
       publicBaseUrl: 'https://test.example.com',
       ensureInvoicePayLink: async () => undefined,
-    });
+    }, pool));
   });
 
   afterAll(async () => {

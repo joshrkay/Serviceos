@@ -26,6 +26,7 @@ import { InMemoryDncRepository } from '../../src/compliance/dnc';
 import { InMemoryLocationRepository } from '../../src/locations/location';
 import { createRecipientLocaleResolver } from '../../src/notifications/recipient-locale';
 import { createLogger } from '../../src/logging/logger';
+import { withOutbound } from '../helpers/outbound-messaging';
 
 const TENANT = '11111111-1111-4111-8111-111111117001';
 const CUSTOMER = '33333333-3333-4333-8333-333333337001';
@@ -77,7 +78,7 @@ async function world(opts: { email?: string; channel?: 'both' }) {
   const dispatchRepo = new InMemoryDispatchRepository();
   const delivery = new InMemoryDeliveryProvider();
   let clock = LATE;
-  const sendService = new SendService({
+  const sendService = new SendService(withOutbound({
     delivery: new GatedMessageDelivery({
       base: delivery,
       dnc: new InMemoryDncRepository(),
@@ -100,7 +101,7 @@ async function world(opts: { email?: string; channel?: 'both' }) {
     dispatchRepo,
     publicBaseUrl: 'https://app.example.com',
     ensureInvoicePayLink: async () => undefined,
-  });
+  }));
   const sweep = () =>
     runEstimateReminderSweep({
       estimateRepo,

@@ -40,6 +40,7 @@ const BLOCK_REASON_LABEL: Record<string, string> = {
   no_phone: 'there is no phone number on file',
   no_marketing_consent: 'the customer has not agreed to marketing texts',
   send_failed: 'the text provider refused it',
+  lookup_failed: "the customer's texting details couldn't be checked",
 };
 
 export function blockReasonLabel(reason: string | undefined): string {

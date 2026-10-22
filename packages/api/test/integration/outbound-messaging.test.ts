@@ -18,6 +18,12 @@ import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provi
 import { PgDispatchRepository } from '../../src/notifications/dispatch-repository';
 import { createOutboundMessaging } from '../../src/notifications/outbound-messaging';
 
+/** The outcome without its message record's id (the unit suite pins that id). */
+function withoutMessageId<T extends { messageId?: string }>(outcome: T): Omit<T, 'messageId'> {
+  const { messageId: _id, ...rest } = outcome;
+  return rest;
+}
+
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
 
 describe('Postgres integration — outbound messaging', () => {
@@ -69,7 +75,7 @@ describe('Postgres integration — outbound messaging', () => {
     const second = await messaging.sendText(text);
 
     expect(first.status).toBe('sent');
-    expect(second).toEqual({ status: 'sent', duplicate: 'sent' });
+    expect(withoutMessageId(second)).toEqual({ status: 'sent', duplicate: 'sent' });
     expect(delivery.sentSms).toHaveLength(1);
     expect(delivery.sentSms[0]).toMatchObject({
       to: phone,
@@ -131,7 +137,7 @@ describe('Postgres integration — outbound messaging', () => {
       body: 'Thanks for choosing us',
     };
 
-    expect(await messaging.sendText(text)).toEqual({
+    expect(withoutMessageId(await messaging.sendText(text))).toEqual({
       status: 'blocked',
       reason: 'no_consent',
       permanent: true,
@@ -154,7 +160,7 @@ describe('Postgres integration — outbound messaging', () => {
       body: 'Fall tune-up special',
     };
 
-    expect(await messaging.sendText(text)).toEqual({
+    expect(withoutMessageId(await messaging.sendText(text))).toEqual({
       status: 'blocked',
       reason: 'no_marketing_consent',
       permanent: true,
@@ -211,7 +217,7 @@ describe('Postgres integration — outbound messaging', () => {
     expect((await messaging.sendText(text)).status).toBe('sent');
     await pool.query(`DELETE FROM customers WHERE id = $1`, [customerId]);
 
-    expect(await messaging.sendText(text)).toEqual({ status: 'sent', duplicate: 'sent' });
+    expect(withoutMessageId(await messaging.sendText(text))).toEqual({ status: 'sent', duplicate: 'sent' });
     expect(delivery.sentSms).toHaveLength(1);
   });
 

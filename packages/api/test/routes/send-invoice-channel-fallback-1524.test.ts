@@ -44,6 +44,7 @@ import {
   setSupervisorPresenceLoader,
   _resetSupervisorPresenceCache,
 } from '../../src/ai/supervisor-presence';
+import { withOutbound } from '../helpers/outbound-messaging';
 
 const TENANT = '11111111-1111-4111-8111-111111111524';
 const USER = '22222222-2222-4222-8222-222222221524';
@@ -156,7 +157,7 @@ async function execute(
     createdAt: new Date(),
     updatedAt: new Date(),
   });
-  const sendService = new SendService({
+  const sendService = new SendService(withOutbound({
     delivery:
       wired?.gate ??
       new GatedMessageDelivery({
@@ -173,7 +174,7 @@ async function execute(
     dispatchRepo: new InMemoryDispatchRepository(),
     publicBaseUrl: 'https://app.example.com',
     ensureInvoicePayLink: async () => undefined,
-  });
+  }));
   const handler = new SendInvoiceExecutionHandler(new SendServiceInvoiceDeliveryProvider(sendService));
   const result = await handler.execute(proposal, { tenantId: TENANT, executedBy: USER });
   return { result, delivery };
