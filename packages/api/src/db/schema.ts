@@ -8380,6 +8380,14 @@ export const MIGRATIONS = {
     END;
     $$ LANGUAGE plpgsql;
   `,
+  // D-045 (Josh, 2026-10-22: "write both") — the owner may keep one wording
+  // per language, so a business with English and Spanish customers writes
+  // each text twice. Key moves from (tenant, purpose) to (tenant, purpose,
+  // language); existing rows keep the language they were written in.
+  '333_customer_text_wording_per_language': `
+    ALTER TABLE customer_text_wording DROP CONSTRAINT IF EXISTS customer_text_wording_pkey;
+    ALTER TABLE customer_text_wording ADD PRIMARY KEY (tenant_id, purpose, language);
+  `,
 
   // #1750 (D-044) — Get found online checklist facts on tenant_settings.
   //   presence_path           — the owner's "do you have a website?" answer; NULL = unanswered
