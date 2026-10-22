@@ -21,7 +21,8 @@ import type { Pool } from 'pg';
 import { z } from 'zod';
 import { asyncRoute } from '../middleware/async-route';
 import { LeadRepository } from '../leads/lead';
-import { createLead } from '../leads/lead-service';
+import { captureLead } from '../leads/lead-service';
+import type { NewLeadAutoReply } from '../leads/new-lead-auto-reply';
 import { AuditRepository } from '../audit/audit';
 import { TenantRepository } from '../auth/clerk';
 import { attributionSchema, LeadSource } from '../leads/enums';
@@ -61,6 +62,9 @@ const intakeSchema = z.object({
   utmMedium: z.string().trim().max(200).optional(),
   utmCampaign: z.string().trim().max(200).optional(),
   attribution: attributionSchema.optional(),
+  // #1738 — the form's UNTICKED "text me about this request" box. Only an
+  // explicit true lets the instant reply text go out; absent means no.
+  smsConsent: z.boolean().optional(),
   // Honeypot — must be empty/absent. Real users never fill this; bots do.
   _company_url: z.string().max(500).optional(),
 }).refine(
@@ -134,6 +138,7 @@ export function createPublicIntakeRouter(
   settingsRepo: SettingsRepository,
   packRegistry: VerticalPackRegistry,
   pool?: Pool,
+  autoReplyToNewLead?: NewLeadAutoReply,
 ): Router {
   const router = Router();
 
@@ -162,7 +167,7 @@ export function createPublicIntakeRouter(
     }
 
     const addressFields = resolveIntakeAddress(parsed);
-    const lead = await createLead(
+    const { lead, outcome } = await captureLead(
       {
         tenantId,
         firstName: parsed.firstName,
@@ -183,6 +188,12 @@ export function createPublicIntakeRouter(
       leadRepo,
       auditRepo
     );
+
+    // #1738 — owner-opt-in instant reply. Never throws, so a texting problem
+    // can't fail the visitor's submission; every outcome is audited on the lead.
+    if (autoReplyToNewLead) {
+      await autoReplyToNewLead({ lead, outcome, smsConsent: parsed.smsConsent === true });
+    }
 
     // Don't echo the full lead back — public callers don't need ids.
     res.status(201).json({ ok: true, leadId: lead.id });

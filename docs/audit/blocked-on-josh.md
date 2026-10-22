@@ -125,7 +125,7 @@ themselves are kept as written (history); this table is the current state.
 | Stripe test key (dues, off-session, Terminal) | #1000 | Open — no key issued | 8.5b/c 3; 5.5 live-charge half |
 | Spanish E1 (#1056) | #1056 (closed) | **Fixed** — "fuga de gas" reaches E1 at the real handler (`e1-life-safety-handler.test.ts`, 31/31) | 2.5 4 (T1), Spanish clause met |
 | §8.5 card-on-file audit | — | Open (money-class emission not landed) | 8.5 card-on-file 4− |
-| #1011 §E (E1–E7) | #995 | E1: superseded by the O-2 answer (a write path is promised) · E2–E5: no answer recorded · E6: runner adopted by practice (`chromium` + CLI testcontainer; `chromium-noauthbypass` for technician sessions), not formally ratified · E7: no answer | 2.6, 2.7 |
+| #1011 §E (E1–E7) | #995 | E1: superseded by the O-2 answer (a write path is promised) · E2–E4: no answer recorded · E5: wire (#1738, 2026-10-22) · E6: runner adopted by practice (`chromium` + CLI testcontainer; `chromium-noauthbypass` for technician sessions), not formally ratified · E7: no answer | 2.6, 2.7 |
 | 3.8 no-provider silence | #1077 (closed) | **Fixed** by PR #1375 — `UndeliveredConfirmationRecorder` writes one `failed` / `provider: none` row per reachable channel; dead class deleted | 3.8 **4 (T1·T3)** |
 | 4.7 wire or retire | #1079 (closed) | **Wired** by PR #1375 — the board API serves `lateness`; no board renders it | 4.7 2 → **4 (T1)** |
 | 9.5 execute-time cap | #1080 (closed) | Closed | 9.5 5 (T2) |
@@ -300,8 +300,12 @@ named, not answered — see this file's own rule at the top.
   its keys were deliberately kept out of `updateSettingsSchema` — it is a
   built-and-never-wired module, the exact shape CLAUDE.md's Code Hygiene
   section asks to either wire or delete. **Josh's call:** wire it into a real
-  trigger site (which one?) or delete the module and its test. **Until
-  decided:** the module stays dormant; no row on this map claims it.
+  trigger site (which one?) or delete the module and its test.
+  **Decided 2026-10-22 (#1738): wire it.** LSA leads already used it; the
+  website intake form and the portal's Request service now do too, behind
+  the owner's "Text new leads right away" switch (`speedToLeadEnabled`, off
+  by default) and an unticked "text me" box (owner chose the box over
+  implied consent). The template stays out of `updateSettingsSchema`.
 - **(E6) Which Playwright runner counts for rung 5 — ratify.** Map research
   #1004 and this ticket's design pass (§C) both settled on **chromium +
   a local Postgres testcontainer** (docs/testing-strategy.md "Real-Postgres

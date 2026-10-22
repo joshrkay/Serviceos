@@ -44,6 +44,28 @@ describe('Portal — PortalRequestService (P10-001)', () => {
     expect((init as RequestInit).method).toBe('POST');
     const body = JSON.parse((init as RequestInit).body as string);
     expect(body.summary).toBe('Furnace not heating');
+    // #1738 — the text-me box starts unticked.
+    expect(body.smsConsent).toBe(false);
+  });
+
+  it('#1738 — sends smsConsent:true once the ≥44px text-me row is ticked', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 201,
+      json: async () => ({ leadId: 'lead-8', message: 'ok' }),
+    } as unknown as Response);
+    vi.stubGlobal('fetch', fetchMock);
+
+    render(<PortalRequestService token="tok-1" />);
+    fireEvent.change(screen.getByLabelText(/what do you need help with/i), {
+      target: { value: 'Furnace not heating' },
+    });
+    expect(screen.getByTestId('portal-sms-consent').className).toContain('min-h-11');
+    fireEvent.click(screen.getByRole('checkbox', { name: /text me about this request/i }));
+    fireEvent.click(screen.getByRole('button', { name: /send request/i }));
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(JSON.parse((fetchMock.mock.calls[0][1] as RequestInit).body as string).smsConsent).toBe(true);
   });
 
   it('surfaces a server error message', async () => {
