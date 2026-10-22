@@ -443,6 +443,31 @@ describe('AnswerAsScreen', () => {
       expect(onSubmit).toHaveBeenCalledWith({ packId: 'plumbing', businessName: 'Walsh Plumbing', phone: '2165550142' });
     });
 
+    it('"type it" on the trade holds listening until a chip is tapped', async () => {
+      await startOutLoud();
+      hear('Walsh Plumbing');
+      await nameSettles();
+      hear('type it');
+      expect(mic()).toHaveAttribute('aria-pressed', 'false');
+      hear('electrical');
+      expect(screen.getByRole('button', { name: 'Electrical' })).toHaveAttribute('aria-pressed', 'false');
+      fireEvent.click(screen.getByRole('button', { name: 'HVAC' }));
+      expect(transcript()).toHaveTextContent("Got it, HVAC. What's your cell number, with the area code?");
+      await flush();
+      open();
+      expect(mic()).toHaveAttribute('aria-pressed', 'true');
+    });
+
+    it('editing the name while it is still being heard cancels its read-back; leaving the field moves on', async () => {
+      await startOutLoud();
+      hear('Welsh Plumbing');
+      await userEvent.click(nameField());
+      await nameSettles();
+      expect(transcript()).toHaveTextContent("What's your business called?");
+      act(() => nameField().blur());
+      expect(transcript()).toHaveTextContent("What's your trade: plumbing, HVAC, electrical, or something else?");
+    });
+
     it('a pause inside a name or a cell does not split the answer', async () => {
       await startOutLoud();
       hear('Walsh');

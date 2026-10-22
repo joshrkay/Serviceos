@@ -136,6 +136,7 @@ export function AnswerAsScreen({ onSubmit, initial, cellProblem = null }: Answer
   );
   const [rivetSaid, setRivetSaid] = useState('');
   const [typing, setTyping] = useState(false);
+  const [tappingTrade, setTappingTrade] = useState(false);
   const focusedValue = useRef('');
   const lastLines = useRef<string[]>([]);
   const [resumedAfterQuiet, setResumedAfterQuiet] = useState(false);
@@ -289,7 +290,11 @@ export function AnswerAsScreen({ onSubmit, initial, cellProblem = null }: Answer
       // The owner's hands take over: put them on the field Rivet was asking for (a field in use pauses listening).
       voice?.stop();
       setRivetSaid(TYPE_IT);
-      if (step === 'trade') tradeGroup.current?.querySelector('button')?.focus();
+      if (step === 'trade') {
+        // Chips are buttons, not a text field: hold the listening until one is tapped.
+        setTappingTrade(true);
+        tradeGroup.current?.querySelector('button')?.focus();
+      }
       else if (step === 'cell') cellField.current?.focus();
       else nameField.current?.focus();
     } else if (id === 'show') {
@@ -315,7 +320,7 @@ export function AnswerAsScreen({ onSubmit, initial, cellProblem = null }: Answer
     turn: 'answer_as',
     screen: listenFor,
     // Not while the owner's hands are on a field: what they then say is never taken as another field's answer.
-    enabled: step !== null && !sent && !typing,
+    enabled: step !== null && !sent && !typing && !tappingTrade,
     onResult: (said: Utterance) => {
       if (sentRef.current || step === null) return;
       if (said.kind === 'help') say(lastLines.current);
@@ -346,6 +351,7 @@ export function AnswerAsScreen({ onSubmit, initial, cellProblem = null }: Answer
       startOutLoud();
       return;
     }
+    setTappingTrade(false);
     if (!listen.listening) {
       // Listening again: ask what is missing now, not the question from before the owner typed.
       const next = step === 'spell' && name === '' ? 'spell' : current();
@@ -360,7 +366,11 @@ export function AnswerAsScreen({ onSubmit, initial, cellProblem = null }: Answer
 
   // A field the owner is typing in pauses listening; leaving it with a new value moves Rivet on.
   const focusField = (value: string) => {
-    focusedValue.current = value;
+    // A name still being heard is the owner's to finish by hand now: no read-back fires under their fingers,
+    // and leaving the field moves Rivet on even if they changed nothing.
+    const pendingName = nameTimer.current !== null;
+    dropName();
+    focusedValue.current = pendingName ? '' : value;
     setTyping(true);
   };
   const leaveField = (value: string) => {
@@ -373,6 +383,7 @@ export function AnswerAsScreen({ onSubmit, initial, cellProblem = null }: Answer
 
   const pickTrade = (id: TradePackId) => {
     setPackId(id);
+    setTappingTrade(false);
     // Out loud, a tapped chip answers the trade question just as saying it would, and on the check is read back.
     if (step === 'trade' || step === 'confirm') moveOn(tradeHeard(id), { name, packId: id, cell: typedCell });
   };
