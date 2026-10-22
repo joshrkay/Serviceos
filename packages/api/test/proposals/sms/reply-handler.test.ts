@@ -752,7 +752,9 @@ describe('edit session flow', () => {
         }),
       } as unknown as SettingsRepository,
       userRepo: {
-        findById: async () => ({ id: 'u-backup', mobileNumber: BACKUP_PHONE }),
+        // B1 — a real users row always carries its tenant and a role; the
+        // backup approves as that role.
+        findById: async () => ({ id: 'u-backup', tenantId: TENANT, role: 'dispatcher', mobileNumber: BACKUP_PHONE }),
       } as unknown as UserRepository,
       interpretEdit: async () => ({ customerName: 'X' }),
     });

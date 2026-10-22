@@ -10,6 +10,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { createVoiceActionRouterWorker } from '../../src/workers/voice-action-router';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { verifyOneTapApproveToken, createInMemoryNonceStore } from '../../src/proposals/auto-approve';
 import {
   setSupervisorPresenceLoader,
   _resetSupervisorPresenceCache,
@@ -137,6 +138,45 @@ describe('voice-action-router — P12-004 unsupervised routing', () => {
       effectiveRouting: 'queue_and_sms',
       smsSent: true,
     });
+  });
+
+  // B1 — a tenant with no owner phone texts the link to the backup
+  // supervisor; the link must approve as them, not as 'owner'.
+  it("queue_and_sms to the backup supervisor's mobile mints a link that carries their role", async () => {
+    const sendSms = vi.fn(async (_to: string, _body: string) => {});
+    const lookups: string[] = [];
+    const worker = createVoiceActionRouterWorker({
+      tenantSchedulingResolver: async () => ({ timezone: 'America/Phoenix' }),
+      gateway: bookingGateway(),
+      proposalRepo,
+      unsupervisedRouting: {
+        auditRepo,
+        sendSms,
+        secret: 'test-secret',
+        buildApproveUrl: (token) => `https://api.example.com/approve?token=${token}`,
+        resolveOwnerPhone: async () => '+15125550111',
+        resolveLinkApprover: async (_tenantId, phone) => {
+          lookups.push(phone);
+          return { role: 'dispatcher', userId: 'clerk-backup', via: 'backup_supervisor' };
+        },
+        resolveRouting: async () => 'queue_and_sms',
+      },
+    });
+
+    await worker.handle(
+      msg({ tenantId: 't-unsup', userId: 'u-1', transcript: 'Book Mrs Lee next Tuesday at 2pm' }),
+      silentLogger(),
+    );
+
+    expect(lookups).toEqual(['+15125550111']);
+    const [, body] = sendSms.mock.calls[0];
+    const token = body.match(/token=([A-Za-z0-9._-]+)/)![1];
+    const verified = await verifyOneTapApproveToken({
+      token,
+      secret: 'test-secret',
+      consumeNonce: createInMemoryNonceStore(),
+    });
+    expect(verified).toMatchObject({ ok: true, approver: { userId: 'clerk-backup', role: 'dispatcher' } });
   });
 
   it('queue_and_sms: a non-holding supervisor review attaches an N-002 marker that reaches the rendered SMS', async () => {

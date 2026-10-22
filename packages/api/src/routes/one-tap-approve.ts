@@ -37,7 +37,8 @@ import {
 import { createAuditEvent, type AuditRepository } from '../audit/audit';
 import type { Role } from '../auth/rbac';
 import type { ApprovalReferenceCheck } from '../proposals/approval-reference-checks';
-import { ValidationError } from '../shared/errors';
+import type { ResolvedApprover } from '../proposals/approver-identity';
+import { ForbiddenError, ValidationError } from '../shared/errors';
 import { createLogger } from '../logging/logger';
 
 const logger = createLogger({
@@ -45,7 +46,13 @@ const logger = createLogger({
   environment: process.env.NODE_ENV || 'development',
 });
 
-/** Synthetic actor for SMS one-tap approvals (no Clerk session). */
+/**
+ * Synthetic actor for SMS one-tap approvals (no Clerk session) — an owner
+ * link. B1 — a link sent to anyone else (the backup supervisor, when the
+ * tenant has no owner phone) carries its recipient's user id and role in the
+ * signed token, and the approval acts as them instead — re-checked against
+ * who the backup is when the link is tapped (`resolveBackupApprover`).
+ */
 const ONE_TAP_ACTOR_ID = 'one_tap_sms';
 const ONE_TAP_ACTOR_ROLE: Role = 'owner';
 
@@ -74,6 +81,15 @@ export interface OneTapApproveRouterDeps {
    * an "Approved" that then fails at execution.
    */
   approvalReferenceChecks?: ApprovalReferenceCheck[];
+  /**
+   * B1 — who the tenant's backup supervisor is RIGHT NOW
+   * (`resolveBackupSupervisorApprover`). A link minted for the backup carries
+   * their id and role from when the text went out; the tap re-checks it here,
+   * so a backup who was replaced or deactivated since approves nothing and a
+   * re-roled one acts with the role they hold now. Absent → the token's
+   * claims are used as minted (unit fixtures).
+   */
+  resolveBackupApprover?: (tenantId: string) => Promise<ResolvedApprover | null>;
   /**
    * RV-065 — deps for the digest "invoice it" token variant
    * (action: 'mint_draft_invoice'). When the tapped token carries that
@@ -378,6 +394,52 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
       return;
     }
 
+    // B1 — an owner link approves as the owner; a link minted for the backup
+    // supervisor approves as who the backup is NOW. Replaced, deactivated, or
+    // unknown because the lookup failed → nothing is approved (fail closed;
+    // the nonce is spent either way).
+    let actorId = ONE_TAP_ACTOR_ID;
+    let actorRole: Role = ONE_TAP_ACTOR_ROLE;
+    if (verified.approver) {
+      let current: Pick<ResolvedApprover, 'role' | 'userId'> | null = verified.approver;
+      if (deps.resolveBackupApprover) {
+        try {
+          current = await deps.resolveBackupApprover(verified.tenantId);
+        } catch (err) {
+          logger.warn('one-tap backup recheck failed — refusing', {
+            proposalId: verified.proposalId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          current = null;
+        }
+      }
+      if (!current?.userId || current.userId !== verified.approver.userId) {
+        await deps.auditRepo.create(
+          createAuditEvent({
+            tenantId: verified.tenantId,
+            actorId: ONE_TAP_ACTOR_ID,
+            actorRole: 'system',
+            eventType: 'proposal.one_tap_blocked_recipient',
+            entityType: 'proposal',
+            entityId: verified.proposalId,
+            metadata: { channel: 'sms_one_tap', recipient: verified.approver.userId },
+          }),
+        );
+        res
+          .status(403)
+          .type('html')
+          .send(
+            page(
+              'Ask the owner',
+              'This link can’t approve anything now — the owner needs to. It’s still waiting in the review queue.',
+            ),
+          );
+        return;
+      }
+      actorId = current.userId;
+      actorRole = current.role;
+    }
+
     try {
       // EXISTING approval path: status transition guards, missing-field
       // guard, approvedAt stamp (undo window), `proposal.approved` audit
@@ -387,8 +449,8 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
         deps.proposalRepo,
         verified.tenantId,
         verified.proposalId,
-        ONE_TAP_ACTOR_ID,
-        ONE_TAP_ACTOR_ROLE,
+        actorId,
+        actorRole,
         deps.auditRepo,
         'one_tap', // RV-073 — HMAC one-tap link approval
         deps.smsEventRepo
@@ -440,6 +502,20 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
         proposalId: verified.proposalId,
         error: err instanceof Error ? err.message : String(err),
       });
+      // B1 — the link's recipient (a backup supervisor) holds a role that
+      // does not reach this card. Nothing was approved; say who can.
+      if (err instanceof ForbiddenError) {
+        res
+          .status(403)
+          .type('html')
+          .send(
+            page(
+              'Ask the owner',
+              'You can’t approve this one — the owner needs to. It’s still waiting in the review queue.',
+            ),
+          );
+        return;
+      }
       // B4 — still waiting, but something on it has to be fixed first (an
       // unfilled field, or a reference check: e.g. its job belongs to another
       // customer — both carry `details.missingFields`). Say so plainly instead

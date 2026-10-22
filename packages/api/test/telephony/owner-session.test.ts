@@ -15,11 +15,7 @@ import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { SettingsRepository, TenantSettings } from '../../src/settings/settings';
 import type { UserRepository } from '../../src/users/user';
 import type { User } from '../../src/users/user';
-import {
-  resolveApproverPhones,
-  isApprover,
-  isApproverPhone,
-} from '../../src/proposals/approver-identity';
+import { resolveApproverRole, isApproverPhone } from '../../src/proposals/approver-identity';
 
 const TENANT = 't-owner';
 const OWNER_PHONE = '+15125550100';
@@ -39,7 +35,8 @@ function stubSettingsRepo(
 }
 
 function stubUserRepo(): UserRepository {
-  const row = { id: BACKUP_USER_ID, tenantId: TENANT, mobileNumber: BACKUP_MOBILE };
+  // B1 — a real users row always carries a role; the backup approves as it.
+  const row = { id: BACKUP_USER_ID, tenantId: TENANT, role: 'dispatcher', mobileNumber: BACKUP_MOBILE };
   return {
     findById: async (tenantId: string, id: string) =>
       tenantId === TENANT && id === BACKUP_USER_ID ? row : null,
@@ -228,22 +225,24 @@ describe('RV-070 — owner-line recognition (Media Streams inbound)', () => {
 });
 
 describe('RV-070 — approver-identity helper (shared with SMS transport)', () => {
-  it('resolveApproverPhones returns owner phone then backup mobile', async () => {
-    const phones = await resolveApproverPhones(
-      {
-        settingsRepo: stubSettingsRepo({ backupSupervisorUserId: BACKUP_USER_ID }),
-        userRepo: stubUserRepo(),
-      },
-      TENANT,
-    );
-    expect(phones).toEqual([OWNER_PHONE, BACKUP_MOBILE]);
+  it('resolveApproverRole recognises the owner phone and the backup mobile, as their roles', async () => {
+    const deps = {
+      settingsRepo: stubSettingsRepo({ backupSupervisorUserId: BACKUP_USER_ID }),
+      userRepo: stubUserRepo(),
+    };
+    await expect(resolveApproverRole(deps, TENANT, OWNER_PHONE)).resolves.toMatchObject({ role: 'owner' });
+    await expect(resolveApproverRole(deps, TENANT, BACKUP_MOBILE)).resolves.toMatchObject({
+      role: 'dispatcher',
+      userId: BACKUP_USER_ID,
+    });
   });
 
-  it('isApprover matches across normalization variants', () => {
-    expect(isApprover(['+1 (512) 555-0100'], '15125550100')).toBe(true);
-    expect(isApprover(['5125550100'], '+15125550100')).toBe(true);
-    expect(isApprover([OWNER_PHONE], CUSTOMER_PHONE)).toBe(false);
-    expect(isApprover([OWNER_PHONE], '')).toBe(false);
+  it('resolveApproverRole matches across normalization variants', async () => {
+    const deps = { settingsRepo: stubSettingsRepo({ ownerPhone: '+1 (512) 555-0100' }) };
+    await expect(resolveApproverRole(deps, TENANT, '15125550100')).resolves.not.toBeNull();
+    await expect(resolveApproverRole(deps, TENANT, '5125550100')).resolves.not.toBeNull();
+    await expect(resolveApproverRole(deps, TENANT, CUSTOMER_PHONE)).resolves.toBeNull();
+    await expect(resolveApproverRole(deps, TENANT, '')).resolves.toBeNull();
   });
 
   it('isApproverPhone returns false for missing caller-ID', async () => {

@@ -28,7 +28,8 @@ function settings(overrides: Partial<TenantSettings> = {}): SettingsRepository {
 }
 
 function users(): UserRepository {
-  const row = { id: BACKUP_USER_ID, tenantId: TENANT, mobileNumber: BACKUP_MOBILE };
+  // B1 — a real users row always carries a role; the backup approves as it.
+  const row = { id: BACKUP_USER_ID, tenantId: TENANT, role: 'dispatcher', mobileNumber: BACKUP_MOBILE };
   return {
     findById: async (tenantId: string, id: string) =>
       tenantId === TENANT && id === BACKUP_USER_ID ? row : null,

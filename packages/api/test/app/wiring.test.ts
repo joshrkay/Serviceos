@@ -195,4 +195,27 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
     expect(depsOf('registerProposalReplySms(')).toMatch(/\bapprovalReferenceChecks,/);
     expect(depsOf('createOneTapApproveRouter({')).toMatch(/\bapprovalReferenceChecks,/);
   });
+
+  it('B1 — every one-tap approve-link mint site resolves who its recipient approves as', () => {
+    // routeUnsupervisedProposal mints the legacy OWNER link when this optional
+    // dep is absent, so a dropped line would hand the backup supervisor's
+    // mobile a link that approves as 'owner' again.
+    const block = (opener: string) => {
+      const from = src.slice(src.indexOf(`\n    ${opener}`));
+      return from.slice(0, from.indexOf('\n    },'));
+    };
+    expect(src).toMatch(/const resolveLinkApprover = \(tenantId: string, phone: string\) =>\s*resolveApproverRole\(/);
+    for (const opener of ['unsupervisedRouting: {', 'voiceApprovalOneTap: {', 'autonomousClose: {']) {
+      expect(block(opener)).toMatch(/\bresolveLinkApprover,/);
+    }
+  });
+
+  it('B1 — the one-tap route re-checks a backup link against the current backup supervisor', () => {
+    // Optional dep: dropped, a link minted for a backup who has since been
+    // replaced or deactivated would still approve for its 30 minutes.
+    const from = src.slice(src.indexOf('createOneTapApproveRouter({'));
+    expect(from.slice(0, from.indexOf('});'))).toMatch(
+      /resolveBackupApprover: \(tenantId: string\) =>\s*resolveBackupSupervisorApprover\(\{ settingsRepo, userRepo \}, tenantId\)/,
+    );
+  });
 });

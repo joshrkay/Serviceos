@@ -55,6 +55,7 @@ import {
 } from '../../db/tenant-transaction';
 import { currentTenantContext } from '../../middleware/tenant-context';
 import type { ApprovalReferenceCheck } from '../../proposals/approval-reference-checks';
+import type { RouteUnsupervisedProposalDeps } from '../../proposals/auto-approve';
 import { appendAgentTts, callerTranscriptText } from './transcript-append';
 import { redactCardNumbers } from '../privacy/pan-redact';
 import {
@@ -870,6 +871,8 @@ export interface VoiceTurnProcessorDeps {
     /** One-tap HMAC secret (approve token). */
     oneTapSecret?: string;
     buildApproveUrl?: (token: string) => string;
+    /** B1 — who the owner-phone recipient's link approves as (owner, or the backup). */
+    resolveLinkApprover?: RouteUnsupervisedProposalDeps['resolveLinkApprover'];
   };
   /**
    * D-015 — the owner one-tap UNDO SMS for a lane-approved live-call booking
@@ -4081,6 +4084,8 @@ export function createVoiceTurnProcessor(
       tenantId,
       sessionId: session.id,
       ownerSession: session.machine.currentContext.ownerSession === true,
+      // B1 — who the line approves as (the backup supervisor as their role).
+      ...(session.ownerLineApprover ? { approver: session.ownerLineApprover } : {}),
       // Session-level lockout / fail-counter state — without this the
       // challenge lockout is dead code (the task can't see prior failures).
       sessionState: session.voiceApprovalState,
@@ -4144,6 +4149,7 @@ export function createVoiceTurnProcessor(
         tenantId: args.tenantId,
         sessionId: session.id,
         ownerSession,
+        ...(session.ownerLineApprover ? { approver: session.ownerLineApprover } : {}),
         sessionState: session.voiceApprovalState,
       });
       return applyVoiceApprovalResult(session, batchResult);
@@ -4153,6 +4159,7 @@ export function createVoiceTurnProcessor(
       tenantId: args.tenantId,
       sessionId: session.id,
       ownerSession,
+      ...(session.ownerLineApprover ? { approver: session.ownerLineApprover } : {}),
       // Session-level lockout state: a locked session refuses fresh
       // money/irreversible dialogues immediately (capture-class still works).
       sessionState: session.voiceApprovalState,
@@ -4217,6 +4224,7 @@ export function createVoiceTurnProcessor(
       tenantId: args.tenantId,
       sessionId: session.id,
       ownerSession,
+      ...(session.ownerLineApprover ? { approver: session.ownerLineApprover } : {}),
       sessionState: session.voiceApprovalState,
       reference,
       instruction,
@@ -4259,6 +4267,7 @@ export function createVoiceTurnProcessor(
                   ...(ac.sendOwnerSms ? { sendSms: ac.sendOwnerSms } : {}),
                   ...(ac.oneTapSecret ? { secret: ac.oneTapSecret } : {}),
                   ...(ac.buildApproveUrl ? { buildApproveUrl: ac.buildApproveUrl } : {}),
+                  ...(ac.resolveLinkApprover ? { resolveLinkApprover: ac.resolveLinkApprover } : {}),
                   ...(ac.ownerPhoneResolver
                     ? { ownerPhoneResolver: ac.ownerPhoneResolver }
                     : {}),

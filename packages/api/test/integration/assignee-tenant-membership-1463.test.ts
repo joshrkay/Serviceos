@@ -444,6 +444,15 @@ describe('Postgres integration — assignee must be an active tenant member (#14
       expect(res.body.error).toBe('VALIDATION_ERROR');
     });
 
+    // B1 — the backup's mobile approves with the backup's own role, so a role
+    // without proposals:approve would be an approval phone that approves nothing.
+    it('refuses an active technician of tenant A with the plain message', async () => {
+      const technician = await makeUser(tenantA.tenantId, 'technician');
+      const res = await request(app).put('/api/settings').send({ backupSupervisorUserId: technician });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toBe("That team member can't approve work, so they can't be your backup.");
+    });
+
     it('accepts an active dispatcher of tenant A, and null clears it', async () => {
       const dispatcher = await makeUser(tenantA.tenantId, 'dispatcher');
       const set = await request(app).put('/api/settings').send({ backupSupervisorUserId: dispatcher });

@@ -15,9 +15,12 @@
  * Trust model: identity is the inbound mobile number, verified against
  * `tenant_settings.owner_phone` (and the backup supervisor's mobile) with
  * the same normalization as voice activation. The body is never trusted
- * for identity. Tenant isolation is structural — the Twilio webhook URL
- * binds the tenant, signature-verified upstream, and every repo call is
- * tenant-scoped (RLS underneath).
+ * for identity. B1 — the sender acts with the authority they actually hold
+ * (`resolveApproverRole`): the owner phone as the owner, the backup as their
+ * own role and user, and a role without proposals:approve changes nothing.
+ * Tenant isolation is structural — the Twilio webhook URL binds the tenant,
+ * signature-verified upstream, and every repo call is tenant-scoped (RLS
+ * underneath).
  *
  * Idempotency: duplicate webhook deliveries are dropped upstream on
  * (source='twilio', MessageSid). A *re-sent* approval (new MessageSid,
@@ -58,9 +61,10 @@ import type { SettingsRepository } from '../../settings/settings';
 import type { AppointmentRepository } from '../../appointments/appointment';
 import type { UserRepository } from '../../users/user';
 import { type AuditRepository, createAuditEvent } from '../../audit/audit';
-import { ValidationError } from '../../shared/errors';
+import { hasPermission, type Role } from '../../auth/rbac';
+import { ForbiddenError, ValidationError } from '../../shared/errors';
 import { normalizePhone } from '../../shared/phone';
-import { resolveApproverPhones, isApprover } from '../approver-identity';
+import { resolveApproverRole } from '../approver-identity';
 import { STOP_KEYWORDS, START_KEYWORDS } from '../../compliance/stop-reply';
 import {
   type ProposalSmsEventRepository,
@@ -85,7 +89,7 @@ export interface ProposalSmsReplyDeps {
   proposalRepo: ProposalRepository;
   smsEventRepo: ProposalSmsEventRepository;
   settingsRepo: SettingsRepository;
-  /** Resolves the backup supervisor's mobile. Optional — owner_phone still works. */
+  /** Resolves the backup supervisor's mobile and role. Optional — owner_phone still works. */
   userRepo?: UserRepository;
   auditRepo?: AuditRepository;
   /** Outbound reply seam. Absent (dev without Twilio): actions still apply, replies are skipped. */
@@ -115,20 +119,38 @@ export interface ProposalSmsReplyDeps {
   now?: () => Date;
 }
 
+/** B1 — who an approval texted from this phone acts as. */
+interface SmsApprover {
+  actorId: string;
+  role: Role;
+}
+
 /**
  * RV-070 — approver identity (owner_phone + backup supervisor mobile,
  * normalized comparison) is shared with the voice owner-line recognition.
- * See `proposals/approver-identity.ts` for the canonical logic.
+ * See `proposals/approver-identity.ts` for the canonical logic. B1 — the
+ * owner phone keeps the synthetic SMS actor; the backup acts as their own
+ * user and role. null → not an approver (fail closed).
  */
-async function resolveApproverPhonesForDeps(
+async function resolveSmsApprover(
   deps: ProposalSmsReplyDeps,
-  tenantId: string,
-): Promise<string[]> {
-  return resolveApproverPhones(
+  ctx: InboundSmsContext,
+): Promise<SmsApprover | null> {
+  const approver = await resolveApproverRole(
     { settingsRepo: deps.settingsRepo, ...(deps.userRepo ? { userRepo: deps.userRepo } : {}) },
-    tenantId,
+    ctx.tenantId,
+    ctx.fromE164,
   );
+  return approver ? { actorId: approver.userId ?? SMS_REPLY_ACTOR_ID, role: approver.role } : null;
 }
+
+/** B1 — a recognised approver whose role cannot approve (e.g. a technician backup). */
+const ROLE_CANNOT_APPROVE_REPLY =
+  'You can’t approve work by text, so nothing changed. Ask the owner to handle it.';
+
+/** B1 — an approval the sender's role does not reach (a settings change, for a dispatcher). */
+const NEEDS_OWNER_REPLY =
+  'You can’t approve this one — the owner needs to. It’s still waiting in the review queue.';
 
 async function audit(
   deps: ProposalSmsReplyDeps,
@@ -268,6 +290,7 @@ async function recordInbound(
 async function handleApproveAll(
   deps: ProposalSmsReplyDeps,
   ctx: InboundSmsContext,
+  approver: SmsApprover,
 ): Promise<HandlerResult> {
   const pending = await deps.proposalRepo.findByStatus(ctx.tenantId, 'ready_for_review');
   const candidates = pending.filter(
@@ -302,8 +325,8 @@ async function handleApproveAll(
     deps.proposalRepo,
     ctx.tenantId,
     eligible.map((p) => p.id),
-    SMS_REPLY_ACTOR_ID,
-    'owner',
+    approver.actorId,
+    approver.role,
     deps.auditRepo,
     'sms',
     { referenceChecks: deps.approvalReferenceChecks },
@@ -331,6 +354,7 @@ async function handleApprove(
   deps: ProposalSmsReplyDeps,
   ctx: InboundSmsContext,
   proposal: Proposal,
+  approver: SmsApprover,
 ): Promise<HandlerResult> {
   await recordInbound(deps, ctx, proposal.id, 'reply_approve');
 
@@ -402,8 +426,8 @@ async function handleApprove(
       deps.proposalRepo,
       ctx.tenantId,
       proposal.id,
-      SMS_REPLY_ACTOR_ID,
-      'owner',
+      approver.actorId,
+      approver.role,
       deps.auditRepo,
       'sms', // RV-073 — inbound SMS reply approval
       (tenantId, proposalId) => deps.smsEventRepo.hasUnappliedEditRequest(tenantId, proposalId),
@@ -423,6 +447,16 @@ async function handleApprove(
         `Can't approve yet — it's missing required info. Open your review queue to finish it.`,
       );
       return { handled: true, handler: HANDLER_NAME, reason: 'approve_blocked' };
+    }
+    if (err instanceof ForbiddenError) {
+      // B1 — the sender's role does not reach this card (a backup dispatcher
+      // on a settings change). Truthful, and nothing was approved.
+      await audit(deps, ctx, 'proposal.sms_approve_forbidden', proposal.id, {
+        role: approver.role,
+        proposalType: proposal.proposalType,
+      });
+      await reply(deps, ctx.fromE164, NEEDS_OWNER_REPLY);
+      return { handled: true, handler: HANDLER_NAME, reason: 'approve_failed' };
     }
     await audit(deps, ctx, 'proposal.sms_approve_failed', proposal.id, {
       error: err instanceof Error ? err.message : String(err),
@@ -503,6 +537,7 @@ async function handleReject(
   ctx: InboundSmsContext,
   proposal: Proposal,
   reason: string,
+  approver: SmsApprover,
 ): Promise<HandlerResult> {
   await recordInbound(deps, ctx, proposal.id, 'reply_reject');
   // Same separation as approve: the catch covers only the mutation.
@@ -512,8 +547,8 @@ async function handleReject(
       deps.proposalRepo,
       ctx.tenantId,
       proposal.id,
-      SMS_REPLY_ACTOR_ID,
-      'owner',
+      approver.actorId,
+      approver.role,
       reason || 'Rejected via SMS reply',
       undefined,
       deps.appointmentRepo,
@@ -579,14 +614,30 @@ export async function handleProposalSmsReply(
 ): Promise<HandlerResult> {
   const parsed = parseProposalSmsReply(ctx.body);
 
-  const phones = await resolveApproverPhonesForDeps(deps, ctx.tenantId);
-  if (!isApprover(phones, ctx.fromE164)) {
+  const approver = await resolveSmsApprover(deps, ctx);
+  if (!approver) {
     if (parsed.intent !== 'unrecognized') {
       await audit(deps, ctx, 'proposal.sms_reply_unverified_mobile', '', {
         intent: parsed.intent,
       });
     }
     return { handled: false, handler: HANDLER_NAME, reason: 'unknown_mobile' };
+  }
+
+  // B1 — a recognised approver phone is not authority: a backup whose role
+  // cannot approve (a technician, or one demoted after being named backup)
+  // changes nothing by text — not an approval, a rejection, an edit, or an
+  // edit session opened before the demotion.
+  if (!hasPermission(approver.role, 'proposals:approve')) {
+    if (parsed.intent === 'unrecognized') {
+      return { handled: false, handler: HANDLER_NAME, reason: 'unrecognized_keyword' };
+    }
+    await audit(deps, ctx, 'proposal.sms_reply_role_cannot_approve', '', {
+      intent: parsed.intent,
+      role: approver.role,
+    });
+    await reply(deps, ctx.fromE164, ROLE_CANNOT_APPROVE_REPLY);
+    return { handled: true, handler: HANDLER_NAME, reason: 'approve_failed' };
   }
 
   // An open edit session captures EVERYTHING the owner sends next — the
@@ -597,7 +648,7 @@ export async function handleProposalSmsReply(
   // bail-out, or such instructions would be swallowed.
   const session = await findActiveEditSession(deps, ctx);
   if (session) {
-    return handleEditRequest(deps, ctx, session.id, session.proposalId);
+    return handleEditRequest(deps, ctx, session.id, session.proposalId, approver);
   }
 
   if (parsed.intent === 'unrecognized') {
@@ -609,7 +660,7 @@ export async function handleProposalSmsReply(
   // U5 — "ALL" / "APPROVE ALL" is tenant-wide, not a single-render target, so
   // it branches BEFORE the most-recent-render resolution.
   if (parsed.intent === 'approve_all') {
-    return handleApproveAll(deps, ctx);
+    return handleApproveAll(deps, ctx, approver);
   }
 
   const target = await resolveTargetProposal(deps, ctx.tenantId);
@@ -640,14 +691,14 @@ export async function handleProposalSmsReply(
 
   switch (parsed.intent) {
     case 'approve':
-      return handleApprove(deps, ctx, proposal);
+      return handleApprove(deps, ctx, proposal, approver);
     case 'reject':
-      return handleReject(deps, ctx, proposal, parsed.remainder);
+      return handleReject(deps, ctx, proposal, parsed.remainder, approver);
     case 'edit':
       // "EDIT make it $200" carries the instruction inline — apply it
       // directly instead of a pointless "What should I change?" round trip.
       if (parsed.remainder) {
-        return applyEditInstruction(deps, ctx, proposal, ctx.body);
+        return applyEditInstruction(deps, ctx, proposal, ctx.body, approver);
       }
       return handleEditOpen(deps, ctx, proposal);
     default:
@@ -699,6 +750,7 @@ async function handleEditRequest(
   ctx: InboundSmsContext,
   sessionId: string,
   proposalId: string,
+  approver: SmsApprover,
 ): Promise<HandlerResult> {
   const now = deps.now ? deps.now() : new Date();
   const proposal = await deps.proposalRepo.findById(ctx.tenantId, proposalId);
@@ -717,7 +769,7 @@ async function handleEditRequest(
     return { handled: true, handler: HANDLER_NAME, reason: 'edit_target_gone' };
   }
 
-  return applyEditInstruction(deps, ctx, proposal, ctx.body);
+  return applyEditInstruction(deps, ctx, proposal, ctx.body, approver);
 }
 
 /**
@@ -730,6 +782,7 @@ async function applyEditInstruction(
   ctx: InboundSmsContext,
   proposal: Proposal,
   instruction: string,
+  approver: SmsApprover,
 ): Promise<HandlerResult> {
   await recordInbound(deps, ctx, proposal.id, 'edit_request');
 
@@ -764,8 +817,8 @@ async function applyEditInstruction(
           deps.proposalRepo,
           ctx.tenantId,
           proposal.id,
-          SMS_REPLY_ACTOR_ID,
-          'owner',
+          approver.actorId,
+          approver.role,
           edits,
           deps.auditRepo,
         );
@@ -846,16 +899,16 @@ export async function handleProposalSmsFallback(
   ctx: InboundSmsContext,
   deps: ProposalSmsReplyDeps,
 ): Promise<HandlerResult> {
-  const phones = await resolveApproverPhonesForDeps(deps, ctx.tenantId);
-  if (!isApprover(phones, ctx.fromE164)) {
-    // Not the owner — silently decline so other features (and the
-    // unhandled audit upstream) keep their behavior.
+  const approver = await resolveSmsApprover(deps, ctx);
+  // Not an approver — or (B1) one whose role cannot approve: silently decline
+  // so other features (and the unhandled audit upstream) keep their behavior.
+  if (!approver || !hasPermission(approver.role, 'proposals:approve')) {
     return { handled: false, handler: HANDLER_NAME, reason: 'not_owner' };
   }
 
   const session = await findActiveEditSession(deps, ctx);
   if (session) {
-    return handleEditRequest(deps, ctx, session.id, session.proposalId);
+    return handleEditRequest(deps, ctx, session.id, session.proposalId, approver);
   }
 
   // Only nudge while the latest render is still actionable — clarifying

@@ -19,6 +19,7 @@ import {
 } from '../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import type { SettingsRepository } from '../../src/settings/settings';
+import type { UserRepository } from '../../src/users/user';
 
 const TENANT = 't-approval';
 const OWNER_PHONE = '+15125550100';
@@ -73,7 +74,12 @@ async function seedPending(repo: InMemoryProposalRepository): Promise<Proposal> 
   return (await repo.findById(TENANT, proposal.id))!;
 }
 
-function makeHarness(opts: { gateway: LLMGateway; challenge?: string }) {
+function makeHarness(opts: {
+  gateway: LLMGateway;
+  challenge?: string;
+  settingsRepo?: SettingsRepository;
+  userRepo?: UserRepository;
+}) {
   const store = new VoiceSessionStore({ startInterval: false });
   const proposalRepo = new InMemoryProposalRepository();
   const auditRepo = new InMemoryAuditRepository();
@@ -85,7 +91,8 @@ function makeHarness(opts: { gateway: LLMGateway; challenge?: string }) {
     publicBaseUrl: 'https://example.com',
     proposalRepo,
     auditRepo,
-    settingsRepo: stubSettingsRepo(opts.challenge),
+    settingsRepo: opts.settingsRepo ?? stubSettingsRepo(opts.challenge),
+    ...(opts.userRepo ? { userRepo: opts.userRepo } : {}),
     voiceApprovalOneTap: {
       sendSms: async (to, body) => {
         sent.push({ to, body });
@@ -608,5 +615,80 @@ describe('#850 — the spoken challenge is redacted from the transcript', () => 
     });
 
     expect(h.store.get(sessionId)!.transcript.join('\n')).toContain('boiler');
+  });
+});
+
+// B1 — the backup supervisor's line is an owner line, but it approves as the
+// backup's own role and user (resolved once at establishment, carried on the
+// session), not as 'owner'.
+describe('B1 — a backup supervisor on the owner line approves as themselves (Gather, end to end)', () => {
+  const BACKUP_MOBILE = '+15125550111';
+  const BACKUP_ID = 'user-backup-gather';
+
+  function backupHarness(role: string) {
+    return makeHarness({
+      gateway: gatewayReturning([APPROVE_CLASSIFICATION]),
+      settingsRepo: {
+        findByTenant: async () => ({
+          ownerPhone: OWNER_PHONE,
+          backupSupervisorUserId: BACKUP_ID,
+          escalationSettings: {},
+        }),
+      } as unknown as SettingsRepository,
+      userRepo: {
+        findById: async (t: string, id: string) =>
+          t === TENANT && id === BACKUP_ID
+            ? { id: BACKUP_ID, tenantId: TENANT, role, clerkUserId: 'clerk-backup-gather', mobileNumber: BACKUP_MOBILE }
+            : null,
+        findByMobileNumber: async () => null,
+        findByTenant: async () => [],
+      } as unknown as UserRepository,
+    });
+  }
+
+  async function approveOverTheLine(h: ReturnType<typeof makeHarness>, callSid: string) {
+    const sessionId = await startCall(h, BACKUP_MOBILE, callSid);
+    for (const speechResult of ['approve the Henderson estimate', 'yes']) {
+      await h.adapter.handleGather({ sessionId, callSid, speechResult, confidence: 0.9, tenantId: TENANT });
+    }
+    return sessionId;
+  }
+
+  it('a dispatcher backup: the session carries their role, and the approval stamps it', async () => {
+    const h = backupHarness('dispatcher');
+    const proposal = await seedPending(h.proposalRepo);
+
+    const sessionId = await approveOverTheLine(h, 'CA-b1-dispatcher');
+
+    expect(h.store.get(sessionId)!.ownerLineApprover).toEqual({
+      role: 'dispatcher',
+      userId: 'clerk-backup-gather',
+    });
+    const stored = (await h.proposalRepo.findById(TENANT, proposal.id))!;
+    expect(stored.status).toBe('approved');
+    expect(stored.executedByRole).toBe('dispatcher');
+    expect(stored.executedBy).toBe('clerk-backup-gather');
+  });
+
+  it('a technician backup: recognised, but the line approves nothing', async () => {
+    const h = backupHarness('technician');
+    const proposal = await seedPending(h.proposalRepo);
+
+    await approveOverTheLine(h, 'CA-b1-technician');
+
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
+    expect(h.auditRepo.getAll().map((e) => e.eventType)).not.toContain('proposal.approved');
+  });
+
+  it('the owner phone carries the owner, and approves as before', async () => {
+    const h = backupHarness('dispatcher');
+    const proposal = await seedPending(h.proposalRepo);
+    const sessionId = await startCall(h, OWNER_PHONE, 'CA-b1-owner');
+    for (const speechResult of ['approve the Henderson estimate', 'yes']) {
+      await h.adapter.handleGather({ sessionId, callSid: 'CA-b1-owner', speechResult, confidence: 0.9, tenantId: TENANT });
+    }
+
+    expect(h.store.get(sessionId)!.ownerLineApprover).toEqual({ role: 'owner' });
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.executedByRole).toBe('owner');
   });
 });

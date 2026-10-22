@@ -2406,6 +2406,8 @@ async function processChain(
           ...(ur.notifyPush ? { notifyPush: ur.notifyPush } : {}),
           ...(ur.secret ? { secret: ur.secret } : {}),
           ...(ur.buildApproveUrl ? { buildApproveUrl: ur.buildApproveUrl } : {}),
+          // B1 — the link approves as its recipient (owner, or the backup).
+          ...(ur.resolveLinkApprover ? { resolveLinkApprover: ur.resolveLinkApprover } : {}),
           ...(ur.recordSmsEvent
             ? {
                 onSmsSent: async ({ body, kind }: { body: string; kind: OutboundAnchorKind }) =>
@@ -2813,6 +2815,8 @@ export function createVoiceActionRouterWorker(
                 ...(ur.notifyPush ? { notifyPush: ur.notifyPush } : {}),
                 ...(ur.secret ? { secret: ur.secret } : {}),
                 ...(ur.buildApproveUrl ? { buildApproveUrl: ur.buildApproveUrl } : {}),
+                // B1 — the link approves as its recipient (owner, or the backup).
+                ...(ur.resolveLinkApprover ? { resolveLinkApprover: ur.resolveLinkApprover } : {}),
                 // P2-034 — persist the outbound render so the inbound
                 // Y/N/EDIT reply handler can resolve which proposal the
                 // owner is answering.

@@ -474,7 +474,11 @@ import { createPinLockAlertRetryWorker, createPinLockAlertRetryScheduler } from 
 import { createTranscriptionRouterHandoff } from './workers/transcription-router-handoff';
 // U9 — voicemail router gate: owner/approver caller-ID check (same identity
 // module the SMS reply transport and RV-070 owner-line recognition use).
-import { isApproverPhone } from './proposals/approver-identity';
+import {
+  isApproverPhone,
+  resolveApproverRole,
+  resolveBackupSupervisorApprover,
+} from './proposals/approver-identity';
 import { createTranscriptIngestionWorker } from './workers/transcript-ingestion-worker';
 import { createProposalCorrectionWorker } from './workers/proposal-correction-worker';
 // U7 — structured correction-lesson loop (record on execution, undo on undo).
@@ -1867,6 +1871,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     }
     return null;
   };
+  // B1 — who a one-tap link sent to that phone approves as: the owner phone
+  // mints the plain owner link, the backup supervisor's mobile a link that
+  // carries their own role and id, an unrecognised recipient no link at all.
+  const resolveLinkApprover = (tenantId: string, phone: string) =>
+    resolveApproverRole({ settingsRepo, userRepo }, tenantId, phone);
 
   const workerLogger = createLogger({
     service: 'transcription-worker',
@@ -3219,6 +3228,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // deliver; without it the router's lane refuses autonomy.
       ...(laneUndoChannel ? { laneUndo: laneUndoChannel } : {}),
       resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
+      resolveLinkApprover,
       resolveRouting: async (tenantId: string) =>
         (await settingsRepo.findByTenant(tenantId))?.unsupervisedProposalRouting,
       // P2-034 — persist each outbound render so inbound Y/N/EDIT replies
@@ -3585,6 +3595,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       smsEventRepo: proposalSmsEventRepo,
       // B4 — the link runs the same reference checks as the dashboard approve.
       approvalReferenceChecks,
+      // B1 — a link minted for the backup supervisor approves as who the
+      // backup is when it is tapped (replaced / deactivated → nothing).
+      resolveBackupApprover: (tenantId: string) =>
+        resolveBackupSupervisorApprover({ settingsRepo, userRepo }, tenantId),
       // RV-065 — digest "invoice it" tokens: mint a draft_invoice proposal
       // for the bound job (batch-invoice eligibility machinery), then
       // redirect into the standard approve flow.
@@ -4189,6 +4203,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       buildApproveUrl: (token: string) =>
         `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
       resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
+      resolveLinkApprover,
       recordSmsEvent: recordProposalSmsRender,
     },
     // #1051 / #1233 review — the tenant PIN-lock owner alert is claimed
@@ -4471,6 +4486,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       platformDisabled: config.AUTONOMOUS_CLOSE_DISABLED === 'true',
       bookingPlatformDisabled: config.AUTONOMOUS_BOOKING_DISABLED === 'true',
       ownerPhoneResolver: resolveUnsupervisedOwnerPhone,
+      resolveLinkApprover,
       ...(oneTapSmsSender ? { sendOwnerSms: oneTapSmsSender } : {}),
       ...(oneTapSecret ? { oneTapSecret } : {}),
       buildApproveUrl: (token: string) =>

@@ -35,6 +35,7 @@ import type {
   ReplyUnackedReason,
 } from '../../../voice/call-transcript-turn';
 import { voiceReplyStampLostTotal } from '../../../monitoring/metrics';
+import type { ResolvedApprover } from '../../../proposals/approver-identity';
 import type {
   EscalationStartedEvent,
   EscalationSummaryBuiltEvent,
@@ -385,6 +386,17 @@ export interface VoiceSession {
    * scripts and otherwise leaves it undefined.
    */
   actorUserId?: string;
+  /**
+   * B1 — who this owner line approves AS (`resolveApproverRole`): the owner
+   * for the owner phone, the backup supervisor as their own role and user.
+   * Stamped by the telephony establishment core
+   * (`TwilioGatherAdapter.establishInboundSession`, both transports) together
+   * with `ownerSession`, from the caller-ID — never from utterance content —
+   * and read by every voice approve / reject / edit. Absent on a session whose
+   * owner authority came from an authenticated owner (in-app) or a harness
+   * fixture: that is the owner.
+   */
+  ownerLineApprover?: Pick<ResolvedApprover, 'role' | 'userId'>;
   /**
    * True once the recording disclosure has actually been emitted to the caller
    * on this call (set by `bootstrapCallEstablishment`, which is the only

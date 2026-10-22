@@ -12,10 +12,15 @@
  * was a stranger on the harness and an owner line in production. Both now
  * call this. Transport-level recognition, not identity proof: the Gather
  * adapter still ANDs the result with STIR/SHAKEN A-attestation (#1223).
+ *
+ * B1 — the Gather adapter also needs WHO the line approves as (the owner, or
+ * the backup supervisor as their own role), so it resolves the approver
+ * itself (`resolveOwnerLineApprover`) and carries it on the session; the
+ * boolean is that approver's presence.
  */
 import type { SettingsRepository } from '../../../settings/settings';
 import type { UserRepository } from '../../../users/user';
-import { isApproverPhone } from '../../../proposals/approver-identity';
+import { resolveApproverRole, type ResolvedApprover } from '../../../proposals/approver-identity';
 import { createLogger } from '../../../logging/logger';
 
 const logger = createLogger({
@@ -29,14 +34,15 @@ export interface OwnerSessionDeps {
   userRepo?: Pick<UserRepository, 'findById'>;
 }
 
-export async function resolveOwnerSession(
+/** The approver this caller-ID is (owner / backup as their role), or null. Fail closed. */
+export async function resolveOwnerLineApprover(
   deps: OwnerSessionDeps,
   tenantId: string,
   from: string | undefined,
-): Promise<boolean> {
-  if (!deps.settingsRepo || !from) return false;
+): Promise<ResolvedApprover | null> {
+  if (!deps.settingsRepo || !from) return null;
   try {
-    return await isApproverPhone(
+    return await resolveApproverRole(
       {
         settingsRepo: deps.settingsRepo,
         ...(deps.userRepo ? { userRepo: deps.userRepo } : {}),
@@ -49,6 +55,14 @@ export async function resolveOwnerSession(
       tenantId,
       error: err instanceof Error ? err.message : String(err),
     });
-    return false;
+    return null;
   }
+}
+
+export async function resolveOwnerSession(
+  deps: OwnerSessionDeps,
+  tenantId: string,
+  from: string | undefined,
+): Promise<boolean> {
+  return (await resolveOwnerLineApprover(deps, tenantId, from)) !== null;
 }
