@@ -110,10 +110,25 @@ describe('U8 — resolveProposalEntity', () => {
     expect((after?.payload as Record<string, unknown>).entityCandidates).toBeDefined();
   });
 
-  it('rejects resolving an entity on an already-terminal proposal', async () => {
-    await repo.create(ambiguousEntityProposal({ status: 'approved' }));
-    await expect(call('cust-a')).rejects.toBeInstanceOf(ValidationError);
-  });
+  // A3-2 — the first read refuses a row that already left review with the
+  // SAME 409 and plain message as the row lock inside the transaction (the
+  // A-R3 race), not a 400 that names the status. Both mean the same thing to
+  // the owner: someone already decided this card.
+  it.each(['approved', 'rejected', 'executed', 'expired'] as const)(
+    'refuses a pick on a row that is already %s with the same 409 the row lock gives',
+    async (status) => {
+      await repo.create(ambiguousEntityProposal({ status }));
+      const err = await call('cust-a').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ConflictError);
+      expect((err as ConflictError).statusCode).toBe(409);
+      expect((err as ConflictError).message).toBe('This was already handled, so that choice was not saved.');
+      expect((err as ConflictError).details).toEqual({ status });
+      // Untouched.
+      const after = await repo.findById(TENANT, PROPOSAL);
+      expect(after?.status).toBe(status);
+      expect((after?.payload as Record<string, unknown>).entityCandidates).toBeDefined();
+    },
+  );
 
   it('400s when the proposal carries no candidate set', async () => {
     await repo.create(

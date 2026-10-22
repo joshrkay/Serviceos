@@ -124,10 +124,18 @@ function transactionRunnerOf(deps: ResolveEntityDeps): TenantTransactionRunner {
   return deps.transactionRunner ?? new InMemoryTransactionRunner();
 }
 
-/** Only a proposal still under review takes a pick — never one already
- *  approved/executed/rejected (terminal states can't be re-drafted). */
-function isOpenForPick(status: ProposalStatus): boolean {
-  return status === 'draft' || status === 'ready_for_review';
+/**
+ * Only a proposal still under review takes a pick — never one already
+ * approved/executed/rejected (terminal states can't be re-drafted).
+ *
+ * A3-2 — the one refusal for a row that already left review, whether the
+ * first read sees it or the row lock does (A-R3): the owner gets the same 409
+ * and the same plain words either way.
+ */
+function assertOpenForPick(status: ProposalStatus): void {
+  if (status !== 'draft' && status !== 'ready_for_review') {
+    throw new ConflictError('This was already handled, so that choice was not saved.', { status });
+  }
 }
 
 /**
@@ -157,11 +165,7 @@ async function lockOpenForPick(
   if (!locked) {
     throw new NotFoundError('Proposal', proposalId);
   }
-  if (!isOpenForPick(locked.status)) {
-    throw new ConflictError('This was already handled, so that choice was not saved.', {
-      status: locked.status,
-    });
-  }
+  assertOpenForPick(locked.status);
 }
 
 /** The structured original-intent context the producer stamps for re-draft. */
@@ -369,11 +373,7 @@ export async function resolveProposalEntity(
   // Only a proposal still under review can be patched. Re-checked under the
   // row lock inside each path's transaction (lockOpenForPick / the re-draft's
   // status write), since a concurrent approve/reject can land after this read.
-  if (!isOpenForPick(proposal.status)) {
-    throw new ValidationError(
-      `Cannot resolve an entity on a proposal in '${proposal.status}' status`,
-    );
-  }
+  assertOpenForPick(proposal.status);
 
   const payload = asRecord(proposal.payload);
   const sourceContext = asRecord(proposal.sourceContext);
