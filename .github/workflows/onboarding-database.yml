@@ -47,7 +47,7 @@ jobs:
         run: node --test scripts/release/*.test.mjs
       - name: Install browser and database client
         run: |
-          sudo rm -f /etc/apt/sources.list.d/deadsnakes-* /etc/apt/sources.list.d/ondrej-* || true
+          sudo rm -f /etc/apt/sources.list.d/deadsnakes-* /etc/apt/sources.list.d/ondrej-* /etc/apt/sources.list.d/microsoft-prod* || true
           sudo apt-get update
           sudo apt-get install -y postgresql-client
           # WebKit (iOS Safari's engine) runs the v3 voice spec (E2E_V3_WEBKIT=1 below): owner

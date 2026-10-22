@@ -52,4 +52,8 @@ describe('mobile route table (expo-router file routes)', () => {
     expect(table.get('/')).toEqual([path.join('(tabs)', 'index.tsx')]);
     expect(table.get('/onboarding')?.[0]).toMatch(/^\(onboarding\)/);
   });
+
+  it('the spoken setup screen is in the (onboarding) group, which the setup gate lets the owner stay in', () => {
+    expect(routeTable().get('/setup-voice')).toEqual([path.join('(onboarding)', 'setup-voice.tsx')]);
+  });
 });

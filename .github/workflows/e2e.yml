@@ -22,14 +22,16 @@ jobs:
         run: npm ci
 
       # ubuntu-latest currently ships broken third-party PPAs
-      # (deadsnakes, ondrej/php) that return 403 Forbidden during
+      # (deadsnakes, ondrej/php, and since 2026-10-22 packages.microsoft.com)
+      # that return 403 Forbidden during
       # `apt-get update`. Playwright's `--with-deps` runs apt-get update
       # internally, so the whole step fails with exit 100. Drop those
       # sources before installing browser deps.
       - name: Remove broken apt repositories
         run: |
           sudo rm -f /etc/apt/sources.list.d/deadsnakes-* \
-                     /etc/apt/sources.list.d/ondrej-* || true
+                     /etc/apt/sources.list.d/ondrej-* \
+                     /etc/apt/sources.list.d/microsoft-prod* || true
 
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
