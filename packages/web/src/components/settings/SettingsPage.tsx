@@ -8,6 +8,7 @@ import {
   MapPin, Check, Store, RefreshCw, TrendingUp, Mail, BookOpen, Star, Phone,
   Calendar, ClipboardList, SlidersHorizontal, Megaphone, ScrollText,
   MessageSquareQuote,
+  MessageSquareText,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { QuickBooksIntegrationSheet } from './QuickBooksIntegrationSheet';
@@ -27,6 +28,7 @@ import { MarketingCampaignsSheet } from './MarketingCampaignsSheet';
 import { CustomerGroupsSheet } from './CustomerGroupsSheet';
 import { StandingInstructionsSheet } from './StandingInstructionsSheet';
 import { BrandVoiceSheet } from './BrandVoiceSheet';
+import { TextWordingSheet } from './TextWordingSheet';
 import { AIApprovalRulesSheet } from './AIApprovalRulesSheet';
 import { DepositRulesSheet } from './DepositRulesSheet';
 import { DiscountPolicySheet } from './DiscountPolicySheet';
@@ -598,6 +600,7 @@ export function SettingsPage() {
   const [customerGroupsOpen, setCustomerGroupsOpen] = useState(false);
   const [standingInstructionsOpen, setStandingInstructionsOpen] = useState(false);
   const [brandVoiceOpen, setBrandVoiceOpen] = useState(false);
+  const [textWordingOpen, setTextWordingOpen] = useState(false);
   const [aiRulesOpen, setAiRulesOpen] = useState(false);
   const [depositRulesOpen, setDepositRulesOpen] = useState(false);
   const [discountPolicyOpen, setDiscountPolicyOpen] = useState(false);
@@ -956,6 +959,8 @@ export function SettingsPage() {
     {
       title: 'Customer experience',
       items: [
+        // D-045 — the owner's own wording for estimate, invoice, portal-link and thank-you texts.
+        { icon: MessageSquareText, label: 'Text wording', description: 'Your own words for the estimate, invoice, portal-link and thank-you texts', action: () => setTextWordingOpen(true) },
         { icon: Star, label: 'Feedback & reviews', description: 'Average rating, distribution, and recent comments', action: () => navigate('/settings/feedback') },
         { icon: Megaphone, label: 'Email campaigns', description: 'Send promos & announcements to customer segments', action: () => setMarketingOpen(true) },
       ],
@@ -1746,6 +1751,7 @@ export function SettingsPage() {
       {customerGroupsOpen && (
         <CustomerGroupsSheet onClose={() => setCustomerGroupsOpen(false)} />
       )}
+      {textWordingOpen && <TextWordingSheet onClose={() => setTextWordingOpen(false)} />}
       {brandVoiceOpen && me?.brand_voice_configurator_enabled && (
         <BrandVoiceSheet onClose={() => setBrandVoiceOpen(false)} />
       )}

@@ -25,7 +25,11 @@ import {
   renderInvoiceSms,
   renderPortalLinkEmail,
   renderPortalLinkSms,
+  smsInvoiceCollectOnSiteLine,
 } from './templates';
+import type { CustomerTextWording, WordingPurpose } from './customer-text-wording';
+import type { Language } from '../ai/i18n/i18n';
+import { formatUsdCentsPlain } from '@ai-service-os/shared';
 import { DeliveryError } from './notification-errors';
 import { createLogger } from '../logging/logger';
 import { resolveCustomerLanguage } from '../i18n/resolve-language';
@@ -227,6 +231,11 @@ export interface SendServiceDeps {
    */
   ensureInvoicePayLink: (tenantId: string, invoiceId: string) => Promise<unknown>;
   publicBaseUrl: string;
+  /**
+   * D-045 — the owner's own wording for the estimate, invoice and portal-link
+   * texts. Absent (legacy harnesses) means our wording.
+   */
+  wording?: CustomerTextWording;
 }
 
 /**
@@ -275,6 +284,7 @@ export class SendService {
       customerPreferredLanguage: customer.preferredLanguage,
       tenantDefaultLanguage,
     });
+    const businessLanguage = resolveCustomerLanguage({ tenantDefaultLanguage });
     const viewToken = estimate.viewToken ?? generateViewToken();
     const viewTokenExpiresAt =
       estimate.viewTokenExpiresAt ?? new Date(Date.now() + ESTIMATE_TOKEN_TTL_MS);
@@ -331,15 +341,30 @@ export class SendService {
         ),
         render: () =>
           target.channel === 'sms'
-            ? renderEstimateSms({
-                customerName: customer.displayName,
-                estimateNumber: estimate.estimateNumber,
-                totalCents: estimate.totals.totalCents,
-                businessName,
-                viewUrl,
-                customMessage: input.customMessage,
-                language,
-              }).body
+            ? this.textInWording({
+                tenantId: input.tenantId,
+                purpose: 'estimate_text',
+                customerLanguage: language,
+                businessLanguage,
+                values: {
+                  customer_name: customer.displayName,
+                  business_name: businessName,
+                  number: estimate.estimateNumber,
+                  total: formatUsdCentsPlain(estimate.totals.totalCents),
+                  link: viewUrl,
+                },
+                note: input.customMessage,
+                builtIn: () =>
+                  renderEstimateSms({
+                    customerName: customer.displayName,
+                    estimateNumber: estimate.estimateNumber,
+                    totalCents: estimate.totals.totalCents,
+                    businessName,
+                    viewUrl,
+                    customMessage: input.customMessage,
+                    language,
+                  }).body,
+              })
             : this.renderEstimateEmailMessage(target.recipient, {
                 customerName: customer.displayName,
                 estimateNumber: estimate.estimateNumber,
@@ -508,6 +533,9 @@ export class SendService {
       customerPreferredLanguage: customer.preferredLanguage,
       tenantDefaultLanguage: settingsRow?.defaultLanguage ?? null,
     });
+    const businessLanguage = resolveCustomerLanguage({
+      tenantDefaultLanguage: settingsRow?.defaultLanguage ?? null,
+    });
     const viewToken = invoice.viewToken ?? generateViewToken();
     const viewTokenExpiresAt =
       invoice.viewTokenExpiresAt ?? new Date(Date.now() + INVOICE_TOKEN_TTL_MS);
@@ -542,17 +570,35 @@ export class SendService {
         ),
         render: () =>
           target.channel === 'sms'
-            ? renderInvoiceSms({
-                customerName: customer.displayName,
-                invoiceNumber: invoice.invoiceNumber,
-                totalCents: invoice.totals.totalCents,
-                businessName,
-                viewUrl,
-                dueDateIso: invoice.dueDate?.toISOString(),
-                customMessage: input.customMessage,
-                language,
-                paymentCollectionMode,
-              }).body
+            ? this.textInWording({
+                tenantId: input.tenantId,
+                purpose: 'invoice_text',
+                customerLanguage: language,
+                businessLanguage,
+                values: {
+                  customer_name: customer.displayName,
+                  business_name: businessName,
+                  number: invoice.invoiceNumber,
+                  total: formatUsdCentsPlain(invoice.totals.totalCents),
+                  link: viewUrl,
+                },
+                note: input.customMessage,
+                // The owner's wording can't know the invoice is paid in
+                // person, so that line is always ours.
+                extraLines: smsInvoiceCollectOnSiteLine({ businessName, language, paymentCollectionMode }),
+                builtIn: () =>
+                  renderInvoiceSms({
+                    customerName: customer.displayName,
+                    invoiceNumber: invoice.invoiceNumber,
+                    totalCents: invoice.totals.totalCents,
+                    businessName,
+                    viewUrl,
+                    dueDateIso: invoice.dueDate?.toISOString(),
+                    customMessage: input.customMessage,
+                    language,
+                    paymentCollectionMode,
+                  }).body,
+              })
             : this.renderInvoiceEmailMessage(target.recipient, {
                 customerName: customer.displayName,
                 invoiceNumber: invoice.invoiceNumber,
@@ -629,6 +675,7 @@ export class SendService {
       recipientEmail: input.recipientEmail,
     });
 
+    const businessLanguage = resolveCustomerLanguage({ tenantDefaultLanguage });
     const templateCtx = {
       customerName: customer.displayName,
       businessName,
@@ -657,7 +704,19 @@ export class SendService {
           ),
           render: () =>
             target.channel === 'sms'
-              ? renderPortalLinkSms(templateCtx).body
+              ? this.textInWording({
+                  tenantId: input.tenantId,
+                  purpose: 'portal_link_text',
+                  customerLanguage: language,
+                  businessLanguage,
+                  values: {
+                    customer_name: customer.displayName,
+                    business_name: businessName,
+                    link: input.portalUrl,
+                  },
+                  note: input.customMessage,
+                  builtIn: () => renderPortalLinkSms(templateCtx).body,
+                })
               : { to: target.recipient, ...renderPortalLinkEmail(templateCtx) },
         })
       )
@@ -680,6 +739,20 @@ export class SendService {
       businessName: settings?.businessName ?? 'Your service team',
       tenantDefaultLanguage: settings?.defaultLanguage ?? null,
     };
+  }
+
+  /** The owner's wording for this text when it applies, else ours (`builtIn`). */
+  private async textInWording(args: {
+    tenantId: string;
+    purpose: WordingPurpose;
+    customerLanguage: Language;
+    businessLanguage: Language;
+    values: Record<string, string>;
+    note?: string;
+    extraLines?: readonly string[];
+    builtIn: () => string;
+  }): Promise<string> {
+    return this.deps.wording ? this.deps.wording.textFor(args) : args.builtIn();
   }
 
   private buildViewUrl(prefix: 'e' | 'pay', token: string): string {
@@ -746,7 +819,7 @@ export class SendService {
     entityId: string;
     target: ChannelTarget;
     /** The text's body, or the email. */
-    render: () => string | EmailMessage;
+    render: () => string | EmailMessage | Promise<string | EmailMessage>;
     /** Stable dedupe identity (see `buildDedupe`). */
     dedupe: OutboundText['dedupe'];
     /** A send now, or an automatic reminder (waits for daytime, needs consent). */
@@ -770,7 +843,7 @@ export class SendService {
       dispatchId: prior!.id,
     });
 
-    const message = args.render();
+    const message = await args.render();
     if (args.target.channel === 'sms') {
       // A text that went out replays. One the carrier reported failed or
       // bounced was still sent under this key, so it is not sent again in

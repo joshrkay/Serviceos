@@ -33,6 +33,10 @@ import {
 } from '../../src/settings/settings';
 import { InMemoryDncRepository, normalizePhone } from '../../src/compliance/dnc';
 import { withOutbound } from '../helpers/outbound-messaging';
+import {
+  createCustomerTextWording,
+  InMemoryCustomerTextWordingRepository,
+} from '../../src/notifications/customer-text-wording';
 
 const TENANT = 'tenant-test-1';
 
@@ -739,5 +743,102 @@ describe('textNotSentError', () => {
     expect(block('send_failed', { errorCode: 'AUTH_FAILED' })).toMatchObject({ code: 'AUTH_FAILED' });
     expect(block('lookup_failed').message).toMatch(/couldn't be checked/);
     expect(block('no_phone').message).toBe('text not sent: no phone');
+  });
+});
+
+describe("SendService — the owner's own text wording (D-045)", () => {
+  let h: Harness;
+  let wordingRepo: InMemoryCustomerTextWordingRepository;
+  let send: SendService;
+  beforeEach(async () => {
+    h = await buildHarness();
+    wordingRepo = new InMemoryCustomerTextWordingRepository();
+    send = new SendService(
+      withOutbound({
+        delivery: h.delivery,
+        estimateRepo: h.estimate,
+        invoiceRepo: h.invoice,
+        jobRepo: h.job,
+        customerRepo: h.customer,
+        settingsRepo: h.settings,
+        dispatchRepo: h.dispatch,
+        publicBaseUrl: 'https://app.example.com',
+        ensureInvoicePayLink: async () => undefined,
+        wording: createCustomerTextWording({ repo: wordingRepo, logger: { warn: () => {} } }),
+      }),
+    );
+  });
+
+  async function seedJob(customer: Partial<Customer> = {}) {
+    const c = makeCustomer(customer);
+    await h.customer.create(c);
+    const j = makeJob(c.id);
+    await h.job.create(j);
+    return { c, j };
+  }
+
+  it("an estimate text uses the owner's wording, with the per-send note on the second line", async () => {
+    const { j } = await seedJob();
+    const est = makeEstimate(j.id);
+    await h.estimate.create(est);
+    await wordingRepo.save(TENANT, 'estimate_text', 'Hi {{customer_name}}! {{business_name}} quote {{number}}: {{total}}\n{{link}}', 'user-1');
+
+    await send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'sms', customMessage: 'Good for 30 days' });
+
+    const body = h.delivery.sentSms[0].body;
+    expect(body).toMatch(/^Hi Sarah Johnson! Acme HVAC quote EST-1042: \$875\.00\nGood for 30 days\nhttps:\/\/app\.example\.com\/e\/[\w-]+$/);
+  });
+
+  it('the email is untouched by the text wording', async () => {
+    const { j } = await seedJob();
+    const est = makeEstimate(j.id);
+    await h.estimate.create(est);
+    await wordingRepo.save(TENANT, 'estimate_text', 'OWNER {{link}}', 'user-1');
+
+    await send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'email' });
+
+    expect(h.delivery.sentEmails[0].text).not.toContain('OWNER');
+  });
+
+  it('a customer who reads Spanish gets our Spanish text, not the English wording', async () => {
+    const { j } = await seedJob({ preferredLanguage: 'es-MX' });
+    const est = makeEstimate(j.id);
+    await h.estimate.create(est);
+    await wordingRepo.save(TENANT, 'estimate_text', 'OWNER {{link}}', 'user-1');
+
+    await send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'sms' });
+
+    expect(h.delivery.sentSms[0].body).not.toContain('OWNER');
+    expect(h.delivery.sentSms[0].body).toMatch(/estimado|presupuesto|cotizaci/i);
+  });
+
+  it("an invoice paid in person keeps our in-person line after the owner's wording", async () => {
+    await h.settings.update(TENANT, { paymentCollectionMode: 'collect_on_site' });
+    const { j } = await seedJob();
+    const inv = makeInvoice(j.id);
+    await h.invoice.create(inv);
+    await wordingRepo.save(TENANT, 'invoice_text', 'Invoice {{number}} for {{total}}: {{link}}', 'user-1');
+
+    await send.sendInvoice({ tenantId: TENANT, invoiceId: inv.id, channel: 'sms' });
+
+    const lines = h.delivery.sentSms[0].body.split('\n');
+    expect(lines[0]).toMatch(/^Invoice INV-2042 for \$1250\.00: https:\/\/app\.example\.com\/pay\//);
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toMatch(/Acme HVAC/);
+  });
+
+  it('a portal-link text uses the owner wording with the portal link', async () => {
+    const { c } = await seedJob();
+    await wordingRepo.save(TENANT, 'portal_link_text', 'Your {{business_name}} account: {{link}}', 'user-1');
+
+    await send.sendPortalLink({
+      tenantId: TENANT,
+      customerId: c.id,
+      portalSessionId: uuidv4(),
+      portalUrl: 'https://app.example.com/portal/tok',
+      channel: 'sms',
+    });
+
+    expect(h.delivery.sentSms[0].body).toBe('Your Acme HVAC account: https://app.example.com/portal/tok');
   });
 });
