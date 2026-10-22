@@ -447,17 +447,27 @@ async function handleApprove(
       // a text cannot do. Otherwise: missing required fields. Truthful, with
       // the next step, either way. B3-4 — not the linked-step gate (today
       // the action-class guard above stops every card it holds).
-      const heldByReferenceCheck = isReferenceCheckHold(err.details, proposal);
+      // B3-6 — a schedule card whose 48-hour window passed before the hourly
+      // sweep: approveProposal marks it expired, then refuses with a
+      // ValidationError that names no fields. Nothing is missing, and it
+      // can no longer be finished — it can only be redone.
+      const heldBy = isReferenceCheckHold(err.details, proposal)
+        ? 'reference_check'
+        : (await deps.proposalRepo.findById(ctx.tenantId, proposal.id).catch(() => null))?.status === 'expired'
+          ? 'expired'
+          : undefined;
       await audit(deps, ctx, 'proposal.sms_approve_blocked', proposal.id, {
         error: err.message,
-        ...(heldByReferenceCheck ? { heldBy: 'reference_check' } : {}),
+        ...(heldBy ? { heldBy } : {}),
       });
       await reply(
         deps,
         ctx.fromE164,
-        heldByReferenceCheck
+        heldBy === 'reference_check'
           ? `Can't approve yet — something on it needs fixing first. Open it in the app to fix it.`
-          : `Can't approve yet — it's missing required info. Open your review queue to finish it.`,
+          : heldBy === 'expired'
+            ? `Can't approve — that one expired. You can redo it in the app.`
+            : `Can't approve yet — it's missing required info. Open your review queue to finish it.`,
       );
       return { handled: true, handler: HANDLER_NAME, reason: 'approve_blocked' };
     }

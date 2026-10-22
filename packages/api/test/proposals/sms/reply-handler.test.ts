@@ -1494,3 +1494,27 @@ describe('B4 — SMS approvals run the approval-time reference checks', () => {
     expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('approved');
   });
 });
+
+// B3-6 — a schedule card's 48-hour window is swept hourly, so between its
+// expiresAt and the sweep a texted Y still reaches approveProposal, which
+// marks it expired and refuses with a ValidationError that names no fields.
+// The reply was "it's missing required info" — wrong, and the next step
+// ("finish it") is impossible. Expiry has its own reply now.
+describe('B3-6 — SMS Y on a card whose window has just expired', () => {
+  it('says it expired, approves nothing, and does not claim missing info', async () => {
+    const h = makeHarness();
+    const proposal = await seedPendingProposal(h, TENANT, { expiresAt: new Date(Date.now() - 60_000) });
+
+    const result = await handleProposalSmsReply(ctx('Y'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'approve_blocked' });
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('expired');
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0].body).toBe("Can't approve — that one expired. You can redo it in the app.");
+    expect(h.sent[0].body).not.toMatch(/missing/i);
+    expect(h.auditRepo.getAll().map((e) => e.eventType)).not.toContain('proposal.approved');
+    expect(
+      h.auditRepo.getAll().find((e) => e.eventType === 'proposal.sms_approve_blocked')?.metadata,
+    ).toMatchObject({ heldBy: 'expired' });
+  });
+});
