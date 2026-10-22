@@ -17,6 +17,7 @@ import { describe, it, expect } from 'vitest';
 import {
   resolveApproverRole,
   resolveBackupSupervisorApprover,
+  resolveApprovalSmsPhone,
   isApproverPhone,
 } from '../../src/proposals/approver-identity';
 import type { SettingsRepository, TenantSettings } from '../../src/settings/settings';
@@ -135,5 +136,64 @@ describe('resolveBackupSupervisorApprover', () => {
     ['the backup role is not one we know', settings(), users({ role: 'superuser' as User['role'] })],
   ])('is null when %s', async (_label, settingsRepo, userRepo) => {
     await expect(resolveBackupSupervisorApprover({ settingsRepo, userRepo }, TENANT)).resolves.toBeNull();
+  });
+});
+
+/**
+ * B1 follow-up — WHERE an approval SMS goes (the unsupervised routing SMS,
+ * the voice one-tap fallback, the owner close chain): owner_phone, else the
+ * backup supervisor's mobile — and only while that backup is an active member
+ * of this tenant. A deactivated, deleted or other-tenant backup used to be
+ * texted the job details anyway.
+ */
+describe('resolveApprovalSmsPhone', () => {
+  function logSink() {
+    const warnings: { message: string; meta: unknown }[] = [];
+    return { warnings, logger: { warn: (message: string, meta?: unknown) => warnings.push({ message, meta }) } };
+  }
+
+  it('is the owner phone when the tenant has one', async () => {
+    await expect(
+      resolveApprovalSmsPhone({ settingsRepo: settings(), userRepo: users({ role: 'dispatcher' }) }, TENANT),
+    ).resolves.toBe(OWNER_PHONE);
+  });
+
+  it("is the active backup's mobile when the tenant has no owner phone", async () => {
+    await expect(
+      resolveApprovalSmsPhone(
+        { settingsRepo: settings({ ownerPhone: undefined }), userRepo: users({ role: 'dispatcher', status: 'active' }) },
+        TENANT,
+      ),
+    ).resolves.toBe(BACKUP_MOBILE);
+  });
+
+  it.each([
+    ['suspended', { role: 'dispatcher', status: 'suspended' }],
+    ['deleted', { role: 'dispatcher', deletedAt: new Date('2026-10-01T00:00:00Z') }],
+    ['in another tenant', { role: 'dispatcher', tenantId: 't-other' }],
+  ] as const)('a backup who is %s is texted nothing, and the skip is logged', async (_label, row) => {
+    const sink = logSink();
+    await expect(
+      resolveApprovalSmsPhone(
+        { settingsRepo: settings({ ownerPhone: undefined }), userRepo: users(row as Partial<User>), logger: sink.logger },
+        TENANT,
+      ),
+    ).resolves.toBeNull();
+    expect(sink.warnings).toHaveLength(1);
+    expect(sink.warnings[0].meta).toEqual({ tenantId: TENANT, backupSupervisorUserId: BACKUP_ID });
+  });
+
+  it('a backup with no mobile, no backup, or no userRepo is no recipient', async () => {
+    const noOwner = settings({ ownerPhone: undefined });
+    await expect(
+      resolveApprovalSmsPhone({ settingsRepo: noOwner, userRepo: users({ role: 'dispatcher', mobileNumber: undefined }) }, TENANT),
+    ).resolves.toBeNull();
+    await expect(
+      resolveApprovalSmsPhone(
+        { settingsRepo: settings({ ownerPhone: undefined, backupSupervisorUserId: null }), userRepo: users({ role: 'dispatcher' }) },
+        TENANT,
+      ),
+    ).resolves.toBeNull();
+    await expect(resolveApprovalSmsPhone({ settingsRepo: noOwner }, TENANT)).resolves.toBeNull();
   });
 });

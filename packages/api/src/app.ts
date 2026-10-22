@@ -477,6 +477,7 @@ import { createMemoCreatorModeLoader } from './workers/memo-creator-mode';
 // module the SMS reply transport and RV-070 owner-line recognition use).
 import {
   isApproverPhone,
+  resolveApprovalSmsPhone,
   resolveApproverRole,
   resolveBackupSupervisorApprover,
 } from './proposals/approver-identity';
@@ -1862,16 +1863,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     secret: oneTapSecret,
   });
   // Owner/backup-supervisor phone for the unsupervised SMS: tenant_settings
-  // owner_phone first, then the backup supervisor's mobile_number.
-  const resolveUnsupervisedOwnerPhone = async (tenantId: string): Promise<string | null> => {
-    const settings = await settingsRepo.findByTenant(tenantId);
-    if (settings?.ownerPhone) return settings.ownerPhone;
-    if (settings?.backupSupervisorUserId) {
-      const backup = await userRepo.findById(tenantId, settings.backupSupervisorUserId);
-      return backup?.mobileNumber ?? null;
-    }
-    return null;
-  };
+  // owner_phone first, then the backup supervisor's mobile_number — only
+  // while the backup is an active member (B1 follow-up).
+  const resolveUnsupervisedOwnerPhone = (tenantId: string): Promise<string | null> =>
+    resolveApprovalSmsPhone({ settingsRepo, userRepo }, tenantId);
   // B1 — who a one-tap link sent to that phone approves as: the owner phone
   // mints the plain owner link, the backup supervisor's mobile a link that
   // carries their own role and id, an unrecognised recipient no link at all.

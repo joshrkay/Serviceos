@@ -217,6 +217,18 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
     expect(src).not.toMatch(/resolveUserMode/);
   });
 
+  it('B1 follow-up — every approval SMS recipient is resolved through the active-member check', () => {
+    // The inline resolver read the backup's users row by id and texted it
+    // whatever its status, so a deactivated backup still got job details.
+    expect(src).toMatch(
+      /const resolveUnsupervisedOwnerPhone = \(tenantId: string\): Promise<string \| null> =>\s*resolveApprovalSmsPhone\(\{ settingsRepo, userRepo \}, tenantId\);/,
+    );
+    expect(src).not.toMatch(/backup\?\.mobileNumber/);
+    for (const site of [/resolveOwnerPhone: resolveUnsupervisedOwnerPhone,/g, /ownerPhoneResolver: resolveUnsupervisedOwnerPhone,/g]) {
+      expect(src.match(site)?.length ?? 0).toBeGreaterThan(0);
+    }
+  });
+
   it('B1 — the one-tap route re-checks a backup link against the current backup supervisor', () => {
     // Optional dep: dropped, a link minted for a backup who has since been
     // replaced or deactivated would still approve for its 30 minutes.

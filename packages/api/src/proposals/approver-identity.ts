@@ -31,6 +31,12 @@ import type { User, UserRepository } from '../users/user';
 import { findActiveTenantMember } from '../users/tenant-member';
 import { isValidRole, type Role } from '../auth/rbac';
 import { normalizePhone } from '../shared/phone';
+import { createLogger, type Logger } from '../logging/logger';
+
+const logger = createLogger({
+  service: 'approver-identity',
+  environment: process.env.NODE_ENV || 'development',
+});
 
 export interface ApproverIdentityDeps {
   /** Only `findByTenant` is read (owner_phone + backupSupervisorUserId). */
@@ -115,6 +121,41 @@ async function activeBackup(
 
 function backupApprover(backup: User & { role: Role }): ResolvedApprover {
   return { role: backup.role, userId: backup.clerkUserId ?? backup.id, via: 'backup_supervisor' };
+}
+
+export interface ApprovalSmsRecipientDeps extends ApproverIdentityDeps {
+  /** Where the skipped-backup line goes; defaults to this module's logger. */
+  logger?: Pick<Logger, 'warn'>;
+}
+
+/**
+ * B1 follow-up — where an approval SMS goes (the unsupervised routing SMS,
+ * the voice one-tap fallback, the owner close chain): `owner_phone`, else the
+ * backup supervisor's mobile — only while that backup is an active member of
+ * this tenant (#1402 §13, the same check `resolveApproverRole` makes). A
+ * deactivated, removed or other-tenant backup is no recipient: null, so the
+ * caller's no-phone path applies (the card waits in the queue, the routing
+ * audit records smsSent: false), and the skip is logged. The role is NOT
+ * checked here — a backup who cannot approve still hears about the work, as
+ * a for-your-info text (renderProposalSms `recipientCannotApprove`).
+ */
+export async function resolveApprovalSmsPhone(
+  deps: ApprovalSmsRecipientDeps,
+  tenantId: string,
+): Promise<string | null> {
+  const settings = await deps.settingsRepo.findByTenant(tenantId);
+  if (settings?.ownerPhone) return settings.ownerPhone;
+  const backupUserId = settings?.backupSupervisorUserId;
+  if (!backupUserId || !deps.userRepo) return null;
+  const backup = await findActiveTenantMember(deps.userRepo, tenantId, backupUserId);
+  if (!backup) {
+    (deps.logger ?? logger).warn(
+      'backup supervisor is not an active member of this tenant — no approval SMS sent',
+      { tenantId, backupSupervisorUserId: backupUserId },
+    );
+    return null;
+  }
+  return backup.mobileNumber ?? null;
 }
 
 /**

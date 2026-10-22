@@ -11,6 +11,9 @@ import { createVoiceActionRouterWorker } from '../../src/workers/voice-action-ro
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { verifyOneTapApproveToken, createInMemoryNonceStore } from '../../src/proposals/auto-approve';
+import { resolveApprovalSmsPhone, resolveApproverRole } from '../../src/proposals/approver-identity';
+import type { SettingsRepository } from '../../src/settings/settings';
+import type { User, UserRepository } from '../../src/users/user';
 import {
   setSupervisorPresenceLoader,
   _resetSupervisorPresenceCache,
@@ -223,6 +226,64 @@ describe('voice-action-router — P12-004 unsupervised routing', () => {
       (e) => e.eventType === 'unsupervised_proposal_routed',
     );
     expect(routed?.metadata).toMatchObject({ approveLinkSuppressed: true, suppressReason: 'recipient_cannot_approve' });
+  });
+
+  // B1 follow-up — with no owner phone the SMS goes to the backup
+  // supervisor, but only while they are an active member: a deactivated
+  // backup must not be texted the job details.
+  describe("the backup supervisor's mobile, resolved as production wires it", () => {
+    const BACKUP_ID = 'user-backup';
+    const settingsRepo = {
+      findByTenant: async () => ({ ownerPhone: undefined, backupSupervisorUserId: BACKUP_ID }),
+    } as unknown as SettingsRepository;
+    const userRepoWith = (status: 'active' | 'suspended'): Pick<UserRepository, 'findById'> => ({
+      findById: async (tenantId: string, id: string) =>
+        id === BACKUP_ID
+          ? ({ id, tenantId, role: 'dispatcher', clerkUserId: 'clerk-backup', mobileNumber: '+15125550111', status } as User)
+          : null,
+    });
+
+    async function route(status: 'active' | 'suspended') {
+      const sendSms = vi.fn(async (_to: string, _body: string) => {});
+      const userRepo = userRepoWith(status);
+      const worker = createVoiceActionRouterWorker({
+        tenantSchedulingResolver: async () => ({ timezone: 'America/Phoenix' }),
+        gateway: bookingGateway(),
+        proposalRepo,
+        unsupervisedRouting: {
+          auditRepo,
+          sendSms,
+          secret: 'test-secret',
+          buildApproveUrl: (token) => `https://api.example.com/approve?token=${token}`,
+          resolveOwnerPhone: (tenantId) => resolveApprovalSmsPhone({ settingsRepo, userRepo }, tenantId),
+          resolveLinkApprover: (tenantId, phone) => resolveApproverRole({ settingsRepo, userRepo }, tenantId, phone),
+          resolveRouting: async () => 'queue_and_sms',
+        },
+      });
+      await worker.handle(
+        msg({ tenantId: 't-unsup', userId: 'u-1', transcript: 'Book Mrs Lee next Tuesday at 2pm' }),
+        silentLogger(),
+      );
+      const [proposal] = await proposalRepo.findByTenant('t-unsup');
+      const routed = (await auditRepo.findByEntity('t-unsup', 'proposal', proposal.id)).find(
+        (e) => e.eventType === 'unsupervised_proposal_routed',
+      );
+      return { sendSms, proposal, routed };
+    }
+
+    it('an active backup is texted the approval link', async () => {
+      const { sendSms, routed } = await route('active');
+      expect(sendSms).toHaveBeenCalledTimes(1);
+      expect(sendSms.mock.calls[0][0]).toBe('+15125550111');
+      expect(routed?.metadata).toMatchObject({ smsSent: true });
+    });
+
+    it('a deactivated backup is texted nothing; the card still waits in the queue', async () => {
+      const { sendSms, proposal, routed } = await route('suspended');
+      expect(sendSms).not.toHaveBeenCalled();
+      expect(proposal.status).toBe('ready_for_review');
+      expect(routed?.metadata).toMatchObject({ requestedRouting: 'queue_and_sms', smsSent: false });
+    });
   });
 
   it('queue_and_sms: a non-holding supervisor review attaches an N-002 marker that reaches the rendered SMS', async () => {
