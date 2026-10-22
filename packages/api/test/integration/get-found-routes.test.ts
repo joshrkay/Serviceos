@@ -126,13 +126,25 @@ describe('Get-found routes (real Postgres)', () => {
     expect(unskipped.body.items).toContainEqual({ id: 'call_routing', status: 'pending' });
     expect(await rawColumn<string[]>('get_found_skipped_items')).toEqual([]);
 
+    // Only the writes that changed something are audited: the repeat skip was a no-op.
     const types = (await auditEvents()).map((e) => e.eventType);
-    expect(types.filter((t) => t === 'get_found.item.skipped')).toHaveLength(2);
-    expect(types).toContain('get_found.item.unskipped');
+    expect(types.filter((t) => t === 'get_found.item.skipped')).toHaveLength(1);
+    expect(types.filter((t) => t === 'get_found.item.unskipped')).toHaveLength(1);
+  });
+
+  it('un-skipping an item that was never skipped succeeds without an audit row', async () => {
+    await request(app).put('/api/get-found/presence-path').send({ presencePath: 'neither' });
+
+    const res = await request(app).delete('/api/get-found/items/google_profile/skip');
+
+    expect(res.status).toBe(200);
+    expect((await auditEvents()).map((e) => e.eventType)).toEqual(['get_found.presence_path.set']);
   });
 
   it('refuses an unknown item or an invalid answer with a 400 and writes nothing', async () => {
-    expect((await request(app).put('/api/get-found/items/blog/skip')).status).toBe(400);
+    const unknownItem = await request(app).put('/api/get-found/items/blog/skip');
+    expect(unknownItem.status).toBe(400);
+    expect(unknownItem.body.details.fields).toHaveProperty('id');
     expect((await request(app).put('/api/get-found/presence-path').send({ presencePath: 'tiktok' })).status).toBe(400);
     expect(await auditEvents()).toEqual([]);
   });

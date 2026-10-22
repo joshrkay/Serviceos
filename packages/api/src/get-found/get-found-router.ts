@@ -35,7 +35,7 @@ const presencePathSchema = z.object({
   presencePath: z.enum(['own_website', 'google_only', 'neither']),
 });
 
-const itemIdSchema = z.enum(GET_FOUND_ITEM_IDS);
+const itemParamsSchema = z.object({ id: z.enum(GET_FOUND_ITEM_IDS) });
 
 const callRoutingModeSchema = z.object({
   callRoutingMode: z.enum(['forward_all', 'forward_unanswered', 'rivet_only']),
@@ -139,22 +139,27 @@ export function createGetFoundRouter(deps: GetFoundRouterDeps): Router {
       requirePermission('settings:update'),
       async (req: AuthenticatedRequest, res: Response) => {
         try {
-          const item = itemIdSchema.parse(req.params.id);
+          const { id: item } = itemParamsSchema.parse(req.params);
           const { tenantId } = req.auth!;
           await ensureTenantSettings(tenantId, deps.settingsRepo);
-          await db().query(
+          // The membership guard makes a repeat skip / a stray un-skip match
+          // no row, so only a write that changed something is audited.
+          const { rowCount } = await db().query(
             method === 'put'
               ? `UPDATE tenant_settings
-                    SET get_found_skipped_items = array_append(array_remove(get_found_skipped_items, $2), $2),
-                        updated_at = NOW()
-                  WHERE tenant_id = $1`
+                    SET get_found_skipped_items = array_append(get_found_skipped_items, $2), updated_at = NOW()
+                  WHERE tenant_id = $1 AND NOT ($2 = ANY (get_found_skipped_items))`
               : `UPDATE tenant_settings
                     SET get_found_skipped_items = array_remove(get_found_skipped_items, $2), updated_at = NOW()
-                  WHERE tenant_id = $1`,
+                  WHERE tenant_id = $1 AND $2 = ANY (get_found_skipped_items)`,
             [tenantId, item],
           );
-          const eventType = method === 'put' ? 'get_found.item.skipped' : 'get_found.item.unskipped';
-          await auditAndRespond(req, res, eventType, { item });
+          if (rowCount) {
+            const eventType = method === 'put' ? 'get_found.item.skipped' : 'get_found.item.unskipped';
+            await auditAndRespond(req, res, eventType, { item });
+          } else {
+            res.json(deriveGetFoundChecklist(await loadGetFoundFacts(db(), tenantId)));
+          }
         } catch (err) {
           const { statusCode, body } = toErrorResponse(err);
           res.status(statusCode).json(body);
