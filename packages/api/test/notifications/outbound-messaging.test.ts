@@ -436,6 +436,44 @@ describe('outbound messaging', () => {
       expect(await recorded()).toMatchObject([{ status: 'sent' }]);
     });
 
+    it('backfills a missing record when a retry finds the text already sent, and keeps a recorded one', async () => {
+      // The claim says sent; the first attempt's record write never landed.
+      const pool = {
+        query: vi.fn(async (sql: string) =>
+          sql.includes('SELECT status') ? { rows: [{ status: 'sent' }], rowCount: 1 } : { rows: [], rowCount: 0 },
+        ),
+      } as unknown as Pool;
+      const outbound = createOutboundMessaging({
+        delivery: { sendSms, sendEmail: vi.fn() } as unknown as MessageDeliveryProvider,
+        customerRepo,
+        dncRepo,
+        consentLedger: { listByPhone: async () => [] },
+        dispatchRepo: dispatches,
+        pool,
+        logger,
+      });
+
+      expect(await outbound.sendText(toCustomer('transactional'))).toEqual({ status: 'sent', duplicate: 'sent' });
+      expect(await recorded()).toMatchObject([
+        { status: 'sent', idempotencyKey: 'test_message:job-1', customerId: 'cust-1', jobId: 'job-1', recipient: '' },
+      ]);
+
+      // A record that did land is never replaced by the backfill.
+      dispatches = new InMemoryDispatchRepository();
+      await customerRepo.create(makeCustomer());
+      await messaging().sendText(toCustomer('transactional'));
+      await createOutboundMessaging({
+        delivery: { sendSms, sendEmail: vi.fn() } as unknown as MessageDeliveryProvider,
+        customerRepo,
+        dncRepo,
+        consentLedger: { listByPhone: async () => [] },
+        dispatchRepo: dispatches,
+        pool,
+        logger,
+      }).sendText(toCustomer('transactional'));
+      expect(await recorded()).toMatchObject([{ status: 'sent', recipient: '+15551234567', providerMessageId: 'm-1' }]);
+    });
+
     it('does not record a text to the owner', async () => {
       await messaging().sendText({
         tenantId: TENANT,
