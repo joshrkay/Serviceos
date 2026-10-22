@@ -15,6 +15,16 @@
  * locked row; this pins exactly that interleaving: the second pick is
  * observed blocked on the lock in pg_stat_activity before the first commits.
  *
+ * A4-4 — the reverse direction. editProposal (PUT /api/proposals/:id) and
+ * resolveProposalLine (POST /:id/resolve-line) read the row and wrote the
+ * whole payload back with no row lock, so an edit or a line pick that read
+ * before an entity pick committed, and wrote after it, put the picker's
+ * entityCandidates back and dropped the resolved id. resolve-line now reads
+ * the row under the lock (held to the end of its request transaction) and
+ * builds from it; an edit that finds the row changed since its read is
+ * refused with a plain 409 (editProposal also runs outside a request
+ * transaction, from the voice and text edit paths).
+ *
  * Real Postgres, RLS_RUNTIME_ROLE=true, the REAL request-transaction
  * middleware, the REAL proposals router, PgProposalRepository and
  * PgAuditRepository on an app pool with room for the concurrent requests.
@@ -87,6 +97,78 @@ const JOB_A = '33333333-3333-4333-8333-333333333333';
 const JOB_B = '44444444-4444-4444-8444-444444444444';
 const APPT_A = '55555555-5555-4555-8555-555555555555';
 const APPT_B = '66666666-6666-4666-8666-666666666666';
+const INV_A = '77777777-7777-4777-8777-777777777777';
+const INV_B = '88888888-8888-4888-8888-888888888888';
+const CAT_A = '99999999-9999-4999-8999-999999999999';
+const CAT_B = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
+
+/** "Invoice Bob for the water heater": one ambiguous customer, no re-draft context (annotate-only). */
+function oneAmbiguity(tenantId: string, createdBy: string): Proposal {
+  const customers = [
+    { id: CUST_A, label: 'Bob Smith', score: 0.82 },
+    { id: CUST_B, label: 'Bob Jones', score: 0.81 },
+  ];
+  return createProposal({
+    tenantId,
+    proposalType: 'voice_clarification',
+    summary: 'Which customer? "Bob" matched 2 records',
+    createdBy,
+    payload: {
+      transcript: 'invoice Bob for the water heater',
+      reason: 'ambiguous_entity',
+      entityReference: 'Bob',
+      entityCandidates: customers,
+    },
+    sourceContext: {
+      source: 'voice',
+      transcript: 'invoice Bob for the water heater',
+      entityKind: 'customer',
+      entityReference: 'Bob',
+      entityCandidates: customers.map((c) => ({ ...c, kind: 'customer' })),
+    },
+  });
+}
+
+/**
+ * "Add a filter to the Smith invoice": an invoice edit gated on BOTH an
+ * ambiguous invoice (resolve-entity) and an ambiguous catalog line
+ * (resolve-line); whichever resolution clears the last gate surfaces it.
+ */
+function invoiceEditWithTwoGates(tenantId: string, createdBy: string): Proposal {
+  const invoices = [
+    { id: INV_A, label: 'INV-1001', score: 0.8 },
+    { id: INV_B, label: 'INV-1002', score: 0.79 },
+  ];
+  return createProposal({
+    tenantId,
+    proposalType: 'update_invoice',
+    summary: 'Add a filter to the Smith invoice',
+    createdBy,
+    payload: {
+      editActions: [
+        {
+          type: 'add_line_item',
+          lineItem: { description: 'filter', quantity: 1, pricingSource: 'ambiguous', needsPricing: true },
+        },
+      ],
+      entityReference: 'the Smith invoice',
+      entityCandidates: invoices,
+    },
+    sourceContext: {
+      source: 'voice',
+      entityKind: 'invoice',
+      entityReference: 'the Smith invoice',
+      entityCandidates: invoices.map((c) => ({ ...c, kind: 'invoice' })),
+      missingFields: ['invoiceId', 'editActions[0].lineItem.catalogItemId'],
+      catalogResolution: {
+        '0': [
+          { id: CAT_A, name: 'Filter 16x25', unitPriceCents: 2500, score: 0.7, category: 'material' },
+          { id: CAT_B, name: 'Filter 20x25', unitPriceCents: 2900, score: 0.69, category: 'material' },
+        ],
+      },
+    },
+  });
+}
 
 /**
  * "Invoice Bob for the Rodriguez job's Tuesday visit": three references, each
@@ -301,6 +383,88 @@ describe('proposal row writers that race each other (real Postgres)', () => {
     const [firstRes, secondRes] = await Promise.all([firstPick, secondDone]);
     return { firstRes, secondRes, secondWaitedOnTheLock };
   }
+
+  const resolveLine = (id: string, catalogItemId: string) =>
+    send('POST', `/api/proposals/${id}/resolve-line`, { lineIndex: 0, catalogItemId });
+
+  /** Both gates lifted: the line priced from CAT_B, the invoice resolved, nothing left to pick. */
+  async function expectBothResolutionsKept(id: string) {
+    const r = await row(id);
+    const action = (r.payload.editActions as Array<{ lineItem: Record<string, unknown> }>)[0];
+    expect(action.lineItem).toMatchObject({ catalogItemId: CAT_B, unitPrice: 2900, pricingSource: 'catalog' });
+    expect(r.payload.invoiceId).toBe(INV_B);
+    expect(r.payload.entityCandidates).toBeUndefined();
+    expect(r.source_context.entityCandidates).toBeUndefined();
+    expect(r.source_context.missingFields).toBeUndefined();
+    expect(r.source_context.catalogResolution).toEqual({});
+    // Nothing gated any more, so the pick that cleared the last gate
+    // surfaced it for review (never approved).
+    expect(r.status).toBe('ready_for_review');
+    expect(await audits(id, 'proposal.line_resolved')).toBe(1);
+    expect(await audits(id, 'proposal.entity_resolved')).toBe(1);
+  }
+
+  it('A4-4 edit: an entity pick that commits after an edit read the row refuses the edit (plain 409); the pick is kept', async () => {
+    const seeded = await seedRepo.create(oneAmbiguity(tenant.tenantId, tenant.userId));
+
+    const editRead = parkAfter(['findById', 'findByIdsForUpdate'], seeded.id);
+    const edit = send('PUT', `/api/proposals/${seeded.id}`, {
+      edits: { transcript: 'invoice Bob for the water heater and the filter' },
+    });
+    await editRead.reached.promise;
+    const picked = await pick(seeded.id, CUST_B);
+    expect(picked.status).toBe(200);
+    editRead.release.resolve();
+    const edited = await edit;
+
+    expect(edited.status).toBe(409);
+    const message = ((await edited.json()) as { message: string }).message;
+    expect(message).toBe('This changed while you were editing. Please try again.');
+    expect(message).not.toMatch(/\b(ai|agent|proposals?)\b/i);
+    const r = await row(seeded.id);
+    expect(r.payload.customerId).toBe(CUST_B);
+    expect(r.payload.entityCandidates).toBeUndefined();
+    expect(r.payload.transcript).toBe('invoice Bob for the water heater');
+    expect(r.status).toBe('ready_for_review');
+    expect(await audits(seeded.id, 'proposal.entity_resolved')).toBe(1);
+    expect(await audits(seeded.id, 'proposal.edited')).toBe(0);
+  });
+
+  it('A4-4 resolve-line: an entity pick that arrives while a line pick holds the row waits on its lock, then lands on top; both are kept', async () => {
+    const seeded = await seedRepo.create(invoiceEditWithTwoGates(tenant.tenantId, tenant.userId));
+
+    const lineRead = parkAfter(['findById', 'findByIdsForUpdate'], seeded.id);
+    const line = resolveLine(seeded.id, CAT_B);
+    await lineRead.reached.promise;
+
+    let pickSettled = false;
+    const entity = pick(seeded.id, INV_B).finally(() => {
+      pickSettled = true;
+    });
+    const pickWaitedOnTheLock = await sawLockWait(10_000, () => pickSettled);
+    lineRead.release.resolve();
+    const [lineRes, entityRes] = await Promise.all([line, entity]);
+
+    expect(pickWaitedOnTheLock).toBe(true);
+    expect(lineRes.status).toBe(200);
+    expect(entityRes.status).toBe(200);
+    await expectBothResolutionsKept(seeded.id);
+  });
+
+  it('A4-4 resolve-line: a line pick that commits after an entity pick read the row is kept; the entity pick lands on top', async () => {
+    const seeded = await seedRepo.create(invoiceEditWithTwoGates(tenant.tenantId, tenant.userId));
+
+    const entityRead = parkAfter(['findById'], seeded.id);
+    const entity = pick(seeded.id, INV_B);
+    await entityRead.reached.promise;
+    const lineRes = await resolveLine(seeded.id, CAT_B);
+    expect(lineRes.status).toBe(200);
+    entityRead.release.resolve();
+    const entityRes = await entity;
+
+    expect(entityRes.status).toBe(200);
+    await expectBothResolutionsKept(seeded.id);
+  });
 
   it('A4-3: a second pick that read the draft before the first committed, then waited on its row lock, keeps the first pick and the queue as the first left them', async () => {
     const seeded = await seedRepo.create(threeAmbiguities(tenant.tenantId, tenant.userId));

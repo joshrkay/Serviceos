@@ -37,6 +37,10 @@
  *    candidate) the operator-confirmed spoken price recorded at grounding
  *    time. Either way it's a recorded candidate, never a fresh number.
  *  - Audited: every resolution emits `proposal.line_resolved`.
+ *  - Row lock (A4-4): runs inside the caller's tenant transaction (the /api
+ *    request transaction) and reads the row under its lock, so a pick that
+ *    races it never loses its write. The Pg repository refuses the lock
+ *    outside a transaction.
  */
 import { Role, hasPermission } from '../auth/rbac';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
@@ -153,7 +157,13 @@ export async function resolveProposalLine(
     throw new ValidationError('catalogItemId is required');
   }
 
-  const proposal = await deps.proposalRepo.findById(tenantId, proposalId);
+  // A4-4 — read under the row lock, held until the request transaction ends,
+  // and build the write below from this row only. The write puts back the
+  // whole payload and sourceContext; from an unlocked read, an entity pick
+  // that committed in between had its picker restored and its resolved id
+  // dropped. Now that pick either committed first (and is in this row) or
+  // waits for this request, then builds on what it wrote (A3-1).
+  const [proposal] = await deps.proposalRepo.findByIdsForUpdate(tenantId, [proposalId]);
   if (!proposal) {
     throw new NotFoundError('Proposal', proposalId);
   }

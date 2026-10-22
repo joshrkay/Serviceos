@@ -897,6 +897,9 @@ export async function rejectProposal(
   return updated;
 }
 
+/** A4-4 — owner copy (the edit routes show it verbatim): short and plain. */
+const EDIT_RACED = 'This changed while you were editing. Please try again.';
+
 export async function editProposal(
   proposalRepo: ProposalRepository,
   tenantId: string,
@@ -1016,13 +1019,20 @@ export async function editProposal(
   // by later edits (both fields come from the same row read above).
   const preserveOriginal = editedFields.length > 0 && proposal.originalPayload === undefined;
 
-  const updated = await proposalRepo.update(tenantId, proposalId, {
+  // A4-4 — the whole payload and sourceContext above were built from the row
+  // read at the top. Written only while the row is still that row: a change
+  // that landed in between (an entity pick clearing its picker and stamping
+  // the id, a line pick, another edit, a decision) is never overwritten with
+  // the stale copy. The edit is refused instead, and a retry re-reads.
+  // Refused rather than rebuilt under the row lock because this also runs
+  // outside a request transaction (the voice and text edit paths).
+  const updated = await proposalRepo.updateIfUnchanged(tenantId, proposalId, proposal, {
     payload: updatedPayload,
     ...(preserveOriginal ? { originalPayload: proposal.payload } : {}),
     ...(sourceContextUpdate ? { sourceContext: sourceContextUpdate } : {}),
   });
   if (!updated) {
-    throw new NotFoundError('Proposal', proposalId);
+    throw new ConflictError(EDIT_RACED, { status: proposal.status });
   }
 
   // D2-1c — audit-log the edit. Custom event (vs. logProposalEvent) so

@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { v4 as uuidv4 } from 'uuid';
 import { ConflictError } from '../shared/errors';
 import { assertStatusWrite } from './lifecycle';
@@ -316,6 +317,23 @@ export function missingFieldsFor(proposal: Proposal): string[] {
   const mf = (ctx as Record<string, unknown>).missingFields;
   if (!Array.isArray(mf)) return [];
   return mf.filter((s): s is string => typeof s === 'string');
+}
+
+/**
+ * A3-1 / A4-4 — whether `now` (the row as it stands) differs from `read` (the
+ * row a writer built its patch from). updated_at moves on every proposal
+ * write, but the domain Date keeps milliseconds only, so the fields a writer
+ * builds from are compared too: two writes in the same millisecond can't
+ * hide a change.
+ */
+export function proposalChangedSince(read: Proposal, now: Proposal): boolean {
+  return (
+    now.updatedAt.getTime() !== read.updatedAt.getTime() ||
+    now.status !== read.status ||
+    now.proposalType !== read.proposalType ||
+    !isDeepStrictEqual(now.payload, read.payload) ||
+    !isDeepStrictEqual(now.sourceContext ?? null, read.sourceContext ?? null)
+  );
 }
 
 // ─── Decision 3: action class + trust tier ───────────────────────────────
@@ -1180,6 +1198,22 @@ export interface ProposalRepository {
     id: string,
     updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt' | 'status'>>
   ): Promise<Proposal | null>;
+  /**
+   * A4-4 — `update`, but only while the row is still `read` (the row the
+   * caller built `updates` from): it is re-read under the row lock and
+   * compared with `proposalChangedSince`, in the same transaction as the
+   * write. Returns null, writing nothing, when the row moved since `read` or
+   * is missing (or another tenant's). Runs inside the caller's tenant
+   * transaction when there is one, otherwise in its own; for a writer that
+   * cannot hold the row lock across its read (editProposal is also called
+   * outside a request transaction, from the voice and text edit paths).
+   */
+  updateIfUnchanged(
+    tenantId: string,
+    id: string,
+    read: Proposal,
+    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt' | 'status'>>
+  ): Promise<Proposal | null>;
 
   /**
    * System-level query for the auto-delivery worker. Returns all
@@ -1770,6 +1804,18 @@ export class InMemoryProposalRepository implements ProposalRepository {
     Object.assign(proposal, fields, { updatedAt: new Date() });
     this.proposals.set(id, proposal);
     return { ...proposal };
+  }
+
+  /** In-memory callers are single-threaded: the read, the check and the write cannot interleave. */
+  async updateIfUnchanged(
+    tenantId: string,
+    id: string,
+    read: Proposal,
+    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt' | 'status'>>
+  ): Promise<Proposal | null> {
+    const now = await this.findById(tenantId, id);
+    if (!now || proposalChangedSince(read, now)) return null;
+    return this.update(tenantId, id, updates);
   }
 
   async findReadyForExecution(windowMs: number): Promise<Proposal[]> {

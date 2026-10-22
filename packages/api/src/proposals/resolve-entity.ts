@@ -66,11 +66,16 @@
  * proposal per queued ambiguity — is also what makes a retried/double-tapped
  * pick safe: see the `already_applied` case in `readPick`.
  */
-import { isDeepStrictEqual } from 'node:util';
 import { Role, hasPermission } from '../auth/rbac';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { AppError, ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../shared/errors';
-import { Proposal, ProposalRepository, missingFieldsFor, type ProposalStatus } from './proposal';
+import {
+  Proposal,
+  ProposalRepository,
+  missingFieldsFor,
+  proposalChangedSince,
+  type ProposalStatus,
+} from './proposal';
 import { assertValidProposalPayload, validateProposalPayload } from './contracts';
 import type { IntentType } from '../ai/orchestration/intent-classifier';
 import type { TaskContext, TaskHandler } from '../ai/tasks/task-handlers';
@@ -233,7 +238,7 @@ function assertOpenForPick(status: ProposalStatus): void {
  * resolve-line or another pick can commit in between. Holding the row lock
  * to commit makes whatever committed first win: each path works from the
  * locked row (`lockPickForPatch`) or refuses when it moved
- * (`changedSinceRead`), and its patch rolls back.
+ * (`proposalChangedSince`), and its patch rolls back.
  */
 async function lockOpenForPick(
   deps: ResolveEntityDeps,
@@ -600,22 +605,6 @@ async function lockPickForPatch(
   return { row, pick };
 }
 
-/**
- * A3-1 — whether `now` (the locked row) differs from `read` (what the re-draft
- * was built from). updated_at moves on every proposal write, but the domain
- * Date keeps milliseconds only, so the fields a pick depends on are compared
- * too: two writes in the same millisecond can't hide a change.
- */
-function changedSinceRead(read: Proposal, now: Proposal): boolean {
-  return (
-    now.updatedAt.getTime() !== read.updatedAt.getTime() ||
-    now.status !== read.status ||
-    now.proposalType !== read.proposalType ||
-    !isDeepStrictEqual(now.payload, read.payload) ||
-    !isDeepStrictEqual(now.sourceContext ?? null, read.sourceContext ?? null)
-  );
-}
-
 interface PickIds {
   tenantId: string;
   proposalId: string;
@@ -945,7 +934,7 @@ async function redraftResolvedProposal(
     // another pick answered the question, readPickAgain refuses it as already
     // handled; when the question is still open, a retry goes through.
     const row = await lockOpenForPick(deps, tenantId, proposalId);
-    if (changedSinceRead(read, row)) {
+    if (proposalChangedSince(read, row)) {
       if (readPickAgain(row, candidateId).kind === 'already_applied') return false;
       throw pickRaced(row.status);
     }
