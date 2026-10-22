@@ -866,9 +866,12 @@ test.describe('v3 opening questions out loud (voice-only onboarding PR 4) at 320
     const { voice, posts, deepgram, transcript } = await answeringOutLoud(page, 'happy');
     await expect.poll(() => spoken(voice)).toContain("What's your business called?");
 
-    deepgram.say("It's Walsh Plumbing.");
+    deepgram.say("It's Walsh");
+    // A pause inside the name: the rest is still the name, never the trade.
+    deepgram.say('Plumbing.');
     await expect(page.getByLabel('Business name')).toHaveValue('Walsh Plumbing');
     await expect(transcript).toContainText("What's your trade: plumbing, HVAC, electrical, or something else?");
+    await expect(page.getByRole('button', { name: 'Plumbing' })).toHaveAttribute('aria-pressed', 'false');
 
     deepgram.say('plumbing');
     await expect(page.getByRole('button', { name: 'Plumbing' })).toHaveAttribute('aria-pressed', 'true');
@@ -900,6 +903,8 @@ test.describe('v3 opening questions out loud (voice-only onboarding PR 4) at 320
     const { voice, posts, deepgram, transcript } = await answeringOutLoud(page, 'misses');
     deepgram.say('Lakeside');
     await expect(page.getByLabel('Business name')).toHaveValue('Lakeside');
+    // The name is read back once the owner has finished (a pause inside a name does not end it).
+    await expect(transcript).toContainText("I've got Lakeside.");
 
     deepgram.say('banana');
     const tradeMiss = "I didn't catch the trade. Plumbing, HVAC, electrical, or something else?";
@@ -940,6 +945,7 @@ test.describe('v3 opening questions out loud (voice-only onboarding PR 4) at 320
     const { deepgram, transcript } = await answeringOutLoud(page, 'spell');
     deepgram.say('Welsh Plumbing');
     await expect(page.getByLabel('Business name')).toHaveValue('Welsh Plumbing');
+    await expect(transcript).toContainText("I've got Welsh Plumbing.");
     deepgram.say('spell it');
     await expect(transcript).toHaveText('Go ahead and spell it, letter by letter.');
     deepgram.say('W-A-L-S-H plumbing');
