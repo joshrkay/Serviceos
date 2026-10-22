@@ -109,10 +109,10 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 
 ```json
 {
-  "ownerOnlyRoutes": 89,
+  "ownerOnlyRoutes": 91,
   "daily": 2,
   "onboarding": 16,
-  "occasional": 71,
+  "occasional": 73,
   "ownerRequiredDailyWebActions": 1,
   "ownerRequiredOnboardingWebActions": 16
 }
@@ -155,6 +155,8 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `GET /api/get-found-online/` | occasional | D-044: the home "Get found online" checklist. A read of setup progress that no working day forces; dispatchers and techs never see the card. | false | none | |
 | `GET /api/get-found-online/forwarding` | occasional | D-044 / #1765: reads the carrier and mode the owner forwards their number with. Setup read; no working day forces it. | false | none | |
 | `PUT /api/get-found-online/forwarding` | occasional | D-044 / #1765: saves carrier and forwarding mode (missed calls only, or all). One-time setup choice. | false | none | |
+| `GET /api/get-found-online/forwarding/check` | occasional | D-044 / #1766: reads the latest call-forwarding test result. Setup read; no working day forces it. | false | none | |
+| `POST /api/get-found-online/forwarding/check` | occasional | D-044 / #1766: places a test call from the Rivet number to the business number. Rate-limited per tenant; run when forwarding is set up or changed. | false | none | |
 | `POST /api/get-found-online/dismiss` | occasional | D-044: hides the finished checklist. Optional tidy-up, allowed only once every item is done. | false | none | |
 | `POST /api/integrations/quickbooks/connect` | occasional | Connects the tenant's books to a QuickBooks company. Tenant-wide financial integration set up once; owner-gated so a member cannot sync paid invoices/customers into their own Intuit company. | false | none | |
 | `POST /api/integrations/quickbooks/disconnect` | occasional | QuickBooks teardown — never part of a working day. | false | none | |

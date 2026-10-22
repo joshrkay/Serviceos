@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
 import {
   isCallForwardingCarrier,
   isCallForwardingMode,
@@ -21,6 +22,8 @@ import {
 } from '../onboarding/get-found-online';
 import { GetFoundOnlineDismissalRepository } from '../onboarding/get-found-online-dismissal';
 import type { CallForwardingRepository } from '../onboarding/call-forwarding';
+import type { ForwardingCheckService } from '../onboarding/forwarding-check';
+import { createRateLimitStore } from '../middleware/rate-limit-store';
 
 /**
  * D-044 / #1763 — the owner's "Get found online" home checklist.
@@ -29,6 +32,8 @@ import type { CallForwardingRepository } from '../onboarding/call-forwarding';
  *   POST /api/get-found-online/dismiss  — hide it once every item is done
  *   GET  /api/get-found-online/forwarding — carrier + mode + the Rivet number (#1765)
  *   PUT  /api/get-found-online/forwarding — save carrier + mode
+ *   POST /api/get-found-online/forwarding/check — place the test call (#1766)
+ *   GET  /api/get-found-online/forwarding/check — the latest check's state
  *
  * Owner-only (settings:update): dispatchers and technicians get a 403 and
  * the home card renders nothing for them.
@@ -39,6 +44,8 @@ export interface GetFoundOnlineRouteDeps {
   settingsRepo: Pick<SettingsRepository, 'findByTenant'>;
   dismissalRepo: GetFoundOnlineDismissalRepository;
   forwardingRepo: CallForwardingRepository;
+  /** The forwarding check (#1766); absent ⇒ the check endpoints answer 503. */
+  forwardingCheck?: Pick<ForwardingCheckService, 'start' | 'latestView'>;
   /** The tenant's Rivet number (E.164), or null when no line is active. */
   getRivetNumber?: (tenantId: string) => Promise<string | null>;
   auditRepo?: AuditRepository | undefined;
@@ -167,6 +174,70 @@ export function createGetFoundOnlineRouter(deps: GetFoundOnlineRouteDeps): Route
           );
         }
         res.json({ data: await forwardingView(tenantId) });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  // A check places a real phone call, so cap how often one tenant can start it.
+  const checkLimiter = rateLimit({
+    windowMs: 10 * 60 * 1000,
+    max: Math.max(1, Number(process.env.FORWARDING_CHECKS_PER_10_MIN) || 5),
+    standardHeaders: true,
+    legacyHeaders: false,
+    keyGenerator: (req) =>
+      (req as AuthenticatedRequest).auth?.tenantId ?? ipKeyGenerator(req.ip ?? ''),
+    handler: (_req, res) => {
+      res.status(429).json({
+        error: 'RATE_LIMITED',
+        message: 'Too many forwarding tests. Please wait a few minutes and try again.',
+      });
+    },
+    store: createRateLimitStore(process.env.REDIS_URL, 'forwarding-check:'),
+  });
+
+  router.post(
+    '/forwarding/check',
+    requireAuth,
+    requireTenant,
+    requirePermission('settings:update'),
+    checkLimiter,
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!deps.forwardingCheck) {
+          res.status(503).json({ error: 'FORWARDING_CHECK_UNAVAILABLE', message: 'Forwarding tests are not available yet' });
+          return;
+        }
+        const { view } = await deps.forwardingCheck.start(req.auth!.tenantId, {
+          id: req.auth!.userId,
+          role: req.auth!.role,
+        });
+        res.status(202).json({ data: view });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  router.get(
+    '/forwarding/check',
+    requireAuth,
+    requireTenant,
+    requirePermission('settings:update'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        if (!deps.forwardingCheck) {
+          res.status(503).json({ error: 'FORWARDING_CHECK_UNAVAILABLE', message: 'Forwarding tests are not available yet' });
+          return;
+        }
+        const view = await deps.forwardingCheck.latestView(req.auth!.tenantId, {
+          id: req.auth!.userId,
+          role: req.auth!.role,
+        });
+        res.json({ data: view });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

@@ -75,6 +75,27 @@ async function mockPhoneApi(page: Page): Promise<{ changed: () => string | null 
 async function mockCallForwarding(page: Page): Promise<void> {
   let setup = { carrier: null as string | null, mode: 'missed' };
   await page.route(
+    (url) => url.pathname === '/api/get-found-online/forwarding/check',
+    async (route) => {
+      const started = route.request().method() === 'POST';
+      await route.fulfill({
+        status: started ? 202 : 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          data: started
+            ? {
+                status: 'timed_out',
+                checkedAt: null,
+                expiresAt: null,
+                guidance:
+                  'The test call did not come back. Make sure you let your phone ring out without answering, then check that you dialed the forwarding code from your business phone and heard a confirmation. Then test again.',
+              }
+            : null,
+        }),
+      });
+    },
+  );
+  await page.route(
     (url) => url.pathname === '/api/get-found-online/forwarding',
     async (route) => {
       if (route.request().method() === 'PUT') {
@@ -210,6 +231,11 @@ test.describe('Settings → Phone — mobile layout', () => {
         expect(Math.round(box!.height)).toBeGreaterThanOrEqual(44);
         expect(box!.x + box!.width).toBeLessThanOrEqual(320);
       }
+      await expectGloveTarget(page, /^Test it$/);
+      await page.getByRole('button', { name: /^Test it$/ }).click();
+      await expect(page.getByTestId('call-forwarding-check-result')).toContainText('did not come back');
+      await expectGloveTarget(page, /^Test again$|^Test it$/);
+      expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
       await page.getByRole('button', { name: 'Other' }).click();
       await expect(page.getByTestId('call-forwarding-generic')).toBeVisible();
       expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);

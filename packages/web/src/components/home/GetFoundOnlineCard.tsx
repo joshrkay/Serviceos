@@ -69,7 +69,7 @@ function doneDetail(item: ChecklistItem): string {
       month: 'short',
       day: 'numeric',
     });
-    return `Your business number forwards to Rivet. Last checked ${date}.`;
+    return `Your business number forwards to Rivet. Last checked ${date}. Tap to check again.`;
   }
   return DONE_DETAIL[item.id];
 }
@@ -163,7 +163,7 @@ export function GetFoundOnlineCard() {
           );
           return (
             <li key={item.id} data-testid={`get-found-online-item-${item.id}`} data-status={item.status}>
-              {item.status === 'done' ? (
+              {item.status === 'done' && item.id !== 'call_forwarding' ? (
                 <div className="flex min-h-11 items-start gap-3 py-2">{body}</div>
               ) : (
                 <button

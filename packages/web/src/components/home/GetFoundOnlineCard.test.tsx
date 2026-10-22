@@ -97,6 +97,8 @@ describe('GetFoundOnlineCard', () => {
     renderCard();
     const done = await screen.findByTestId('get-found-online-item-call_forwarding');
     expect(done).toHaveTextContent(/Last checked/);
+    // A passed check offers a re-check: it is still a way into Phone settings.
+    expect(done.querySelector('button')).not.toBeNull();
   });
 
   it('keeps every tap target at least 44px tall (min-h-11)', async () => {

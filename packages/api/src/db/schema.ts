@@ -8264,6 +8264,37 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS call_forwarding_verified_at TIMESTAMPTZ;
   `,
+  // D-044 / #1766 — the forwarding check: a short-lived correlation record
+  // between the test call we place and the call that comes back through the
+  // owner's carrier. The inbound voice webhook matches on (tenant, Rivet
+  // number as caller, still pending, not expired). One row per attempt; the
+  // result is audited, and tenant_settings.call_forwarding_verified_at keeps
+  // the last pass.
+  '333_call_forwarding_checks': `
+    CREATE TABLE IF NOT EXISTS call_forwarding_checks (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'passed', 'timed_out', 'failed')),
+      mode TEXT NOT NULL CHECK (mode IN ('missed', 'all')),
+      rivet_number TEXT NOT NULL,
+      business_number TEXT NOT NULL,
+      call_sid TEXT,
+      failure_reason TEXT CHECK (failure_reason IN ('call_not_placed')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ NOT NULL,
+      completed_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_call_forwarding_checks_tenant_created
+      ON call_forwarding_checks (tenant_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_call_forwarding_checks_pending
+      ON call_forwarding_checks (tenant_id, rivet_number) WHERE status = 'pending';
+    ALTER TABLE call_forwarding_checks ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE call_forwarding_checks FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_call_forwarding_checks ON call_forwarding_checks;
+    CREATE POLICY tenant_isolation_call_forwarding_checks ON call_forwarding_checks
+  `,
+
 
   // #1735 — outbound multi-step drip campaigns (SMS | call | email). A
   // sequence is an ordered list of steps (JSONB, validated by the Zod

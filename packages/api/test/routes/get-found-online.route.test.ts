@@ -12,6 +12,10 @@ import { InMemoryReviewPollStateRepository } from '../../src/reputation/poll-sta
 import { InMemorySettingsRepository } from '../../src/settings/settings';
 import { InMemoryGetFoundOnlineDismissalRepository } from '../../src/onboarding/get-found-online-dismissal';
 import { InMemoryCallForwardingRepository } from '../../src/onboarding/call-forwarding';
+import {
+  ForwardingCheckService,
+  InMemoryForwardingCheckRepository,
+} from '../../src/onboarding/forwarding-check';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
@@ -25,6 +29,8 @@ describe('/api/get-found-online', () => {
   let settingsRepo: InMemorySettingsRepository;
   let dismissalRepo: InMemoryGetFoundOnlineDismissalRepository;
   let forwardingRepo: InMemoryCallForwardingRepository;
+  let checkFetch: ReturnType<typeof vi.fn>;
+  let checkService: ForwardingCheckService;
   let auditRepo: InMemoryAuditRepository;
 
   beforeAll(() => {
@@ -43,6 +49,21 @@ describe('/api/get-found-online', () => {
     await settingsRepo.upsertIdentityFields(TENANT, { businessName: 'Acme' });
     dismissalRepo = new InMemoryGetFoundOnlineDismissalRepository();
     forwardingRepo = new InMemoryCallForwardingRepository();
+    checkFetch = vi.fn(async () => ({ ok: true, status: 201, json: async () => ({ sid: 'CA1' }) }));
+    checkService = new ForwardingCheckService({
+      repo: new InMemoryForwardingCheckRepository(),
+      forwardingRepo,
+      getBusinessPhone: async () => '(512) 555-0999',
+      getCreds: async () => ({
+        accountSid: 'ACtest',
+        authToken: 'tok',
+        messagingServiceSid: null,
+        phoneE164: '+15125550123',
+        credentialVersion: 1,
+      }),
+      auditRepo: undefined,
+      fetchImpl: checkFetch as unknown as typeof fetch,
+    });
     auditRepo = new InMemoryAuditRepository();
   });
 
@@ -62,6 +83,7 @@ describe('/api/get-found-online', () => {
         dismissalRepo,
         forwardingRepo,
         getRivetNumber: async () => '+15125550123',
+        forwardingCheck: checkService,
         auditRepo,
       }),
     );
@@ -222,5 +244,39 @@ describe('/api/get-found-online', () => {
     expect(
       (await request(app('technician')).put('/api/get-found-online/forwarding').send({ carrier: 'att' })).status,
     ).toBe(403);
+  });
+
+  it('POST /forwarding/check places the test call; GET reports it pending', async () => {
+    await forwardingRepo.save(TENANT, { carrier: 'att', mode: 'missed' });
+    const started = await request(app()).post('/api/get-found-online/forwarding/check');
+    expect(started.status).toBe(202);
+    expect(started.body.data).toMatchObject({ status: 'pending' });
+    expect(started.body.data.guidance).toMatch(/ring out/i);
+    expect(checkFetch).toHaveBeenCalledTimes(1);
+
+    const latest = await request(app()).get('/api/get-found-online/forwarding/check');
+    expect(latest.body.data.status).toBe('pending');
+  });
+
+  it('POST /forwarding/check explains what is missing instead of calling', async () => {
+    const res = await request(app()).post('/api/get-found-online/forwarding/check');
+    expect(res.status).toBe(400);
+    expect(res.body.message ?? res.body.error).toMatch(/carrier/i);
+    expect(checkFetch).not.toHaveBeenCalled();
+  });
+
+  it('the check endpoints are owner-only and rate-limited per tenant', async () => {
+    expect((await request(app('technician')).post('/api/get-found-online/forwarding/check')).status).toBe(403);
+    expect((await request(app('technician')).get('/api/get-found-online/forwarding/check')).status).toBe(403);
+
+    await forwardingRepo.save(TENANT, { carrier: 'att', mode: 'missed' });
+    const a = app();
+    const statuses: number[] = [];
+    for (let i = 0; i < 6; i++) {
+      statuses.push((await request(a).post('/api/get-found-online/forwarding/check')).status);
+    }
+    expect(statuses.slice(0, 5)).toEqual([202, 202, 202, 202, 202]);
+    expect(statuses[5]).toBe(429);
+    expect(checkFetch).toHaveBeenCalledTimes(5);
   });
 });

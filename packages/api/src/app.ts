@@ -420,6 +420,7 @@ import {
   InMemoryCallForwardingRepository,
   PgCallForwardingRepository,
 } from './onboarding/call-forwarding';
+import { ForwardingCheckService, PgForwardingCheckRepository } from './onboarding/forwarding-check';
 import {
   InMemoryGetFoundOnlineDismissalRepository,
   PgGetFoundOnlineDismissalRepository,
@@ -4576,6 +4577,22 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // TWILIO_DEFAULT_TENANT_ID is only ever a dev seam (with a WARN).
   const phoneNumberRepo = pool ? new PgPhoneNumberRepository(pool) : undefined;
 
+  // D-044 / #1765, #1766 — call forwarding setup and its check call. Built here
+  // because the inbound voice webhook (below) recognises the check coming back.
+  const callForwardingRepo = pool
+    ? new PgCallForwardingRepository(pool)
+    : new InMemoryCallForwardingRepository();
+  const forwardingCheckService = pool
+    ? new ForwardingCheckService({
+        repo: new PgForwardingCheckRepository(pool),
+        forwardingRepo: callForwardingRepo,
+        getBusinessPhone: async (tenantId) =>
+          (await settingsRepo.findByTenant(tenantId))?.businessPhone ?? null,
+        getCreds: (tenantId) => getTenantTwilioCreds(tenantId, pool),
+        auditRepo,
+      })
+    : undefined;
+
   // F6b: Whisper TwiML route — mounted BEFORE requireAuth so Twilio's signed
   // GETs (no Clerk session) are accepted, and BEFORE the telephony router
   // below because that router's signature middleware runs for EVERY
@@ -4643,6 +4660,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       authTokenGetter: resolveTwilioWebhookCredential,
       publicBaseUrl: process.env.PUBLIC_API_URL,
       ...(phoneNumberRepo ? { phoneNumberRepo } : {}),
+      ...(forwardingCheckService ? { forwardingCheck: forwardingCheckService } : {}),
       resolveTenantId: createDidTenantResolver(phoneNumberRepo ? { phoneNumberRepo } : {}),
       // WS8 — a worker-role process never attaches the media-streams WS
       // handler (see the role gate on attachMediaStreamServer below), so its
@@ -5969,9 +5987,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       dismissalRepo: pool
         ? new PgGetFoundOnlineDismissalRepository(pool)
         : new InMemoryGetFoundOnlineDismissalRepository(),
-      forwardingRepo: pool
-        ? new PgCallForwardingRepository(pool)
-        : new InMemoryCallForwardingRepository(),
+      forwardingRepo: callForwardingRepo,
+      ...(forwardingCheckService ? { forwardingCheck: forwardingCheckService } : {}),
       ...(pool
         ? {
             getRivetNumber: async (tenantId: string) =>

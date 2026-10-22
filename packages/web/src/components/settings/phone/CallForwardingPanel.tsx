@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useApiClient } from '../../../lib/apiClient';
+import { Button } from '../../ui';
 import {
   CALL_FORWARDING_CARRIERS,
   CALL_FORWARDING_CARRIER_LABELS,
@@ -23,6 +24,23 @@ interface ForwardingState {
   mode: CallForwardingMode;
   checkPassedAt: string | null;
   rivetNumber: string | null;
+}
+
+interface CheckView {
+  status: 'pending' | 'passed' | 'timed_out' | 'failed';
+  checkedAt: string | null;
+  expiresAt: string | null;
+  guidance: string;
+}
+
+const CHECK_POLL_MS = 3000;
+
+function isCheckView(v: unknown): v is CheckView {
+  return !!v && typeof (v as CheckView).status === 'string' && typeof (v as CheckView).guidance === 'string';
+}
+
+function formatDate(iso: string): string {
+  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
 const MODE_LABEL: Record<CallForwardingMode, { title: string; hint: string }> = {
@@ -53,6 +71,9 @@ export function CallForwardingPanel() {
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const [check, setCheck] = useState<CheckView | null>(null);
+  const [starting, setStarting] = useState(false);
+  const [checkError, setCheckError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -68,9 +89,57 @@ export function CallForwardingPanel() {
     }
   }, [apiFetch]);
 
+  const loadCheck = useCallback(async () => {
+    try {
+      const res = await apiFetch('/api/get-found-online/forwarding/check');
+      if (!res.ok) return;
+      const data = ((await res.json()) as { data?: unknown }).data;
+      setCheck(isCheckView(data) ? data : null);
+    } catch {
+      // The check is optional UI; a failed read leaves the last known state.
+    }
+  }, [apiFetch]);
+
   useEffect(() => {
     void load();
-  }, [load]);
+    void loadCheck();
+  }, [load, loadCheck]);
+
+  // While a test call is in flight, watch for it to come back (or time out).
+  const pending = check?.status === 'pending';
+  useEffect(() => {
+    if (!pending) return;
+    const t = setInterval(() => void loadCheck(), CHECK_POLL_MS);
+    return () => clearInterval(t);
+  }, [pending, loadCheck]);
+
+  // A pass is recorded server-side; pick up the date it ticked.
+  const passed = check?.status === 'passed';
+  useEffect(() => {
+    if (passed) void load();
+  }, [passed, load]);
+
+  async function startCheck() {
+    setStarting(true);
+    setCheckError(null);
+    try {
+      const res = await apiFetch('/api/get-found-online/forwarding/check', { method: 'POST' });
+      const body = (await res.json().catch(() => ({}))) as { data?: unknown; message?: string };
+      if (!res.ok) {
+        setCheckError(
+          res.status === 429
+            ? 'Too many tests. Wait a few minutes and try again.'
+            : (body.message ?? "Couldn't start the test. Try again."),
+        );
+        return;
+      }
+      if (isCheckView(body.data)) setCheck(body.data);
+    } catch {
+      setCheckError('Check your connection and try again.');
+    } finally {
+      setStarting(false);
+    }
+  }
 
   async function save(carrier: CallForwardingCarrier, mode: CallForwardingMode) {
     setSaving(true);
@@ -86,6 +155,8 @@ export function CallForwardingPanel() {
         return;
       }
       setState(((await res.json()) as { data: ForwardingState }).data);
+      // A different carrier or mode is a different forward: the old test no longer applies.
+      void loadCheck();
     } catch {
       setSaveError('Check your connection and try again.');
     } finally {
@@ -207,6 +278,43 @@ export function CallForwardingPanel() {
           {state.rivetNumber && (
             <p className="break-words text-sm text-slate-700">
               Your Rivet number is <span className="font-mono">{state.rivetNumber}</span>.
+            </p>
+          )}
+        </div>
+      )}
+
+      {state.carrier && instructions && (
+        <div data-testid="call-forwarding-check" className="min-w-0 space-y-2">
+          <p className="text-sm font-medium text-slate-800">Make sure it works</p>
+          {state.checkPassedAt && (
+            <p className="text-sm text-emerald-700">
+              Last passing test: {formatDate(state.checkPassedAt)}
+            </p>
+          )}
+          <Button
+            variant="secondary"
+            size="lg"
+            className="min-h-11"
+            loading={starting || pending}
+            onClick={() => void startCheck()}
+          >
+            {pending ? 'Testing…' : state.checkPassedAt ? 'Test again' : 'Test it'}
+          </Button>
+          {checkError && (
+            <p role="alert" className="text-sm text-red-700">
+              {checkError}
+            </p>
+          )}
+          {check && (
+            <p
+              role="status"
+              data-testid="call-forwarding-check-result"
+              data-status={check.status}
+              className={`break-words text-sm ${
+                check.status === 'passed' ? 'text-emerald-700' : check.status === 'pending' ? 'text-slate-700' : 'text-amber-800'
+              }`}
+            >
+              {check.guidance}
             </p>
           )}
         </div>

@@ -135,7 +135,8 @@ const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 16;
 // D-044 (#1762, #1763): +4 occasional (Google listing picker GET/PUT, get-found-online GET + dismiss).
 // D-045: +2 occasional (PUT/DELETE /api/settings/text-wording/:purpose — owner's text wording).
 // #1765: +2 occasional (get-found-online forwarding GET/PUT — carrier + mode).
-const OWNER_ONLY_ROUTES = 89;
+// #1766: +2 occasional (get-found-online forwarding/check GET/POST — the forwarding test call).
+const OWNER_ONLY_ROUTES = 91;
 
 // ── Derivation ──────────────────────────────────────────────────────────────
 
