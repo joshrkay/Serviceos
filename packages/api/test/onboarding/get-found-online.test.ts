@@ -1,0 +1,81 @@
+/**
+ * D-044 / #1763 — the "Get found online" checklist is derived from tenant
+ * facts; an item reopens the moment its fact stops being true.
+ */
+import { describe, expect, it } from 'vitest';
+import {
+  GetFoundOnlineFacts,
+  deriveGetFoundOnlineChecklist,
+} from '../../src/onboarding/get-found-online';
+
+const NOTHING: GetFoundOnlineFacts = { google: null, googleReviewUrl: null, dismissedAt: null };
+const CONNECTED = { locationState: 'connected' as const, pollingPaused: false };
+const REVIEW = 'https://g.page/r/review-999';
+
+function statuses(facts: GetFoundOnlineFacts) {
+  return Object.fromEntries(
+    deriveGetFoundOnlineChecklist(facts).items.map((i) => [i.id, [i.status, i.reason]]),
+  );
+}
+
+describe('deriveGetFoundOnlineChecklist', () => {
+  it('a fresh tenant: connect Google is the next step, the review link waits behind it', () => {
+    expect(statuses(NOTHING)).toEqual({
+      google_listing: ['current', 'not_connected'],
+      review_link: ['pending', 'missing'],
+    });
+    expect(deriveGetFoundOnlineChecklist(NOTHING)).toMatchObject({ allDone: false, visible: true });
+  });
+
+  it('several locations: picking one is the next step', () => {
+    expect(
+      statuses({ ...NOTHING, google: { locationState: 'needs_pick', pollingPaused: false } }),
+    ).toMatchObject({ google_listing: ['current', 'needs_pick'] });
+  });
+
+  it('no Business Profile yet: the listing waits on Google and the review link becomes current', () => {
+    expect(
+      statuses({ ...NOTHING, google: { locationState: 'no_location', pollingPaused: false } }),
+    ).toEqual({
+      google_listing: ['waiting', 'no_location'],
+      review_link: ['current', 'missing'],
+    });
+  });
+
+  it('a connected listing whose polling is paused is an error, not done', () => {
+    expect(
+      statuses({ ...NOTHING, google: { ...CONNECTED, pollingPaused: true }, googleReviewUrl: REVIEW }),
+    ).toEqual({
+      google_listing: ['error', 'polling_paused'],
+      review_link: ['done', undefined],
+    });
+  });
+
+  it('a pasted review link counts even without Google connected', () => {
+    expect(statuses({ ...NOTHING, googleReviewUrl: REVIEW })).toMatchObject({
+      review_link: ['done', undefined],
+    });
+    expect(statuses({ ...NOTHING, googleReviewUrl: '   ' })).toMatchObject({
+      review_link: ['pending', 'missing'],
+    });
+  });
+
+  it('everything done: visible until dismissed', () => {
+    const done = { ...NOTHING, google: CONNECTED, googleReviewUrl: REVIEW };
+    expect(deriveGetFoundOnlineChecklist(done)).toMatchObject({ allDone: true, visible: true });
+    expect(
+      deriveGetFoundOnlineChecklist({ ...done, dismissedAt: new Date('2026-10-22T00:00:00Z') }),
+    ).toMatchObject({ allDone: true, visible: false });
+  });
+
+  it('disconnecting Google after a dismissal reopens the item and shows the card again', () => {
+    const reopened = deriveGetFoundOnlineChecklist({
+      google: null,
+      googleReviewUrl: REVIEW,
+      dismissedAt: new Date('2026-10-22T00:00:00Z'),
+    });
+    expect(reopened.visible).toBe(true);
+    expect(reopened.allDone).toBe(false);
+    expect(reopened.items[0]).toEqual({ id: 'google_listing', status: 'current', reason: 'not_connected' });
+  });
+});

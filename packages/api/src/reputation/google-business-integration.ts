@@ -17,15 +17,13 @@
  *     accessTokenEnc:       AES-256-GCM via TENANT_ENCRYPTION_KEY,
  *     refreshTokenEnc:      AES-256-GCM via TENANT_ENCRYPTION_KEY,
  *     accessTokenExpiresAt: ISO timestamp,
- *     providerData: { accountId, locationId, locationTitle?, placeId?,
- *                     reviewUrl?, locationStatus? },
+ *     providerData: { accountId, locationId, placeId, reviewUrl,
+ *                     locationTitle, locationCount },
  *   }
  *
- * `placeId` / `reviewUrl` (Google's write-a-review link) are read from
- * the Business Information API at connect / location-change time.
- * `locationStatus: 'needs_selection'` marks a multi-location account
- * waiting on the owner's pick; absent with no `locationId` means the
- * account has no location ('no_location').
+ * `locationCount` is how many locations discovery saw at connect time; with
+ * no `locationId` it tells "the owner must pick one" (>1 or unknown) apart
+ * from "this Google account has no Business Profile yet" (0).
  *
  * Legacy hand-seeded rows with plaintext `accessToken` / top-level
  * `accountId`/`locationId` keys stay readable (the worker always
@@ -74,6 +72,17 @@ function getKey(): string {
     );
   }
   return key;
+}
+
+/** The connected Google listing (D-044) inside `credentials.providerData`. */
+interface StoredProviderData {
+  /** Null once the chosen listing was forgotten (Google stopped listing it). */
+  accountId?: string | null;
+  locationId?: string | null;
+  placeId?: string | null;
+  reviewUrl?: string | null;
+  locationTitle?: string | null;
+  locationCount?: number;
 }
 
 /** The credentials JSONB shape (writer side + both legacy read fallbacks). */
@@ -158,16 +167,15 @@ export function resolveGoogleBusinessLocation(credRow: CredentialRow): {
   locationId?: string;
 } {
   const creds = (credRow.credentials ?? {}) as StoredGoogleBusinessCredentials;
-  if (creds.providerData) {
-    const { accountId, locationId } = creds.providerData;
-    return {
-      ...(accountId !== undefined ? { accountId } : {}),
-      ...(locationId !== undefined ? { locationId } : {}),
-    };
-  }
+  // Per field: a legacy hand-seeded row keeps its top-level ids even after
+  // providerData gains other fields (e.g. only locationCount); an id
+  // providerData holds, even a forgetLocation null, wins.
+  const pd = creds.providerData;
+  const accountId = pd && 'accountId' in pd ? pd.accountId : creds.accountId;
+  const locationId = pd && 'locationId' in pd ? pd.locationId : creds.locationId;
   return {
-    ...(creds.accountId !== undefined ? { accountId: creds.accountId } : {}),
-    ...(creds.locationId !== undefined ? { locationId: creds.locationId } : {}),
+    ...(accountId != null ? { accountId } : {}),
+    ...(locationId != null ? { locationId } : {}),
   };
 }
 
@@ -294,6 +302,36 @@ export interface GoogleBusinessIntegrationRepository
   ): Promise<GoogleBusinessIntegrationSummary>;
   /** Metadata for the status endpoint — never returns token material. */
   get(tenantId: string): Promise<GoogleBusinessIntegrationSummary | null>;
+  /** Decoded tokens for owner-initiated calls (location picker). */
+  getTokens(tenantId: string): Promise<GoogleBusinessTokens | null>;
+  /**
+   * Point the integration at one location. Keeps the tokens; replaces the
+   * listing fields. Null when the tenant has no integration row.
+   */
+  selectLocation(
+    tenantId: string,
+    selection: GoogleBusinessLocationSelection,
+  ): Promise<GoogleBusinessIntegrationSummary | null>;
+  /**
+   * Record how many locations a later successful discovery saw (the
+   * connect-time count can be missing when discovery failed then), so
+   * "no location" is reported instead of "pick one". Null when the tenant
+   * has no integration row.
+   */
+  recordLocationCount(
+    tenantId: string,
+    locationCount: number,
+  ): Promise<GoogleBusinessIntegrationSummary | null>;
+  /**
+   * Drop the chosen listing (Google no longer lists it for this
+   * connection) and record the new count, so the owner is asked to pick
+   * again and the poll worker stops polling it. Keeps the tokens. Null
+   * when the tenant has no integration row.
+   */
+  forgetLocation(
+    tenantId: string,
+    locationCount: number,
+  ): Promise<GoogleBusinessIntegrationSummary | null>;
   /**
    * Hard-delete the row. The poll worker treats "no row" as a silent
    * skip (many tenants legitimately have no GBP), so deletion — not a

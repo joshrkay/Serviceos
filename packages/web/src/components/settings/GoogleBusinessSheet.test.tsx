@@ -76,6 +76,7 @@ describe('GoogleBusinessSheet', () => {
         data: connectedIntegration({
           // Far-future backoff — credentials are broken until reconnect.
           backoffUntil: '2100-01-01T00:00:00Z',
+          backoffReason: 'auth',
         }),
       }),
     );
@@ -83,6 +84,17 @@ describe('GoogleBusinessSheet', () => {
     await screen.findByTestId('googlebusiness-attention');
     // Reconnect stays available so the operator can self-heal.
     expect(screen.getByTestId('googlebusiness-connect')).toBeInTheDocument();
+  });
+
+  it('Google throttling does not ask the owner to reconnect', async () => {
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        data: connectedIntegration({ backoffUntil: '2100-01-01T00:00:00Z', backoffReason: 'quota' }),
+      }),
+    );
+    render(<GoogleBusinessSheet onClose={() => {}} />);
+    await screen.findByTestId('googlebusiness-connected');
+    expect(screen.queryByTestId('googlebusiness-attention')).toBeNull();
   });
 
   it('clicking Connect POSTs and redirects to the returned Google URL', async () => {
@@ -210,3 +222,4 @@ describe('GoogleBusinessSheet', () => {
     expect(screen.queryByTestId('googlebusiness-change-location')).toBeNull();
   });
 });
+

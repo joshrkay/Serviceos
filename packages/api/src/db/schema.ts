@@ -8235,6 +8235,20 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_customer_text_wording ON customer_text_wording
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+  // D-044 / #1763 — the owner dismissed the "Get found online" home
+  // checklist once every item was done. The card reappears while any item is
+  // open again, so a reopened item is never hidden by an old dismissal.
+  '331_get_found_online': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS get_found_online_dismissed_at TIMESTAMPTZ;
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS google_review_url_derived TEXT;
+    ALTER TABLE review_poll_state
+      ADD COLUMN IF NOT EXISTS backoff_reason TEXT
+        CHECK (backoff_reason IN ('quota', 'auth'));
+    ALTER TABLE review_poll_state
+      ADD COLUMN IF NOT EXISTS auth_generation INTEGER NOT NULL DEFAULT 0;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
