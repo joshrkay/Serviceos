@@ -23,9 +23,14 @@ import {
   BreakerOpenError,
   CircuitBreakerRegistry,
   DEFAULT_BREAKER,
+  isBreakerHealthFailure,
 } from '../../../src/ai/gateway/breaker';
 import { TenantQuotaRegistry, type QuotaStore } from '../../../src/ai/gateway/tenant-quota';
-import { DeadlineExceededError, MIN_RETRY_BUDGET_MS } from '../../../src/ai/gateway/deadline';
+import {
+  DeadlineExceededError,
+  isLocalDeadlineOrAbort,
+  MIN_RETRY_BUDGET_MS,
+} from '../../../src/ai/gateway/deadline';
 import { DEFAULT_RETRY } from '../../../src/ai/gateway/retry';
 import { computeCostMicroCents } from '../../../src/ai/gateway/model-pricing';
 import { InMemoryAiRunRepository } from '../../../src/ai/ai-run';
@@ -164,15 +169,64 @@ describe('GATEWAY-03 — one deadline across failover', () => {
   it('honours the caller signal: an aborted caller stops the whole chain', async () => {
     const primary = new HangingProvider('api.openai.com', () => 0);
     const fallback = new HangingProvider('openrouter.ai', () => 0);
+    const breakers = new CircuitBreakerRegistry(DEFAULT_BREAKER);
+    // The primary's cell for this request (gpt family, classify_intent → the
+    // classify cell). releaseReservation proves the outcome went through it.
+    const primaryCell = breakers.cell({ provider: 'api.openai.com', modelFamily: 'gpt', taskClass: 'classify' });
+    const onResult = vi.spyOn(primaryCell, 'onResult');
+    const releaseReservation = vi.spyOn(primaryCell, 'releaseReservation');
     const controller = new AbortController();
     const started = Date.now();
     setTimeout(() => controller.abort(new Error('caller hung up')), 100);
-    const err = await stack(primary, [fallback])
+    const err = await composeResilienceStack(primary, {
+      breakers,
+      quota: new TenantQuotaRegistry(),
+      fallbackProviders: [fallback],
+    })
       .complete({ ...request(5_000), signal: controller.signal })
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(AppError);
     expect(Date.now() - started).toBeLessThan(600);
     expect(fallback.calls).toHaveLength(0);
+    // The caller hanging up says nothing about the provider's health (FM-01):
+    // the breaker counts no failure, whatever reason the caller aborted with.
+    // The chain settles on the abort itself; the breaker sees the retry
+    // wrapper's outcome a backoff later, so wait for its verdict.
+    await vi.waitFor(() =>
+      expect(releaseReservation.mock.calls.length + onResult.mock.calls.length).toBe(1),
+    );
+    expect(primary.calls).toHaveLength(1);
+    expect(onResult.mock.calls.filter(([success]) => success === false)).toHaveLength(0);
+    expect(releaseReservation).toHaveBeenCalledTimes(1);
+    expect(breakers.getProviderStates()).toEqual([
+      expect.objectContaining({ provider: 'api.openai.com', breakerState: 'closed', lastError: undefined }),
+    ]);
+  });
+
+  it('a caller abort with a reason of its own surfaces as a local abort that keeps the reason as its cause', async () => {
+    const deaf = new DeafProvider('deaf', () => 0);
+    const reason = new Error('caller hung up');
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(reason), 50);
+    const err = await new ProviderRetryDeadlineWrapper(deaf, DEFAULT_RETRY, 8_000)
+      .complete({ ...request(5_000), signal: controller.signal })
+      .catch((e: unknown) => e);
+    expect(isLocalDeadlineOrAbort(err)).toBe(true);
+    expect(isBreakerHealthFailure(err)).toBe(false);
+    expect((err as Error).cause).toBe(reason);
+    expect((err as Error).message).toContain('caller hung up');
+    expect(deaf.calls).toHaveLength(1);
+  });
+
+  it('a local-shaped caller abort reason passes through unchanged', async () => {
+    const deaf = new DeafProvider('deaf', () => 0);
+    const reason = new DeadlineExceededError(50);
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(reason), 50);
+    const err = await new ProviderRetryDeadlineWrapper(deaf, DEFAULT_RETRY, 8_000)
+      .complete({ ...request(5_000), signal: controller.signal })
+      .catch((e: unknown) => e);
+    expect(err).toBe(reason);
   });
 
   describe('fallbackReserveFor', () => {

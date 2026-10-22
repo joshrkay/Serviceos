@@ -50,6 +50,7 @@ import {
 } from './retry';
 import {
   adoptDeadline,
+  asLocalAbort,
   MAX_GATEWAY_DEADLINE_MS,
   MIN_RETRY_BUDGET_MS,
   STAGE_BUDGETS,
@@ -125,10 +126,15 @@ export function fallbackReserveFor(remainingMs: number, reserveCapMs: number): n
  * lease outside the failover chain is sized to the deadline, so the deadline
  * must bound the hold for a provider that does not cooperate too. A late
  * settlement of `work` is observed and dropped (no unhandled rejection).
+ *
+ * The abort rejects with a local-abort-shaped error (`asLocalAbort`): it
+ * usually wins the race against the provider's own abort error, so a caller's
+ * foreign abort reason would otherwise reach the breaker raw and be counted
+ * as a provider-health failure.
  */
 function settleByDeadline<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(signal.reason);
+    const onAbort = () => reject(asLocalAbort(signal.reason));
     if (signal.aborted) onAbort();
     else signal.addEventListener('abort', onAbort, { once: true });
     work.then(
