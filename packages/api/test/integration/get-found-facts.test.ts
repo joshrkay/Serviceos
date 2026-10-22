@@ -33,11 +33,8 @@ async function seedEverything(pool: Pool, tenantId: string): Promise<void> {
      VALUES (gen_random_uuid(), $1, 'twilio', 'full_readiness', $2::jsonb)`,
     [tenantId, JSON.stringify({ phoneE164: uniqueE164() })],
   );
-  await pool.query(
-    `INSERT INTO voice_sessions (id, tenant_id, channel, state, started_at, ended_at)
-     VALUES (gen_random_uuid(), $1, 'voice_inbound', 'ended', now() - interval '1 minute', now())`,
-    [tenantId],
-  );
+  // The first real (customer) call, as voice/activation.ts stamps it.
+  await pool.query(`UPDATE tenant_settings SET activated_at = now() WHERE tenant_id = $1`, [tenantId]);
 }
 
 describe('loadGetFoundFacts (integration)', () => {
@@ -62,7 +59,7 @@ describe('loadGetFoundFacts (integration)', () => {
       hasForwardedLine: true,
       forwardingCheckPassedAt: new Date('2026-10-22T15:00:00Z'),
       rivetNumberLive: true,
-      answeredInboundCall: true,
+      firstRealCallReceived: true,
       skippedItems: ['call_routing'],
     });
 
@@ -73,7 +70,7 @@ describe('loadGetFoundFacts (integration)', () => {
       hasForwardedLine: false,
       forwardingCheckPassedAt: null,
       rivetNumberLive: false,
-      answeredInboundCall: false,
+      firstRealCallReceived: false,
       skippedItems: [],
     });
   });
@@ -87,5 +84,16 @@ describe('loadGetFoundFacts (integration)', () => {
     );
 
     expect((await loadGetFoundFacts(pool, tenant.tenantId)).googleProfile).toBe('none');
+  });
+
+  it('does not count the onboarding test call as a real call', async () => {
+    const tenant = await createTestTenant(pool);
+    await pool.query(
+      `INSERT INTO voice_sessions (id, tenant_id, channel, state, started_at, ended_at)
+       VALUES (gen_random_uuid(), $1, 'voice_inbound', 'ended', now() - interval '1 minute', now())`,
+      [tenant.tenantId],
+    );
+
+    expect((await loadGetFoundFacts(pool, tenant.tenantId)).firstRealCallReceived).toBe(false);
   });
 });

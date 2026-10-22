@@ -9,7 +9,7 @@ function facts(overrides: Partial<GetFoundFacts> = {}): GetFoundFacts {
     hasForwardedLine: false,
     forwardingCheckPassedAt: null,
     rivetNumberLive: false,
-    answeredInboundCall: false,
+    firstRealCallReceived: false,
     skippedItems: [],
     ...overrides,
   };
@@ -48,14 +48,14 @@ describe('deriveGetFoundChecklist', () => {
     const live = { presencePath: 'neither' as const, rivetNumberLive: true };
 
     expect(deriveGetFoundChecklist(facts(live)).items).toContainEqual({ id: 'call_routing', status: 'pending' });
-    expect(deriveGetFoundChecklist(facts({ ...live, answeredInboundCall: true })).items).toContainEqual({
+    expect(deriveGetFoundChecklist(facts({ ...live, firstRealCallReceived: true })).items).toContainEqual({
       id: 'call_routing',
       status: 'done',
     });
   });
 
   it('an owner forwarding an existing line is done only by a passing forwarding check, which the item dates', () => {
-    const forwarding = { presencePath: 'own_website' as const, hasForwardedLine: true, rivetNumberLive: true, answeredInboundCall: true };
+    const forwarding = { presencePath: 'own_website' as const, hasForwardedLine: true, rivetNumberLive: true, firstRealCallReceived: true };
 
     expect(deriveGetFoundChecklist(facts(forwarding)).items).toContainEqual({ id: 'call_routing', status: 'pending' });
     expect(

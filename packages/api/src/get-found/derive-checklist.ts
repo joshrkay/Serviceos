@@ -27,8 +27,11 @@ export interface GetFoundFacts {
    */
   forwardingCheckPassedAt: Date | null;
   rivetNumberLive: boolean;
-  /** At least one real inbound call ended on the Rivet number. */
-  answeredInboundCall: boolean;
+  /**
+   * The Rivet number has answered a real (customer) call: `activated_at`,
+   * stamped by voice/activation.ts, which excludes the onboarding test call.
+   */
+  firstRealCallReceived: boolean;
   /** Items the owner chose to skip; they fold into the card's hidden row. */
   skippedItems: GetFoundItemId[];
 }
@@ -64,7 +67,7 @@ export interface GetFoundChecklist {
  */
 function isCallRoutingDone(f: GetFoundFacts): boolean {
   if (f.hasForwardedLine) return f.forwardingCheckPassedAt !== null;
-  return f.rivetNumberLive && f.answeredInboundCall;
+  return f.rivetNumberLive && f.firstRealCallReceived;
 }
 
 export function deriveGetFoundChecklist(f: GetFoundFacts): GetFoundChecklist {
