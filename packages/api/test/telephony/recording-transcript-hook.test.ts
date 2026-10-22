@@ -644,7 +644,8 @@ describe('createRecordingTranscriptHook (U8)', () => {
 
     // A group of four per caller turn is a card only where it is mentioned;
     // the re-read sees the agent's rows around the caller's, as the live path
-    // sees its lines, and never rewrites them.
+    // sees its lines, and leaves them as stored unless one repeats a part of
+    // the card the caller had already said.
     it("reads the agent's stored rows for a mention of the card, and leaves them as stored", async () => {
       const { hook, repo, send } = harness();
       await seedLeg(repo, SESSION_1, [
@@ -685,6 +686,39 @@ describe('createRecordingTranscriptHook (U8)', () => {
       expect(payloadTurns(send).filter((t) => t.speaker === 'caller').map((t) => t.text).slice(0, 4)).toEqual(
         Array(4).fill(MARKER),
       );
+    });
+
+    // The agent's confirm readback renders what the classifier took from the
+    // caller's turn: its stored row holds the card's first part as well.
+    it("rewrites the agent's stored readback of a part of the card with the caller's rows", async () => {
+      const { hook, repo, send } = harness();
+      await seedLeg(repo, SESSION_1, [
+        ['caller', 'add a note, the card on file is 4111 1111 1111'],
+        ['agent', 'Just to confirm: the card on file is 4111 1111 1111. Is that right?'],
+        ['caller', "1111. Yes, that's right."],
+        ['agent', 'Done.'],
+      ]);
+      const rewrite = vi.spyOn(repo, 'redactCardNumberTurns');
+
+      await hook(event());
+
+      const rows = await repo.listByRecording(TENANT, RECORDING_1);
+      expect(rows.map((r) => r.text)).toEqual([
+        `add a note, the card on file is ${MARKER}`,
+        `Just to confirm: the card on file is ${MARKER}. Is that right?`,
+        `${MARKER}. Yes, that's right.`,
+        'Done.',
+      ]);
+      expect(rewrite).toHaveBeenCalledWith(
+        expect.objectContaining({
+          turns: [
+            { id: rows[0].id, turnIndex: 0, text: `add a note, the card on file is ${MARKER}` },
+            { id: rows[1].id, turnIndex: 1, speaker: 'agent', text: `Just to confirm: the card on file is ${MARKER}. Is that right?` },
+            { id: rows[2].id, turnIndex: 2, text: `${MARKER}. Yes, that's right.` },
+          ],
+        }),
+      );
+      expect(JSON.stringify(payloadTurns(send))).not.toMatch(/4111|\b1111\b/);
     });
 
     it('leaves a call whose rows were already rewritten live as it is', async () => {

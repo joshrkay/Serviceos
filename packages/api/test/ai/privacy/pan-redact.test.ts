@@ -12,6 +12,7 @@ import {
   containsCardNumber,
   redactCardNumbers,
   redactCardNumbersAcrossTurns,
+  redactCardFragments,
   redactCardNumbersInCallTurns,
 } from '../../../src/ai/privacy/pan-redact';
 
@@ -1378,11 +1379,82 @@ describe('redactCardNumbersInCallTurns', () => {
     ).toBeNull();
   });
 
+  // The agent's confirm readback renders what the classifier took from the
+  // turn ("…the card on file is 4111 1111 1111. Is that right?"): once a later
+  // turn shows those digits were part of a card, the readback holds them too.
+  it("rewrites the agent's lines that repeat a part of the card the caller had already said", () => {
+    expect(
+      redactCardNumbersInCallTurns([
+        agent('How can I help?', 0),
+        caller('add a note for Dana Reyes, the card on file is four one one one, one one one one, one one one one', 2),
+        agent("Just to confirm: a note for Dana Reyes, the card on file is 4111-1111-1111. Is that right?", 4),
+        caller("1111. Yes, that's right.", 8),
+        agent('Done. Your note 4111 1111 1111 is saved.', 10),
+      ]),
+    ).toEqual([
+      'How can I help?',
+      `add a note for Dana Reyes, the card on file is ${MARKER}`,
+      `Just to confirm: a note for Dana Reyes, the card on file is ${MARKER}. Is that right?`,
+      `${MARKER}. Yes, that's right.`,
+      // Said after the card was complete: built from the rewritten turn, and
+      // no line of the card's own.
+      'Done. Your note 4111 1111 1111 is saved.',
+    ]);
+    // Only what the caller said before the agent's line: a group the agent
+    // said first is its own.
+    expect(
+      redactCardNumbersInCallTurns([
+        caller('my card is 4111', 0),
+        agent('Your unit number is 1111, go on.', 1),
+        caller('1111', 2),
+        agent('And then? You said 4111 and 1111.', 3),
+        caller('1111 1111', 4),
+      ]),
+    ).toEqual([
+      `my card is ${MARKER}`,
+      'Your unit number is 1111, go on.',
+      MARKER,
+      `And then? You said ${MARKER} and ${MARKER}.`,
+      MARKER,
+    ]);
+  });
+
   it('returns null when nothing changes, and leaves a clean (already rewritten) call alone', () => {
     expect(redactCardNumbersInCallTurns([])).toBeNull();
     expect(
       redactCardNumbersInCallTurns([caller(`my card is ${MARKER}`, 0), caller(MARKER, 3), caller(`${MARKER} thanks`, 6)]),
     ).toBeNull();
+  });
+});
+
+describe('redactCardFragments', () => {
+  it('replaces every run of digits that reads a fragment, written or as words, and nothing else', () => {
+    const said = ['4111 1111 1111'];
+    for (const run of [
+      '4111 1111 1111',
+      '4111-1111-1111',
+      '411111111111',
+      'four one one one, one one one one, one one one one',
+      'forty-one eleven eleven eleven eleven eleven',
+    ]) {
+      expect(redactCardFragments(`the card on file is ${run}. Is that right?`, said)).toBe(
+        `the card on file is ${MARKER}. Is that right?`,
+      );
+    }
+    // Only whole groups: a ZIP or a longer number that merely holds the
+    // fragment's digits is another number, and so is a phone number ending in
+    // them.
+    for (const text of ['zip 84111', 'unit 41111', 'call 602 555 4111', 'call (602) 555-4111', 'call 6025554111']) {
+      expect(redactCardFragments(text, ['4111', '1111 1111'])).toBe(text);
+    }
+    // A number word said next to the digits is a group of its own.
+    expect(redactCardFragments('and the last four, 1111 1111?', ['4111', '1111 1111'])).toBe(
+      `and the last four, ${MARKER}?`,
+    );
+    // Fragments said one after the other may be repeated together.
+    expect(redactCardFragments('so 4111 1111 1111 1111?', ['4111 1111', '1111 1111'])).toBe(`so ${MARKER}?`);
+    expect(redactCardFragments('no digits here', said)).toBe('no digits here');
+    expect(redactCardFragments('4111 1111 1111', [])).toBe('4111 1111 1111');
   });
 });
 

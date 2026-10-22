@@ -263,10 +263,10 @@ export class PgCallTranscriptTurnRepository
    * the audit row, so either the whole card leaves the stored call or none of
    * the rewrite lands (the in-memory transcript is already rewritten either
    * way, and the recording hook later flags the recording from it). Each row
-   * is matched on this session's call key and `speaker = 'caller'` as well as
-   * its id, so a stale id can never rewrite another session's or an agent's
-   * row; without an id, only a row no recording has claimed (its mid-call
-   * index is still the append-time one).
+   * is matched on this session's call key and its speaker (caller unless the
+   * turn names the agent) as well as its id, so a stale id can never rewrite
+   * another session's row or another speaker's; without an id, only a row no
+   * recording has claimed (its mid-call index is still the append-time one).
    */
   async redactCardNumberTurns(input: RedactCardNumberTurnsInput): Promise<number> {
     validateRedactCardNumberTurnsInput(input);
@@ -274,19 +274,20 @@ export class PgCallTranscriptTurnRepository
     return this.withTenantTransaction(tenantId, async (client) => {
       const rewritten: number[] = [];
       for (const turn of input.turns) {
+        const speaker = turn.speaker ?? 'caller';
         const result =
           turn.id !== undefined
             ? await client.query(
                 `UPDATE call_transcript_turns SET text = $5
                   WHERE tenant_id = $1 AND call_sid = $2 AND session_id = $3
-                    AND speaker = 'caller' AND id = $4`,
-                [tenantId, callSid, sessionId, turn.id, turn.text],
+                    AND speaker = $6 AND id = $4`,
+                [tenantId, callSid, sessionId, turn.id, turn.text, speaker],
               )
             : await client.query(
                 `UPDATE call_transcript_turns SET text = $5
                   WHERE tenant_id = $1 AND call_sid = $2 AND session_id = $3
-                    AND speaker = 'caller' AND turn_index = $4 AND voice_recording_id IS NULL`,
-                [tenantId, callSid, sessionId, turn.turnIndex, turn.text],
+                    AND speaker = $6 AND turn_index = $4 AND voice_recording_id IS NULL`,
+                [tenantId, callSid, sessionId, turn.turnIndex, turn.text, speaker],
               );
         if ((result.rowCount ?? 0) > 0) rewritten.push(turn.turnIndex);
       }

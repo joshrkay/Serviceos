@@ -18,7 +18,7 @@ import {
   type VoiceEventTransport,
   type VoiceEventEnvelope,
 } from './voice-event-transport';
-import { CallingAgentStateMachine } from './state-machine';
+import { CallingAgentStateMachine, rewriteStrings } from './state-machine';
 import type {
   CallingAgentChannel,
   CallingAgentContext,
@@ -31,6 +31,7 @@ import { SessionCostTracker, DEFAULT_INAPP_CAPS, DEFAULT_TELEPHONY_CAPS } from '
 import type { CallOutcome } from '../../../voice/voice-service';
 import type {
   CallTranscriptTurnRepository,
+  CallTurnSpeaker,
   CallTurnTransport,
   RedactCardNumberTurnsInput,
   ReplyUnackedReason,
@@ -41,6 +42,7 @@ import {
   agentLinesAround,
   CARD_NUMBER_PLACEHOLDER,
   cardSplitWindow,
+  redactCardFragments,
   redactCardNumbersAcrossTurns,
 } from '../../privacy/pan-redact';
 import type {
@@ -86,6 +88,66 @@ interface RecentCallerTurn {
   at: number;
   /** Its `recordTurn` promise (the row id; undefined when not persisted). */
   row?: Promise<string | undefined>;
+}
+
+/**
+ * PRIV-3 — an earlier caller turn a cross-turn card rewrite changed: where it
+ * is, its text as it was taken, as it now reads, and the spans that became the
+ * marker (in the order said).
+ */
+interface CapturedTextRewrite {
+  turnIndex: number;
+  from: string;
+  to: string;
+  fragments: readonly string[];
+}
+
+/**
+ * PRIV-3 — one stored row a cross-turn card rewrite changed: a caller turn
+ * that held part of the card, or an agent line that repeated a part of it.
+ */
+interface RewrittenTurn {
+  turnIndex: number;
+  speaker: CallTurnSpeaker;
+  text: string;
+  /** Its `recordTurn` promise (the row id; undefined when not persisted). */
+  row?: Promise<string | undefined>;
+}
+
+/**
+ * PRIV-3 — the words a turn already handed on before a later turn showed
+ * they held part of a card number: the FSM context (`lastUtterance`, which
+ * the confirm turn's proposal is drafted from, the classifier's entities, a
+ * pending reference), the requests the session holds for an answer (identity
+ * check, service-area check, a rebook offer and its entities) and the in-app
+ * duplicate-turn record (the operator's words and the line spoken back).
+ * Each is rewritten as the transcript was: text that is a whole earlier turn
+ * becomes its rewritten text, and any number in it that reads a part of the
+ * card that became the marker becomes the marker (`redactCardFragments`:
+ * whole numbers only, in whatever form the classifier wrote them, so a ZIP
+ * that merely holds the same digits is left alone).
+ */
+function rewriteCapturedText(session: VoiceSession, rewrites: readonly CapturedTextRewrite[]): void {
+  const fragments = rewrites.flatMap((r) => r.fragments);
+  const rewrite = (text: string): string =>
+    redactCardFragments(rewrites.find((r) => r.from === text)?.to ?? text, fragments);
+  session.machine.rewriteCapturedText(rewrite);
+  if (session.callerIdentityCheck) {
+    session.callerIdentityCheck.heldUtterance = rewrite(session.callerIdentityCheck.heldUtterance);
+  }
+  if (session.serviceAreaCheck) {
+    session.serviceAreaCheck.heldUtterance = rewrite(session.serviceAreaCheck.heldUtterance);
+  }
+  if (session.rebookOffer) {
+    session.rebookOffer.heldUtterance = rewrite(session.rebookOffer.heldUtterance);
+    session.rebookOffer.entities = rewriteStrings(session.rebookOffer.entities, rewrite);
+  }
+  if (session.lastOperatorTurn) {
+    session.lastOperatorTurn.normalizedText = rewrite(session.lastOperatorTurn.normalizedText);
+    if (session.lastOperatorTurn.lastSpoken !== undefined) {
+      session.lastOperatorTurn.lastSpoken = rewrite(session.lastOperatorTurn.lastSpoken);
+    }
+  }
 }
 
 /** Fold retained stamps into one, the first stamp for a field winning (as the repository's COALESCE does). */
@@ -227,6 +289,24 @@ export interface TranscriptEntry {
    * lines.
    */
   timing?: CallerTurnTiming;
+}
+
+/**
+ * PRIV-3 — what {@link VoiceSessionStore.appendTranscript} stored for a turn.
+ * A caller turn that completes a card number the caller split across turns is
+ * stored with its part of the card replaced by the marker, and so are the
+ * earlier turns that held the rest: the transport reads the turn on as
+ * `text`, never as the words it appended.
+ */
+export interface AppendedTranscriptTurn {
+  /** The turn's text as stored. */
+  text: string;
+  /**
+   * Transcript indexes of the earlier lines the append rewrote (oldest
+   * first): the caller turns that held the card's other parts, and the agent
+   * lines that repeated one of them.
+   */
+  rewrittenTurnIndexes: number[];
 }
 
 /**
@@ -544,6 +624,13 @@ export interface VoiceSession {
    * oldest first. See `appendTranscript`.
    */
   recentCallerTurns: RecentCallerTurn[];
+  /**
+   * PRIV-3 — the agent lines said since the oldest of `recentCallerTurns`
+   * (their transcript index and row), oldest first: a card rewrite also
+   * rewrites one that repeated a part of the card the caller had said before
+   * it (the confirm readback). See `appendTranscript`.
+   */
+  recentAgentTurns: Array<{ turnIndex: number; row?: Promise<string | undefined> }>;
   /**
    * PRIV-3 — tail of this session's cross-turn card-number rewrites of the
    * stored rows, chained so they land in the order they were made (a later
@@ -903,6 +990,7 @@ export class VoiceSessionStore {
       pendingReplyStamps: new Map(),
       replyTimings: [],
       recentCallerTurns: [],
+      recentAgentTurns: [],
       cardRedactionWrites: Promise.resolve(),
       unwrittenCardRedactions: [],
       transcript: [],
@@ -1060,44 +1148,65 @@ export class VoiceSessionStore {
    * contributing span becomes the marker: in the in-memory transcript at once
    * (so no later prompt, proposal or summary built from it carries the card),
    * in the new turn's row as it is inserted, and in the earlier rows by one
-   * transaction chained behind their inserts.
+   * transaction chained behind their inserts. The agent's lines between those
+   * turns that repeated a part of the card the caller had said before them
+   * (the confirm readback renders what the classifier took from the turn)
+   * are rewritten the same way, in memory and in that transaction. The words
+   * already taken from the earlier turns (the FSM context's `lastUtterance`
+   * and extracted entities, a held request) are rewritten too, and the turn's
+   * own text is returned: the transport reads the rest of the turn
+   * (classification, the FSM, the safety scan, the task handlers) on as that,
+   * never as the words it appended.
    */
-  appendTranscript(sessionId: string, entry: TranscriptEntry): void {
+  appendTranscript(sessionId: string, entry: TranscriptEntry): AppendedTranscriptTurn {
     const session = this.sessions.get(sessionId);
-    if (!session) return;
+    if (!session) return { text: entry.text, rewrittenTurnIndexes: [] };
     const turnIndex = session.transcript.length;
     const split = entry.speaker === 'caller' ? this.redactCardSplitAcrossTurns(session, turnIndex, entry) : null;
     const line = split ? { ...entry, text: split.text } : entry;
     session.transcript.push(`${line.speaker}: ${line.text}`);
     session.lastActivityAt = new Date();
-    this.persistTurn(session, turnIndex, line);
+    const row = this.persistTurn(session, turnIndex, line);
     const tracked = session.recentCallerTurns[session.recentCallerTurns.length - 1];
-    if (line.speaker === 'caller' && tracked?.turnIndex === turnIndex) {
-      tracked.row = session.pendingTurnPersist.get(turnIndex);
+    if (line.speaker === 'caller') {
+      if (tracked?.turnIndex === turnIndex) tracked.row = row;
+    } else if (session.recentCallerTurns.length > 0) {
+      session.recentAgentTurns.push({ turnIndex, row });
     }
-    if (split) this.persistCardRedaction(session, split.rewritten);
+    if (split) {
+      const self = split.rewritten.find((t) => t.turnIndex === turnIndex);
+      if (self) self.row = row;
+      this.persistCardRedaction(session, split.rewritten);
+    }
+    return {
+      text: line.text,
+      rewrittenTurnIndexes: (split?.rewritten ?? []).map((t) => t.turnIndex).filter((i) => i !== turnIndex),
+    };
   }
 
   /**
    * PRIV-3 — slide the caller-turn window forward to the new turn and look
-   * for a card number spanning it. On a hit the earlier turns' lines are
-   * rewritten in memory here; returns the new turn's text and every turn
-   * whose stored text changed (the new one included), else null.
+   * for a card number spanning it. On a hit the earlier turns' lines, and the
+   * agent's lines between them that repeated a part of the card, are
+   * rewritten in memory here; returns the new turn's text and every line
+   * whose stored text changed (the new one included, oldest first), else null.
    */
   private redactCardSplitAcrossTurns(
     session: VoiceSession,
     turnIndex: number,
     entry: TranscriptEntry,
-  ): { text: string; rewritten: RecentCallerTurn[] } | null {
+  ): { text: string; rewritten: RewrittenTurn[] } | null {
     const at = entry.ts ?? Date.now();
     const earlier = cardSplitWindow(session.recentCallerTurns, at);
     // An empty utterance holds no digits and is never persisted.
     if (entry.text.trim().length === 0) {
       session.recentCallerTurns = earlier;
+      this.forgetAgentTurnsBefore(session);
       return null;
     }
     const current: RecentCallerTurn = { turnIndex, text: entry.text, at };
     session.recentCallerTurns = [...earlier, current];
+    this.forgetAgentTurnsBefore(session);
     if (earlier.length === 0) return null;
     // The agent's lines around the window: a card read group by group, one
     // per turn, must be mentioned in them or in the caller's turns.
@@ -1108,20 +1217,50 @@ export class VoiceSessionStore {
       session.recentCallerTurns[0].turnIndex,
       turnIndex,
     );
+    const fragments = new Map<number, string[]>();
     const texts = redactCardNumbersAcrossTurns(
       session.recentCallerTurns.map((t) => t.text),
       CARD_NUMBER_PLACEHOLDER,
       { agentLines },
+      (k, matched) => fragments.set(k, [...(fragments.get(k) ?? []), matched]),
     );
     if (!texts) return null;
-    const rewritten: RecentCallerTurn[] = [];
+    const rewritten: RewrittenTurn[] = [];
+    const captured: CapturedTextRewrite[] = [];
     session.recentCallerTurns.forEach((turn, k) => {
       if (texts[k] === turn.text) return;
+      if (turn !== current) {
+        captured.push({ turnIndex: turn.turnIndex, from: turn.text, to: texts[k], fragments: fragments.get(k) ?? [] });
+        session.transcript[turn.turnIndex] = `caller: ${texts[k]}`;
+      }
       turn.text = texts[k];
-      rewritten.push(turn);
-      if (turn !== current) session.transcript[turn.turnIndex] = `caller: ${turn.text}`;
+      rewritten.push({ turnIndex: turn.turnIndex, speaker: 'caller', text: turn.text, row: turn.row });
     });
+    // The agent's lines between the card's turns (an in-app adapter writes its
+    // own straight into the transcript), each against the parts the caller had
+    // said before it.
+    const agentRows = new Map(session.recentAgentTurns.map((t) => [t.turnIndex, t.row]));
+    for (let i = (captured[0]?.turnIndex ?? turnIndex) + 1; i < turnIndex; i++) {
+      const line = session.transcript[i];
+      if (!line.startsWith(AGENT_LINE)) continue;
+      const said = captured.filter((c) => c.turnIndex < i).flatMap((c) => c.fragments);
+      const text = line.slice(AGENT_LINE.length);
+      const next = redactCardFragments(text, said);
+      if (next === text) continue;
+      session.transcript[i] = `${AGENT_LINE}${next}`;
+      rewritten.push({ turnIndex: i, speaker: 'agent', text: next, row: agentRows.get(i) });
+    }
+    if (captured.length > 0) rewriteCapturedText(session, captured);
+    rewritten.sort((a, b) => a.turnIndex - b.turnIndex);
     return rewritten.length > 0 ? { text: current.text, rewritten } : null;
+  }
+
+  /** PRIV-3 — drop the agent lines said before the oldest caller turn still in the window. */
+  private forgetAgentTurnsBefore(session: VoiceSession): void {
+    const oldest = session.recentCallerTurns[0]?.turnIndex ?? Infinity;
+    while (session.recentAgentTurns.length > 0 && session.recentAgentTurns[0].turnIndex < oldest) {
+      session.recentAgentTurns.shift();
+    }
   }
 
   /**
@@ -1132,18 +1271,20 @@ export class VoiceSessionStore {
    * recording hook to write (`unwrittenCardRedactions`), and never reaches the
    * call path.
    */
-  private persistCardRedaction(session: VoiceSession, rewritten: RecentCallerTurn[]): void {
+  private persistCardRedaction(session: VoiceSession, rewritten: RewrittenTurn[]): void {
     const repo = this.callTranscriptTurnRepo;
     const { callSid } = session;
     if (!repo || !callSid) return; // in-app: the running transcript is rewritten from memory
-    const turns = rewritten.map((t) => ({ turnIndex: t.turnIndex, text: t.text.trim(), row: t.row }));
+    const turns = rewritten.map((t) => ({ ...t, text: t.text.trim() }));
     session.cardRedactionWrites = session.cardRedactionWrites
       .then(() => Promise.all(turns.map((t) => t.row ?? Promise.resolve(undefined))))
       .then(async (ids) => {
         const rows = turns.map((t, k) => ({
-          turnIndex: t.turnIndex,
-          text: t.text,
           ...(ids[k] ? { id: ids[k] } : {}),
+          turnIndex: t.turnIndex,
+          // Absent for a caller row (the repository's default).
+          ...(t.speaker === 'agent' ? { speaker: t.speaker } : {}),
+          text: t.text,
         }));
         try {
           await repo.redactCardNumberTurns({
@@ -1167,12 +1308,17 @@ export class VoiceSessionStore {
       });
   }
 
-  private persistTurn(session: VoiceSession, turnIndex: number, entry: TranscriptEntry): void {
+  /** Returns the row's insert (resolving to its id, undefined on failure), or undefined when nothing is persisted. */
+  private persistTurn(
+    session: VoiceSession,
+    turnIndex: number,
+    entry: TranscriptEntry,
+  ): Promise<string | undefined> | undefined {
     const timing = entry.speaker === 'caller' ? entry.timing : undefined;
     const repo = this.callTranscriptTurnRepo;
-    if (!repo || !session.callSid) return; // in-app sessions have no CallSid: nothing to key on
+    if (!repo || !session.callSid) return undefined; // in-app sessions have no CallSid: nothing to key on
     const text = entry.text.trim();
-    if (text.length === 0) return; // an empty utterance still took its transcript index
+    if (text.length === 0) return undefined; // an empty utterance still took its transcript index
     const { callSid } = session;
     const endpointDelayMs =
       timing?.lastWordAt !== undefined
@@ -1234,6 +1380,7 @@ export class VoiceSessionStore {
         }
       }
     }
+    return persisted;
   }
 
   /**
@@ -1371,6 +1518,7 @@ export class VoiceSessionStore {
     session.pendingTurnPersist.clear();
     session.pendingReplyStamps.clear();
     session.recentCallerTurns = [];
+    session.recentAgentTurns = [];
     this.sessions.delete(sessionId);
   }
 

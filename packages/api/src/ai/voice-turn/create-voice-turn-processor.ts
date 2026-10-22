@@ -56,7 +56,7 @@ import {
 import { currentTenantContext } from '../../middleware/tenant-context';
 import type { ApprovalReferenceCheck } from '../../proposals/approval-reference-checks';
 import type { RouteUnsupervisedProposalDeps } from '../../proposals/auto-approve';
-import { appendAgentTts, callerTranscriptText } from './transcript-append';
+import { appendAgentTts, callerTranscriptText, callerTurnTextAfterAppend } from './transcript-append';
 import { redactCardNumbers } from '../privacy/pan-redact';
 import {
   classifyIntent,
@@ -5959,6 +5959,7 @@ export function createVoiceTurnProcessor(
     callSid: _callSid,
     tenantId,
     transcriptAppended = false,
+    onCallerText,
   }): Promise<SideEffect[]> => {
     // PRIV-3 — a recited card number is scrubbed where the caller's words
     // enter the turn: the FSM events built from `speechResult` (their
@@ -6005,12 +6006,13 @@ export function createVoiceTurnProcessor(
       (speechResult.trim().length > 0 ||
         !servesFamilyHere('silence_low_stt_ladder'))
     ) {
-      deps.store.appendTranscript(session.id, {
-        speaker: 'caller',
-        text: callerTranscriptText(session, speechResult),
-        ts: Date.now(),
-      });
+      const stored = callerTranscriptText(session, speechResult);
+      const appended = deps.store.appendTranscript(session.id, { speaker: 'caller', text: stored, ts: Date.now() });
+      // PRIV-3 — the rest of the turn reads on as the store kept it (a turn
+      // that completes a card split across turns carries the marker).
+      speechResult = callerTurnTextAfterAppend(speechResult, stored, appended);
     }
+    onCallerText?.(speechResult);
 
     // B3-1 — the owner line's privileges as of this turn, before anything
     // below reads them.

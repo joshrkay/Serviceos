@@ -120,7 +120,7 @@ async function settled(session: VoiceSession, t: TestTenant = tenant): Promise<C
 }
 
 describe('PRIV-3 follow-up — a card number split across caller turns (real Postgres, RLS on)', () => {
-  it('the third caller turn completes a card: all three caller rows end redacted, agent rows and other sessions untouched', async () => {
+  it("the third caller turn completes a card: all three caller rows end redacted with the agent's repeat of one, other agent rows and sessions untouched", async () => {
     const callSid = newCallSid();
     const session = store.create(tenant.tenantId, 'telephony', { callSid });
     // Another leg of the SAME call (gather fallback after a restart) holding
@@ -148,7 +148,8 @@ describe('PRIV-3 follow-up — a card number split across caller turns (real Pos
       [1, 'caller', `can I pay now, my card is ${MARKER}`],
       [2, 'agent', 'go on'],
       [3, 'caller', MARKER],
-      [4, 'agent', 'and the last four, 1111?'],
+      // The agent repeated the group the caller had just said.
+      [4, 'agent', `and the last four, ${MARKER}?`],
       [5, 'caller', `${MARKER} thanks`],
     ]);
     // The in-memory history the next prompt is built from says the same.
@@ -189,9 +190,36 @@ describe('PRIV-3 follow-up — a card number split across caller turns (real Pos
       tenant_id: tenant.tenantId,
       actor_role: 'system',
       entity_type: 'voice_session',
-      metadata: { callSid, turnIndexes: [1, 3, 5], rows: 3 },
+      // The caller rows that held the card, and the agent's repeat of a group.
+      metadata: { callSid, turnIndexes: [1, 3, 4, 5], rows: 4 },
     });
     expect(JSON.stringify(audits[0].metadata)).not.toContain('1111');
+  });
+
+  // The agent's confirm readback renders what the classifier took from the
+  // turn: its row holds the card's first part too, and is rewritten in the
+  // same transaction as the caller's.
+  it("rewrites the agent's stored readback of the card's first part with the caller's rows", async () => {
+    const callSid = newCallSid();
+    const session = store.create(tenant.tenantId, 'telephony', { callSid });
+    say(session, [
+      ['caller', 'add a note for Dana, the card on file is 4111 1111 1111'],
+      ['agent', 'Just to confirm: a note for Dana, the card on file is 4111 1111 1111. Is that right?'],
+      ['caller', "1111. Yes, that's right."],
+      ['agent', 'Done.'],
+    ]);
+    const rows = await settled(session);
+    expect(rows.map((r) => [r.turnIndex, r.speaker, r.text])).toEqual([
+      [0, 'caller', `add a note for Dana, the card on file is ${MARKER}`],
+      [1, 'agent', `Just to confirm: a note for Dana, the card on file is ${MARKER}. Is that right?`],
+      [2, 'caller', `${MARKER}. Yes, that's right.`],
+      [3, 'agent', 'Done.'],
+    ]);
+    const { rows: audits } = await pool.query(
+      `SELECT metadata FROM audit_events WHERE event_type = $1 AND entity_id = $2`,
+      [CARD_NUMBER_SPLIT_REDACTED_EVENT, session.id],
+    );
+    expect(audits.map((a) => a.metadata)).toEqual([{ callSid, turnIndexes: [0, 1, 2], rows: 3 }]);
   });
 
   // A group of four per caller turn is also how gate codes and years are
@@ -208,7 +236,7 @@ describe('PRIV-3 follow-up — a card number split across caller turns (real Pos
     expect((await settled(codes)).map((r) => r.text)).toEqual(['What is the gate code?', '4111', '1111', '1111', '1111']);
   });
 
-  it('rewrites by the mid-call key when no row id is known, never an agent row or a row a recording claimed', async () => {
+  it("rewrites by the mid-call key when no row id is known, a row only as its own speaker's, never a row a recording claimed", async () => {
     const callSid = newCallSid();
     const sessionId = crypto.randomUUID();
     const seed = async (turnIndex: number, speaker: 'agent' | 'caller', text: string) =>
@@ -223,14 +251,27 @@ describe('PRIV-3 follow-up — a card number split across caller turns (real Pos
       actorId: 'voice-session-store',
       turns: [
         { turnIndex: 0, text: MARKER },
-        // An agent row is never rewritten, by key or by id.
+        // An agent row is never rewritten as a caller's, by key or by id.
         { turnIndex: 1, text: MARKER },
         { id: agent.id, turnIndex: 1, text: MARKER },
+        // Nor a caller row as an agent's.
+        { turnIndex: 0, speaker: 'agent', text: 'x' },
       ],
     });
     expect(rewritten).toBe(1);
     const rows = await repo.listByCallSid(tenant.tenantId, callSid);
     expect(rows.map((r) => r.text)).toEqual([MARKER, '1111']);
+    // Named as the agent's, it is.
+    expect(
+      await repo.redactCardNumberTurns({
+        tenantId: tenant.tenantId,
+        callSid,
+        sessionId,
+        actorId: 'voice-session-store',
+        turns: [{ id: agent.id, turnIndex: 1, speaker: 'agent', text: `you said ${MARKER}` }],
+      }),
+    ).toBe(1);
+    expect((await repo.listByCallSid(tenant.tenantId, callSid)).map((r) => r.text)).toEqual([MARKER, `you said ${MARKER}`]);
 
     // Once a recording claims the call's rows (renumbered at end of call), a
     // mid-call index no longer names a row: a key-only rewrite touches none.
@@ -257,7 +298,7 @@ describe('PRIV-3 follow-up — a card number split across caller turns (real Pos
     ).toBe(0);
     expect((await repo.listByCallSid(tenant.tenantId, callSid)).map((r) => r.text)).toEqual([
       MARKER,
-      '1111',
+      `you said ${MARKER}`,
       '1111 1111',
     ]);
 

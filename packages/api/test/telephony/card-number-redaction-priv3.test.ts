@@ -209,7 +209,11 @@ describe('PRIV-3 follow-up — a card number split across Gather turns', () => {
     for (const req of afterCompletingTurn) {
       const sent = JSON.stringify(req.messages);
       expect(sent).not.toMatch(CARD_DIGITS);
-      expect(sent).not.toMatch(/\b1111\b/);
+      // A digit, not a word boundary, bounds it: in JSON a newline before
+      // the completing turn's "1111" reads "\\n1111". Ids set aside.
+      expect(sent.replace(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi, '<id>')).not.toMatch(
+        /(?<!\d)1111(?!\d)/,
+      );
     }
 
     const callerLines = session.transcript.filter((line) => line.startsWith('caller: '));

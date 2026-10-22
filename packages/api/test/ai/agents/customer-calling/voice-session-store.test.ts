@@ -656,6 +656,162 @@ describe('VoiceSessionStore', () => {
       });
     });
 
+    it('returns the text each turn was stored as, and the earlier turns a completing turn rewrote', () => {
+      const store = newStore();
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      expect(store.appendTranscript(session.id, { speaker: 'agent', text: 'how can I help' })).toEqual({
+        text: 'how can I help',
+        rewrittenTurnIndexes: [],
+      });
+      expect(store.appendTranscript(session.id, { speaker: 'caller', text: 'my card is 4111 1111' })).toEqual({
+        text: 'my card is 4111 1111',
+        rewrittenTurnIndexes: [],
+      });
+      store.appendTranscript(session.id, { speaker: 'agent', text: 'go on' });
+      expect(store.appendTranscript(session.id, { speaker: 'caller', text: '1111 1111 thanks' })).toEqual({
+        text: `${MARKER} thanks`,
+        rewrittenTurnIndexes: [1],
+      });
+      // An unknown session stores nothing and rewrites nothing.
+      expect(store.appendTranscript('no-such-session', { speaker: 'caller', text: '1111' })).toEqual({
+        text: '1111',
+        rewrittenTurnIndexes: [],
+      });
+    });
+
+    it("rewrites the caller's words an earlier turn already handed on: the FSM context and the held requests", () => {
+      const store = newStore();
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      const first = 'book a visit, my card is 4111 1111 1111';
+      store.appendTranscript(session.id, { speaker: 'caller', text: first });
+      // What the first turn handed on before anything could tell it held part
+      // of a card: the classified request, its entities, and a held request.
+      session.machine.dispatch({ type: 'incoming_call', callSid: CALL_SID, from: '+15125550100', to: '+15125550999', tenantId: 'tenant-a' });
+      session.machine.dispatch({ type: 'greeted_ok' });
+      session.machine.dispatch({ type: 'caller_known', customerId: 'cust-41111111' });
+      session.machine.dispatch({
+        type: 'intent_classified',
+        intentType: 'create_appointment',
+        entities: { notes: 'card 4111 1111 1111 on file', serviceType: 'tune-up', jobId: 'job-1111' },
+        confidence: 0.95,
+        utterance: first,
+      });
+      session.serviceAreaCheck = { heldUtterance: first, reasks: 0 };
+      session.callerIdentityCheck = { heldUtterance: first, accountName: 'Dana Reyes', reasks: 0 };
+      session.rebookOffer = { heldUtterance: first, cancelledAppointmentId: 'appt-1', entities: {}, confidence: 0.9 };
+
+      store.appendTranscript(session.id, { speaker: 'caller', text: '1111' });
+
+      const rewrittenFirst = `book a visit, my card is ${MARKER}`;
+      const context = session.machine.currentContext;
+      expect(context.lastUtterance).toBe(rewrittenFirst);
+      expect(context.extractedEntities).toEqual({
+        notes: `card ${MARKER} on file`,
+        serviceType: 'tune-up',
+        // Ids are never rewritten, whatever digits they hold.
+        jobId: 'job-1111',
+      });
+      expect(context.customerId).toBe('cust-41111111');
+      expect(session.serviceAreaCheck.heldUtterance).toBe(rewrittenFirst);
+      expect(session.callerIdentityCheck.heldUtterance).toBe(rewrittenFirst);
+      expect(session.rebookOffer.heldUtterance).toBe(rewrittenFirst);
+    });
+
+    // The agent's confirm readback renders what the classifier took from the
+    // first turn: once the next turn shows those digits were part of a card,
+    // the readback holds them too, in the transcript every later prompt is
+    // built from and in its stored row.
+    it("rewrites the agent's readback of a part of the card, in memory at once and in the same repository call", async () => {
+      const { repo, redactCardNumberTurns } = splitRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'add a note, the card on file is 4111 1111 1111' });
+      store.appendTranscript(session.id, {
+        speaker: 'agent',
+        text: 'Just to confirm: a note, the card on file is 4111-1111-1111. Is that right?',
+      });
+      expect(store.appendTranscript(session.id, { speaker: 'caller', text: "1111. Yes, that's right." })).toEqual({
+        text: `${MARKER}. Yes, that's right.`,
+        rewrittenTurnIndexes: [0, 1],
+      });
+      store.appendTranscript(session.id, { speaker: 'agent', text: 'Done.' });
+      expect(session.transcript).toEqual([
+        `caller: add a note, the card on file is ${MARKER}`,
+        `agent: Just to confirm: a note, the card on file is ${MARKER}. Is that right?`,
+        `caller: ${MARKER}. Yes, that's right.`,
+        'agent: Done.',
+      ]);
+      await session.cardRedactionWrites;
+      expect(redactCardNumberTurns).toHaveBeenCalledTimes(1);
+      expect(redactCardNumberTurns).toHaveBeenCalledWith(
+        expect.objectContaining({
+          turns: [
+            { id: 'row-0', turnIndex: 0, text: `add a note, the card on file is ${MARKER}` },
+            {
+              id: 'row-1',
+              turnIndex: 1,
+              speaker: 'agent',
+              text: `Just to confirm: a note, the card on file is ${MARKER}. Is that right?`,
+            },
+            { id: 'row-2', turnIndex: 2, text: `${MARKER}. Yes, that's right.` },
+          ],
+        }),
+      );
+    });
+
+    // A caller turn that was nothing but "4111" is replaced wherever its
+    // digits are read as one number, never inside another one ("84111").
+    it('rewrites only whole numbers in the captured words, the held rebook entities and the last spoken line included', () => {
+      const store = newStore();
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(session.id, { speaker: 'agent', text: AGENT_ON_CARD });
+      store.appendTranscript(session.id, { speaker: 'caller', text: '4111' });
+      session.machine.dispatch({ type: 'incoming_call', callSid: CALL_SID, from: '+15125550100', to: '+15125550999', tenantId: 'tenant-a' });
+      session.machine.dispatch({ type: 'greeted_ok' });
+      session.machine.dispatch({ type: 'caller_known', customerId: 'cust-1' });
+      session.machine.dispatch({
+        type: 'intent_classified',
+        intentType: 'create_appointment',
+        entities: { zip: '84111', callbackPhone: '602 555 4111', notes: 'card 4111' },
+        confidence: 0.95,
+        utterance: '4111',
+      });
+      session.rebookOffer = {
+        heldUtterance: 'rebook it, the card is 4111',
+        cancelledAppointmentId: 'appt-1',
+        entities: { zip: '84111', notes: 'paid with 4111' },
+        confidence: 0.9,
+      };
+      session.lastOperatorTurn = {
+        normalizedText: '4111',
+        at: 0,
+        stateBefore: 'intent_classify',
+        stateAfter: 'intent_confirm',
+        lastSpoken: 'You said 4111?',
+      };
+      for (const text of ['1111', '1111', '1111']) store.appendTranscript(session.id, { speaker: 'caller', text });
+      expect(session.transcript.slice(1)).toEqual(Array(4).fill(`caller: ${MARKER}`));
+
+      const context = session.machine.currentContext;
+      expect(context.lastUtterance).toBe(MARKER);
+      expect(context.extractedEntities).toEqual({ zip: '84111', callbackPhone: '602 555 4111', notes: `card ${MARKER}` });
+      expect(session.rebookOffer.heldUtterance).toBe(`rebook it, the card is ${MARKER}`);
+      expect(session.rebookOffer.entities).toEqual({ zip: '84111', notes: `paid with ${MARKER}` });
+      expect(session.lastOperatorTurn.normalizedText).toBe(MARKER);
+      expect(session.lastOperatorTurn.lastSpoken).toBe(`You said ${MARKER}?`);
+    });
+
+    it('leaves the captured words alone when no earlier turn is rewritten', () => {
+      const store = newStore();
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'gate code 4111' });
+      session.serviceAreaCheck = { heldUtterance: 'gate code 4111', reasks: 0 };
+      const contextBefore = session.machine.currentContext;
+      store.appendTranscript(session.id, { speaker: 'caller', text: '1111' });
+      expect(session.serviceAreaCheck.heldUtterance).toBe('gate code 4111');
+      expect(session.machine.currentContext).toBe(contextBefore);
+    });
+
     it('waits for the earlier rows to be inserted before rewriting them', async () => {
       const inserts: Array<() => void> = [];
       const recordTurn = vi.fn(
@@ -685,7 +841,7 @@ describe('VoiceSessionStore', () => {
       );
     });
 
-    it('never lets an agent turn join the window, and never rewrites one', async () => {
+    it('never lets an agent turn join the window, nor rewrites one that repeats no part of the card', async () => {
       const { repo, redactCardNumberTurns } = splitRepo();
       const store = newStore({ callTranscriptTurnRepo: repo });
       const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });

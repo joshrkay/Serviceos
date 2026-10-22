@@ -124,11 +124,12 @@ async function writeUnwrittenCardRedactions(
  * rows from a process without the stitching). Each session leg's caller rows
  * are read again exactly as the live path reads them
  * (`redactCardNumbersInCallTurns`: the same window, by the time each row
- * was stored, with the agent's rows around it as context; agent rows are
- * never rewritten), and every row that held part of a card is rewritten in one
- * audited transaction per leg (`redactCardNumberTurns`). Returns the rows as
- * they now read; a failed write is logged (indexes only, never text) and the
- * rewritten text is still what is ingested.
+ * was stored, with the agent's rows around it as context; an agent row
+ * between the card's turns is rewritten only where it repeats a part of the
+ * card, the confirm readback), and every row that held part of a card is
+ * rewritten in one audited transaction per leg (`redactCardNumberTurns`).
+ * Returns the rows as they now read; a failed write is logged (indexes only,
+ * never text) and the rewritten text is still what is ingested.
  */
 async function redactSplitCardNumbers(
   deps: Pick<RecordingTranscriptHookDeps, 'callTranscriptTurnRepo' | 'logger'>,
@@ -138,7 +139,9 @@ async function redactSplitCardNumbers(
   const legs = new Map<string, CallTranscriptTurn[]>();
   for (const row of rows) {
     if (!row.sessionId) continue;
-    legs.set(row.sessionId, [...(legs.get(row.sessionId) ?? []), row]);
+    const leg = legs.get(row.sessionId);
+    if (leg) leg.push(row);
+    else legs.set(row.sessionId, [row]);
   }
   const rewritten = new Map<string, string>();
   for (const [sessionId, legRows] of legs) {
@@ -147,7 +150,16 @@ async function redactSplitCardNumbers(
     );
     if (!texts) continue;
     const turns = legRows.flatMap((row, k) =>
-      texts[k] === row.text ? [] : [{ id: row.id, turnIndex: row.turnIndex, text: texts[k] }],
+      texts[k] === row.text
+        ? []
+        : [
+            {
+              id: row.id,
+              turnIndex: row.turnIndex,
+              ...(row.speaker === 'agent' ? { speaker: row.speaker } : {}),
+              text: texts[k],
+            },
+          ],
     );
     for (const turn of turns) rewritten.set(turn.id, turn.text);
     try {

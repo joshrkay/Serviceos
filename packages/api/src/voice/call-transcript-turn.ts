@@ -164,10 +164,12 @@ export const CARD_NUMBER_SPLIT_REDACTED_EVENT = 'voice.transcript_card_number_re
 
 /**
  * PRIV-3 — a card number a caller split across turns: the new text of each
- * of the session's CALLER turns that held part of it (its part replaced by
- * the marker). A row is addressed by primary key when `recordTurn` resolved
- * one (stable across `attachRecording`'s renumbering), else by the mid-call
- * key on a row no recording has claimed yet.
+ * of the session's caller turns that held part of it (its part replaced by
+ * the marker), and of each agent turn between them that repeated a part
+ * (the confirm readback). A row is addressed by primary key when `recordTurn`
+ * resolved one (stable across `attachRecording`'s renumbering), else by the
+ * mid-call key on a row no recording has claimed yet, and always by its
+ * speaker (`speaker`, a caller turn when absent).
  */
 export interface RedactCardNumberTurnsInput {
   tenantId: string;
@@ -175,7 +177,7 @@ export interface RedactCardNumberTurnsInput {
   sessionId: string;
   /** Who rewrote them, for the audit row: the live store, or the recording hook. */
   actorId: string;
-  turns: ReadonlyArray<{ id?: string; turnIndex: number; text: string }>;
+  turns: ReadonlyArray<{ id?: string; turnIndex: number; speaker?: CallTurnSpeaker; text: string }>;
 }
 
 export interface CallTranscriptTurnRepository {
@@ -214,11 +216,12 @@ export interface CallTranscriptTurnRepository {
   attachRecording(tenantId: string, callSid: string, voiceRecordingId: string): Promise<number>;
 
   /**
-   * PRIV-3 — rewrite the text of the caller turns that held a card number
-   * split across turns, all of them in ONE transaction together with one
+   * PRIV-3 — rewrite the text of the turns that held a card number split
+   * across turns (and the agent's lines that repeated a part of it), all of
+   * them in ONE transaction together with one
    * {@link CARD_NUMBER_SPLIT_REDACTED_EVENT} audit row, so the stored call
-   * never keeps part of the card. Only this session's caller rows are
-   * touched. Returns the number of rows rewritten.
+   * never keeps part of the card. Only this session's rows of the speaker
+   * each turn names are touched. Returns the number of rows rewritten.
    */
   redactCardNumberTurns(input: RedactCardNumberTurnsInput): Promise<number>;
 }
@@ -278,6 +281,9 @@ export function validateRedactCardNumberTurnsInput(input: RedactCardNumberTurnsI
       throw new Error('call_transcript_turns: turnIndex must be a non-negative integer');
     }
     if (turn.text.length === 0) throw new Error('call_transcript_turns: text must be non-empty');
+    if (turn.speaker !== undefined && turn.speaker !== 'caller' && turn.speaker !== 'agent') {
+      throw new Error('call_transcript_turns: speaker must be caller or agent');
+    }
   }
 }
 
@@ -452,7 +458,7 @@ export class InMemoryCallTranscriptTurnRepository implements CallTranscriptTurnR
           r.tenantId === input.tenantId &&
           r.callSid === input.callSid &&
           r.sessionId === input.sessionId &&
-          r.speaker === 'caller' &&
+          r.speaker === (turn.speaker ?? 'caller') &&
           (turn.id !== undefined
             ? r.id === turn.id
             : r.turnIndex === turn.turnIndex && r.voiceRecordingId === undefined),

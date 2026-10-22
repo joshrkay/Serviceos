@@ -1182,14 +1182,16 @@ export interface CardSplitContext {
  * so a stored row written before the scrubber comes out clean.
  *
  * Returns the turns rewritten (same length and order), or null when nothing
- * changed. The caller bounds the window ({@link cardSplitWindow}: the live
- * path in `VoiceSessionStore`, the recording boundary through
+ * changed. `onRedact` (optional) sees each replaced span with the index of
+ * the turn it is in. The caller bounds the window ({@link cardSplitWindow}:
+ * the live path in `VoiceSessionStore`, the recording boundary through
  * {@link redactCardNumbersInCallTurns}).
  */
 export function redactCardNumbersAcrossTurns(
   turns: readonly string[],
   placeholder: string = CARD_NUMBER_PLACEHOLDER,
   context: CardSplitContext = {},
+  onRedact?: (turn: number, matched: string) => void,
 ): string[] | null {
   const tagged = turns.map((text) => text.replace(DEEPGRAM_CARD_TAG, placeholder));
   const tokens: Token[] = [];
@@ -1234,6 +1236,7 @@ export function redactCardNumbersAcrossTurns(
     let out = '';
     let pos = 0;
     for (const { start, end } of spans[seg]) {
+      onRedact?.(seg, text.slice(start, end));
       out += text.slice(pos, start) + placeholder;
       pos = end;
     }
@@ -1291,9 +1294,11 @@ export function agentLinesAround(lines: readonly CallLine[], first: number, curr
  * earlier turns' text as already rewritten and the agent's lines around them
  * ({@link agentLinesAround}). The recording boundary runs this over the
  * stored rows, so a card whose live rewrite of those rows failed (or had not
- * landed yet) still leaves them before ingestion. Agent turns are never
- * rewritten. Returns the turns rewritten (same length and order), or null
- * when nothing changed.
+ * landed yet) still leaves them before ingestion. An agent turn never joins
+ * a window; one said between the card's turns is rewritten where it repeats
+ * a part of the card the caller had already said ({@link redactCardFragments}:
+ * the confirm readback). Returns the turns rewritten (same length and order),
+ * or null when nothing changed.
  */
 export function redactCardNumbersInCallTurns(turns: ReadonlyArray<CallLine & { at: number }>): string[] | null {
   const texts = turns.map((t) => t.text);
@@ -1309,18 +1314,131 @@ export function redactCardNumbersInCallTurns(turns: ReadonlyArray<CallLine & { a
     }
     window = [...earlier, { k, at }];
     if (earlier.length === 0) return;
+    const fragments = new Map<number, string[]>();
     const rewritten = redactCardNumbersAcrossTurns(
       window.map((t) => texts[t.k]),
       CARD_NUMBER_PLACEHOLDER,
       { agentLines: agentLinesAround(turns, window[0].k, k) },
+      (j, matched) => fragments.set(window[j].k, [...(fragments.get(window[j].k) ?? []), matched]),
     );
-    rewritten?.forEach((next, j) => {
+    if (!rewritten) return;
+    rewritten.forEach((next, j) => {
       if (next === texts[window[j].k]) return;
       texts[window[j].k] = next;
       changed = true;
     });
+    // The agent's lines between the card's turns, each against the parts the
+    // caller had said before it.
+    for (let a = window[0].k + 1; a < k; a++) {
+      if (turns[a].speaker !== 'agent') continue;
+      const said = [...fragments].filter(([callerK]) => callerK < a).flatMap(([, f]) => f);
+      const next = redactCardFragments(texts[a], said);
+      if (next === texts[a]) continue;
+      texts[a] = next;
+      changed = true;
+    }
   });
   return changed ? texts : null;
+}
+
+/** The digits `said` reads, written or as words ("4111 1111", "four one one one" → "41111111"). */
+function digitsRead(said: string): string {
+  return tokenize(said)
+    .filter(isDigitToken)
+    .map((t) => t.digits)
+    .join('');
+}
+
+/**
+ * PRIV-3 — `text` with every number in it that reads the same digits as one
+ * of `fragments`, or as several of them said one after the other, replaced
+ * by the marker. `fragments` are the spans of the caller's earlier turns a
+ * cross-turn card rewrite replaced, in the order they were said. What those
+ * turns handed on before a later turn showed they held part of a card
+ * repeats them, often in another form: the agent's confirm readback renders
+ * what the classifier took from the turn ("the card on file is
+ * 4111-1111-1111"), and so do the FSM context's entities.
+ *
+ * Read as the card search reads a run (`findCardHits`: written groups,
+ * digit words, their joiners), only whole groups are matched: a ZIP that
+ * merely holds the same digits ("84111") is another number, and so is a
+ * phone number ending in them ("602 555 4111", `spokenPhoneGroupsAt`). A
+ * number word next to the digits is its own group ("the last four, 1111").
+ */
+export function redactCardFragments(
+  text: string,
+  fragments: readonly string[],
+  placeholder: string = CARD_NUMBER_PLACEHOLDER,
+): string {
+  const read = fragments.map(digitsRead).filter((d) => d.length > 0);
+  const wanted = new Set<string>();
+  for (let a = 0; a < read.length; a++) {
+    let joined = '';
+    for (let b = a; b < read.length; b++) wanted.add((joined += read[b]));
+  }
+  if (wanted.size === 0 || !text) return text;
+  const longest = Math.max(...[...wanted].map((d) => d.length));
+  const tokens = tokenize(text);
+  const spans: Array<{ start: number; end: number }> = [];
+  for (let i = 0; i < tokens.length; i++) {
+    if (!isDigitToken(tokens[i])) continue;
+    // The run's groups: a written number, or digit words said with no pause.
+    const groups: Array<{ digits: string; first: number; last: number }> = [
+      { digits: tokens[i].digits, first: i, last: i },
+    ];
+    let last = i;
+    for (;;) {
+      let next = last + 1;
+      while (next < tokens.length && isJoinerToken(tokens[next])) next++;
+      const right = tokens[next];
+      if (!isDigitToken(right)) break;
+      const joiner = tokens.slice(last + 1, next);
+      if (!joinsGroups(tokens[last], joiner, right)) break;
+      const group = groups[groups.length - 1];
+      if (tokens[last].kind === 'spoken' && right.kind === 'spoken' && joiner.every((t) => t.kind === 'space')) {
+        group.digits += right.digits;
+        group.last = next;
+      } else {
+        groups.push({ digits: right.digits, first: next, last: next });
+      }
+      last = next;
+    }
+    const digits = groups.map((g) => g.digits);
+    // "(602) 555-4111": the area code in parentheses is no part of the run.
+    let back = i - 1;
+    while (back >= 0 && tokens[back].kind === 'space') back--;
+    const areaCode =
+      text[tokens[back]?.start] === ')' && tokens[back - 1]?.kind === 'num' && text[tokens[back - 2]?.start] === '('
+        ? tokens[back - 1].digits
+        : undefined;
+    let a = areaCode !== undefined && phoneGroupsAt([areaCode, ...digits], 0) === 3 ? 2 : 0;
+    while (a < groups.length) {
+      const phone = spokenPhoneGroupsAt(digits, a);
+      if (phone > 0) {
+        a += phone;
+        continue;
+      }
+      let joined = '';
+      let hit = -1;
+      for (let b = a; b < groups.length && (joined += digits[b]).length <= longest; b++) {
+        if (wanted.has(joined)) hit = b;
+      }
+      if (hit < 0) {
+        a++;
+        continue;
+      }
+      spans.push({ start: tokens[groups[a].first].start, end: tokens[groups[hit].last].end });
+      a = hit + 1;
+    }
+    i = last;
+  }
+  let out = '';
+  let pos = 0;
+  for (const { start, end } of spans) {
+    out += text.slice(pos, start) + placeholder;
+    pos = end;
+  }
+  return spans.length === 0 ? text : out + text.slice(pos);
 }
 
 /** True when already-scrubbed text carries the card-number marker. */
