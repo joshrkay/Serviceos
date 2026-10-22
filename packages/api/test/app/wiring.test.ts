@@ -210,6 +210,13 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
     }
   });
 
+  it('C-1698-P1 — the memo worker reads the creator mode through the fail-closed loader', () => {
+    // The request middleware's mode loader defaults a missing user or a DB
+    // error to 'supervisor' (the permissive threshold); the memo path must not.
+    expect(src).toMatch(/resolveMemberMode: createMemoCreatorModeLoader\(\(\) => userModeService\),/);
+    expect(src).not.toMatch(/resolveUserMode/);
+  });
+
   it('B1 — the one-tap route re-checks a backup link against the current backup supervisor', () => {
     // Optional dep: dropped, a link minted for a backup who has since been
     // replaced or deactivated would still approve for its 30 minutes.

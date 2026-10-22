@@ -131,7 +131,7 @@ import {
   type MeTenantSettings,
   type UserModeService,
 } from './routes/me';
-import { setUserModeLoader, resolveUserMode } from './middleware/auth';
+import { setUserModeLoader } from './middleware/auth';
 import {
   setSupervisorPresenceLoader,
   pgSupervisorPresenceLoader,
@@ -472,6 +472,7 @@ import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker, voicemailJobContextFromPersisted } from './workers/transcription';
 import { createPinLockAlertRetryWorker, createPinLockAlertRetryScheduler } from './workers/pin-lock-alert-retry';
 import { createTranscriptionRouterHandoff } from './workers/transcription-router-handoff';
+import { createMemoCreatorModeLoader } from './workers/memo-creator-mode';
 // U9 — voicemail router gate: owner/approver caller-ID check (same identity
 // module the SMS reply transport and RV-070 owner-line recognition use).
 import {
@@ -3242,8 +3243,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     voiceRepo,
     // OVAS-02 — the memo creator's DB role gates auto-approval (same loader).
     resolveMemberRole: resolveVoiceMemberRole,
-    // OVAS-04 — and their current_mode sets the threshold (req.auth.mode's loader).
-    resolveMemberMode: (tenantId: string, userId: string) => resolveUserMode(userId, tenantId),
+    // OVAS-04 — and their current_mode sets the threshold. C-1698-P1 — NOT
+    // req.auth.mode's loader, which defaults a missing user or a DB error to
+    // 'supervisor': here those fail closed to the strictest tenant rule.
+    resolveMemberMode: createMemoCreatorModeLoader(() => userModeService),
     // Same object the assistant-chat router gets — see `lookupAnswerDeps`.
     lookupAnswers: lookupAnswerDeps,
     // B5.5 — en_route ("on my way") voice leg: userRepo resolves the memo
