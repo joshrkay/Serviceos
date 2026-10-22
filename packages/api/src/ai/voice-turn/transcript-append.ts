@@ -52,6 +52,7 @@ export interface ChallengeAwareSession {
  * whose exposure grows with each use.
  *
  * PRIV-3 — card numbers ARE matched on shape (Luhn-valid 13–19 digit runs,
+ * written or spoken as English or Spanish digit words,
  * `ai/privacy/pan-redact.ts`): a caller can recite one at any stage, and this
  * is the one place every transport's stored caller turn passes through, so
  * every store derived from the transcript (call_transcript_turns,

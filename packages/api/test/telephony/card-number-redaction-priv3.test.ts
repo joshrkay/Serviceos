@@ -119,6 +119,31 @@ describe('PRIV-3 — a recited card number on a live call', () => {
     await settle();
     assertNoCardNumber(h, session.transcript);
   });
+
+  // Spanish speech recognition can return the card as words, which the
+  // digit-only scrubber let through to every store and the provider.
+  it('Gather (handleGather): a card read as Spanish words carries the marker, not the words', async () => {
+    const h = harness();
+    const session = await startCall(h, 'CA-pan-gather-es');
+    await h.adapter.handleGather({
+      sessionId: session.id,
+      callSid: 'CA-pan-gather-es',
+      speechResult: 'quiero pagar, mi tarjeta es cuatro uno uno uno, uno uno uno uno, uno uno uno uno, uno uno uno uno',
+      confidence: 0.95,
+      tenantId: TENANT,
+    });
+    await settle();
+    const storedCallerTurns = h.recordTurn.mock.calls
+      .map((c) => (c as unknown as [{ speaker: string; text: string }])[0])
+      .filter((t) => t.speaker === 'caller')
+      .map((t) => t.text);
+    expect(storedCallerTurns).toEqual(['quiero pagar, mi tarjeta es [card number]']);
+    expect(session.transcript).toContain('caller: quiero pagar, mi tarjeta es [card number]');
+    expect(h.providerRequests.length).toBeGreaterThan(0);
+    for (const req of h.providerRequests) {
+      expect(JSON.stringify(req.messages)).not.toContain('cuatro uno uno uno');
+    }
+  });
 });
 
 /**
