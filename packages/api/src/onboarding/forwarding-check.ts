@@ -435,7 +435,7 @@ export class ForwardingCheckService {
     if (!check) return false;
     const system = { id: 'system', role: 'system' };
     if (!(await this.settle(check, system, { status: 'passed' }))) return false;
-    await this.deps.forwardingRepo.recordCheckPassed(input.tenantId, this.now());
+    await this.deps.forwardingRepo.recordCheckPassed(input.tenantId, this.now(), check.rivetNumber);
     return true;
   }
 }
