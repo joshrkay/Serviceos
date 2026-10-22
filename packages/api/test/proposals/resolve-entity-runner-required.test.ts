@@ -9,9 +9,9 @@
  * nothing caught that until a request hit it.
  *
  * The `@ts-expect-error` lines are the contract: they stop compiling the
- * moment the runner becomes optional again. Check them with
- * `npx tsc --noEmit -p <a tsconfig that includes this file>`; at run time the
- * route is driven for real with the runner it was given.
+ * moment the runner becomes optional again. vitest does not type-check, so
+ * tsconfig.lint.json lists this file and `npm run lint` (CI) compiles it; at
+ * run time the route is driven for real with the runner it was given.
  */
 import { describe, expect, it } from 'vitest';
 import express from 'express';
