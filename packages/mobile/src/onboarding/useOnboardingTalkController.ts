@@ -5,7 +5,7 @@
  * useAssistantController; the screen test mocks it.
  */
 import { useMemo } from 'react';
-import { useAuth } from '@clerk/clerk-expo';
+import { useAuth } from '@clerk/expo';
 import { fetchOnboardingStatus } from '../api/onboarding';
 import { createAssistantTransport } from '../assistant/expoFetchTransport';
 import { assistantAudioPlayer } from '../assistant/nativeAssistantDeps';
