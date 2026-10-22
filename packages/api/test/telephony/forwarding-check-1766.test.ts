@@ -16,6 +16,7 @@ import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-se
 import type { LLMGateway } from '../../src/ai/gateway/gateway';
 import {
   FORWARDING_CHECK_TTL_MS,
+  describeForwardingCheck,
   ForwardingCheckService,
   InMemoryForwardingCheckRepository,
 } from '../../src/onboarding/forwarding-check';
@@ -138,6 +139,29 @@ describe('forwarding check — inbound webhook', () => {
       'call_forwarding.check_started',
       'call_forwarding.check_passed',
     ]);
+  });
+
+  it('a pass the line no longer backs (number changed mid-check) is voided: hangs up, owner told to test again', async () => {
+    const { check } = await service.start(TENANT, OWNER);
+    now = new Date(now.getTime() + 20_000);
+    // The repoint landed between the check settling and the stamp.
+    vi.spyOn(forwardingRepo, 'recordCheckPassed').mockResolvedValueOnce(false);
+
+    const res = await inbound(forwarded);
+
+    expect(res.text).toContain('<Hangup');
+    expect(handleInbound).not.toHaveBeenCalled();
+    const latest = await repo.latest(TENANT);
+    expect(latest?.status).toBe('failed');
+    expect(describeForwardingCheck(latest!, 'missed').guidance).not.toMatch(/Forwarding works/);
+    expect((await forwardingRepo.get(TENANT))?.checkPassedAt).toBeNull();
+    const events = await auditRepo.findByEntity(TENANT, 'call_forwarding_check', check.id);
+    expect(events.map((e) => e.eventType)).toEqual([
+      'call_forwarding.check_started',
+      'call_forwarding.check_passed',
+      'call_forwarding.check_failed',
+    ]);
+    expect(events[2].metadata).toMatchObject({ reason: 'number_changed' });
   });
 
   it('a second call with the same caller id after the pass goes to the AI as normal', async () => {

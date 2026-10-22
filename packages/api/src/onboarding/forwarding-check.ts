@@ -63,6 +63,11 @@ export interface ForwardingCheckRepository {
       at: Date;
     },
   ): Promise<boolean>;
+  /**
+   * Turns a pass that could not be recorded on the line back into a failure,
+   * so the owner is not told forwarding works; false unless it was passed.
+   */
+  voidPass(tenantId: string, id: string, at: Date): Promise<boolean>;
 }
 
 export class InMemoryForwardingCheckRepository implements ForwardingCheckRepository {
@@ -107,6 +112,14 @@ export class InMemoryForwardingCheckRepository implements ForwardingCheckReposit
     row.status = result.status;
     row.failureReason = result.failureReason ?? null;
     row.completedAt = result.at;
+    return true;
+  }
+
+  async voidPass(tenantId: string, id: string, at: Date): Promise<boolean> {
+    const row = this.rows.find((r) => r.tenantId === tenantId && r.id === id);
+    if (!row || row.status !== 'passed') return false;
+    row.status = 'failed';
+    row.completedAt = at;
     return true;
   }
 }
@@ -214,6 +227,18 @@ export class PgForwardingCheckRepository extends PgBaseRepository implements For
             SET status = $3, failure_reason = $4, completed_at = $5
           WHERE tenant_id = $1 AND id = $2 AND status = 'pending'`,
         [tenantId, id, result.status, result.failureReason ?? null, result.at],
+      );
+      return (r.rowCount ?? 0) > 0;
+    });
+  }
+
+  async voidPass(tenantId: string, id: string, at: Date): Promise<boolean> {
+    return this.withTenant(tenantId, async (client) => {
+      const r = await client.query(
+        `UPDATE call_forwarding_checks
+            SET status = 'failed', completed_at = $3
+          WHERE tenant_id = $1 AND id = $2 AND status = 'passed'`,
+        [tenantId, id, at],
       );
       return (r.rowCount ?? 0) > 0;
     });
@@ -435,7 +460,16 @@ export class ForwardingCheckService {
     if (!check) return false;
     const system = { id: 'system', role: 'system' };
     if (!(await this.settle(check, system, { status: 'passed' }))) return false;
-    await this.deps.forwardingRepo.recordCheckPassed(input.tenantId, this.now(), check.rivetNumber);
+    const recorded = await this.deps.forwardingRepo.recordCheckPassed(input.tenantId, this.now(), check.rivetNumber);
+    if (!recorded && (await this.deps.repo.voidPass(input.tenantId, check.id, this.now()))) {
+      // The line was repointed while the call came back: forwarding to the
+      // released number proves nothing, so the owner is asked to test again.
+      await this.audit(input.tenantId, system, 'call_forwarding.check_failed', check.id, {
+        mode: check.mode,
+        reason: 'number_changed',
+      });
+    }
+    // Still the check call either way: hang up rather than reach the AI.
     return true;
   }
 }
