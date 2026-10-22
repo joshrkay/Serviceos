@@ -1,7 +1,8 @@
 /**
  * D-045 — the owner's own text wording, pinned against the real
- * customer_text_wording table (migration 330): one row per text, saving again
- * replaces it, reset removes it, and RLS keeps each business's wording its own.
+ * customer_text_wording table (migrations 330, 333): one row per text per
+ * language, saving again replaces it, reset removes it, and RLS keeps each
+ * business's wording its own.
  */
 import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { Pool } from 'pg';
@@ -42,25 +43,32 @@ describe('Postgres integration — customer text wording (D-045)', () => {
       ['estimate_text', 'Quote: {{link}}'],
       ['thank_you_text', 'Thanks again!'],
     ]);
-    expect(await repo.find(tenantA, 'invoice_text')).toBeNull();
+    expect(await repo.find(tenantA, 'invoice_text', 'en')).toBeNull();
 
-    expect(await repo.remove(tenantA, 'thank_you_text')).toBe(true);
-    expect(await repo.remove(tenantA, 'thank_you_text')).toBe(false);
-    expect(await repo.find(tenantA, 'thank_you_text')).toBeNull();
+    expect(await repo.remove(tenantA, 'thank_you_text', 'en')).toBe(true);
+    expect(await repo.remove(tenantA, 'thank_you_text', 'en')).toBe(false);
+    expect(await repo.find(tenantA, 'thank_you_text', 'en')).toBeNull();
   });
 
   it("one business never sees another's wording", async () => {
     await repo.save(tenantA, 'portal_link_text', 'A only {{link}}', 'en', userId);
 
-    expect(await repo.find(tenantB, 'portal_link_text')).toBeNull();
+    expect(await repo.find(tenantB, 'portal_link_text', 'en')).toBeNull();
     expect(await repo.list(tenantB)).toEqual([]);
-    expect(await repo.remove(tenantB, 'portal_link_text')).toBe(false);
-    expect(await repo.find(tenantA, 'portal_link_text')).not.toBeNull();
+    expect(await repo.remove(tenantB, 'portal_link_text', 'en')).toBe(false);
+    expect(await repo.find(tenantA, 'portal_link_text', 'en')).not.toBeNull();
   });
 
-  it('keeps the language each wording was written in', async () => {
+  it('keeps one wording per language, saved and reset apart', async () => {
+    await repo.save(tenantA, 'invoice_text', 'Invoice {{link}}', 'en', userId);
     await repo.save(tenantA, 'invoice_text', 'Factura {{link}}', 'es', userId);
-    expect(await repo.find(tenantA, 'invoice_text')).toMatchObject({ language: 'es' });
+    await repo.save(tenantA, 'invoice_text', 'Su factura {{link}}', 'es', userId);
+
+    expect(await repo.find(tenantA, 'invoice_text', 'en')).toMatchObject({ body: 'Invoice {{link}}', language: 'en' });
+    expect(await repo.find(tenantA, 'invoice_text', 'es')).toMatchObject({ body: 'Su factura {{link}}', language: 'es' });
+    expect(await repo.remove(tenantA, 'invoice_text', 'es')).toBe(true);
+    expect(await repo.find(tenantA, 'invoice_text', 'es')).toBeNull();
+    expect(await repo.find(tenantA, 'invoice_text', 'en')).not.toBeNull();
     await expect(repo.save(tenantA, 'invoice_text', 'x {{link}}', 'vi' as never, userId)).rejects.toThrow(/check constraint/);
   });
 

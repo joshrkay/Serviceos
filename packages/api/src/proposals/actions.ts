@@ -2,6 +2,7 @@ import { Proposal, ProposalRepository, ProposalStatus, missingFieldsFor, actionC
 import { transitionProposal, isInUndoWindow, UNDO_WINDOW_MS } from './lifecycle';
 import { isProposalExpired } from '../workers/proposal-expiry-worker';
 import { validateProposalPayload } from './contracts';
+import { withoutOverlapConsent, editRetargetsReassign } from './contracts/reassignment';
 import { Role, hasPermission } from '../auth/rbac';
 import { AppError, ConflictError, ForbiddenError, ValidationError, NotFoundError } from '../shared/errors';
 import { AppointmentRepository, updateAppointment } from '../appointments/appointment';
@@ -900,15 +901,23 @@ export async function editProposal(
     throw new ValidationError(`Cannot edit proposal in '${proposal.status}' status`);
   }
 
-  const updatedPayload = { ...proposal.payload, ...edits };
+  // FR-2 phase 3c — overlap consent on a reassign is server-pinned at
+  // creation (the dispatch board's explicit "Book anyway"). An edit can
+  // neither add it nor carry it onto a different appointment/technician.
+  const isReassign = proposal.proposalType === 'reassign_appointment';
+  const safeEdits = isReassign ? withoutOverlapConsent(edits) : edits;
+  let updatedPayload: Record<string, unknown> = { ...proposal.payload, ...safeEdits };
+  if (isReassign && editRetargetsReassign(proposal.payload, safeEdits)) {
+    updatedPayload = withoutOverlapConsent(updatedPayload);
+  }
 
   const validation = validateProposalPayload(proposal.proposalType, updatedPayload);
   if (!validation.valid) {
     throw new ValidationError('Invalid payload after edit', { errors: validation.errors });
   }
 
-  const editedFields = Object.keys(edits).filter(
-    (key) => JSON.stringify(proposal.payload[key]) !== JSON.stringify(edits[key])
+  const editedFields = Object.keys(safeEdits).filter(
+    (key) => JSON.stringify(proposal.payload[key]) !== JSON.stringify(safeEdits[key])
   );
 
   // B1 — clear-on-fill: lift only the missingFields entries this edit

@@ -8275,6 +8275,149 @@ export const MIGRATIONS = {
       ADD CONSTRAINT tenant_settings_forwarding_mode_check
         CHECK (forwarding_mode IN ('missed_calls', 'all_calls')) NOT VALID;
   `,
+  // D-045 (Josh, 2026-10-22: "write both") — the owner may keep one wording
+  // per language, so a business with English and Spanish customers writes
+  // each text twice. Key moves from (tenant, purpose) to (tenant, purpose,
+  // language); existing rows keep the language they were written in.
+  '333_customer_text_wording_per_language': `
+    ALTER TABLE customer_text_wording DROP CONSTRAINT IF EXISTS customer_text_wording_pkey;
+    ALTER TABLE customer_text_wording ADD PRIMARY KEY (tenant_id, purpose, language);
+  `,
+
+  // #1750 (D-044) — Get found online checklist facts on tenant_settings.
+  //   presence_path           — the owner's "do you have a website?" answer; NULL = unanswered
+  //   forwarding_mode         — missed calls only (NULL reads as this default) or all calls
+  //   get_found_skipped_items — checklist item ids the owner skipped
+  // The forwarded line and its forwarding check are NOT new: they are 318's
+  // forwarding_source_number / forwarding_verified_at, bound to the line by
+  // forwarding_generation. Skipped-item ids are not CHECKed: the set grows
+  // with each slice and is validated at the request boundary.
+  '334_tenant_settings_get_found': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS presence_path TEXT,
+      ADD COLUMN IF NOT EXISTS forwarding_mode TEXT,
+      ADD COLUMN IF NOT EXISTS get_found_skipped_items TEXT[] NOT NULL DEFAULT '{}';
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_presence_path_check,
+      ADD CONSTRAINT tenant_settings_presence_path_check
+        CHECK (presence_path IN ('own_website', 'google_only', 'neither')) NOT VALID;
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_forwarding_mode_check,
+      ADD CONSTRAINT tenant_settings_forwarding_mode_check
+        CHECK (forwarding_mode IN ('missed_calls', 'all_calls')) NOT VALID;
+  `,
+  // 335 — Dispatch FR-2 phase 3c, review round 2: consent is pinned to the
+  // visits it was given for. 332 let an accepted row overlap anything; this
+  // adds overlap_accepted_with, backfills rows 332 already marked, and
+  // re-creates the guard so an accepted row may overlap ONLY those visits
+  // while an unaccepted row may still overlap nothing active. 333 and 334
+  // are taken by other work in flight.
+  '335_assignment_overlap_accepted_with': `
+    -- The visits (appointment ids) the dispatcher accepted the overlap with.
+    ALTER TABLE appointment_assignments
+      ADD COLUMN IF NOT EXISTS overlap_accepted_with UUID[] NOT NULL DEFAULT '{}';
+
+    -- Backfill: a database that ran 332 before this migration holds accepted
+    -- rows with an empty overlap_accepted_with. The guard below would refuse
+    -- the next status change on them, so pin each one to the active visits
+    -- it overlaps today (the ones the dispatcher saw and accepted). A row
+    -- with nothing left to overlap keeps its empty list, which the guard
+    -- treats as "accepted nothing". No-op once filled.
+    UPDATE appointment_assignments a
+       SET overlap_accepted_with = filled.ids
+      FROM (
+        SELECT acc.id, array_agg(DISTINCT other.appointment_id) AS ids
+          FROM appointment_assignments acc
+          JOIN appointment_assignments other
+            ON other.tenant_id = acc.tenant_id
+           AND other.technician_id = acc.technician_id
+           AND other.id <> acc.id
+           AND other.appointment_status NOT IN ('canceled', 'no_show')
+           AND other.scheduled_start IS NOT NULL AND other.scheduled_end IS NOT NULL
+           AND tstzrange(other.scheduled_start, other.scheduled_end)
+               && tstzrange(acc.scheduled_start, acc.scheduled_end)
+         WHERE acc.overlap_accepted
+           AND acc.overlap_accepted_with = '{}'::uuid[]
+           AND acc.appointment_status NOT IN ('canceled', 'no_show')
+           AND acc.scheduled_start IS NOT NULL AND acc.scheduled_end IS NOT NULL
+         GROUP BY acc.id
+      ) filled
+     WHERE a.id = filled.id;
+
+    -- An EXCLUDE constraint is symmetric, so a row outside its WHERE is also
+    -- invisible to every later row: without this guard a plain booking that
+    -- overlapped ONLY an accepted visit would slip past Postgres. This
+    -- trigger is the asymmetric, consent-aware half:
+    --   * an UNaccepted row may overlap nothing active, accepted rows included;
+    --   * an accepted row may overlap only the visits it was accepted with
+    --     (overlap_accepted_with), so a clash that appeared after the
+    --     dispatcher looked is still refused.
+    -- Every writer, accepted or not, takes the per-(tenant, technician)
+    -- advisory lock first and holds it to the end of the transaction, so two
+    -- racing bookings for the same tech are checked one after the other.
+    CREATE OR REPLACE FUNCTION check_overlap_accepted_guard()
+    RETURNS TRIGGER LANGUAGE plpgsql AS $guard$
+    BEGIN
+      IF NEW.appointment_status IN ('canceled', 'no_show')
+         OR NEW.scheduled_start IS NULL OR NEW.scheduled_end IS NULL THEN
+        RETURN NEW;
+      END IF;
+      PERFORM pg_advisory_xact_lock(hashtext(NEW.tenant_id::text), hashtext(NEW.technician_id::text));
+      IF EXISTS (
+        SELECT 1 FROM appointment_assignments aa
+        WHERE aa.tenant_id = NEW.tenant_id
+          AND aa.technician_id = NEW.technician_id
+          AND aa.id <> NEW.id
+          AND aa.appointment_status NOT IN ('canceled', 'no_show')
+          AND aa.scheduled_start IS NOT NULL AND aa.scheduled_end IS NOT NULL
+          AND tstzrange(aa.scheduled_start, aa.scheduled_end)
+              && tstzrange(NEW.scheduled_start, NEW.scheduled_end)
+          AND NOT (NEW.overlap_accepted AND aa.appointment_id = ANY (NEW.overlap_accepted_with))
+      ) THEN
+        -- Raised as the no_double_booking violation it is (same SQLSTATE and
+        -- constraint name as the EXCLUDE constraint), so every caller that
+        -- recognised the constraint keeps recognising the guard.
+        RAISE EXCEPTION 'DOUBLE_BOOKING: technician % already has an active assignment overlapping [%, %]%',
+          NEW.technician_id, NEW.scheduled_start, NEW.scheduled_end,
+          CASE WHEN NEW.overlap_accepted THEN ' that the dispatcher did not accept' ELSE '' END
+          USING ERRCODE = 'exclusion_violation', CONSTRAINT = 'no_double_booking';
+      END IF;
+      RETURN NEW;
+    END;
+    $guard$;
+
+    DROP TRIGGER IF EXISTS trg_overlap_accepted_guard ON appointment_assignments;
+    CREATE TRIGGER trg_overlap_accepted_guard
+      BEFORE INSERT OR UPDATE OF scheduled_start, scheduled_end, appointment_status,
+        overlap_accepted, overlap_accepted_with, technician_id
+      ON appointment_assignments
+      FOR EACH ROW EXECUTE FUNCTION check_overlap_accepted_guard();
+
+    -- 332's sync plus the array reset: a new window drops the acceptance
+    -- and the visits it named.
+    CREATE OR REPLACE FUNCTION sync_appointment_to_assignments()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      IF (NEW.scheduled_start IS DISTINCT FROM OLD.scheduled_start
+          OR NEW.scheduled_end IS DISTINCT FROM OLD.scheduled_end
+          OR NEW.status IS DISTINCT FROM OLD.status) THEN
+        UPDATE appointment_assignments
+           SET scheduled_start = NEW.scheduled_start,
+               scheduled_end = NEW.scheduled_end,
+               appointment_status = NEW.status,
+               overlap_accepted = overlap_accepted
+                 AND NEW.scheduled_start IS NOT DISTINCT FROM OLD.scheduled_start
+                 AND NEW.scheduled_end IS NOT DISTINCT FROM OLD.scheduled_end,
+               overlap_accepted_with = CASE
+                 WHEN NEW.scheduled_start IS NOT DISTINCT FROM OLD.scheduled_start
+                  AND NEW.scheduled_end IS NOT DISTINCT FROM OLD.scheduled_end
+                 THEN overlap_accepted_with ELSE '{}'::uuid[] END
+         WHERE appointment_id = NEW.id AND tenant_id = NEW.tenant_id;
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

@@ -108,8 +108,9 @@ describe('P0-019 — PgAssignmentRepository', () => {
         assignment.isPrimary,
         assignment.assignedBy,
         assignment.assignedAt,
-        // FR-2 phase 3c — overlap_accepted, false unless the dispatcher chose it.
+        // FR-2 phase 3c — overlap_accepted (+ the visits it covers), unset unless the dispatcher chose it.
         false,
+        [],
       ]);
 
       // Connection always released

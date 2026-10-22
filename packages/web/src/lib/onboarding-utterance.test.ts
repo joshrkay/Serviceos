@@ -112,6 +112,12 @@ describe('unclearReply: what was heard and what the screen accepts', () => {
   it('a choice turn: the cards, and an example from the second miss', () => {
     expect(unclearReply('banana', 1, choiceTurn)).toBe('I heard “banana”. Tap one, or say first or second.');
     expect(unclearReply('something else', 2, choiceTurn)).toBe(
+      'I heard “something else”. Tap one, or say first or second. For example, say “first”, or ask “what does that mean?”',
+    );
+  });
+
+  it('a choice turn that answers no questions does not offer one', () => {
+    expect(unclearReply('something else', 2, { options: booking })).toBe(
       'I heard “something else”. Tap one, or say first or second. For example, say “first”.',
     );
   });
