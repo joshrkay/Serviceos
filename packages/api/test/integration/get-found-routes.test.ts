@@ -17,9 +17,6 @@ import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
-/** Twilio numbers are unique across tenants, and every integration file shares one DB. */
-const uniqueE164 = () => `+1602${String(Math.floor(Math.random() * 1e7)).padStart(7, '0')}`;
-
 describe('Get-found routes (real Postgres)', () => {
   let pool: Pool;
   let app: express.Express;
@@ -88,25 +85,30 @@ describe('Get-found routes (real Postgres)', () => {
     ]);
   });
 
-  it('PUT /call-routing-mode stores the mode, audits it, and Rivet-number-only ticks once a number is live', async () => {
-    await pool.query(
-      `INSERT INTO tenant_integrations (id, tenant_id, provider, status, provider_data)
-       VALUES (gen_random_uuid(), $1, 'twilio', 'full_readiness', $2::jsonb)`,
-      [current.tenantId, JSON.stringify({ phoneE164: uniqueE164() })],
-    );
+  it('PUT /forwarding-mode stores the mode, audits it, and a real change voids the last forwarding check', async () => {
     await request(app).put('/api/get-found/presence-path').send({ presencePath: 'google_only' });
-
-    const res = await request(app).put('/api/get-found/call-routing-mode').send({ callRoutingMode: 'rivet_only' });
-
-    expect(res.status).toBe(200);
-    expect(res.body.items).toContainEqual({ id: 'call_routing', status: 'done' });
-    expect(await rawColumn<string>('call_routing_mode')).toBe('rivet_only');
-    expect(await auditEvents()).toContainEqual(
-      expect.objectContaining({
-        eventType: 'get_found.call_routing_mode.set',
-        metadata: { callRoutingMode: 'rivet_only', previous: null },
-      }),
+    await pool.query(
+      `UPDATE tenant_settings
+          SET forwarding_source_number = '+16025550100', forwarding_mode = 'missed_calls',
+              forwarding_verified_at = '2026-10-22T15:00:00Z', forwarding_generation = 3
+        WHERE tenant_id = $1`,
+      [current.tenantId],
     );
+
+    // Re-saving the same mode keeps the check: nothing about the line changed.
+    const same = await request(app).put('/api/get-found/forwarding-mode').send({ forwardingMode: 'missed_calls' });
+    expect(same.status).toBe(200);
+    expect(same.body.items).toContainEqual({ id: 'call_routing', status: 'done', checkedAt: '2026-10-22T15:00:00.000Z' });
+
+    const changed = await request(app).put('/api/get-found/forwarding-mode').send({ forwardingMode: 'all_calls' });
+    expect(changed.status).toBe(200);
+    expect(changed.body.items).toContainEqual({ id: 'call_routing', status: 'pending' });
+    expect(await rawColumn<string>('forwarding_mode')).toBe('all_calls');
+    expect(await rawColumn<Date | null>('forwarding_verified_at')).toBeNull();
+    expect(await rawColumn<number>('forwarding_generation')).toBe(4);
+    expect((await auditEvents()).filter((e) => e.eventType === 'get_found.forwarding_mode.set')).toEqual([
+      expect.objectContaining({ metadata: { forwardingMode: 'all_calls', previous: 'missed_calls' } }),
+    ]);
   });
 
   it('skipping an item folds it away, un-skipping brings it back, and both are audited', async () => {

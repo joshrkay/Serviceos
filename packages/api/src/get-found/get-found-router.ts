@@ -1,5 +1,5 @@
 /**
- * #1750 slice 1 (D-044) — the Get-found checklist.
+ * #1750 (D-044) — the Get found online checklist.
  *
  * Mounted at /api/get-found. The checklist is derived on every read from
  * facts (`loadGetFoundFacts` → `deriveGetFoundChecklist`); nothing here
@@ -7,7 +7,7 @@
  *
  *   GET    /                 → the checklist
  *   PUT    /presence-path    → the owner's "do you have a website?" answer
- *   PUT    /call-routing-mode → forward all / forward when unanswered / Rivet number only
+ *   PUT    /forwarding-mode  → missed calls only / all calls; a real change voids the last forwarding check
  *   PUT    /items/:id/skip   → fold an item into the hidden row (idempotent)
  *   DELETE /items/:id/skip   → bring it back
  *
@@ -37,8 +37,8 @@ const presencePathSchema = z.object({
 
 const itemParamsSchema = z.object({ id: z.enum(GET_FOUND_ITEM_IDS) });
 
-const callRoutingModeSchema = z.object({
-  callRoutingMode: z.enum(['forward_all', 'forward_unanswered', 'rivet_only']),
+const forwardingModeSchema = z.object({
+  forwardingMode: z.enum(['missed_calls', 'all_calls']),
 });
 
 export function createGetFoundRouter(deps: GetFoundRouterDeps): Router {
@@ -84,51 +84,75 @@ export function createGetFoundRouter(deps: GetFoundRouterDeps): Router {
     res.json(deriveGetFoundChecklist(await loadGetFoundFacts(db(), tenantId)));
   }
 
-  /**
-   * One owner answer: write `column`, audit the change with the previous
-   * value, answer with the re-derived checklist. `column` is only ever one
-   * of the literals below — never request input.
-   */
-  function answerRoute<K extends string>(
-    path: string,
-    column: 'presence_path' | 'call_routing_mode',
-    eventType: string,
-    schema: z.ZodType<Record<K, string>>,
-    key: K,
-  ) {
-    router.put(
-      path,
-      requireAuth,
-      requireTenant,
-      requirePermission('settings:update'),
-      async (req: AuthenticatedRequest, res: Response) => {
-        try {
-          const value = schema.parse(req.body ?? {})[key];
-          const { tenantId } = req.auth!;
-          await ensureTenantSettings(tenantId, deps.settingsRepo);
-          const { rows } = await db().query<{ previous: string | null }>(
-            `UPDATE tenant_settings ts SET ${column} = $2, updated_at = NOW()
-               FROM (SELECT ${column} AS previous FROM tenant_settings WHERE tenant_id = $1 FOR UPDATE) old
-              WHERE ts.tenant_id = $1
-              RETURNING old.previous`,
-            [tenantId, value],
-          );
-          await auditAndRespond(req, res, eventType, { [key]: value, previous: rows[0]?.previous ?? null });
-        } catch (err) {
-          const { statusCode, body } = toErrorResponse(err);
-          res.status(statusCode).json(body);
-        }
-      },
-    );
-  }
+  router.put(
+    '/presence-path',
+    requireAuth,
+    requireTenant,
+    requirePermission('settings:update'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const { presencePath } = presencePathSchema.parse(req.body ?? {});
+        const { tenantId } = req.auth!;
+        await ensureTenantSettings(tenantId, deps.settingsRepo);
+        const { rows } = await db().query<{ previous: string | null }>(
+          `UPDATE tenant_settings ts SET presence_path = $2, updated_at = NOW()
+             FROM (SELECT presence_path AS previous FROM tenant_settings WHERE tenant_id = $1 FOR UPDATE) old
+            WHERE ts.tenant_id = $1
+            RETURNING old.previous`,
+          [tenantId, presencePath],
+        );
+        await auditAndRespond(req, res, 'get_found.presence_path.set', {
+          presencePath,
+          previous: rows[0]?.previous ?? null,
+        });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
 
-  answerRoute('/presence-path', 'presence_path', 'get_found.presence_path.set', presencePathSchema, 'presencePath');
-  answerRoute(
-    '/call-routing-mode',
-    'call_routing_mode',
-    'get_found.call_routing_mode.set',
-    callRoutingModeSchema,
-    'callRoutingMode',
+  /**
+   * D-044: a forwarding check is point-in-time proof for one mode. A real
+   * mode change clears it and advances the line's `forwarding_generation`
+   * (migration 318), so a check still in flight for the old mode cannot
+   * stamp the new one. NULL reads as the default, missed calls only.
+   */
+  router.put(
+    '/forwarding-mode',
+    requireAuth,
+    requireTenant,
+    requirePermission('settings:update'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const { forwardingMode } = forwardingModeSchema.parse(req.body ?? {});
+        const { tenantId } = req.auth!;
+        await ensureTenantSettings(tenantId, deps.settingsRepo);
+        const { rows } = await db().query<{ previous: string }>(
+          `UPDATE tenant_settings ts
+              SET forwarding_mode = $2,
+                  forwarding_verified_at = NULL,
+                  forwarding_generation = ts.forwarding_generation + 1,
+                  updated_at = NOW()
+             FROM (SELECT COALESCE(forwarding_mode, 'missed_calls') AS previous
+                     FROM tenant_settings WHERE tenant_id = $1 FOR UPDATE) old
+            WHERE ts.tenant_id = $1 AND old.previous <> $2
+            RETURNING old.previous`,
+          [tenantId, forwardingMode],
+        );
+        if (rows.length > 0) {
+          await auditAndRespond(req, res, 'get_found.forwarding_mode.set', {
+            forwardingMode,
+            previous: rows[0].previous,
+          });
+        } else {
+          res.json(deriveGetFoundChecklist(await loadGetFoundFacts(db(), tenantId)));
+        }
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
   );
 
   function skipRoute(method: 'put' | 'delete') {

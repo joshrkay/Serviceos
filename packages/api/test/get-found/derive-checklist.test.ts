@@ -6,9 +6,10 @@ function facts(overrides: Partial<GetFoundFacts> = {}): GetFoundFacts {
     presencePath: null,
     googleProfile: 'none',
     googleReviewUrl: null,
-    callRoutingMode: null,
-    rivetNumberProvisioned: false,
-    forwardingVerifiedAt: null,
+    hasForwardedLine: false,
+    forwardingCheckPassedAt: null,
+    rivetNumberLive: false,
+    answeredInboundCall: false,
     skippedItems: [],
     ...overrides,
   };
@@ -43,25 +44,24 @@ describe('deriveGetFoundChecklist', () => {
     expect(checklist.items).toContainEqual({ id: 'review_link', status: 'done' });
   });
 
-  it('ticks call routing in Rivet-number-only mode once the Rivet number is provisioned', () => {
-    const checklist = deriveGetFoundChecklist(
-      facts({ presencePath: 'neither', callRoutingMode: 'rivet_only', rivetNumberProvisioned: true }),
-    );
+  it('a day-one owner (no existing line) is not done by provisioning alone, only once the Rivet number has answered a call', () => {
+    const live = { presencePath: 'neither' as const, rivetNumberLive: true };
 
-    expect(checklist.items).toContainEqual({ id: 'call_routing', status: 'done' });
+    expect(deriveGetFoundChecklist(facts(live)).items).toContainEqual({ id: 'call_routing', status: 'pending' });
+    expect(deriveGetFoundChecklist(facts({ ...live, answeredInboundCall: true })).items).toContainEqual({
+      id: 'call_routing',
+      status: 'done',
+    });
   });
 
-  it.each(['forward_all', 'forward_unanswered'] as const)(
-    'in %s mode, call routing ticks only when a forwarded call has actually arrived',
-    (callRoutingMode) => {
-      const base = { presencePath: 'neither' as const, callRoutingMode, rivetNumberProvisioned: true };
+  it('an owner forwarding an existing line is done only by a passing forwarding check, which the item dates', () => {
+    const forwarding = { presencePath: 'own_website' as const, hasForwardedLine: true, rivetNumberLive: true, answeredInboundCall: true };
 
-      expect(deriveGetFoundChecklist(facts(base)).items).toContainEqual({ id: 'call_routing', status: 'pending' });
-      expect(
-        deriveGetFoundChecklist(facts({ ...base, forwardingVerifiedAt: new Date('2026-10-22T15:00:00Z') })).items,
-      ).toContainEqual({ id: 'call_routing', status: 'done' });
-    },
-  );
+    expect(deriveGetFoundChecklist(facts(forwarding)).items).toContainEqual({ id: 'call_routing', status: 'pending' });
+    expect(
+      deriveGetFoundChecklist(facts({ ...forwarding, forwardingCheckPassedAt: new Date('2026-10-22T15:00:00Z') })).items,
+    ).toContainEqual({ id: 'call_routing', status: 'done', checkedAt: '2026-10-22T15:00:00.000Z' });
+  });
 
   it('ticks the Google profile once a verified profile is connected', () => {
     const checklist = deriveGetFoundChecklist(facts({ presencePath: 'google_only', googleProfile: 'verified' }));

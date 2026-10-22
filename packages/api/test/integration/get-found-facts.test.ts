@@ -16,10 +16,10 @@ async function seedEverything(pool: Pool, tenantId: string): Promise<void> {
   await pool.query(
     `INSERT INTO tenant_settings (id, tenant_id, business_name, terminology_preferences, estimate_prefix, invoice_prefix,
                                   next_estimate_number, next_invoice_number, default_payment_term_days,
-                                  google_review_url, presence_path, call_routing_mode, forwarding_source_number,
+                                  google_review_url, presence_path, forwarding_mode, forwarding_source_number,
                                   forwarding_verified_at, get_found_skipped_items)
      VALUES (gen_random_uuid(), $1, 'Acme', '{}'::jsonb, 'EST', 'INV', 1, 1, 30,
-             'https://g.page/r/acme/review', 'google_only', 'forward_unanswered', '+16025550100',
+             'https://g.page/r/acme/review', 'google_only', 'all_calls', '+16025550100',
              '2026-10-22T15:00:00Z', ARRAY['call_routing'])`,
     [tenantId],
   );
@@ -32,6 +32,11 @@ async function seedEverything(pool: Pool, tenantId: string): Promise<void> {
     `INSERT INTO tenant_integrations (id, tenant_id, provider, status, provider_data)
      VALUES (gen_random_uuid(), $1, 'twilio', 'full_readiness', $2::jsonb)`,
     [tenantId, JSON.stringify({ phoneE164: uniqueE164() })],
+  );
+  await pool.query(
+    `INSERT INTO voice_sessions (id, tenant_id, channel, state, started_at, ended_at)
+     VALUES (gen_random_uuid(), $1, 'voice_inbound', 'ended', now() - interval '1 minute', now())`,
+    [tenantId],
   );
 }
 
@@ -54,9 +59,10 @@ describe('loadGetFoundFacts (integration)', () => {
       presencePath: 'google_only',
       googleProfile: 'verified',
       googleReviewUrl: 'https://g.page/r/acme/review',
-      callRoutingMode: 'forward_unanswered',
-      rivetNumberProvisioned: true,
-      forwardingVerifiedAt: new Date('2026-10-22T15:00:00Z'),
+      hasForwardedLine: true,
+      forwardingCheckPassedAt: new Date('2026-10-22T15:00:00Z'),
+      rivetNumberLive: true,
+      answeredInboundCall: true,
       skippedItems: ['call_routing'],
     });
 
@@ -64,9 +70,10 @@ describe('loadGetFoundFacts (integration)', () => {
       presencePath: null,
       googleProfile: 'none',
       googleReviewUrl: null,
-      callRoutingMode: null,
-      rivetNumberProvisioned: false,
-      forwardingVerifiedAt: null,
+      hasForwardedLine: false,
+      forwardingCheckPassedAt: null,
+      rivetNumberLive: false,
+      answeredInboundCall: false,
       skippedItems: [],
     });
   });

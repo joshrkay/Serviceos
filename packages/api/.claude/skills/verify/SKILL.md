@@ -113,9 +113,11 @@ npm run migrate:apply        # the API does NOT migrate at boot (Railway preDepl
   when `NODE_ENV=dev DEV_AUTH_BYPASS=true` are set (it bootstraps a real
   tenant + owner `users` row on first use; drive owner routes, then read
   columns/`audit_events` back with psql). Without the bypass it is
-  `Clerk token rejected` → 401. The bypass cannot exercise RBAC: a second
-  `sub` always gets its OWN new tenant as owner, even if you pre-insert a
-  `users` row for it in another tenant. To trigger an unauthenticated,
+  `Clerk token rejected` → 401. For RBAC, add a `"role":"technician"` (or
+  `dispatcher`) claim to a FRESH `sub`: the bypass bootstraps that user with
+  the claimed role. A `sub` without the claim becomes an owner, and each new
+  `sub` gets its own tenant — pre-inserting a `users` row for it in another
+  tenant does not move it there. To trigger an unauthenticated,
   DB-backed 500 (Sentry capture, global error handler), stop Postgres and hit
   `GET /public/estimates/<any-token>` — it throws `ECONNREFUSED` through
   `asyncRoute`.

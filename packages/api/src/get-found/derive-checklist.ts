@@ -5,12 +5,12 @@
  * A pure function of facts, like `deriveOnboardingStatus` — but deliberately
  * separate from it: nothing here gates activation, `isComplete`, or the
  * setup-reminder sweep. Items are ticked only by detected facts, never by
- * the owner (D-044 §21).
+ * the owner (D-044 §7 and its 2026-10-22 amendment).
  */
 
 export type PresencePath = 'own_website' | 'google_only' | 'neither';
 
-export type CallRoutingMode = 'forward_all' | 'forward_unanswered' | 'rivet_only';
+export type ForwardingMode = 'missed_calls' | 'all_calls';
 
 export type GoogleProfileState = 'none' | 'pending_verification' | 'verified';
 
@@ -19,10 +19,16 @@ export interface GetFoundFacts {
   googleProfile: GoogleProfileState;
   /** `tenant_settings.google_review_url` — pasted by hand or filled from Google. */
   googleReviewUrl: string | null;
-  callRoutingMode: CallRoutingMode | null;
-  rivetNumberProvisioned: boolean;
-  /** `tenant_settings.forwarding_verified_at` (migration 318): a forwarded call on the owner's current line reached Rivet. */
-  forwardingVerifiedAt: Date | null;
+  /** The owner forwards an existing business line (`tenant_settings.forwarding_source_number`). */
+  hasForwardedLine: boolean;
+  /**
+   * The last passing forwarding check on that line (`forwarding_verified_at`,
+   * migration 318) — point-in-time, voided by a line or mode change.
+   */
+  forwardingCheckPassedAt: Date | null;
+  rivetNumberLive: boolean;
+  /** At least one real inbound call ended on the Rivet number. */
+  answeredInboundCall: boolean;
   /** Items the owner chose to skip; they fold into the card's hidden row. */
   skippedItems: GetFoundItemId[];
 }
@@ -41,6 +47,8 @@ export interface GetFoundItem {
   id: GetFoundItemId;
   status: GetFoundItemStatus;
   waitingOn?: GetFoundWaitingOn;
+  /** The call item's last passing forwarding check, ISO-8601. */
+  checkedAt?: string;
 }
 
 export interface GetFoundChecklist {
@@ -49,10 +57,14 @@ export interface GetFoundChecklist {
   allDone: boolean;
 }
 
+/**
+ * A forwarding owner is done only by a passing forwarding check. A day-one
+ * owner (no existing line) forwards nothing: done once the Rivet number is
+ * live and has answered a real call — provisioning alone proves nothing.
+ */
 function isCallRoutingDone(f: GetFoundFacts): boolean {
-  if (f.callRoutingMode === 'rivet_only') return f.rivetNumberProvisioned;
-  if (f.callRoutingMode === null) return false;
-  return f.forwardingVerifiedAt !== null;
+  if (f.hasForwardedLine) return f.forwardingCheckPassedAt !== null;
+  return f.rivetNumberLive && f.answeredInboundCall;
 }
 
 export function deriveGetFoundChecklist(f: GetFoundFacts): GetFoundChecklist {
@@ -65,6 +77,9 @@ export function deriveGetFoundChecklist(f: GetFoundFacts): GetFoundChecklist {
     call_routing: isCallRoutingDone(f),
   };
   const items = GET_FOUND_ITEM_IDS.map((id): GetFoundItem => {
+    if (done[id] && id === 'call_routing' && f.hasForwardedLine && f.forwardingCheckPassedAt) {
+      return { id, status: 'done', checkedAt: f.forwardingCheckPassedAt.toISOString() };
+    }
     if (done[id]) return { id, status: 'done' };
     if (f.skippedItems.includes(id)) return { id, status: 'skipped' };
     if (id === 'google_profile' && f.googleProfile === 'pending_verification') {
