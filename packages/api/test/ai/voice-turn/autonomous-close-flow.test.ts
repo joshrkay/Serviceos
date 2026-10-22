@@ -216,7 +216,12 @@ async function makeHarness(opts: {
     autonomousClose: {
       platformDisabled: false,
       bookingPlatformDisabled: false,
-      ownerPhoneResolver: async () => (opts.ownerSms === false ? null : OWNER_PHONE),
+      // B3-2 — the phone and whose it is: a harness with a link approver is
+      // texting the backup supervisor's mobile; otherwise the owner phone.
+      resolveSmsRecipient: async () =>
+        opts.ownerSms === false
+          ? null
+          : { phone: OWNER_PHONE, via: opts.linkApprover ? ('backup_supervisor' as const) : ('owner_phone' as const) },
       sendOwnerSms: async (to, body) => {
         ownerSmsBodies.push({ to, body });
       },
@@ -415,7 +420,7 @@ describe('WS2 — fallback modes (no held booking staged)', () => {
       customerRepo: h.customerRepo,
       consentEventRepo: h.consentEventRepo,
       autonomousClose: {
-        ownerPhoneResolver: async () => OWNER_PHONE,
+        resolveSmsRecipient: async () => ({ phone: OWNER_PHONE, via: 'owner_phone' as const }),
         sendOwnerSms: async (to, body) => { h.ownerSmsBodies.push({ to, body }); },
         oneTapSecret: 'close-secret',
         buildApproveUrl: (t) => `https://x/approve?token=${t}`,

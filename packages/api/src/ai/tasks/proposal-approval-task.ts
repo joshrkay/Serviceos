@@ -99,7 +99,7 @@ import {
 } from '../../settings/voice-approval-pin';
 import { ForbiddenError, ValidationError } from '../../shared/errors';
 import { hasPermission, type Role } from '../../auth/rbac';
-import type { ResolvedApprover } from '../../proposals/approver-identity';
+import type { ApprovalSmsRecipient, ResolvedApprover } from '../../proposals/approver-identity';
 import {
   attemptWithinBudget,
   decideTenantPinLock,
@@ -260,8 +260,11 @@ export interface OneTapFallbackDeps {
   secret?: string;
   /** Builds the public approve URL from the signed token. */
   buildApproveUrl?: (token: string) => string;
-  /** Owner/backup mobile resolver (same as unsupervised routing). */
-  resolveOwnerPhone?: (tenantId: string) => Promise<string | null | undefined>;
+  /**
+   * Owner/backup mobile resolver (same as unsupervised routing). B3-2 — it
+   * says whose phone it is, so the owner phone's link needs no lookup.
+   */
+  resolveSmsRecipient?: (tenantId: string) => Promise<ApprovalSmsRecipient | null | undefined>;
   /**
    * B1 — who that phone's link approves as (same as unsupervised routing):
    * the owner link for the owner phone, the backup's own role and id for
@@ -840,7 +843,7 @@ async function alertOwnerOfTenantPinLock(
   let smsSent = false;
   try {
     const sendSms = deps.oneTapFallback?.sendSms;
-    const ownerPhone = await deps.oneTapFallback?.resolveOwnerPhone?.(ref.tenantId);
+    const ownerPhone = (await deps.oneTapFallback?.resolveSmsRecipient?.(ref.tenantId))?.phone;
     if (!sendSms || !ownerPhone) {
       logger.warn('voice approval tenant PIN lock engaged — no owner SMS route for the alert', context);
     } else {
@@ -1060,7 +1063,7 @@ async function sendOneTapFallback(
     return false;
   }
   try {
-    const ownerPhone = await fallback.resolveOwnerPhone?.(ref.tenantId);
+    const recipient = await fallback.resolveSmsRecipient?.(ref.tenantId);
     const result = await routeUnsupervisedProposal(
       {
         auditRepo: deps.auditRepo,
@@ -1098,7 +1101,8 @@ async function sendOneTapFallback(
         // requested, so the minted one-tap link is flagged to clear the
         // redeem-side class gate. An ordinary digest/queue link is not.
         confirmNonCapture: true,
-        ...(ownerPhone ? { ownerPhone } : {}),
+        // B3-2 — and whose phone it is (the owner phone needs no lookup).
+        ...(recipient ? { ownerPhone: recipient.phone, recipientVia: recipient.via } : {}),
         summaryText: proposal.summary,
         renderSmsBody: (approveUrl: string, { recipientCannotApprove }) =>
           renderProposalSms(
@@ -1592,9 +1596,9 @@ async function deliverVoiceEditReapproval(
 ): Promise<void> {
   const fallback = deps.oneTapFallback;
   let ownerPhone: string | null | undefined;
-  if (fallback?.sendSms && fallback.resolveOwnerPhone) {
+  if (fallback?.sendSms && fallback.resolveSmsRecipient) {
     try {
-      ownerPhone = await fallback.resolveOwnerPhone(ref.tenantId);
+      ownerPhone = (await fallback.resolveSmsRecipient(ref.tenantId))?.phone;
     } catch {
       ownerPhone = undefined;
     }

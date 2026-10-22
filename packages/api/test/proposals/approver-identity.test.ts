@@ -18,6 +18,7 @@ import {
   resolveApproverRole,
   resolveBackupSupervisorApprover,
   resolveApprovalSmsPhone,
+  resolveApprovalSmsRecipient,
   isApproverPhone,
 } from '../../src/proposals/approver-identity';
 import type { SettingsRepository, TenantSettings } from '../../src/settings/settings';
@@ -195,5 +196,53 @@ describe('resolveApprovalSmsPhone', () => {
       ),
     ).resolves.toBeNull();
     await expect(resolveApprovalSmsPhone({ settingsRepo: noOwner }, TENANT)).resolves.toBeNull();
+  });
+});
+
+/**
+ * B3-2 — the SMS recipient says whose phone it is, from the same settings
+ * read that picked it: the owner phone is the owner by definition, so the
+ * router never has to look it up again (a second read that could fail and
+ * turn the owner's approval text into the for-your-info form).
+ */
+describe('resolveApprovalSmsRecipient', () => {
+  it('the owner phone is marked as the owner phone, and the backup is not read', async () => {
+    let backupReads = 0;
+    const userRepo: Pick<UserRepository, 'findById'> = {
+      findById: async () => {
+        backupReads += 1;
+        return null;
+      },
+    };
+    await expect(resolveApprovalSmsRecipient({ settingsRepo: settings(), userRepo }, TENANT)).resolves.toEqual({
+      phone: OWNER_PHONE,
+      via: 'owner_phone',
+    });
+    expect(backupReads).toBe(0);
+  });
+
+  it("the active backup's mobile is marked as the backup's", async () => {
+    await expect(
+      resolveApprovalSmsRecipient(
+        { settingsRepo: settings({ ownerPhone: undefined }), userRepo: users({ role: 'dispatcher', status: 'active' }) },
+        TENANT,
+      ),
+    ).resolves.toEqual({ phone: BACKUP_MOBILE, via: 'backup_supervisor' });
+  });
+
+  it('a deactivated backup, a backup with no mobile, or no backup is no recipient', async () => {
+    const noOwner = settings({ ownerPhone: undefined });
+    await expect(
+      resolveApprovalSmsRecipient(
+        { settingsRepo: noOwner, userRepo: users({ role: 'dispatcher', status: 'suspended' }), logger: { warn: () => {} } },
+        TENANT,
+      ),
+    ).resolves.toBeNull();
+    await expect(
+      resolveApprovalSmsRecipient({ settingsRepo: noOwner, userRepo: users({ role: 'dispatcher', mobileNumber: undefined }) }, TENANT),
+    ).resolves.toBeNull();
+    await expect(
+      resolveApprovalSmsRecipient({ settingsRepo: settings({ ownerPhone: undefined, backupSupervisorUserId: null }) }, TENANT),
+    ).resolves.toBeNull();
   });
 });

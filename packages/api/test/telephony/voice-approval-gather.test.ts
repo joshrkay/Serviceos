@@ -99,7 +99,7 @@ function makeHarness(opts: {
       },
       secret: 'test-secret',
       buildApproveUrl: (token) => `https://x.test/approve?token=${token}`,
-      resolveOwnerPhone: async () => OWNER_PHONE,
+      resolveSmsRecipient: async () => ({ phone: OWNER_PHONE, via: 'owner_phone' as const }),
     },
   });
   return { adapter, store, proposalRepo, auditRepo, sent };

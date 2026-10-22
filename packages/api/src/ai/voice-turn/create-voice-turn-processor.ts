@@ -346,7 +346,7 @@ import {
 } from './shared/low-stt-ladder';
 import { createLogger } from '../../logging/logger';
 import { resolveOwnerLineApprover } from './shared/owner-session';
-import type { ResolvedApprover } from '../../proposals/approver-identity';
+import type { ApprovalSmsRecipient, ResolvedApprover } from '../../proposals/approver-identity';
 import type { UserRepository } from '../../users/user';
 import type { VoiceApprovalSessionRef } from '../tasks/proposal-approval-task';
 import {
@@ -874,8 +874,8 @@ export interface VoiceTurnProcessorDeps {
     platformDisabled?: boolean;
     /** AUTONOMOUS_BOOKING_DISABLED === 'true' — the composed D-015 leg. */
     bookingPlatformDisabled?: boolean;
-    /** Owner phone for the one-tap approval chain SMS. */
-    ownerPhoneResolver?: (tenantId: string) => Promise<string | null | undefined>;
+    /** Owner phone for the one-tap approval chain SMS, and (B3-2) whose phone it is. */
+    resolveSmsRecipient?: (tenantId: string) => Promise<ApprovalSmsRecipient | null | undefined>;
     /** Owner-class SMS sender (never customer-gated). */
     sendOwnerSms?: (to: string, body: string) => Promise<void>;
     /** One-tap HMAC secret (approve token). */
@@ -4360,8 +4360,8 @@ export function createVoiceTurnProcessor(
                   ...(ac.oneTapSecret ? { secret: ac.oneTapSecret } : {}),
                   ...(ac.buildApproveUrl ? { buildApproveUrl: ac.buildApproveUrl } : {}),
                   ...(ac.resolveLinkApprover ? { resolveLinkApprover: ac.resolveLinkApprover } : {}),
-                  ...(ac.ownerPhoneResolver
-                    ? { ownerPhoneResolver: ac.ownerPhoneResolver }
+                  ...(ac.resolveSmsRecipient
+                    ? { resolveSmsRecipient: ac.resolveSmsRecipient }
                     : {}),
                 },
               }

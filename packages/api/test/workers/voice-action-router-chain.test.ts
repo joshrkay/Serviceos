@@ -277,7 +277,12 @@ describe('voice-action-router — RV-221 chain SMS routing', () => {
         sendSms: sendSms as unknown as (to: string, body: string) => Promise<void>,
         secret: 'test-secret',
         buildApproveUrl: (token) => `https://api.example.com/approve?token=${token}`,
-        resolveOwnerPhone: async () => '+15125550100',
+        // B3-2 — a test that passes a link approver is texting the backup
+        // supervisor's mobile (looked up); otherwise the owner phone (not).
+        resolveSmsRecipient: async () => ({
+          phone: '+15125550100',
+          via: resolveLinkApprover ? ('backup_supervisor' as const) : ('owner_phone' as const),
+        }),
         resolveRouting: async () => 'queue_and_sms',
         ...(resolveLinkApprover ? { resolveLinkApprover } : {}),
         recordSmsEvent: recordSmsEvent as unknown as (args: {

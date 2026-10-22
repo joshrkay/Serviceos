@@ -80,7 +80,7 @@ function makeHarness(opts: {
             },
             secret: 'test-secret',
             buildApproveUrl: (token) => `https://x.test/approve?token=${token}`,
-            resolveOwnerPhone: async () => '+15125550100',
+            resolveSmsRecipient: async () => ({ phone: '+15125550100', via: 'owner_phone' as const }),
             recordSmsEvent: async (args) => {
               recorded.push(args);
             },
@@ -1360,7 +1360,7 @@ function makeEditHarness(opts: {
               if (opts.smsSendFails) throw new Error('provider down');
               sent.push({ to, body });
             },
-            resolveOwnerPhone: async () => '+15125550100',
+            resolveSmsRecipient: async () => ({ phone: '+15125550100', via: 'owner_phone' as const }),
           },
         }
       : {}),
@@ -1818,7 +1818,7 @@ function makeBatchHarness(
       },
       secret: 'test-secret',
       buildApproveUrl: (token) => `https://x.test/approve?token=${token}`,
-      resolveOwnerPhone: async () => '+15125550100',
+      resolveSmsRecipient: async () => ({ phone: '+15125550100', via: 'owner_phone' as const }),
     },
   };
   return { deps, proposalRepo, auditRepo, smsEvents, sent };

@@ -38,7 +38,7 @@ async function stageChain(recipient: ResolvedApprover) {
         secret: 'close-sms-secret',
         buildApproveUrl: (token) => `https://x.test/approve?token=${token}`,
         resolveLinkApprover: async () => recipient,
-        ownerPhoneResolver: async () => '+15125550111',
+        resolveSmsRecipient: async () => ({ phone: '+15125550111', via: 'backup_supervisor' as const }),
       },
     },
     {

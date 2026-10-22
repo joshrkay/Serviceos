@@ -203,7 +203,7 @@ describe('B1 — the voice one-tap fallback link approves as its recipient', () 
       },
       secret: 'voice-b1-secret',
       buildApproveUrl: (token) => `https://x.test/approve?token=${token}`,
-      resolveOwnerPhone: async () => '+15125550111',
+      resolveSmsRecipient: async () => ({ phone: '+15125550111', via: 'backup_supervisor' as const }),
       resolveLinkApprover: async () => ({ role: 'dispatcher', userId: BACKUP_SUBJECT, via: 'backup_supervisor' }),
     };
     await seed(h.proposalRepo, {
@@ -233,7 +233,7 @@ describe('B1 — the voice one-tap fallback link approves as its recipient', () 
       },
       secret: 'voice-b1-secret',
       buildApproveUrl: (token) => `https://x.test/approve?token=${token}`,
-      resolveOwnerPhone: async () => '+15125550111',
+      resolveSmsRecipient: async () => ({ phone: '+15125550111', via: 'backup_supervisor' as const }),
       resolveLinkApprover: async () => ({ role: 'technician', userId: BACKUP_SUBJECT, via: 'backup_supervisor' }),
     };
     await seed(h.proposalRepo, {
