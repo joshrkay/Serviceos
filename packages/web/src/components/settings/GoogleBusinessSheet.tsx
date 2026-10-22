@@ -53,9 +53,13 @@ async function errorDetail(res: Response, fallback: string): Promise<string> {
 
 interface GoogleBusinessSheetProps {
   onClose: () => void;
+  /** Choosing a location can fill or clear the Google review link on the
+   *  server; the Settings page mirrors it so a later Save can't put the
+   *  stale value back. */
+  onReviewUrlChange?: (url: string | null) => void;
 }
 
-export function GoogleBusinessSheet({ onClose }: GoogleBusinessSheetProps) {
+export function GoogleBusinessSheet({ onClose, onReviewUrlChange }: GoogleBusinessSheetProps) {
   const [integration, setIntegration] =
     useState<GoogleBusinessIntegrationView | null>(null);
   const [loading, setLoading] = useState(true);
@@ -104,6 +108,9 @@ export function GoogleBusinessSheet({ onClose }: GoogleBusinessSheetProps) {
       };
       setIntegration(json.data);
       setLocations(null);
+      if (json.reviewUrlFilled || json.reviewUrlCleared) {
+        onReviewUrlChange?.(json.data.reviewUrl ?? null);
+      }
       toast.success(
         json.reviewUrlFilled
           ? `${location.title} connected. Your Google review link is set.`
@@ -328,19 +335,38 @@ export function GoogleBusinessSheet({ onClose }: GoogleBusinessSheetProps) {
               </button>
             ) : loadingLocations ? (
               <p className="text-sm text-slate-500">Loading your Google locations…</p>
-            ) : null
+            ) : (
+              // needs_pick whose automatic load failed: the error shows
+              // below, and this keeps a way to try again.
+              <button
+                type="button"
+                onClick={() => void loadLocations()}
+                data-testid="googlebusiness-load-locations"
+                className="min-h-11 rounded-xl border border-slate-300 px-4 text-sm text-slate-700"
+              >
+                Load my Google locations
+              </button>
+            )
           )}
 
           {locations !== null && (
             <div data-testid="googlebusiness-location-picker" className="space-y-2">
               <p className="text-sm text-slate-900">Which location is yours?</p>
               {locations.length === 0 ? (
-                <p
-                  data-testid="googlebusiness-no-locations-found"
-                  className="text-sm text-slate-500"
-                >
-                  Google lists no locations on this account yet.
-                </p>
+                <div data-testid="googlebusiness-no-locations-found">
+                  <p className="text-sm text-slate-500">
+                    Google lists no locations on this account yet.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void loadLocations()}
+                    disabled={loadingLocations}
+                    data-testid="googlebusiness-recheck-locations"
+                    className="mt-2 min-h-11 rounded-xl border border-slate-300 px-4 text-sm text-slate-700 disabled:opacity-60"
+                  >
+                    {loadingLocations ? 'Checking…' : 'Check again'}
+                  </button>
+                </div>
               ) : (
                 <ul className="space-y-2">
                   {locations.map((loc) => {

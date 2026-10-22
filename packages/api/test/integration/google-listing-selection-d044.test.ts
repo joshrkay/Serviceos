@@ -8,6 +8,8 @@
  * fields), the token read the picker uses, and the settings write, against
  * a real Postgres under RLS. No Google calls.
  *
+ * Also pins review_poll_state.cursor reset on a listing change.
+ *
  * #1763 — also pins tenant_settings.get_found_online_dismissed_at (migration
  * 330), read and written by the home checklist's dismissal repo.
  */
@@ -18,6 +20,7 @@ import { PgGoogleBusinessIntegrationRepository } from '../../src/reputation/goog
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { applyDerivedGoogleReviewUrl } from '../../src/reputation/google-review-link';
 import { PgGetFoundOnlineDismissalRepository } from '../../src/onboarding/get-found-online-dismissal';
+import { PgReviewPollStateRepository } from '../../src/reputation/poll-state';
 
 const KEY = 'b'.repeat(64);
 
@@ -145,5 +148,21 @@ describe('D-044 Google listing selection (real Postgres)', () => {
     const at = new Date('2026-10-22T06:00:00.000Z');
     expect(await repo.dismiss(tenantId, at)).toBe(true);
     expect(await repo.getDismissedAt(tenantId)).toEqual(at);
+  });
+
+  it('resetCursor clears review_poll_state.cursor for a listing change and keeps the backoff', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    const repo = new PgReviewPollStateRepository(pool);
+    // No row yet: nothing to reset.
+    await repo.resetCursor(tenantId);
+    expect(await repo.getPollState(tenantId)).toBeNull();
+
+    await repo.recordSuccess(tenantId, '2026-10-01T00:00:00.000Z');
+    await repo.recordQuotaError(tenantId, 60);
+    await repo.resetCursor(tenantId);
+    const state = await repo.getPollState(tenantId);
+    expect(state?.cursor).toBeNull();
+    expect(state?.consecutive429Count).toBe(1);
+    expect(state?.backoffUntil).not.toBeNull();
   });
 });

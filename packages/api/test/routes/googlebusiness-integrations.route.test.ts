@@ -521,7 +521,12 @@ describe('Google Business integrations routes', () => {
 
     async function connect(
       byAccount: Record<string, StubLocation[]>,
-      extra: { settingsRepo?: InMemorySettingsRepository; auditRepo?: InMemoryAuditRepository } = {},
+      extra: {
+        settingsRepo?: InMemorySettingsRepository;
+        auditRepo?: InMemoryAuditRepository;
+        pollStateRepo?: InMemoryReviewPollStateRepository;
+        googleFetch?: typeof fetch;
+      } = {},
     ) {
       const { id: stateId } = await stateRepo.create({
         tenantId: TENANT,
@@ -608,6 +613,69 @@ describe('Google Business integrations routes', () => {
       expect((await settingsRepo.findByTenant(TENANT))?.googleReviewUrl).toBe(
         'https://g.page/r/review-555',
       );
+    });
+
+    it('a reconnect while Google discovery is down keeps the saved location', async () => {
+      await connect(TWO_LOCATIONS);
+      await integrationRepo.selectLocation(TENANT, {
+        accountId: '456',
+        locationId: '555',
+        placeId: 'ChIJnorth',
+        reviewUrl: 'https://g.page/r/review-555',
+        locationTitle: 'Acme North',
+      });
+      const tokenOnly = makeConnectFetch(TWO_LOCATIONS);
+      const discoveryDown = vi.fn(async (input: string | URL | Request) =>
+        String(input).includes('oauth2.googleapis.com/token')
+          ? tokenOnly(input)
+          : jsonRes({ error: { message: 'unavailable' } }, 503),
+      );
+      const auditRepo = new InMemoryAuditRepository();
+      const res = await connect(TWO_LOCATIONS, {
+        googleFetch: discoveryDown as unknown as typeof fetch,
+        auditRepo,
+      });
+      expect(res.status).toBe(302);
+      const summary = await integrationRepo.get(TENANT);
+      expect(summary).toMatchObject({
+        accountId: '456',
+        locationId: '555',
+        locationTitle: 'Acme North',
+        reviewUrl: 'https://g.page/r/review-555',
+        locationCount: 2,
+      });
+      const [event] = await auditRepo.findByEntity(TENANT, 'googlebusiness_integration', summary!.id);
+      expect(event.metadata).toMatchObject({ discoveryFailed: true, reviewCursorReset: false });
+    });
+
+    it('switching listings restarts review polling; re-choosing the same one does not', async () => {
+      const pollStateRepo = new InMemoryReviewPollStateRepository(() => new Date());
+      await connect({ '123': ONE_LOCATION }, { pollStateRepo });
+      await pollStateRepo.recordSuccess(TENANT, '2026-10-01T00:00:00.000Z');
+      const app = buildApp({
+        integrationRepo,
+        stateRepo,
+        googleConfig: GOOGLE_CONFIG,
+        googleFetch: makeConnectFetch(TWO_LOCATIONS) as unknown as typeof fetch,
+        pollStateRepo,
+      });
+      await request(app)
+        .put('/api/googlebusiness-integrations/google/location')
+        .send({ accountId: '123', locationId: '999' });
+      expect((await pollStateRepo.getPollState(TENANT))?.cursor).toBe('2026-10-01T00:00:00.000Z');
+      await request(app)
+        .put('/api/googlebusiness-integrations/google/location')
+        .send({ accountId: '456', locationId: '555' });
+      expect((await pollStateRepo.getPollState(TENANT))?.cursor).toBeNull();
+    });
+
+    it('connecting after a disconnect restarts review polling', async () => {
+      const pollStateRepo = new InMemoryReviewPollStateRepository(() => new Date());
+      await connect({ '123': ONE_LOCATION }, { pollStateRepo });
+      await pollStateRepo.recordSuccess(TENANT, '2026-10-01T00:00:00.000Z');
+      await integrationRepo.disconnect(TENANT);
+      await connect({ '456': TWO_LOCATIONS['456'] }, { pollStateRepo });
+      expect((await pollStateRepo.getPollState(TENANT))?.cursor).toBeNull();
     });
 
     it('a reconnect keeps the location the owner already chose', async () => {

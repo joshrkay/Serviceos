@@ -97,4 +97,16 @@ describe('applyDerivedGoogleReviewUrl', () => {
     expect(await applyDerivedGoogleReviewUrl(repo, 't1', null, null)).toBe('cleared');
     expect((await repo.findByTenant('t1'))?.googleReviewUrl ?? null).toBeNull();
   });
+
+  it('a retry after a failed settings write still replaces the old listing link', async () => {
+    const repo = new InMemorySettingsRepository();
+    await repo.upsertIdentityFields('t1', { businessName: 'Acme' });
+    await applyDerivedGoogleReviewUrl(repo, 't1', null, 'https://g.page/r/a');
+    // The integration already moved to B, but the settings write for B failed:
+    // the caller now reports B as the previous link.
+    expect(
+      await applyDerivedGoogleReviewUrl(repo, 't1', 'https://g.page/r/b', 'https://g.page/r/b'),
+    ).toBe('set');
+    expect((await repo.findByTenant('t1'))?.googleReviewUrl).toBe('https://g.page/r/b');
+  });
 });

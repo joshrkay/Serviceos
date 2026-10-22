@@ -40,6 +40,13 @@ export interface ReviewPollStateRepository {
   recordSuccess(tenantId: string, newCursor: string): Promise<void>;
 
   /**
+   * D-044 — forget the watermark when the tenant's Google listing changes,
+   * so the next poll ingests the new listing from the start. Throttling
+   * state is kept (it is per Google account, not per listing).
+   */
+  resetCursor(tenantId: string): Promise<void>;
+
+  /**
    * Persist a 429: increment `consecutive_429_count`, set
    * `backoff_until = now + max(exponential delay, retryAfter)`.
    * Cursor untouched — we'll retry from the same watermark once the
@@ -144,6 +151,16 @@ export class PgReviewPollStateRepository
     });
   }
 
+  async resetCursor(tenantId: string): Promise<void> {
+    const now = this.now();
+    await this.withTenant(tenantId, async (client) => {
+      await client.query(
+        `UPDATE review_poll_state SET cursor = NULL, updated_at = $2 WHERE tenant_id = $1`,
+        [tenantId, now],
+      );
+    });
+  }
+
   async recordQuotaError(
     tenantId: string,
     retryAfterSeconds?: number,
@@ -226,6 +243,12 @@ export class InMemoryReviewPollStateRepository
       consecutive429Count: 0,
       updatedAt: now,
     });
+  }
+
+  async resetCursor(tenantId: string): Promise<void> {
+    const existing = this.store.get(tenantId);
+    if (!existing) return;
+    this.store.set(tenantId, { ...existing, cursor: null, updatedAt: this.now() });
   }
 
   async recordQuotaError(

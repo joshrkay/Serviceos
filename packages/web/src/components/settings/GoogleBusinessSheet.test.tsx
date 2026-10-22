@@ -179,7 +179,8 @@ describe('GoogleBusinessSheet', () => {
             reviewUrlFilled: true,
           }),
         );
-      render(<GoogleBusinessSheet onClose={() => {}} />);
+      const onReviewUrlChange = vi.fn();
+      render(<GoogleBusinessSheet onClose={() => {}} onReviewUrlChange={onReviewUrlChange} />);
       await screen.findByTestId('googlebusiness-location-picker');
       expect(apiFetchMock).toHaveBeenNthCalledWith(
         2,
@@ -215,6 +216,8 @@ describe('GoogleBusinessSheet', () => {
       expect(toastSuccess).toHaveBeenCalledWith(
         'Acme North connected. Your Google review link is set.',
       );
+      // The Settings page's review-link field follows the server.
+      expect(onReviewUrlChange).toHaveBeenCalledWith('https://g.page/r/review-555');
     });
 
     it('tells the owner when the old review link was removed', async () => {
@@ -262,6 +265,30 @@ describe('GoogleBusinessSheet', () => {
       expect(again.className).toContain('min-h-11');
       fireEvent.click(again);
       await screen.findByTestId('googlebusiness-no-locations-found');
+      // The empty picker keeps a way to try again.
+      apiFetchMock.mockResolvedValueOnce(jsonResponse({ data: LOCATIONS }));
+      const recheck = screen.getByTestId('googlebusiness-recheck-locations');
+      expect(recheck.className).toContain('min-h-11');
+      fireEvent.click(recheck);
+      await waitFor(() =>
+        expect(screen.getAllByTestId('googlebusiness-location-option')).toHaveLength(2),
+      );
+    });
+
+    it('needs a pick but the automatic load failed: offers a retry', async () => {
+      apiFetchMock
+        .mockResolvedValueOnce(
+          jsonResponse({
+            data: connectedIntegration({ locationId: null, locationState: 'needs_pick' }),
+          }),
+        )
+        .mockResolvedValueOnce(jsonResponse({ error: { message: 'Google is down' } }, { ok: false, status: 502 }))
+        .mockResolvedValueOnce(jsonResponse({ data: LOCATIONS }));
+      render(<GoogleBusinessSheet onClose={() => {}} />);
+      const retry = await screen.findByTestId('googlebusiness-load-locations');
+      expect(retry.className).toContain('min-h-11');
+      fireEvent.click(retry);
+      await screen.findByTestId('googlebusiness-location-picker');
     });
 
     it('connected: Change location opens the picker with the current one marked', async () => {

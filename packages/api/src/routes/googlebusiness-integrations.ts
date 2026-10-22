@@ -101,6 +101,43 @@ function toSelection(location: GoogleBusinessLocation): GoogleBusinessLocationSe
   };
 }
 
+function previousSelection(
+  previous: GoogleBusinessIntegrationSummary,
+): GoogleBusinessLocationSelection | undefined {
+  if (!previous.accountId || !previous.locationId) return undefined;
+  return {
+    accountId: previous.accountId,
+    locationId: previous.locationId,
+    placeId: previous.placeId,
+    reviewUrl: previous.reviewUrl,
+    locationTitle: previous.locationTitle,
+  };
+}
+
+/**
+ * The review-poll cursor is a timestamp watermark for one listing: a
+ * different listing's older unread reviews would sit behind it and never
+ * be ingested. Start the new listing from scratch (ingest is idempotent).
+ * A previous integration of null means the tenant disconnected, so the
+ * cursor's listing is unknown and it is reset too.
+ */
+async function resetReviewCursorIfMoved(
+  deps: GoogleBusinessIntegrationsRouteDeps,
+  tenantId: string,
+  previous: GoogleBusinessIntegrationSummary | null,
+  selection: GoogleBusinessLocationSelection,
+): Promise<boolean> {
+  if (!deps.pollStateRepo) return false;
+  if (
+    previous?.locationId === selection.locationId &&
+    previous.accountId === selection.accountId
+  ) {
+    return false;
+  }
+  await deps.pollStateRepo.resetCursor(tenantId);
+  return true;
+}
+
 /**
  * Fill the review link from the chosen listing. Best-effort on the OAuth
  * callback (the tokens are already stored and the owner can still pick or
@@ -204,31 +241,43 @@ export function createGoogleBusinessOAuthCallbackRouter(
       }
       // A reconnect keeps the location the owner already chose; otherwise
       // a single location is chosen for them, and several wait for a pick.
+      // When discovery is down, a reconnect keeps the saved location as
+      // is rather than dropping it (polling needs it).
       const previous = await deps.integrationRepo.get(consumed.tenantId);
-      const kept = previous?.locationId
-        ? locations?.find(
-            (l) =>
-              l.locationId === previous.locationId &&
-              l.accountId === previous.accountId,
-          )
-        : undefined;
-      const chosen = kept ?? (locations?.length === 1 ? locations[0] : undefined);
+      let selection: GoogleBusinessLocationSelection | undefined;
+      if (locations === null) {
+        selection = previous ? previousSelection(previous) : undefined;
+      } else {
+        const kept = previous?.locationId
+          ? locations.find(
+              (l) =>
+                l.locationId === previous.locationId &&
+                l.accountId === previous.accountId,
+            )
+          : undefined;
+        const chosen = kept ?? (locations.length === 1 ? locations[0] : undefined);
+        selection = chosen ? toSelection(chosen) : undefined;
+      }
+      const locationCount = locations ? locations.length : previous?.locationCount;
 
       const upserted = await deps.integrationRepo.upsert({
         tenantId: consumed.tenantId,
         accessToken: tokens.accessToken,
         refreshToken: tokens.refreshToken,
         accessTokenExpiresAt: tokens.expiresAt,
-        ...(chosen ? { selection: toSelection(chosen) } : {}),
-        ...(locations ? { locationCount: locations.length } : {}),
+        ...(selection ? { selection } : {}),
+        ...(locationCount != null ? { locationCount } : {}),
       });
 
-      const reviewUrl = chosen
+      const reviewCursorReset = selection
+        ? await resetReviewCursorIfMoved(deps, consumed.tenantId, previous, selection)
+        : false;
+      const reviewUrl = selection
         ? await fillReviewUrl(
             deps,
             consumed.tenantId,
             previous?.reviewUrl ?? null,
-            chosen.reviewUrl,
+            selection.reviewUrl,
           )
         : { reviewUrlFilled: false };
 
@@ -250,6 +299,8 @@ export function createGoogleBusinessOAuthCallbackRouter(
               accountId: upserted.accountId,
               locationId: upserted.locationId,
               locationCount: locations?.length ?? null,
+              discoveryFailed: locations === null,
+              reviewCursorReset,
               ...reviewUrl,
               ipAddress: extractIp(req),
               userAgent: req.headers['user-agent'],
@@ -432,6 +483,12 @@ export function createGoogleBusinessIntegrationsRouter(
         if (!updated) {
           throw new NotFoundError('Google Business integration', 'google_business');
         }
+        const reviewCursorReset = await resetReviewCursorIfMoved(
+          deps,
+          tenantId,
+          previous,
+          toSelection(location),
+        );
         const reviewUrl = await fillReviewUrl(
           deps,
           tenantId,
@@ -452,6 +509,7 @@ export function createGoogleBusinessIntegrationsRouter(
                 accountId,
                 locationId,
                 previousLocationId: previous?.locationId ?? null,
+                reviewCursorReset,
                 ...reviewUrl,
                 ipAddress: extractIp(req),
                 userAgent: req.headers['user-agent'],

@@ -1809,7 +1809,10 @@ export function SettingsPage() {
 
       {/* Calendar sync sheet — Google OAuth connect/disconnect (PR 1). */}
       {googleBusinessOpen && (
-        <GoogleBusinessSheet onClose={() => setGoogleBusinessOpen(false)} />
+        <GoogleBusinessSheet
+          onClose={() => setGoogleBusinessOpen(false)}
+          onReviewUrlChange={(url) => setGoogleReviewUrl(url ?? '')}
+        />
       )}
       {calendarSyncOpen && (
         <CalendarSyncSheet onClose={() => setCalendarSyncOpen(false)} />
