@@ -94,10 +94,10 @@ and that is a stated ceiling of this pin rather than an oversight.**
 
 | Budget | Count |
 |---|---|
-| Owner-only routes in code | **120** |
+| Owner-only routes in code | **121** |
 | `cadence: daily` | **2** |
 | `cadence: onboarding` | **16** |
-| `cadence: occasional` | **102** |
+| `cadence: occasional` | **103** |
 | `ownerRequiredDailyWebActions` — `daily` ∧ not reachable | **1** |
 | `ownerRequiredOnboardingWebActions` — `onboarding` ∧ not reachable | **16** |
 
@@ -109,10 +109,10 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 
 ```json
 {
-  "ownerOnlyRoutes": 120,
+  "ownerOnlyRoutes": 121,
   "daily": 2,
   "onboarding": 16,
-  "occasional": 102,
+  "occasional": 103,
   "ownerRequiredDailyWebActions": 1,
   "ownerRequiredOnboardingWebActions": 16
 }
@@ -246,6 +246,7 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `GET /api/webchat/` | occasional | Reads the web chat settings and the embed snippet (#1737). Read-only. | false | none | |
 | `POST /api/webchat/rotate-token` | occasional | Rotates the web chat embed token (#1737). Rare security action. | false | none | |
 | `PUT /api/webchat/` | occasional | Web chat on/off, allowed sites and daily caps (#1737). Configuration set once. | false | none | |
+| `POST /api/get-found-online/google-website/draft` | occasional | Drafts the approval card that adds the owner's website and booking link to their Google listing (#1771). Nothing is written until the owner taps approve; it is a public change, so it is never automatic. | false | none | |
 
 <!-- END machine-readable: owner-daily-actions -->
 
