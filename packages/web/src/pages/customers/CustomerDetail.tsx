@@ -6,6 +6,7 @@ import { DetailPage } from '../../components/DetailPage';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { CommunicationTimeline } from '../../components/customers/CommunicationTimeline';
 import { CustomerProfitCard } from '../../components/customers/CustomerProfitCard';
+import { LatestTextStatus } from '../../components/interactions/LatestTextStatus';
 import { toTitleCase } from '../../utils/string';
 import { LanguageBadge } from '../../components/customers/LanguageBadge';
 import { ContactsPanel } from '../../components/customers/ContactsPanel';
@@ -692,6 +693,7 @@ export function CustomerDetail({
                   </p>
                 ) : null}
                 <CustomerProfitCard customerId={customerId} />
+                <LatestTextStatus filter={{ customerId }} />
                 <CommunicationTimeline customerId={customerId} />
               </div>
             ),
