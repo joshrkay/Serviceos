@@ -9,6 +9,7 @@ import {
 import type { MessageDeliveryProvider, SmsMessage } from '../../src/notifications/delivery-provider';
 import type { ConsentLedgerEventLike } from '../../src/compliance/resolve-outbound-consent';
 import { InMemoryDispatchRepository } from '../../src/notifications/dispatch-repository';
+import { DeliveryError } from '../../src/notifications/notification-errors';
 import {
   createOutboundMessaging,
   type OutboundText,
@@ -171,7 +172,7 @@ describe('outbound messaging', () => {
 
     expect(withoutMessageId(outcome)).toEqual({
       status: 'blocked',
-      reason: 'send_failed',
+      reason: 'lookup_failed',
       permanent: false,
       detail: 'connection reset',
     });
@@ -360,6 +361,16 @@ describe('outbound messaging', () => {
     expect(logger.warn).toHaveBeenCalled();
   });
 
+  it("keeps the provider error's code, so the sender can tell a credentials failure from an outage", async () => {
+    await customerRepo.create(makeCustomer());
+
+    const outcome = await messaging(async () => {
+      throw new DeliveryError('AUTH_FAILED', 'Twilio 401');
+    }).sendText(toCustomer('transactional'));
+
+    expect(outcome).toMatchObject({ status: 'blocked', reason: 'send_failed', errorCode: 'AUTH_FAILED' });
+  });
+
   describe('message record', () => {
     const recorded = async () => (await dispatches.listByTenant(TENANT)).dispatches;
 
@@ -496,6 +507,22 @@ describe('outbound messaging', () => {
       expect(await recorded()).toMatchObject([
         { status: 'sent', idempotencyKey: 'test_message:job-1', customerId: 'cust-1', jobId: 'job-1', recipient: '' },
       ]);
+
+      // A sender that named the number backfills it, rather than a blank.
+      dispatches = new InMemoryDispatchRepository();
+      await createOutboundMessaging({
+        delivery: { sendSms, sendEmail: vi.fn() } as unknown as MessageDeliveryProvider,
+        customerRepo,
+        dncRepo,
+        consentLedger: { listByPhone: async () => [] },
+        dispatchRepo: dispatches,
+        pool,
+        logger,
+      }).sendText({
+        ...toCustomer('transactional'),
+        recipient: { kind: 'customer', customerId: 'cust-1', phone: '+15559990000' },
+      } as OutboundText);
+      expect(await recorded()).toMatchObject([{ status: 'sent', recipient: '+15559990000' }]);
 
       // A record that did land is never replaced by the backfill.
       dispatches = new InMemoryDispatchRepository();

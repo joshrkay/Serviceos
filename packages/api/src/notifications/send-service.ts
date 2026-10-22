@@ -10,7 +10,6 @@ import { outboundClaimKey, type OutboundMessaging, type OutboundText, type Recor
 import {
   EmailMessage,
   MessageDeliveryProvider,
-  SmsMessage,
   SmsQuietHoursPolicy,
 } from './delivery-provider';
 import {
@@ -193,7 +192,8 @@ export interface SendResult {
     channel: 'sms' | 'email';
     recipient: string;
     provider: string;
-    providerMessageId: string;
+    /** The provider's receipt; absent when this send replayed one whose receipt is unknown. */
+    providerMessageId?: string;
     /** The message record; absent only when writing it failed (logged). */
     dispatchId?: string;
   }>;
@@ -331,7 +331,7 @@ export class SendService {
         ),
         render: () =>
           target.channel === 'sms'
-            ? this.renderEstimateSmsMessage(target.recipient, {
+            ? renderEstimateSms({
                 customerName: customer.displayName,
                 estimateNumber: estimate.estimateNumber,
                 totalCents: estimate.totals.totalCents,
@@ -339,7 +339,7 @@ export class SendService {
                 viewUrl,
                 customMessage: input.customMessage,
                 language,
-              })
+              }).body
             : this.renderEstimateEmailMessage(target.recipient, {
                 customerName: customer.displayName,
                 estimateNumber: estimate.estimateNumber,
@@ -379,35 +379,7 @@ export class SendService {
       dispatch: dispatchTo,
     });
 
-    const sent: SendResult['channelsSent'] = [];
-    const errors: string[] = [];
-    results.forEach((r, i) => {
-      if (r.status === 'fulfilled') {
-        sent.push(r.value);
-      } else {
-        const target = tried[i];
-        errors.push(
-          `${target.channel} to ${target.recipient}: ${
-            mapDeliveryErrorForClient(r.reason)
-          }`
-        );
-      }
-    });
-
-    // Every channel held back by quiet hours is "not sent yet", not a failure:
-    // surface the deferral itself so the caller keeps its work retryable.
-    const deferrals = results.flatMap((r) =>
-      r.status === 'rejected' && r.reason instanceof SmsDeferredError ? [r.reason] : [],
-    );
-    if (deferrals.length > 0 && deferrals.length === results.length) {
-      throw deferrals[0];
-    }
-
-    if (sent.length === 0) {
-      throw new ValidationError(
-        `Estimate send failed on all channels: ${errors.join('; ')}`
-      );
-    }
+    const sent = settleChannels('Estimate', tried, results);
 
     // Codex P1 #2 follow-up — the customer has now actually received this
     // estimate on at least one channel. Signal any claim wrapper BEFORE the
@@ -570,7 +542,7 @@ export class SendService {
         ),
         render: () =>
           target.channel === 'sms'
-            ? this.renderInvoiceSmsMessage(target.recipient, {
+            ? renderInvoiceSms({
                 customerName: customer.displayName,
                 invoiceNumber: invoice.invoiceNumber,
                 totalCents: invoice.totals.totalCents,
@@ -580,7 +552,7 @@ export class SendService {
                 customMessage: input.customMessage,
                 language,
                 paymentCollectionMode,
-              })
+              }).body
             : this.renderInvoiceEmailMessage(target.recipient, {
                 customerName: customer.displayName,
                 invoiceNumber: invoice.invoiceNumber,
@@ -601,24 +573,7 @@ export class SendService {
       dispatch: dispatchTo,
     });
 
-    const sent: SendResult['channelsSent'] = [];
-    const errors: string[] = [];
-    results.forEach((r, i) => {
-      if (r.status === 'fulfilled') {
-        sent.push(r.value);
-      } else {
-        const target = tried[i];
-        errors.push(
-          `${target.channel} to ${target.recipient}: ${
-            mapDeliveryErrorForClient(r.reason)
-          }`
-        );
-      }
-    });
-
-    if (sent.length === 0) {
-      throw new InvoiceNotDeliveredError(errors);
-    }
+    const sent = settleChannels('Invoice', tried, results);
 
     // Codex P1 #2 follow-up — see the matching call in sendEstimate above.
     // No current caller wraps sendInvoice in withSendClaim (the direct send
@@ -702,32 +657,13 @@ export class SendService {
           ),
           render: () =>
             target.channel === 'sms'
-              ? { to: target.recipient, body: renderPortalLinkSms(templateCtx).body, recipientClass: 'customer' as const }
+              ? renderPortalLinkSms(templateCtx).body
               : { to: target.recipient, ...renderPortalLinkEmail(templateCtx) },
         })
       )
     );
 
-    const sent: SendResult['channelsSent'] = [];
-    const errors: string[] = [];
-    results.forEach((r, i) => {
-      if (r.status === 'fulfilled') {
-        sent.push(r.value);
-      } else {
-        const target = channels[i];
-        errors.push(
-          `${target.channel} to ${target.recipient}: ${
-            mapDeliveryErrorForClient(r.reason)
-          }`
-        );
-      }
-    });
-
-    if (sent.length === 0) {
-      throw new ValidationError(
-        `Portal link send failed on all channels: ${errors.join('; ')}`
-      );
-    }
+    const sent = settleChannels('Portal link', channels, results);
 
     return {
       portalSessionId: input.portalSessionId,
@@ -788,28 +724,12 @@ export class SendService {
     };
   }
 
-  private renderEstimateSmsMessage(
-    to: string,
-    ctx: Parameters<typeof renderEstimateSms>[0]
-  ): SmsMessage {
-    const { body } = renderEstimateSms(ctx);
-    return { to, body, recipientClass: 'customer' };
-  }
-
   private renderEstimateEmailMessage(
     to: string,
     ctx: Parameters<typeof renderEstimateEmail>[0]
   ): EmailMessage {
     const { subject, text, html } = renderEstimateEmail(ctx);
     return { to, subject, text, html };
-  }
-
-  private renderInvoiceSmsMessage(
-    to: string,
-    ctx: Parameters<typeof renderInvoiceSms>[0]
-  ): SmsMessage {
-    const { body } = renderInvoiceSms(ctx);
-    return { to, body, recipientClass: 'customer' };
   }
 
   private renderInvoiceEmailMessage(
@@ -825,7 +745,8 @@ export class SendService {
     entityType: 'estimate' | 'invoice' | 'portal_session';
     entityId: string;
     target: ChannelTarget;
-    render: () => SmsMessage | EmailMessage;
+    /** The text's body, or the email. */
+    render: () => string | EmailMessage;
     /** Stable dedupe identity (see `buildDedupe`). */
     dedupe: OutboundText['dedupe'];
     /** A send now, or an automatic reminder (waits for daytime, needs consent). */
@@ -839,23 +760,34 @@ export class SendService {
     // context inside the idempotency minute, e.g. a double-tapped Resend)
     // already went out: replay that dispatch instead of messaging the
     // customer twice and tripping idx_dispatches_idempotency (which surfaced
-    // to the owner as a raw "duplicate key" 400). Only a message that went
-    // out replays; a failed, held or blocked one is tried again.
+    // to the owner as a raw "duplicate key" 400).
     const prior = await this.deps.dispatchRepo.findByIdempotencyKey?.(args.tenantId, idempotencyKey);
-    if (prior && (prior.status === 'sent' || prior.status === 'delivered')) {
-      return {
-        channel: args.target.channel,
-        recipient: args.target.recipient,
-        provider: prior.provider,
-        providerMessageId: prior.providerMessageId ?? '',
-        dispatchId: prior.id,
-      };
-    }
+    const replay = (): ChannelSent => ({
+      channel: args.target.channel,
+      recipient: args.target.recipient,
+      provider: prior!.provider,
+      ...(prior!.providerMessageId ? { providerMessageId: prior!.providerMessageId } : {}),
+      dispatchId: prior!.id,
+    });
 
     const message = args.render();
     if (args.target.channel === 'sms') {
-      return this.textOne(args, (message as SmsMessage).body);
+      // A text that went out replays. One the carrier reported failed or
+      // bounced was still sent under this key, so it is not sent again in
+      // the same minute, and the owner is told so rather than shown "sent".
+      // A held or blocked one goes back through outbound messaging, which
+      // replaces its record.
+      if (prior?.status === 'sent' || prior?.status === 'delivered') return replay();
+      if (prior?.status === 'failed' || prior?.status === 'bounced') {
+        throw new Error(
+          `this text was just sent and the carrier reported it ${prior.status}; try again in a minute`,
+        );
+      }
+      return this.textOne(args, message as string);
     }
+    // An email row is never replaced: anything but a failed attempt (which
+    // never reached the provider) replays, a bounce included.
+    if (prior && prior.status !== 'failed') return replay();
 
     let providerMessageId: string;
     let provider: string;
@@ -947,7 +879,9 @@ export class SendService {
         channel: 'sms',
         recipient: args.target.recipient,
         provider: outcome.delivery?.provider ?? UNKNOWN_PROVIDER,
-        providerMessageId: outcome.delivery?.providerMessageId ?? '',
+        ...(outcome.delivery?.providerMessageId
+          ? { providerMessageId: outcome.delivery.providerMessageId }
+          : {}),
         ...(outcome.messageId ? { dispatchId: outcome.messageId } : {}),
       };
     }
@@ -956,26 +890,47 @@ export class SendService {
   }
 }
 
-const GATE_REASONS: ReadonlySet<string> = new Set<SmsSuppressionReason>([
-  'no_consent',
-  'dnc',
-  'missing_consent_context',
-  'revoked',
-  'channel_disabled',
-  'recipient_volume_cap',
-]);
+/**
+ * Every gate refusal, so the compiler flags a reason added later: each one is
+ * an `SmsSuppressedError`, which is what lets an 'auto' send fall back to
+ * email.
+ */
+const GATE_REASONS: Record<SmsSuppressionReason, true> = {
+  no_consent: true,
+  dnc: true,
+  missing_consent_context: true,
+  revoked: true,
+  channel_disabled: true,
+  recipient_volume_cap: true,
+};
+
+function isGateReason(reason: string): reason is SmsSuppressionReason {
+  return Object.prototype.hasOwnProperty.call(GATE_REASONS, reason);
+}
+
+/** Another attempt is sending the same text right now. */
+export class TextInFlightError extends Error {
+  constructor() {
+    super('the same text is already being sent');
+    this.name = 'TextInFlightError';
+  }
+}
 
 /** A refused text as the error the send's callers already handle. */
-function textNotSentError(outcome: Extract<RecordedSendOutcome, { status: 'blocked' }>): Error {
-  if (GATE_REASONS.has(outcome.reason)) {
-    return new SmsSuppressedError(outcome.reason as SmsSuppressionReason);
-  }
+export function textNotSentError(outcome: Extract<RecordedSendOutcome, { status: 'blocked' }>): Error {
+  if (isGateReason(outcome.reason)) return new SmsSuppressedError(outcome.reason);
   switch (outcome.reason) {
     case 'in_flight':
-      return new Error('the same text is already being sent');
+      return new TextInFlightError();
     case 'send_failed':
-      // The provider's own words are in the message record and the log.
-      return new DeliveryError('PROVIDER_FAILED', 'delivery provider failed');
+      // The provider's own words are in the message record and the log; the
+      // owner sees what kind of failure it was.
+      return new DeliveryError(
+        outcome.errorCode === 'AUTH_FAILED' ? 'AUTH_FAILED' : 'PROVIDER_FAILED',
+        'delivery provider failed',
+      );
+    case 'lookup_failed':
+      return new Error("the customer's texting details couldn't be checked; try again");
     default:
       return new Error(`text not sent: ${outcome.reason.replace(/_/g, ' ')}`);
   }
@@ -1004,16 +959,50 @@ export class PayLinkUnavailableError extends AppError {
 }
 
 /**
- * Every channel of an invoice send failed. By then the send may have made the
- * invoice's pay link and its view token, so the owner route commits with this
- * error (res.locals.forceCommit): a rollback would leave a live Stripe link no
- * invoice points at, and the retry would mint another.
+ * Every channel of a send failed. The send has by then written what it is
+ * not allowed to lose: each text's message record (blocked, with the reason),
+ * and for an invoice its pay link and view token. Owner routes commit with
+ * this error (res.locals.forceCommit): a rollback would erase the record the
+ * status bubble shows, or leave a live Stripe link no invoice points at.
  */
-export class InvoiceNotDeliveredError extends ValidationError {
-  constructor(errors: string[]) {
-    super(`Invoice send failed on all channels: ${errors.join('; ')}`);
-    this.name = 'InvoiceNotDeliveredError';
+export class NotDeliveredError extends ValidationError {
+  constructor(what: SendSubject, errors: string[]) {
+    super(`${what} send failed on all channels: ${errors.join('; ')}`);
+    this.name = 'NotDeliveredError';
   }
+}
+
+type SendSubject = 'Estimate' | 'Invoice' | 'Portal link';
+
+/**
+ * The channels that went out, or the reason none did: every channel held for
+ * quiet hours is "not sent yet" (the deferral is rethrown so the caller keeps
+ * its work retryable); every channel already being sent by another attempt is
+ * a 409, not a failure; anything else is `NotDeliveredError`.
+ */
+function settleChannels(
+  what: SendSubject,
+  tried: ChannelTarget[],
+  results: PromiseSettledResult<ChannelSent>[],
+): ChannelSent[] {
+  const sent: ChannelSent[] = [];
+  const errors: string[] = [];
+  const reasons: unknown[] = [];
+  results.forEach((r, i) => {
+    if (r.status === 'fulfilled') {
+      sent.push(r.value);
+    } else {
+      reasons.push(r.reason);
+      const target = tried[i];
+      errors.push(`${target.channel} to ${target.recipient}: ${mapDeliveryErrorForClient(r.reason)}`);
+    }
+  });
+  if (sent.length > 0) return sent;
+  if (reasons.every((r) => r instanceof SmsDeferredError)) throw reasons[0];
+  if (reasons.every((r) => r instanceof TextInFlightError)) {
+    throw new ConflictError(`${what} is already being sent. Check its messages in a moment.`);
+  }
+  throw new NotDeliveredError(what, errors);
 }
 
 type ChannelSent = SendResult['channelsSent'][number];
@@ -1064,7 +1053,9 @@ function resolveChannels(args: {
   const wantEmail = args.channel === 'email' || args.channel === 'both';
 
   if (wantSms) {
-    const phone = args.recipientPhone ?? args.customer.primaryPhone;
+    // A blank override is no override: the text, its record and the result
+    // all name the number on file.
+    const phone = args.recipientPhone?.trim() || args.customer.primaryPhone;
     if (!phone) {
       throw new ValidationError(
         'Cannot send SMS — no phone number provided and customer has no primary phone'
@@ -1073,7 +1064,7 @@ function resolveChannels(args: {
     targets.push({ channel: 'sms', recipient: phone });
   }
   if (wantEmail) {
-    const email = args.recipientEmail ?? args.customer.email;
+    const email = args.recipientEmail?.trim() || args.customer.email;
     if (!email) {
       throw new ValidationError(
         'Cannot send email — no email provided and customer has no email on file'

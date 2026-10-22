@@ -25,7 +25,7 @@ import { AuditRepository, createAuditEvent, createAuditEventBestEffort } from '.
 import { resolveDefaultTaxRateBps, SettingsRepository } from '../settings/settings';
 import { PaymentRepository, recordPayment } from '../invoices/payment';
 import { applyDepositCreditToInvoice } from '../invoices/deposit-credit';
-import { SendService, PayLinkUnavailableError, InvoiceNotDeliveredError } from '../notifications/send-service';
+import { SendService, PayLinkUnavailableError, NotDeliveredError } from '../notifications/send-service';
 import { Job, JobRepository } from '../jobs/job';
 import { Customer, CustomerRepository } from '../customers/customer';
 import { EstimateRepository } from '../estimates/estimate';
@@ -715,7 +715,7 @@ export function createInvoiceRouter(
         // setting that couldn't be read, or the pay link it already made
         // before every channel failed. A rollback would erase the only record
         // of the refusal, or orphan a live Stripe link.
-        if (err instanceof PayLinkUnavailableError || err instanceof InvoiceNotDeliveredError) {
+        if (err instanceof PayLinkUnavailableError || err instanceof NotDeliveredError) {
           res.locals.forceCommit = true;
         }
         const { statusCode, body } = toErrorResponse(err);

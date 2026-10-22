@@ -24,7 +24,7 @@ import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import { extractIp } from '../shared/extract-ip';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { PortalSessionRepository } from '../portal/portal-session';
-import type { SendService } from '../notifications/send-service';
+import { NotDeliveredError, type SendService } from '../notifications/send-service';
 import {
   DEFAULT_PORTAL_TTL_DAYS,
   createPortalSession,
@@ -231,6 +231,10 @@ export function createPortalRouter(deps: PortalRouterDeps): Router {
       ).catch(() => {
         /* best-effort — never mask the send error */
       });
+      // D-045 — keep what the refusal wrote: each refused text's message
+      // record and the revoke itself. A rollback would erase both (and the
+      // session's creation with them), leaving no trace of the attempt.
+      if (err instanceof NotDeliveredError) res.locals.forceCommit = true;
       throw err;
     }
 

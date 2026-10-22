@@ -52,6 +52,8 @@ interface Harness {
   delivery: InMemoryDeliveryProvider;
   dnc: InMemoryDncRepository;
   customer: Customer;
+  /** `res.locals.forceCommit` as the last response left it. */
+  forceCommit: () => unknown;
 }
 
 async function build(opts: {
@@ -123,6 +125,13 @@ async function build(opts: {
 
   const app = express();
   app.use(express.json());
+  let forceCommit: unknown;
+  app.use((_req: Request, res: Response, next: NextFunction) => {
+    res.on('finish', () => {
+      forceCommit = res.locals.forceCommit;
+    });
+    next();
+  });
   if (!opts.unauthenticated) {
     app.use((req: Request, _res: Response, next: NextFunction) => {
       (req as AuthenticatedRequest).auth = {
@@ -139,7 +148,10 @@ async function build(opts: {
     createPortalRouter({ portalRepo, customerRepo, auditRepo, sendService }),
   );
 
-  return { app, portalRepo, customerRepo, auditRepo, dispatchRepo, delivery, dnc, customer };
+  return {
+    app, portalRepo, customerRepo, auditRepo, dispatchRepo, delivery, dnc, customer,
+    forceCommit: () => forceCommit,
+  };
 }
 
 describe('POST /api/portal-sessions/send — auth + configuration gates', () => {
@@ -281,6 +293,8 @@ describe('POST /api/portal-sessions/send — consent/DNC gating (never weakened)
     expect(res.status).toBe(400);
     // Nothing reached the provider.
     expect(h.delivery.sentSms).toHaveLength(0);
+    // The 400 commits, so the refused text's record and the revoke survive.
+    expect(h.forceCommit()).toBe(true);
 
     // The refusal is the text's message record, with the reason, like every
     // other customer text (D-045).

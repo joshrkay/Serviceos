@@ -108,6 +108,11 @@ export type MessageBlockReason =
    * known to have gone out; the holder may still fail, so try again later.
    */
   | 'in_flight'
+  /**
+   * A customer, DNC or consent-ledger read failed before sending. Nothing was
+   * sent; a later attempt may get through.
+   */
+  | 'lookup_failed'
   | 'send_failed';
 
 export type SendOutcome =
@@ -131,8 +136,10 @@ export type SendOutcome =
        * volume cap or a provider error, which a later attempt can get past.
        */
       permanent: boolean;
-      /** The underlying error message for `send_failed`. */
+      /** The underlying error message for `send_failed` and `lookup_failed`. */
       detail?: string;
+      /** The provider error's code for `send_failed`, when it gave one (e.g. 'AUTH_FAILED'). */
+      errorCode?: string;
     };
 
 /**
@@ -181,13 +188,19 @@ export interface OutboundMessaging {
   sendText(text: OutboundText): Promise<RecordedSendOutcome>;
 }
 
-function blocked(reason: MessageBlockReason, detail?: string): SendOutcome {
+function blocked(reason: MessageBlockReason, detail?: string, errorCode?: string): SendOutcome {
   return {
     status: 'blocked',
     reason,
     permanent: PERMANENT_BLOCK_REASONS.has(reason),
     ...(detail ? { detail } : {}),
+    ...(errorCode ? { errorCode } : {}),
   };
+}
+
+function errorCodeOf(err: unknown): string | undefined {
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === 'string' ? code : undefined;
 }
 
 /** The dedupe claim key a text is sent under. */
@@ -284,15 +297,15 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
       // since, and a retry by a caller that crashed before recording the
       // first send must not record a delivered text as blocked.
       if (deps.pool && (await readSendClaimStatus(deps.pool, text.tenantId, claimKey)) === 'sent') {
-        return record(text, '', { status: 'sent', duplicate: 'sent' });
+        return record(text, namedNumber(text), { status: 'sent', duplicate: 'sent' });
       }
       addressed = await address(text);
     } catch (err) {
       // A failed claim, customer, DNC or ledger read is not a verdict: nothing
       // was sent, and a later attempt may get through.
-      const outcome = blocked('send_failed', err instanceof Error ? err.message : String(err));
+      const outcome = blocked('lookup_failed', err instanceof Error ? err.message : String(err));
       deps.logger.warn('Outbound text recipient lookup failed', logFields(text, outcome));
-      return record(text, '', outcome);
+      return record(text, namedNumber(text), outcome);
     }
     if ('outcome' in addressed) {
       deps.logger.info('Outbound text blocked before sending', logFields(text, addressed.outcome));
@@ -360,7 +373,7 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
       } else if (err instanceof SmsSuppressedError) {
         outcome = blocked(err.reason);
       } else {
-        outcome = blocked('send_failed', err instanceof Error ? err.message : String(err));
+        outcome = blocked('send_failed', err instanceof Error ? err.message : String(err), errorCodeOf(err));
         deps.logger.warn('Outbound text failed', logFields(text, outcome));
         return outcome;
       }
@@ -437,6 +450,11 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
   }
 
   return { sendText };
+}
+
+/** The number the sender named, if any ('' when only the customer record knows it). */
+function namedNumber(text: OutboundText): string {
+  return text.recipient.kind === 'customer' ? (text.recipient.phone?.trim() ?? '') : text.recipient.phone;
 }
 
 function logFields(text: OutboundText, outcome: SendOutcome): Record<string, unknown> {

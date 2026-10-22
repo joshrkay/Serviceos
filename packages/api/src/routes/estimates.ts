@@ -38,7 +38,7 @@ import { DocumentRevisionRepository } from '../ai/document-revision';
 import { EditDeltaRepository } from '../estimates/edit-delta';
 import { AuditRepository, createAuditEvent, createAuditEventBestEffort } from '../audit/audit';
 import { getNextEstimateNumber, resolveDefaultTaxRateBps, SettingsRepository } from '../settings/settings';
-import { SendService } from '../notifications/send-service';
+import { SendService, NotDeliveredError } from '../notifications/send-service';
 import { LLMGateway } from '../ai/gateway/gateway';
 import { ProposalRepository } from '../proposals/proposal';
 import { EstimateTaskHandler } from '../ai/tasks/estimate-task';
@@ -1009,6 +1009,10 @@ export function createEstimateRouter(
         }
         res.status(202).json(result);
       } catch (err) {
+        // D-045 — a send no channel delivered keeps its message records (each
+        // refused text, with the reason) and the view token it wrote; a
+        // rollback would erase what the status bubble shows.
+        if (err instanceof NotDeliveredError) res.locals.forceCommit = true;
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
       }
