@@ -524,6 +524,8 @@ describe('A1 — resolve-entity holds no connection across its LLM call and comm
    */
   async function pickRacingAnEdit(proposalId: string) {
     log.length = 0;
+    // A4-5 — probes from earlier tests in the file must not count for this pick.
+    llmProbes.length = 0;
     llmEntered = deferred();
     releaseLlm = deferred();
     releaseLlm.resolve();
@@ -618,8 +620,9 @@ describe('A1 — resolve-entity holds no connection across its LLM call and comm
     expect(row.payload.customerId).toBeUndefined();
     expect(row.payload.entityCandidates).toHaveLength(2);
     expect(await resolvedAudits(seeded.id)).toBe(0);
-    // The draft was built (the LLM ran), then refused under the lock: no write.
-    expect(llmProbes.length).toBeGreaterThan(0);
+    // The draft was built (the LLM ran once, for this pick), then refused
+    // under the lock: no write.
+    expect(llmProbes).toHaveLength(1);
     const lock = after.findIndex((s) => LOCK_ROW.test(s));
     expect(lock).toBeGreaterThan(after.indexOf('BEGIN'));
     expect(after[lock + 1]).toBe('ROLLBACK');
