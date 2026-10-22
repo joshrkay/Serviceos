@@ -198,7 +198,7 @@ describe('useOnboardingTalk', () => {
     const deps = makeDeps({ identityDone });
     const { result } = await inReview(deps);
     expect(result.current.proposalIds).toEqual(['p1', 'p2']);
-    await act(() => result.current.save());
+    await act(() => result.current.save(['p1', 'p2']));
     expect(deps.approve).toHaveBeenCalledWith(['p1', 'p2']);
     expect(identityDone).toHaveBeenCalledTimes(2);
     expect(result.current.status).toBe('finished');
@@ -209,7 +209,7 @@ describe('useOnboardingTalk', () => {
       approve: vi.fn().mockResolvedValueOnce({ approved: ['p1'], failed: [{ id: 'p2', reason: 'VALIDATION_ERROR' }] }),
     });
     const { result } = await inReview(deps);
-    await act(() => result.current.save());
+    await act(() => result.current.save(['p1', 'p2']));
     expect(result.current.status).toBe('review');
     expect(result.current.proposalIds).toEqual(['p2']);
     expect(result.current.error?.message).toMatch(/^1 setup item still needs a detail/);
@@ -223,7 +223,7 @@ describe('useOnboardingTalk', () => {
   it('a save whose answer was lost but went through is not re-approved on "Try again"', async () => {
     const deps = makeDeps({ approve: vi.fn().mockRejectedValueOnce(new Error('offline')) });
     const { result } = await inReview(deps);
-    await act(() => result.current.save());
+    await act(() => result.current.save(['p1', 'p2']));
     vi.mocked(deps.stillAwaiting).mockResolvedValueOnce([]);
     await act(() => result.current.recover());
     expect(deps.approve).toHaveBeenCalledTimes(1);
@@ -233,7 +233,7 @@ describe('useOnboardingTalk', () => {
   it('a retry only re-approves what is still waiting', async () => {
     const deps = makeDeps({ approve: vi.fn().mockRejectedValueOnce(new Error('offline')) });
     const { result } = await inReview(deps);
-    await act(() => result.current.save());
+    await act(() => result.current.save(['p1', 'p2']));
     vi.mocked(deps.stillAwaiting).mockResolvedValueOnce(['p2']);
     vi.mocked(deps.approve).mockResolvedValueOnce({ approved: ['p2'], failed: [] });
     await act(() => result.current.recover());
@@ -244,7 +244,7 @@ describe('useOnboardingTalk', () => {
   it('a retry that cannot check what was saved says so and sends nothing', async () => {
     const deps = makeDeps({ approve: vi.fn().mockRejectedValueOnce(new Error('offline')) });
     const { result } = await inReview(deps);
-    await act(() => result.current.save());
+    await act(() => result.current.save(['p1', 'p2']));
     vi.mocked(deps.stillAwaiting).mockResolvedValueOnce(null);
     await act(() => result.current.recover());
     expect(deps.approve).toHaveBeenCalledTimes(1);
@@ -255,7 +255,7 @@ describe('useOnboardingTalk', () => {
   it('a save that does not reach the server says so and can be retried', async () => {
     const deps = makeDeps({ approve: vi.fn().mockRejectedValueOnce(new Error('offline')) });
     const { result } = await inReview(deps);
-    await act(() => result.current.save());
+    await act(() => result.current.save(['p1', 'p2']));
     expect(result.current.error).toEqual({ message: SAVE_FAILED_COPY, action: 'retry_save' });
     expect(result.current.status).toBe('review');
   });
@@ -263,7 +263,7 @@ describe('useOnboardingTalk', () => {
   it('a setup that is slow to apply says so instead of opening the app early', async () => {
     const deps = makeDeps({ identityDone: vi.fn().mockResolvedValue(false) });
     const { result } = await inReview(deps);
-    await act(() => result.current.save());
+    await act(() => result.current.save(['p1', 'p2']));
     expect(deps.identityDone).toHaveBeenCalledTimes(SAVE_POLL_ATTEMPTS);
     expect(result.current.status).toBe('saving');
     expect(result.current.error).toEqual({ message: SAVE_SLOW_COPY, action: 'check_again' });
@@ -272,10 +272,48 @@ describe('useOnboardingTalk', () => {
     expect(result.current.status).toBe('finished');
   });
 
+  it('only batch-eligible items are approved; the rest stay for review in Approvals and the app does not open', async () => {
+    const deps = makeDeps({ approve: vi.fn().mockResolvedValue({ approved: ['p1'], failed: [] }) });
+    const { result } = await inReview(deps);
+    await act(() => result.current.save(['p1']));
+    expect(deps.approve).toHaveBeenCalledWith(['p1']);
+    expect(result.current.proposalIds).toEqual(['p2']);
+    expect(result.current.status).toBe('review');
+    expect(deps.identityDone).not.toHaveBeenCalled();
+  });
+
+  it('with nothing batch-eligible, saving approves nothing', async () => {
+    const deps = makeDeps();
+    const { result } = await inReview(deps);
+    await act(() => result.current.save([]));
+    expect(deps.approve).not.toHaveBeenCalled();
+    expect(result.current.status).toBe('review');
+  });
+
+  it('a retry keeps held items out of the batch', async () => {
+    const deps = makeDeps({ approve: vi.fn().mockRejectedValueOnce(new Error('offline')) });
+    const { result } = await inReview(deps);
+    await act(() => result.current.save(['p1']));
+    vi.mocked(deps.approve).mockResolvedValueOnce({ approved: ['p1'], failed: [] });
+    await act(() => result.current.recover());
+    expect(deps.stillAwaiting).toHaveBeenLastCalledWith(['p1']);
+    expect(deps.approve).toHaveBeenLastCalledWith(['p1']);
+    expect(result.current.proposalIds).toEqual(['p2']);
+  });
+
+  it('typing an answer drops Rivet\'s pending line, so it cannot play out of order', async () => {
+    const deps = makeDeps();
+    const { result } = await started(deps);
+    const isCurrent = vi.mocked(deps.speak).mock.calls[0][1];
+    vi.mocked(deps.sendTurn).mockResolvedValueOnce(reply('What trade are you in?'));
+    await act(() => result.current.sendText('Walsh Plumbing'));
+    expect(isCurrent()).toBe(false);
+  });
+
   it('a status it cannot read is reported as unknown, not as done', async () => {
     const deps = makeDeps({ identityDone: vi.fn().mockRejectedValue(new Error('500')) });
     const { result } = await inReview(deps);
-    await act(() => result.current.save());
+    await act(() => result.current.save(['p1', 'p2']));
     expect(result.current.error).toEqual({ message: STATUS_UNKNOWN_COPY, action: 'check_again' });
   });
 });

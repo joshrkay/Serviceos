@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PendingProposalSummary } from '../proposals/proposalEvents';
-import { MIC_DENIED_COPY, MIC_FAILED_COPY, type UseOnboardingTalk } from '../onboarding/useOnboardingTalk';
+import { heldForReviewCopy, MIC_DENIED_COPY, MIC_FAILED_COPY, type UseOnboardingTalk } from '../onboarding/useOnboardingTalk';
 
 const h = vi.hoisted(() => ({
   push: vi.fn(),
@@ -126,7 +126,7 @@ describe('spoken setup screen', () => {
   it('a finished conversation lists what will be set up and saves on one tap', () => {
     h.talk = talk({ status: 'review', proposalIds: ['p1', 'p2'] });
     h.proposals = [
-      { id: 'p1', summary: 'Business profile: Walsh Plumbing', proposalType: 'onboarding_tenant_settings', createdAt: '2026-10-22T00:00:00Z' },
+      { id: 'p1', summary: 'Business profile: Walsh Plumbing', proposalType: 'onboarding_tenant_settings', createdAt: '2026-10-22T00:00:00Z', confidenceScore: 0.95 },
       { id: 'other', summary: 'Unrelated invoice', proposalType: 'draft_invoice', createdAt: '2026-10-22T00:00:00Z' },
     ];
     render(createElement(SetupVoiceScreen));
@@ -134,7 +134,33 @@ describe('spoken setup screen', () => {
     expect(screen.queryByText('Unrelated invoice')).toBeNull();
     expect(h.refresh).toHaveBeenCalled();
     fireEvent.click(button('Save my setup'));
-    expect(h.talk.save).toHaveBeenCalled();
+    expect(h.talk.save).toHaveBeenCalledWith(['p1']);
+  });
+
+  it('an item it was unsure about is held out of the one-tap save and sent to Approvals', () => {
+    h.talk = talk({ status: 'review', proposalIds: ['p1', 'p2'] });
+    h.proposals = [
+      { id: 'p1', summary: 'Business profile: Walsh Plumbing', proposalType: 'onboarding_tenant_settings', createdAt: '2026-10-22T00:00:00Z', confidenceScore: 0.95 },
+      { id: 'p2', summary: 'Service: drain cleaning $150', proposalType: 'onboarding_service_category', createdAt: '2026-10-22T00:00:00Z', confidenceScore: 0.5 },
+    ];
+    render(createElement(SetupVoiceScreen));
+    expect(screen.getByText('Service: drain cleaning $150 (needs a closer look)')).toBeTruthy();
+    expect(screen.getByText(heldForReviewCopy(1))).toBeTruthy();
+    fireEvent.click(button('Save my setup'));
+    expect(h.talk.save).toHaveBeenCalledWith(['p1']);
+    fireEvent.click(button('Check in Approvals'));
+    expect(h.skip).toHaveBeenCalledWith('user_owner');
+    expect(h.push).toHaveBeenCalledWith('/approvals');
+  });
+
+  it('with nothing safe to save in one tap, Save is off and Approvals is the way forward', () => {
+    h.talk = talk({ status: 'review', proposalIds: ['p2'] });
+    h.proposals = [
+      { id: 'p2', summary: 'Service: drain cleaning $150', proposalType: 'onboarding_service_category', createdAt: '2026-10-22T00:00:00Z', confidenceScore: 0.5 },
+    ];
+    render(createElement(SetupVoiceScreen));
+    expect(button('Save my setup').disabled).toBe(true);
+    expect(button('Check in Approvals')).toBeTruthy();
   });
 
   it('once setup has applied, "Open my business" opens the app past the gate', () => {

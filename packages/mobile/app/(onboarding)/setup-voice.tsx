@@ -6,7 +6,13 @@ import { PrimaryButton } from '../../src/components/Buttons';
 import { skipSetupGateForSession } from '../../src/hooks/useOnboardingStatus';
 import { usePendingProposals } from '../../src/hooks/usePendingProposals';
 import { useOnboardingTalkController } from '../../src/onboarding/useOnboardingTalkController';
-import { MIC_DENIED_COPY, MIC_FAILED_COPY, type TalkError } from '../../src/onboarding/useOnboardingTalk';
+import {
+  heldForReviewCopy,
+  MIC_DENIED_COPY,
+  MIC_FAILED_COPY,
+  type TalkError,
+} from '../../src/onboarding/useOnboardingTalk';
+import { isBatchEligible } from '../../src/proposals/proposalEvents';
 import { useRecorder } from '../../src/voice/useRecorder';
 
 const ERROR_ACTION_LABEL: Record<TalkError['action'], string | null> = {
@@ -36,6 +42,10 @@ export default function SetupVoiceScreen() {
   const inReview = status === 'review' || status === 'saving';
   const pending = usePendingProposals({ enabled: inReview });
   const items = pending.proposals.filter((p) => proposalIds.includes(p.id));
+  // Only high-confidence capture items are saved in one tap; anything else (or not yet
+  // loaded) is held for individual review, the same rule as the Approvals batch.
+  const eligibleIds = items.filter(isBatchEligible).map((p) => p.id);
+  const heldCount = proposalIds.length - eligibleIds.length;
 
   const { refresh } = pending;
   useEffect(() => {
@@ -65,6 +75,11 @@ export default function SetupVoiceScreen() {
     if (!text) return;
     setDraft('');
     void talk.sendText(text);
+  };
+  const reviewInApprovals = () => {
+    // Approvals sits outside the setup group; the session pass lets the owner reach it.
+    skipSetupGateForSession(userId);
+    router.push('/approvals');
   };
   const skip = () => {
     skipSetupGateForSession(userId);
@@ -114,6 +129,7 @@ export default function SetupVoiceScreen() {
               items.map((p) => (
                 <Text key={p.id} className="mt-2 text-base text-foreground">
                   {p.summary}
+                  {isBatchEligible(p) ? '' : ' (needs a closer look)'}
                 </Text>
               ))
             ) : (
@@ -148,12 +164,26 @@ export default function SetupVoiceScreen() {
           <PrimaryButton label="Open my business" onPress={openApp} />
         </View>
       ) : inReview ? (
-        <PrimaryButton
-          label="Save my setup"
-          loading={status === 'saving' && !error}
-          disabled={proposalIds.length === 0 || status === 'saving'}
-          onPress={() => void talk.save()}
-        />
+        <View>
+          {heldCount > 0 && !pending.isLoading ? (
+            <View className="mb-3">
+              <Text className="text-base text-foreground">{heldForReviewCopy(heldCount)}</Text>
+              <Pressable
+                accessibilityRole="button"
+                onPress={reviewInApprovals}
+                className="mt-2 min-h-11 items-center justify-center rounded-md border border-border px-4 py-3"
+              >
+                <Text className="text-base text-foreground">Check in Approvals</Text>
+              </Pressable>
+            </View>
+          ) : null}
+          <PrimaryButton
+            label="Save my setup"
+            loading={status === 'saving' && !error}
+            disabled={eligibleIds.length === 0 || status === 'saving'}
+            onPress={() => void talk.save(eligibleIds)}
+          />
+        </View>
       ) : talking ? (
         <View>
           <View className="flex-row items-end">

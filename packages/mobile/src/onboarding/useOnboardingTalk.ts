@@ -74,7 +74,13 @@ export interface UseOnboardingTalk {
   hush: () => void;
   /** The error's action: re-send the last turn, start a new conversation, re-save, or re-check. */
   recover: () => Promise<void>;
-  save: () => Promise<void>;
+  /**
+   * Approve, in one batch, only the ids the caller found batch-eligible (capture
+   * lane and high confidence, `isBatchEligible`). Anything else the FSM emitted
+   * (a forced advance or the turn cap can leave low-confidence items) stays in
+   * `proposalIds` for individual review in Approvals and is never batched.
+   */
+  save: (batchEligibleIds: string[]) => Promise<void>;
 }
 
 /** After approval the settings execute once the 5 s undo window closes; this is how long the screen waits. */
@@ -87,6 +93,11 @@ export const STT_UNAVAILABLE_COPY = "Voice isn't available right now. Type your 
 export const MIC_DENIED_COPY = 'Microphone access is off. Turn it on in Settings, or type your answer.';
 export const MIC_FAILED_COPY = "I couldn't start the microphone. Try again, or type your answer.";
 export const SAVE_FAILED_COPY = "I couldn't save your setup. Check your connection and try again.";
+export function heldForReviewCopy(count: number): string {
+  return count === 1
+    ? "1 setup item I wasn't sure about needs a closer look. Check it in Approvals before it's saved."
+    : `${count} setup items I wasn't sure about need a closer look. Check them in Approvals before they're saved.`;
+}
 export const SAVE_CHECK_FAILED_COPY = "I couldn't check what was already saved. Check your connection and try again.";
 export const SAVE_SLOW_COPY = "Your setup is saved but still being applied. Check again in a moment.";
 export const STATUS_UNKNOWN_COPY = "Your setup is saved, but I couldn't confirm it's finished. Check again in a moment.";
@@ -175,6 +186,8 @@ export function useOnboardingTalk(deps: OnboardingTalkDeps): UseOnboardingTalk {
     async (userMessage: string | undefined) => {
       setStatus(userMessage === undefined ? 'starting' : 'sending');
       setError(null);
+      // Any owner answer makes Rivet's pending line stale; played late it would land out of order.
+      if (userMessage !== undefined) speechGen.current += 1;
       lastMessage.current = userMessage;
       const outcome = await request(userMessage);
       if (!mounted.current) return;
@@ -288,45 +301,74 @@ export function useOnboardingTalk(deps: OnboardingTalkDeps): UseOnboardingTalk {
     setError({ message: lastKnown === null ? STATUS_UNKNOWN_COPY : SAVE_SLOW_COPY, action: 'check_again' });
   }, []);
 
-  /** `reconcile`: a retry. The last attempt may have gone through, so only re-approve what still waits. */
-  const save = useCallback(async (reconcile = false) => {
-    let ids = proposalIds;
-    setStatus('saving');
-    setError(null);
-    if (reconcile) {
-      const waiting = await depsRef.current.stillAwaiting(ids);
-      if (!mounted.current) return;
-      if (waiting === null) {
-        setError({ message: SAVE_CHECK_FAILED_COPY, action: 'retry_save' });
+  /** Ids the owner may approve in one tap (capture-class, high confidence); the rest stay for individual review. */
+  const batchEligible = useRef<string[]>([]);
+
+  /** Approved what could be batched: the rest wait in Approvals, otherwise wait for setup to apply. */
+  const afterSave = useCallback(
+    async (held: string[]) => {
+      if (held.length > 0) {
+        setProposalIds(held);
         setStatus('review');
         return;
       }
-      if (waiting.length === 0) {
-        await awaitIdentity();
+      await awaitIdentity();
+    },
+    [awaitIdentity],
+  );
+
+  /** `reconcile`: a retry. The last attempt may have gone through, so only re-approve what still waits. */
+  const runSave = useCallback(
+    async (reconcile: boolean) => {
+      const held = proposalIds.filter((id) => !batchEligible.current.includes(id));
+      let ids = proposalIds.filter((id) => batchEligible.current.includes(id));
+      if (ids.length === 0) return;
+      setStatus('saving');
+      setError(null);
+      if (reconcile) {
+        const waiting = await depsRef.current.stillAwaiting(ids);
+        if (!mounted.current) return;
+        if (waiting === null) {
+          setError({ message: SAVE_CHECK_FAILED_COPY, action: 'retry_save' });
+          setStatus('review');
+          return;
+        }
+        if (waiting.length === 0) {
+          await afterSave(held);
+          return;
+        }
+        ids = waiting;
+        setProposalIds([...waiting, ...held]);
+      }
+      let result: BatchApproveResult;
+      try {
+        result = await depsRef.current.approve(ids);
+      } catch {
+        if (!mounted.current) return;
+        setError({ message: SAVE_FAILED_COPY, action: 'retry_save' });
+        setStatus('review');
         return;
       }
-      ids = waiting;
-      setProposalIds(waiting);
-    }
-    let result: BatchApproveResult;
-    try {
-      result = await depsRef.current.approve(ids);
-    } catch {
       if (!mounted.current) return;
-      setError({ message: SAVE_FAILED_COPY, action: 'retry_save' });
-      setStatus('review');
-      return;
-    }
-    if (!mounted.current) return;
-    if (result.failed.length > 0) {
-      // Keep only what is still waiting, so "Try again" never re-sends an approved item.
-      setProposalIds(result.failed.map((f) => f.id));
-      setError({ message: approvalFailureCopy(result.failed), action: 'retry_save' });
-      setStatus('review');
-      return;
-    }
-    await awaitIdentity();
-  }, [proposalIds, awaitIdentity]);
+      if (result.failed.length > 0) {
+        // Keep only what is still waiting, so "Try again" never re-sends an approved item.
+        setProposalIds([...result.failed.map((f) => f.id), ...held]);
+        setError({ message: approvalFailureCopy(result.failed), action: 'retry_save' });
+        setStatus('review');
+        return;
+      }
+      await afterSave(held);
+    },
+    [proposalIds, afterSave],
+  );
+
+  const save = useCallback(
+    async (batchEligibleIds: string[]) => {
+      batchEligible.current = batchEligibleIds;
+      await runSave(false);
+    },
+    [runSave],
+  );
 
   const recover = useCallback(async () => {
     const action = error?.action;
@@ -337,12 +379,12 @@ export function useOnboardingTalk(deps: OnboardingTalkDeps): UseOnboardingTalk {
       setTurns([]);
       await runTurn(undefined);
     } else if (action === 'retry_save') {
-      await save(true);
+      await runSave(true);
     } else if (action === 'check_again') {
       setError(null);
       await awaitIdentity();
     }
-  }, [error, retryTurn, runTurn, save, awaitIdentity]);
+  }, [error, retryTurn, runTurn, runSave, awaitIdentity]);
 
-  return { status, turns, proposalIds, error, sttUnavailable, sendText, sendAudio, hush, recover, save: () => save() };
+  return { status, turns, proposalIds, error, sttUnavailable, sendText, sendAudio, hush, recover, save };
 }
