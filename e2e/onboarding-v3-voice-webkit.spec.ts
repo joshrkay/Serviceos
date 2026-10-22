@@ -45,7 +45,11 @@ import { fakeDeepgram } from './helpers/fake-deepgram';
  * nothing. Questions (build plan PR 3): "what does that mean?", "give me an
  * example", "what do most shops do?" and "say that again" are answered in the
  * transcript card and aloud, save nothing, and the next answer still picks;
- * "what does the first one mean?" is a question, never a pick. That real speech is recognised (audio/mp4 accepted by the stream,
+ * "what does the first one mean?" is a question, never a pick. The opening questions
+ * (build plan PR 4): "Answer out loud" on the first screen, then the name, the trade and the cell
+ * said out loud fill the form and "show me my shop" reaches Ready with nothing typed; a trade not
+ * caught, two trades, a seven-digit cell and a refused microphone are each said back, never guessed.
+ * That real speech is recognised (audio/mp4 accepted by the stream,
  * the transcript card on a phone) needs a Deepgram key and a microphone: a
  * device run through the web verify skill (owner action).
  *
@@ -803,5 +807,162 @@ test.describe('v3 spoken answers, everyday and edge (voice-only onboarding PR 1)
     ]);
     deepgram.say('hold it for me');
     await expect.poll(() => saved(saves).at(-1)).toEqual(['booking_posture', 'b']);
+  });
+});
+
+/**
+ * The opening questions out loud (voice-only onboarding, build plan PR 4): on "What should I answer
+ * as?", "Answer out loud" asks for the microphone and Rivet asks the name, the trade and the cell one
+ * at a time; each answer fills the form, and "show me my shop" sends it. Proven by what the real API
+ * took (the draft POST) and by Ready opening, with nothing typed.
+ */
+test.describe('v3 opening questions out loud (voice-only onboarding PR 4) at 320x568', () => {
+  test.use({ viewport: { width: 320, height: 568 }, permissions: ['microphone'] });
+
+  interface DraftPost {
+    body: { businessName?: string; packId?: string; phone?: string };
+    status?: number;
+  }
+
+  function recordDraftPosts(page: Page): DraftPost[] {
+    const posts: DraftPost[] = [];
+    const byRequest = new Map<Request, DraftPost>();
+    page.on('request', (req) => {
+      if (new URL(req.url()).pathname !== '/api/onboarding/draft' || req.method() !== 'POST') return;
+      const post: DraftPost = { body: (req.postDataJSON() ?? {}) as DraftPost['body'] };
+      posts.push(post);
+      byRequest.set(req, post);
+    });
+    page.on('response', (res) => {
+      const post = byRequest.get(res.request());
+      if (post) post.status = res.status();
+    });
+    return posts;
+  }
+
+  /** A fresh owner on the first screen, after "Answer out loud", with the fake socket open. */
+  async function answeringOutLoud(page: Page, label: string) {
+    await signInAsFreshOwner(page, `intro_${label}`);
+    await watchVoiceAndFunnel(page);
+    const voice = recordVoice(page);
+    const posts = recordDraftPosts(page);
+    const deepgram = await fakeDeepgram(page);
+    await openOnboarding(page);
+    const mic = page.getByRole('button', { name: 'Answer out loud' });
+    await expectScreenFits(page);
+    await mic.click();
+    await expect(mic).toHaveAttribute('aria-pressed', 'true');
+    await expect.poll(() => deepgram.urls.length).toBe(1);
+    expect(new URL(deepgram.urls[0]!).searchParams.getAll('keyterm')).toEqual(expect.arrayContaining(['HVAC', 'show me my shop']));
+    const transcript = page.getByTestId('rivet-transcript');
+    await expect(transcript).toHaveText("What's your business called?");
+    return { voice, posts, deepgram, transcript };
+  }
+
+  const spoken = (voice: VoiceCall[]) => batches(voice).flatMap((c) => c.items);
+
+  test('21. Name, trade and cell said out loud fill the form, and "show me my shop" reaches Ready with nothing typed', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    const { voice, posts, deepgram, transcript } = await answeringOutLoud(page, 'happy');
+    await expect.poll(() => spoken(voice)).toContain("What's your business called?");
+
+    deepgram.say("It's Walsh Plumbing.");
+    await expect(page.getByLabel('Business name')).toHaveValue('Walsh Plumbing');
+    await expect(transcript).toContainText("What's your trade: plumbing, HVAC, electrical, or something else?");
+
+    deepgram.say('plumbing');
+    await expect(page.getByRole('button', { name: 'Plumbing' })).toHaveAttribute('aria-pressed', 'true');
+    await expect(transcript).toHaveText("Got it, plumbing. What's your cell number, with the area code?");
+
+    deepgram.say('216-555-0142');
+    await expect(page.getByLabel('Your cell')).toHaveValue('(216) 555-0142');
+    const readBack = 'Walsh Plumbing, plumbing, and your cell is 2 1 6, 5 5 5, 0 1 4 2.';
+    await expect(transcript).toContainText(readBack);
+    await expect.poll(() => spoken(voice)).toContain(readBack);
+    await expectScreenFits(page);
+    expect(posts).toEqual([]);
+
+    deepgram.say('show me my shop');
+    await expect(page.getByRole('heading', { level: 1, name: 'Walsh Plumbing is already set up.' })).toBeVisible();
+    expect(posts).toHaveLength(1);
+    expect(posts[0]!.body).toMatchObject({ businessName: 'Walsh Plumbing', packId: 'plumbing', phone: '(216) 555-0142' });
+    expect(posts[0]!.status).toBe(201);
+
+    // The microphone is still held: the first choice turn listens without asking again.
+    await page.getByRole('button', { name: 'Make it mine, 7 choices' }).click();
+    await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[0] })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Answer out loud' })).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByRole('alert')).toHaveCount(0);
+  });
+
+  test('22. A trade not caught, two trades, and a seven-digit cell are each said back; nothing is guessed or sent', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    const { voice, posts, deepgram, transcript } = await answeringOutLoud(page, 'misses');
+    deepgram.say('Lakeside');
+    await expect(page.getByLabel('Business name')).toHaveValue('Lakeside');
+
+    deepgram.say('banana');
+    const tradeMiss = "I didn't catch the trade. Plumbing, HVAC, electrical, or something else?";
+    await expect(transcript).toHaveText(tradeMiss);
+    await expect.poll(() => spoken(voice)).toContain(tradeMiss);
+
+    deepgram.say('plumbing, heating and air');
+    await expect(transcript).toHaveText('I heard plumbing and HVAC. Which one do you do most?');
+    for (const chip of ['Plumbing', 'HVAC', 'Electrical', 'Something else']) {
+      await expect(page.getByRole('button', { name: chip })).toHaveAttribute('aria-pressed', 'false');
+    }
+    deepgram.say('mostly heating and cooling');
+    await expect(page.getByRole('button', { name: 'HVAC' })).toHaveAttribute('aria-pressed', 'true');
+
+    deepgram.say('555-0142');
+    const notUs = "That doesn't look like a US cell number. Include the area code, 10 digits.";
+    await expect(page.getByLabel('Your cell')).toHaveValue('5550142');
+    await expect(page.getByLabel('Your cell')).toHaveAttribute('aria-invalid', 'true');
+    await expect(transcript).toHaveText(notUs);
+    await expect.poll(() => spoken(voice)).toContain(notUs);
+    await expectScreenFits(page);
+
+    // Not complete: "show me my shop" asks for what is missing instead of sending.
+    deepgram.say('show me my shop');
+    await expect(transcript).toHaveText("What's your cell number, with the area code?");
+    await page.waitForTimeout(1_000);
+    expect(posts).toEqual([]);
+
+    deepgram.say('two one six, five five five, oh one four two');
+    await expect(page.getByLabel('Your cell')).toHaveValue('(216) 555-0142');
+    deepgram.say('looks good');
+    await expect(page.getByRole('heading', { level: 1, name: 'Lakeside is already set up.' })).toBeVisible();
+    expect(posts.map((p) => p.body)).toEqual([expect.objectContaining({ businessName: 'Lakeside', packId: 'hvac', phone: '(216) 555-0142' })]);
+  });
+
+  test('23. "Spell it" fixes a misheard name letter by letter', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    const { deepgram, transcript } = await answeringOutLoud(page, 'spell');
+    deepgram.say('Welsh Plumbing');
+    await expect(page.getByLabel('Business name')).toHaveValue('Welsh Plumbing');
+    deepgram.say('spell it');
+    await expect(transcript).toHaveText('Go ahead and spell it, letter by letter.');
+    deepgram.say('W-A-L-S-H plumbing');
+    await expect(page.getByLabel('Business name')).toHaveValue('Walsh Plumbing');
+    await expect(transcript).toContainText("I've got Walsh Plumbing.");
+  });
+});
+
+test.describe('v3 opening questions, microphone refused (voice-only onboarding PR 4) at 320x568', () => {
+  test.use({ viewport: { width: 320, height: 568 } });
+
+  test('24. "Answer out loud" with the microphone refused says so, and the form still sends by typing', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    await signInAsFreshOwner(page, 'intro_denied');
+    await openOnboarding(page);
+    await page.getByRole('button', { name: 'Answer out loud' }).click();
+    await expect(page.getByTestId('rivet-transcript')).toHaveText("I can't hear you on this device, so type your answers below.");
+    await expect(page.getByRole('button', { name: 'Answer out loud' })).toHaveCount(0);
+    await expectScreenFits(page);
+    await page.getByLabel('Business name').fill('Walsh Plumbing');
+    await page.getByRole('button', { name: 'Plumbing' }).click();
+    await page.getByLabel('Your cell').fill('(216) 555-0142');
+    await page.getByRole('button', { name: 'Show me my shop' }).click();
+    await expect(page.getByRole('heading', { level: 1, name: 'Walsh Plumbing is already set up.' })).toBeVisible();
   });
 });

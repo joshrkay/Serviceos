@@ -59,6 +59,7 @@ import { PgSupervisorPolicyRepository } from '../../src/proposals/supervisor/pol
 import { PgTenantBudgetCounterRepository } from '../../src/proposals/supervisor/budget-counters-repo';
 import { InMemoryFeatureFlagRepository } from '../../src/flags/feature-flags';
 import { PgTriageEventRepository } from '../../src/ai/agents/customer-calling/pg-triage-events';
+import { PgCallSummaryRepository } from '../../src/ai/skills/pg-call-summary';
 import { PgConsentEventRepository } from '../../src/compliance/consent-events';
 import { PgUserRepository } from '../../src/users/pg-user';
 import { PgPendingInvitationRepository } from '../../src/users/pg-pending-invitation';
@@ -790,6 +791,38 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
     });
   });
 
+  // ── call_summaries (A2 — written through PgCallSummaryRepository) ─────────
+  describe('PgCallSummaryRepository', () => {
+    it('create writes each row under its own tenant, and tenant B cannot read tenant A row via RLS (pins real column names)', async () => {
+      const repo = new PgCallSummaryRepository(pool);
+      const row = {
+        callId: null,
+        summary: 'Caller booked a tune-up.',
+        detectedIntent: 'schedule_appointment',
+        proposalIds: [proposalA],
+        qualityScore: 0.75,
+      };
+      const a = await repo.create(tenantA.tenantId, row);
+      const b = await repo.create(tenantB.tenantId, { ...row, proposalIds: [proposalB] });
+      expect(a.id).not.toBe(b.id);
+
+      const owners = await pool.query<{ id: string; tenant_id: string }>(
+        'SELECT id, tenant_id FROM call_summaries WHERE id = ANY($1) ORDER BY tenant_id = $2 DESC',
+        [[a.id, b.id], tenantA.tenantId],
+      );
+      expect(owners.rows).toEqual([
+        { id: a.id, tenant_id: tenantA.tenantId },
+        { id: b.id, tenant_id: tenantB.tenantId },
+      ]);
+
+      const seenByB = await asTenant(pool, tenantB.tenantId, async (client) => {
+        const res = await client.query<{ id: string }>('SELECT id FROM call_summaries WHERE id = ANY($1)', [[a.id, b.id]]);
+        return res.rows.map((r) => r.id);
+      });
+      expect(seenByB).toEqual([b.id]);
+    });
+  });
+
   // ── supervisor_policies + tenant_budget_counters (F-1, migration 167) ─────
   describe('PgSupervisorPolicyRepository', () => {
     it('createVersion/activate/getActive round-trip per tenant and never cross tenants (pins real column names)', async () => {
@@ -1091,6 +1124,24 @@ describe('repository-layer cross-tenant leak (RV-003)', () => {
         await client.query(`RESET app.current_tenant_id`);
         await expect(
           client.query('SELECT count(*) FROM daily_digests'),
+        ).rejects.toThrow(/unrecognized configuration parameter|invalid input syntax for type uuid/);
+      } finally {
+        await client.query('ROLLBACK').catch(() => undefined);
+        client.release();
+      }
+    });
+
+    it('SELECT on call_summaries throws when GUC is not set (fail-closed policy)', async () => {
+      // call_summaries policy (schema.ts, FORCE'd later):
+      //   USING (tenant_id = current_setting('app.current_tenant_id')::UUID)
+      // No missing_ok → same fail-closed error as customers above.
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(`SET LOCAL ROLE ${APP_ROLE}`);
+        await client.query(`RESET app.current_tenant_id`);
+        await expect(
+          client.query('SELECT count(*) FROM call_summaries'),
         ).rejects.toThrow(/unrecognized configuration parameter|invalid input syntax for type uuid/);
       } finally {
         await client.query('ROLLBACK').catch(() => undefined);

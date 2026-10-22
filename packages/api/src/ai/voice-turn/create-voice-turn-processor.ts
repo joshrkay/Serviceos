@@ -96,6 +96,7 @@ import {
 import type { ProposalSmsEventRepository } from '../../proposals/sms/sms-event';
 import { confirmIntent } from '../skills/confirm-intent';
 import { summarizeSession } from '../skills/summarize-session';
+import type { CallSummaryRepository } from '../skills/pg-call-summary';
 import {
   escalateToHuman,
   emergencyImmediateDial,
@@ -710,6 +711,11 @@ export interface VoiceTurnProcessorDeps {
   store: VoiceSessionStore;
   gateway: LLMGateway;
   pool?: Pool;
+  /**
+   * A2 — when present, end-of-call summaries are persisted to call_summaries
+   * through it (its own tenant transaction under the RLS runtime role).
+   */
+  callSummaryRepo?: CallSummaryRepository;
   auditRepo?: AuditRepository;
   proposalRepo?: ProposalRepository;
   onCallRepo?: OnCallRepository;
@@ -3977,7 +3983,7 @@ export function createVoiceTurnProcessor(
             durationMs,
             gateway: deps.gateway,
             ...(intentDetected ? { intentDetected } : {}),
-            ...(deps.pool ? { pool: deps.pool } : {}),
+            ...(deps.callSummaryRepo ? { callSummaryRepo: deps.callSummaryRepo } : {}),
           });
           lastErr = null;
           break;

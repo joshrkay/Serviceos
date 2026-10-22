@@ -1,7 +1,12 @@
-import { render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import { describe, expect, it, vi } from 'vitest';
-import { AnswerAsScreen } from './AnswerAsScreen';
+import { useState, type ReactNode } from 'react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { RivetVoiceContext, useRivetVoice } from '../../../hooks/useRivetVoice';
+import { expectTapTarget } from '../../../test-utils/tap-target';
+import { AnswerAsScreen, type AnswerAsScreenProps } from './AnswerAsScreen';
+
+vi.mock('../../../lib/analytics', () => ({ trackFunnel: vi.fn(), track: vi.fn() }));
 
 const WHY = 'I ring this number for emergencies, and your area code sets your prices. 10 digits with the area code.';
 const NOT_A_US_CELL = "That doesn't look like a US cell number. Include the area code, 10 digits.";
@@ -144,6 +149,309 @@ describe('AnswerAsScreen', () => {
       expect(cellField()).toHaveValue('(216) 555-0142');
       expect(screen.queryByRole('alert')).not.toBeInTheDocument();
       expect(go()).toBeEnabled();
+    });
+  });
+
+  describe('out loud (inside the shell)', () => {
+    // The microphone and Deepgram's socket are the browser/vendor boundary (faked as in
+    // OptionPairTurn.test.tsx); the voice hook, the listener and the screen are real, and the
+    // API is stubbed at fetch. Rivet's voice works, so what he says is read off the batch requests.
+    class FakeWebSocket {
+      static OPEN = 1;
+      static instances: FakeWebSocket[] = [];
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onmessage: ((e: { data: string }) => void) | null = null;
+      onerror: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor(readonly url: string) {
+        FakeWebSocket.instances.push(this);
+      }
+      send() {}
+      close() {
+        this.readyState = 3;
+      }
+    }
+    class FakeMediaRecorder {
+      state = 'inactive';
+      ondataavailable: unknown = null;
+      start() {
+        this.state = 'recording';
+      }
+      stop() {
+        this.state = 'inactive';
+      }
+    }
+    let micAnswer: 'granted' | 'denied';
+    let getUserMedia: ReturnType<typeof vi.fn>;
+    let batches: string[][];
+    const socket = () => FakeWebSocket.instances.at(-1)!;
+    const open = () =>
+      act(() => {
+        socket().readyState = 1;
+        socket().onopen?.();
+      });
+    const hear = (transcript: string) =>
+      act(() => {
+        socket().onmessage?.({ data: JSON.stringify({ is_final: true, speech_final: true, channel: { alternatives: [{ transcript }] } }) });
+      });
+    const flush = () =>
+      act(async () => {
+        for (let i = 0; i < 10; i += 1) await Promise.resolve();
+      });
+    const said = () => batches.flat();
+
+    beforeEach(() => {
+      FakeWebSocket.instances = [];
+      micAnswer = 'granted';
+      batches = [];
+      getUserMedia = vi.fn(async () => {
+        if (micAnswer === 'denied') throw new DOMException('Permission denied', 'NotAllowedError');
+        return { getTracks: () => [{ stop: vi.fn() }] };
+      });
+      vi.stubGlobal('WebSocket', FakeWebSocket as unknown as typeof WebSocket);
+      vi.stubGlobal('MediaRecorder', FakeMediaRecorder as unknown as typeof MediaRecorder);
+      vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia } });
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+          const path = String(input);
+          const reply = (body: unknown) =>
+            Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+          if (path.startsWith('/api/voice/stream-token')) return reply({ token: 'dg-temp', expiresIn: 30, model: 'nova-3' });
+          if (path === '/api/voice/tts/batch') {
+            const { items } = JSON.parse(String(init?.body)) as { items: string[] };
+            batches.push(items);
+            return reply({
+              clips: items.map((text, i) => ({
+                text,
+                clipHash: String(i).padStart(64, '0'),
+                audio: btoa(encodeURIComponent(text)),
+                contentType: 'audio/mpeg',
+                cached: false,
+              })),
+            });
+          }
+          throw new Error(`unexpected request ${path}`);
+        }),
+      );
+      vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(() => Promise.resolve());
+      vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+    });
+    afterEach(() => {
+      cleanup();
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    });
+
+    function Voice({ children }: { children: ReactNode }) {
+      const voice = useRivetVoice({ funnel: { tenantId: 't', userId: 'u' } });
+      return <RivetVoiceContext.Provider value={voice}>{children}</RivetVoiceContext.Provider>;
+    }
+
+    const mic = () => screen.queryByRole('button', { name: 'Answer out loud' });
+    const transcript = () => screen.getByTestId('rivet-transcript');
+    const nameField = () => screen.getByLabelText('Business name');
+
+    /** The screen in the shell's voice, then the owner taps "Answer out loud" and the socket opens. */
+    async function startOutLoud(props: Partial<AnswerAsScreenProps> = {}) {
+      const onSubmit = vi.fn();
+      render(
+        <Voice>
+          <AnswerAsScreen onSubmit={onSubmit} {...props} />
+        </Voice>,
+      );
+      fireEvent.click(mic()!);
+      await flush();
+      open();
+      return { onSubmit };
+    }
+
+    it('offers "Answer out loud" only where Rivet can listen, as a 44px control, and asks nothing until it is tapped', async () => {
+      render(
+        <Voice>
+          <AnswerAsScreen onSubmit={vi.fn()} />
+        </Voice>,
+      );
+      expect(mic()).toBeInTheDocument();
+      expect(mic()).not.toHaveAttribute('aria-pressed');
+      expectTapTarget(mic()!, 'Answer out loud');
+      expect(screen.queryByTestId('rivet-transcript')).not.toBeInTheDocument();
+      expect(getUserMedia).not.toHaveBeenCalled();
+      expect(FakeWebSocket.instances).toHaveLength(0);
+      cleanup();
+
+      vi.stubGlobal('MediaRecorder', undefined);
+      render(
+        <Voice>
+          <AnswerAsScreen onSubmit={vi.fn()} />
+        </Voice>,
+      );
+      expect(mic()).not.toBeInTheDocument();
+    });
+
+    it('name, trade and cell by voice fill the form, the read-back is said, and "show me my shop" sends it once', async () => {
+      const { onSubmit } = await startOutLoud();
+      expect(getUserMedia).toHaveBeenCalledTimes(1);
+      expect(mic()).toHaveAttribute('aria-pressed', 'true');
+      expect(transcript()).toHaveTextContent("What's your business called?");
+      expect(said()).toContain("What's your business called?");
+
+      hear("It's Walsh Plumbing.");
+      expect(nameField()).toHaveValue('Walsh Plumbing');
+      expect(transcript()).toHaveTextContent(
+        "I've got Walsh Plumbing. If that's not right, say “spell it”, or type it above. What's your trade: plumbing, HVAC, electrical, or something else?",
+      );
+
+      hear('plumbing');
+      expect(screen.getByRole('button', { name: 'Plumbing' })).toHaveAttribute('aria-pressed', 'true');
+      expect(transcript()).toHaveTextContent("Got it, plumbing. What's your cell number, with the area code?");
+
+      hear('two one six five five five zero one four two');
+      expect(screen.getByLabelText('Your cell')).toHaveValue('(216) 555-0142');
+      expect(transcript()).toHaveTextContent(
+        'Walsh Plumbing, plumbing, and your cell is 2 1 6, 5 5 5, 0 1 4 2. Say “show me my shop”, or fix anything above.',
+      );
+      await flush();
+      expect(said()).toContain('Walsh Plumbing, plumbing, and your cell is 2 1 6, 5 5 5, 0 1 4 2.');
+      expect(onSubmit).not.toHaveBeenCalled();
+
+      hear('show me my shop');
+      hear('show me my shop');
+      expect(onSubmit).toHaveBeenCalledTimes(1);
+      expect(onSubmit).toHaveBeenCalledWith({ packId: 'plumbing', businessName: 'Walsh Plumbing', phone: '(216) 555-0142' });
+      expect(go()).toBeDisabled();
+    });
+
+    it('a trade it did not catch, or two trades, is asked again and no chip is picked', async () => {
+      await startOutLoud();
+      hear('Walsh');
+      hear('banana');
+      expect(transcript()).toHaveTextContent("I didn't catch the trade. Plumbing, HVAC, electrical, or something else?");
+      hear('plumbing, heating and air');
+      expect(transcript()).toHaveTextContent('I heard plumbing and HVAC. Which one do you do most?');
+      expect(screen.getAllByRole('button', { pressed: true })).toEqual([mic()]);
+      hear('mostly heating');
+      expect(screen.getByRole('button', { name: 'HVAC' })).toHaveAttribute('aria-pressed', 'true');
+    });
+
+    it("a number that is not a US cell shows in the field with the form's message, said aloud; no number says so", async () => {
+      const { onSubmit } = await startOutLoud();
+      hear('Walsh Plumbing');
+      hear('plumbing');
+      hear('five five five zero one four two');
+      expect(screen.getByLabelText('Your cell')).toHaveValue('5550142');
+      expect(screen.getByLabelText('Your cell')).toHaveAttribute('aria-invalid', 'true');
+      expect(transcript()).toHaveTextContent(NOT_A_US_CELL);
+      await flush();
+      expect(said()).toContain(NOT_A_US_CELL);
+
+      hear("hang on, I don't know it");
+      expect(transcript()).toHaveTextContent("I didn't catch a number. Say your cell with the area code, 10 digits.");
+
+      hear('show me my shop');
+      expect(onSubmit).not.toHaveBeenCalled();
+      expect(transcript()).toHaveTextContent("What's your cell number, with the area code?");
+
+      hear('216-555-0142');
+      expect(screen.getByLabelText('Your cell')).toHaveValue('(216) 555-0142');
+      expect(screen.getByLabelText('Your cell')).toHaveAttribute('aria-invalid', 'false');
+    });
+
+    it('"spell it" takes the name letter by letter; "change the trade" goes back to the trade', async () => {
+      await startOutLoud();
+      hear('Welsh Plumbing');
+      hear('spell it');
+      expect(transcript()).toHaveTextContent('Go ahead and spell it, letter by letter.');
+      hear('W A L S H plumbing');
+      expect(nameField()).toHaveValue('Walsh Plumbing');
+      hear('electrical');
+      hear('216 555 0142');
+      hear('change the trade');
+      expect(transcript()).toHaveTextContent("What's your trade: plumbing, HVAC, electrical, or something else?");
+      hear('plumber');
+      expect(screen.getByRole('button', { name: 'Plumbing' })).toHaveAttribute('aria-pressed', 'true');
+      expect(transcript()).toHaveTextContent('Walsh Plumbing, plumbing, and your cell is 2 1 6, 5 5 5, 0 1 4 2.');
+    });
+
+    it('"say that again" repeats the question; a tapped chip answers the trade question too', async () => {
+      await startOutLoud();
+      hear('Walsh Plumbing');
+      hear('say that again');
+      expect(transcript()).toHaveTextContent("I've got Walsh Plumbing.");
+      fireEvent.click(screen.getByRole('button', { name: 'Electrical' }));
+      expect(transcript()).toHaveTextContent("Got it, electrical. What's your cell number, with the area code?");
+    });
+
+    it('"type it" stops listening and puts the owner on the field Rivet asked for', async () => {
+      await startOutLoud();
+      hear('Walsh Plumbing');
+      hear('plumbing');
+      hear("I'll type it");
+      expect(mic()).toHaveAttribute('aria-pressed', 'false');
+      expect(transcript()).toHaveTextContent('Go ahead and type it.');
+      expect(screen.getByLabelText('Your cell')).toHaveFocus();
+    });
+
+    it('a refused microphone says so and leaves the form to type', async () => {
+      micAnswer = 'denied';
+      render(
+        <Voice>
+          <AnswerAsScreen onSubmit={vi.fn()} />
+        </Voice>,
+      );
+      fireEvent.click(mic()!);
+      await flush();
+      expect(mic()).not.toBeInTheDocument();
+      expect(transcript()).toHaveTextContent("I can't hear you on this device, so type your answers below.");
+    });
+
+    it('coming back with the microphone on after the API refused the cell: the reason is said, then the cell is asked for', async () => {
+      const onSubmit = vi.fn();
+      // The microphone is held when the form opens: the owner answered out loud, then the API refused the cell.
+      function Held({ children }: { children: ReactNode }) {
+        const voice = useRivetVoice({ funnel: { tenantId: 't', userId: 'u' } });
+        const [shown, setShown] = useState(false);
+        return (
+          <RivetVoiceContext.Provider value={voice}>
+            <button
+              type="button"
+              onClick={() => {
+                voice.unlock('start');
+                voice.openMic();
+              }}
+            >
+              Earlier tap
+            </button>
+            <button type="button" onClick={() => setShown(true)}>
+              Open form
+            </button>
+            {shown ? children : null}
+          </RivetVoiceContext.Provider>
+        );
+      }
+      render(
+        <Held>
+          <AnswerAsScreen
+            onSubmit={onSubmit}
+            initial={{ packId: 'plumbing', businessName: 'Walsh Plumbing', phone: '(216) 555-0142' }}
+            cellProblem={REFUSED}
+          />
+        </Held>,
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Earlier tap' }));
+      await flush();
+      fireEvent.click(screen.getByRole('button', { name: 'Open form' }));
+      await flush();
+      expect(transcript()).toHaveTextContent(`${REFUSED} What's your cell number, with the area code?`);
+      expect(said()).toContain(REFUSED);
+      open();
+      hear('216-555-0142');
+      expect(transcript()).toHaveTextContent(`${REFUSED} What's your cell number, with the area code?`);
+      hear('216 555 0199');
+      expect(transcript()).toHaveTextContent('Walsh Plumbing, plumbing, and your cell is 2 1 6, 5 5 5, 0 1 9 9.');
+      hear('looks good');
+      expect(onSubmit).toHaveBeenCalledWith({ packId: 'plumbing', businessName: 'Walsh Plumbing', phone: '(216) 555-0199' });
     });
   });
 });
