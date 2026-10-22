@@ -22,10 +22,13 @@ import {
   renderPortalLinkSms,
 } from './templates';
 import { DeliveryError } from './notification-errors';
+import { createLogger } from '../logging/logger';
 import { resolveCustomerLanguage } from '../i18n/resolve-language';
 import type { AuditRepository } from '../audit/audit';
 import { auditPaymentModeUnavailable, readPaymentCollectionMode } from '../invoices/payment-collection-mode';
 import type { PaymentCollectionMode } from '../settings/settings';
+
+const sendLogger = createLogger({ service: 'send-service', environment: process.env.NODE_ENV || 'dev' });
 
 export type SendChannel = 'sms' | 'email' | 'both' | 'auto';
 
@@ -491,9 +494,19 @@ export class SendService {
       try {
         await this.deps.ensureInvoicePayLink(input.tenantId, invoice.id);
       } catch (err) {
+        // Our own refusals (AppError) are written for the owner; anything else
+        // is a raw provider error (Stripe's HTTP body, ids), which stays in the
+        // server log and never reaches the screen.
+        if (!(err instanceof AppError)) {
+          sendLogger.warn('invoice pay link could not be made; send refused', {
+            tenantId: input.tenantId,
+            invoiceId: invoice.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
         throw new PayLinkUnavailableError(
           invoice.invoiceNumber,
-          err instanceof Error ? err.message : 'the payment provider did not answer',
+          err instanceof AppError ? err.message : 'the payment provider did not answer',
         );
       }
     }

@@ -10,6 +10,7 @@
  * and open on delivery.
  */
 import { describe, it, expect, vi } from 'vitest';
+import { AppError } from '../../src/shared/errors';
 import { v4 as uuidv4 } from 'uuid';
 import {
   InMemorySettingsRepository,
@@ -384,10 +385,30 @@ describe('sendInvoice honours payment_collection_mode', () => {
       h.send.sendInvoice({ tenantId: TENANT, invoiceId: h.invoice.id, channel: 'both' }),
     ).rejects.toMatchObject({
       code: 'PAY_LINK_UNAVAILABLE',
-      message: expect.stringContaining('Stripe is not answering'),
+      message: expect.stringContaining('the payment provider did not answer'),
     });
+    // The provider's own words (an HTTP body, ids) never reach the owner.
+    await expect(
+      h.send.sendInvoice({ tenantId: TENANT, invoiceId: h.invoice.id, channel: 'both' }),
+    ).rejects.not.toMatchObject({ message: expect.stringContaining('Stripe is not answering') });
     expect(h.delivery.sentSms).toHaveLength(0);
     expect(h.delivery.sentEmails).toHaveLength(0);
+  });
+
+  it('pay_link, refused by our own check (an AppError) → its owner-facing reason is shown', async () => {
+    const h = await buildSendHarness({
+      mode: 'pay_link',
+      ensureInvoicePayLink: async () => {
+        throw new AppError('PAYMENTS_NOT_CONNECTED', 'online payments are not set up for this business', 409);
+      },
+    });
+    await expect(
+      h.send.sendInvoice({ tenantId: TENANT, invoiceId: h.invoice.id, channel: 'sms' }),
+    ).rejects.toMatchObject({
+      code: 'PAY_LINK_UNAVAILABLE',
+      message: expect.stringContaining('online payments are not set up for this business'),
+    });
+    expect(h.delivery.sentSms).toHaveLength(0);
   });
 
   it('collect_on_site, or nothing left to pay → no pay link is asked for', async () => {
