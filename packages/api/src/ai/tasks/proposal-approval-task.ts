@@ -53,7 +53,7 @@
  *      `hasUnappliedEditRequest` (same guard as SMS reply and one-tap).
  */
 import type { Proposal, ProposalRepository } from '../../proposals/proposal';
-import type { ApprovalReferenceCheck } from '../../proposals/approval-reference-checks';
+import { isReferenceCheckHold, type ApprovalReferenceCheck } from '../../proposals/approval-reference-checks';
 import { actionClassForProposalType } from '../../proposals/proposal';
 import { formatUsdCentsFixed } from '@ai-service-os/shared';
 import {
@@ -1313,12 +1313,20 @@ async function executeApprove(
     skipped = summary.skipped;
   } catch (err) {
     if (err instanceof ValidationError) {
+      // B3-5 — the same reading as the SMS Y reply: a card with no unfilled
+      // field was held by the approval-time reference checks (its job belongs
+      // to another customer, an id names nothing): nothing is missing,
+      // something on it needs fixing in the app.
+      const card = await deps.proposalRepo.findById(ref.tenantId, proposalId).catch(() => null);
+      const heldByReferenceCheck = card !== null && isReferenceCheckHold(err.details, card);
       await audit(deps, ref, 'proposal.voice_approve_blocked', proposalId, {
         error: err.message,
+        ...(heldByReferenceCheck ? { heldBy: 'reference_check' } : {}),
       });
       return {
-        speak:
-          "Can't approve that yet — it's missing required info. Finish it in your review queue.",
+        speak: heldByReferenceCheck
+          ? "Can't approve that yet — something on it needs fixing first. Fix it in the app."
+          : "Can't approve that yet — it's missing required info. Finish it in your review queue.",
         pending: null,
         outcome: 'approve_failed',
         proposalId,

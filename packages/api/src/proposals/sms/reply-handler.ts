@@ -44,8 +44,8 @@ import type {
   FallbackHandler,
 } from '../../sms/inbound-dispatch';
 import type { Proposal, ProposalRepository } from '../proposal';
-import { actionClassForProposalType, missingFieldsFor } from '../proposal';
-import type { ApprovalReferenceCheck } from '../approval-reference-checks';
+import { actionClassForProposalType } from '../proposal';
+import { isReferenceCheckHold, type ApprovalReferenceCheck } from '../approval-reference-checks';
 import {
   approveChainSet,
   approveProposalsBatch,
@@ -445,13 +445,9 @@ async function handleApprove(
       // approval-time reference checks (e.g. its job belongs to another
       // customer): nothing is missing, something on it needs fixing — which
       // a text cannot do. Otherwise: missing required fields. Truthful, with
-      // the next step, either way. B3-4 — the linked-step gate refuses with
-      // `missingFields: ['linkedStep']` too; its `linkedStepReason` keeps it
-      // out (today the action-class guard above stops every card it holds).
-      const heldByReferenceCheck =
-        Array.isArray(err.details?.missingFields) &&
-        err.details?.linkedStepReason === undefined &&
-        missingFieldsFor(proposal).length === 0;
+      // the next step, either way. B3-4 — not the linked-step gate (today
+      // the action-class guard above stops every card it holds).
+      const heldByReferenceCheck = isReferenceCheckHold(err.details, proposal);
       await audit(deps, ctx, 'proposal.sms_approve_blocked', proposal.id, {
         error: err.message,
         ...(heldByReferenceCheck ? { heldBy: 'reference_check' } : {}),
