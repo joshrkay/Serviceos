@@ -636,11 +636,15 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['330_customer_text_wording', 'cb3931893bf7d7fdf018c8fb546cd0d0b15fbf8823a4ce1dbfd67e86195df1b7'],
   // D-044 / #1763 — tenant_settings.get_found_online_dismissed_at, google_review_url_derived; review_poll_state.backoff_reason, auth_generation.
   ['331_get_found_online', 'eb7e83e23154cb56342b21f1b83c90733349f649215af5206885b77bb3a639ca'],
+  // #1750 (D-044) — Get found online checklist facts on tenant_settings + 2 NOT VALID CHECKs (restored after the #1752 merge dropped it).
+  ['332_tenant_settings_get_found', 'a55ccb06da1509baa49df4ff5d76102e8f9ea2115ae2a3f28516b78e7966755c'],
   ['332_assignment_overlap_accepted', 'eb06c6a9b4dc679fa9532a486a8941a19abcceb6e95875e0fb9d930b94eef471'],
   // D-045 "write both" — customer_text_wording keyed by (tenant, purpose, language).
   ['333_customer_text_wording_per_language', '8e523289f2ee6272d8c9c1acb7902f6ecde0cc82aea93bb9588b58aec866b8f2'],
   // #1750 (D-044) — tenant_settings.presence_path, forwarding_mode (NOT VALID CHECKs), get_found_skipped_items.
   ['334_tenant_settings_get_found', 'a55ccb06da1509baa49df4ff5d76102e8f9ea2115ae2a3f28516b78e7966755c'],
+  // Dispatch FR-2 phase 3c round 2 — appointment_assignments.overlap_accepted_with, consent-aware guard, backfill of rows 332 marked.
+  ['335_assignment_overlap_accepted_with', '9ce17e738283dccfdb696047dec16aba693948ccdd5c6309942ed5eb6a65b51a'],
 ];
 
 function hashMigration(value: string): string {
