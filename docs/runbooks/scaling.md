@@ -107,10 +107,14 @@ PgBouncer config: `pool_mode = transaction`, `max_client_conn` high (e.g. 1000),
   > one optional trailing slash and any letter case (A-R4). Without that,
   > `POST /proposals/:id/resolve-entity/` reached the same handler inside the
   > request transaction, and its runner took a second connection inside it.
-  > The SSE stream bypass (`SSE_STREAM_ROUTES`: `GET /escalations/events`,
-  > `GET /dispatch/board/events`, `GET /voice/sessions/:id/events`) matches
-  > the same way (A3-5); before, `GET /escalations/events/` held a request
-  > transaction and a pooled connection for the whole life of the stream.
+  > The SSE stream bypass (`SSE_STREAM_ROUTES`: `GET/HEAD /escalations/events`,
+  > `GET/HEAD /dispatch/board/events`, `GET/HEAD /voice/sessions/:id/events`)
+  > matches the same way (A3-5); before, `GET /escalations/events/` held a
+  > request transaction and a pooled connection for the whole life of the
+  > stream. HEAD is on it because Express sends HEAD to a route's GET handler
+  > when the route has no HEAD handler: the stream handler then never ends the
+  > response, and a HEAD inside the request transaction held its connection
+  > until the client closed the socket.
 - Direct pool: `DB_DIRECT_MAX_CONNECTIONS` small (default 10) — only lock holders
   + the LISTEN client use it.
 - Postgres ceiling = PgBouncer `default_pool_size` (server side), independent of

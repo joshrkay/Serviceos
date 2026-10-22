@@ -158,13 +158,14 @@ export const tenantContextStore = new AsyncLocalStorage<TenantContext>();
  * than crash the database with a missing GUC.
  */
 /**
- * Authenticated GET endpoints whose responses are long-lived SSE event streams
- * (dispatch board / escalation / voice-session events). The request-transaction
- * bypass in `withTenantTransaction` is restricted to these — NOT keyed off the
- * client-controlled `Accept` header — so a caller can't send
- * `Accept: text/event-stream` to a mutating route to skip the transaction and
- * lose multi-write atomicity (Codex P2). Adding a new SSE route? add its
- * matcher here; until then it keeps the (safe) transactional path.
+ * Authenticated GET/HEAD endpoints whose responses are long-lived SSE event
+ * streams (dispatch board / escalation / voice-session events). The
+ * request-transaction bypass in `withTenantTransaction` is restricted to
+ * these — NOT keyed off the client-controlled `Accept` header — so a caller
+ * can't send `Accept: text/event-stream` to a mutating route to skip the
+ * transaction and lose multi-write atomicity (Codex P2). Adding a new SSE
+ * route? add its matcher here; until then it keeps the (safe) transactional
+ * path.
  *
  * A3-5 — the same treatment as LLM_LONG_CALL_ROUTES (TI-02, A-R4): anchored at
  * both ends (the `/api` mount prefix optional, as it is stripped from
@@ -173,6 +174,12 @@ export const tenantContextStore = new AsyncLocalStorage<TenantContext>();
  * routes. Otherwise `/escalations/events/` reached the same stream handler
  * INSIDE the request transaction and held a pooled connection for the whole
  * life of the stream.
+ *
+ * HEAD too: Express sends HEAD to a route's GET handler when the route has no
+ * HEAD handler of its own, and these routes have none. The stream handler
+ * flushes its headers and never ends the response, so a HEAD inside the
+ * request transaction held a pooled connection until the client closed the
+ * socket. HEAD reaches only the GET handlers here, never a mutating route.
  */
 const SSE_STREAM_ROUTES: readonly RegExp[] = [
   /^(?:\/api)?\/escalations\/events\/?$/i,
@@ -181,7 +188,10 @@ const SSE_STREAM_ROUTES: readonly RegExp[] = [
 ];
 
 function isSseStreamRoute(req: { method: string; path: string }): boolean {
-  return req.method === 'GET' && SSE_STREAM_ROUTES.some((re) => re.test(req.path));
+  return (
+    (req.method === 'GET' || req.method === 'HEAD') &&
+    SSE_STREAM_ROUTES.some((re) => re.test(req.path))
+  );
 }
 
 /**
