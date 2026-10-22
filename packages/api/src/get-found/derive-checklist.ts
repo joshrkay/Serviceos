@@ -21,7 +21,7 @@ export interface GetFoundFacts {
   googleReviewUrl: string | null;
   callRoutingMode: CallRoutingMode | null;
   rivetNumberProvisioned: boolean;
-  /** When a call forwarded from the owner's existing number reached Rivet. */
+  /** `tenant_settings.forwarding_verified_at` (migration 318): a forwarded call on the owner's current line reached Rivet. */
   forwardingVerifiedAt: Date | null;
   /** Items the owner chose to skip; they fold into the card's hidden row. */
   skippedItems: GetFoundItemId[];

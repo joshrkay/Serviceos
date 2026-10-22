@@ -8170,6 +8170,30 @@ export const MIGRATIONS = {
     ALTER TABLE jobs
       ADD COLUMN IF NOT EXISTS required_skills TEXT[] NOT NULL DEFAULT '{}';
   `,
+
+  // #1750 slice 1 (D-044) — Get-found checklist facts on tenant_settings.
+  //   presence_path           — the owner's "do you have a website?" answer; NULL = unanswered
+  //   call_routing_mode       — how calls to the owner's existing number reach the AI
+  //   get_found_skipped_items — checklist item ids the owner skipped
+  // The forwarded line itself and its verification stamp are NOT new: they
+  // are 318's forwarding_source_number / forwarding_verified_at (bound to the
+  // line by forwarding_generation), which this checklist reads.
+  // Skipped-item ids are not CHECKed: the set grows with each slice and is
+  // validated at the request boundary.
+  '329_tenant_settings_get_found': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS presence_path TEXT,
+      ADD COLUMN IF NOT EXISTS call_routing_mode TEXT,
+      ADD COLUMN IF NOT EXISTS get_found_skipped_items TEXT[] NOT NULL DEFAULT '{}';
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_presence_path_check,
+      ADD CONSTRAINT tenant_settings_presence_path_check
+        CHECK (presence_path IN ('own_website', 'google_only', 'neither')) NOT VALID;
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_call_routing_mode_check,
+      ADD CONSTRAINT tenant_settings_call_routing_mode_check
+        CHECK (call_routing_mode IN ('forward_all', 'forward_unanswered', 'rivet_only')) NOT VALID;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

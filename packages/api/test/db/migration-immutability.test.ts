@@ -630,6 +630,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['327_service_locations_geocode_status', '8de7949551f27df07e557b82ce08edab52d318b0034fe46fce0230330c248c78'],
   // Dispatch FR-2 phase 2 — users.skills + jobs.required_skills (TEXT[], no CHECK).
   ['328_skill_tags', '7b58a5e30ea28966566996c314b41b155333fe55ce687e8463eabf92ad7261ea'],
+  // #1750 slice 1 (D-044) — Get-found checklist facts on tenant_settings + 2 NOT VALID CHECKs.
+  ['329_tenant_settings_get_found', 'bd784801b0b1febe18e4037ae9e6e21ce7392712fe9ede0fee6767def69c70df'],
 ];
 
 function hashMigration(value: string): string {
