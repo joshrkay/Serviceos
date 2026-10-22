@@ -61,13 +61,15 @@ export interface InstallClerkStubOptions {
    */
   token?: string;
   /**
-   * Milliseconds before `load()` resolves. Default 0 (resolves at once). The
-   * mobile web export needs a delay: there clerk-react emits its "ready" status
-   * before ClerkProvider's effect subscribes to it, so a load that resolves in a
-   * microtask leaves <ClerkLoaded> blank. Real Clerk always loads over the
-   * network. Part of the one init script, so it can never run before the stub.
+   * Answer `on('status', fn)` with "ready" at once. Default false (no `on`, so
+   * clerk-react's own event bus carries the status, unchanged for every web
+   * spec). The mobile web export (@clerk/react 6 via @clerk/expo) needs it: with
+   * an already-loaded stub there is no network gap, so IsomorphicClerk emits
+   * "ready" before ClerkProvider's effect subscribes, and <ClerkLoaded> stays
+   * blank. IsomorphicClerk.on delegates to the loaded Clerk, so the late
+   * subscriber hears "ready" here, as it would from real clerk-js.
    */
-  loadDelayMs?: number;
+  replayReadyStatus?: boolean;
 }
 
 /**
@@ -81,8 +83,8 @@ export async function installClerkStub(
   const sub = opts.sub ?? 'user_e2e_stub';
   const token = opts.token ?? 'e2e.stub.jwt';
   await page.addInitScript(
-    (args: { signedIn: boolean; sub: string; token: string; loadDelayMs: number }) => {
-    const { signedIn, sub, token, loadDelayMs } = args;
+    (args: { signedIn: boolean; sub: string; token: string; replayReadyStatus: boolean }) => {
+    const { signedIn, sub, token, replayReadyStatus } = args;
     const counters = { signOutCalls: 0, getTokenCalls: 0 };
     type Listener = (resources: unknown) => void;
     const listeners: Listener[] = [];
@@ -146,9 +148,15 @@ export async function installClerkStub(
       loaded: true,
       // Deliberately NO `status` field — see file header.
       version: 'e2e-stub',
-      load: async () => {
-        if (loadDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, loadDelayMs));
-      },
+      load: async () => undefined,
+      ...(replayReadyStatus
+        ? {
+            on: (event: string, fn: (status: string) => void) => {
+              if (event === 'status') fn('ready');
+            },
+            off: noop,
+          }
+        : {}),
 
       addListener: (fn: Listener) => {
         listeners.push(fn);
@@ -200,7 +208,7 @@ export async function installClerkStub(
       buildAfterSignOutUrl: () => '/login',
     };
     },
-    { signedIn: opts.signedIn, sub, token, loadDelayMs: opts.loadDelayMs ?? 0 },
+    { signedIn: opts.signedIn, sub, token, replayReadyStatus: opts.replayReadyStatus ?? false },
   );
 }
 

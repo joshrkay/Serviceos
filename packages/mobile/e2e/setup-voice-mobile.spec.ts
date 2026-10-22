@@ -8,7 +8,7 @@ import { installClerkStub } from '../../../e2e/helpers/clerk-stub';
  *
  * Signed in without network: the shared window.Clerk stub (e2e/helpers/
  * clerk-stub.ts) is adopted by clerk-react on web before any Clerk script loads
- * (with a delayed load(); see loadDelayMs), and every API call is answered by page.route. The export needs
+ * (answering clerk-react's late status subscription; see replayReadyStatus), and every API call is answered by page.route. The export needs
  * EXPO_PUBLIC_API_URL and a syntactically valid EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY
  * at build time (see playwright.config.ts); the key is never contacted.
  */
@@ -36,8 +36,8 @@ interface Api {
 }
 
 async function signedInWithApi(page: Page, api: Api): Promise<void> {
-  // A load() that resolves at once leaves <ClerkLoaded> blank in this export (see loadDelayMs).
-  await installClerkStub(page, { signedIn: true, loadDelayMs: 50 });
+  // Without it <ClerkLoaded> can stay blank in this export (see replayReadyStatus).
+  await installClerkStub(page, { signedIn: true, replayReadyStatus: true });
   let turnIndex = 0;
   await page.route('**/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
