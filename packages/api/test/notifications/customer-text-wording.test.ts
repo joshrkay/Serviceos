@@ -115,15 +115,21 @@ describe('createCustomerTextWording.textFor', () => {
     expect(await wording.textFor({ ...base, customerLanguage: 'es', builtIn })).toBe('NUESTRO');
   });
 
-  it('goes by the language the wording was written in, so a business that switches language does not send it to the new language', async () => {
+  it("with both written, each customer gets the owner's wording in the language they read", async () => {
     const { repo, wording } = setup();
-    // Written while the business was English; the business is Spanish now.
     await repo.save(TENANT, 'invoice_text', 'Hey {{customer_name}}, {{link}}', 'en', 'user-1');
-    expect(await wording.textFor({ ...base, customerLanguage: 'es', builtIn: () => 'NUESTRO' })).toBe('NUESTRO');
-    // Spanish wording goes to Spanish readers.
     await repo.save(TENANT, 'invoice_text', 'Hola {{customer_name}}, {{link}}', 'es', 'user-1');
+
+    expect(await wording.textFor(base)).toBe('Hey Ana, https://x/pay/1');
     expect(await wording.textFor({ ...base, customerLanguage: 'es' })).toBe('Hola Ana, https://x/pay/1');
+  });
+
+  it('with only Spanish written, English readers get ours', async () => {
+    const { repo, wording } = setup();
+    await repo.save(TENANT, 'invoice_text', 'Hola {{customer_name}}, {{link}}', 'es', 'user-1');
+
     expect(await wording.textFor(base)).toBe('OURS');
+    expect(await wording.textFor({ ...base, customerLanguage: 'es' })).toBe('Hola Ana, https://x/pay/1');
   });
 
   it('keeps purposes apart', async () => {

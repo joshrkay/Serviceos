@@ -1013,7 +1013,7 @@ export function SettingsPage() {
         // D-045 — the owner's own wording for estimate, invoice, portal-link and
         // thank-you texts. Owner-only, like its settings:update save.
         ...(me?.role === 'owner'
-          ? [{ icon: MessageSquareText, label: 'Text wording', description: 'Your own words for the estimate, invoice, portal-link and thank-you texts', action: () => setTextWordingOpen(true) }]
+          ? [{ icon: MessageSquareText, label: 'Text wording', description: 'Your own words, in English and Spanish, for the estimate, invoice, portal-link and thank-you texts', action: () => setTextWordingOpen(true) }]
           : []),
         // #1737 — embeddable website chat (off by default). Owner-only, like its save.
         ...(me?.role === 'owner'

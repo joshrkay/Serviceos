@@ -17,6 +17,9 @@ function mapRow(row: Record<string, unknown>): AppointmentAssignment {
     // May be NULL for rows created before the migration.
     scheduledStart: row.scheduled_start ? new Date(row.scheduled_start as string) : undefined,
     scheduledEnd: row.scheduled_end ? new Date(row.scheduled_end as string) : undefined,
+    ...(row.overlap_accepted
+      ? { overlapAccepted: true, overlapAcceptedWith: Array.isArray(row.overlap_accepted_with) ? row.overlap_accepted_with : [] }
+      : {}),
   };
 }
 
@@ -83,8 +86,8 @@ export class PgAssignmentRepository
         const result = await client.query(
           `INSERT INTO appointment_assignments (
             id, tenant_id, appointment_id, technician_id,
-            is_primary, assigned_by, assigned_at
-          ) VALUES ($1, $2, $3, $4, $5, $6, $7)
+            is_primary, assigned_by, assigned_at, overlap_accepted, overlap_accepted_with
+          ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
           RETURNING *`,
           [
             assignment.id,
@@ -94,6 +97,8 @@ export class PgAssignmentRepository
             assignment.isPrimary,
             assignment.assignedBy,
             assignment.assignedAt,
+            assignment.overlapAccepted ?? false,
+            assignment.overlapAccepted ? (assignment.overlapAcceptedWith ?? []) : [],
           ]
         );
         return mapRow(result.rows[0]);

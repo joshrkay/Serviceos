@@ -259,6 +259,7 @@ test.describe('settings — mobile viewport', () => {
         contentType: 'application/json',
         body: JSON.stringify({
           language: 'en',
+          languages: ['en', 'es'],
           maxLength: 480,
           texts: [
             {
@@ -271,9 +272,18 @@ test.describe('settings — mobile viewport', () => {
                 total: '$485.00',
                 link: longLink,
               },
-              ours: `Hi Sam Rivera, your invoice is ready.\nPay here: ${longLink}`,
-              addedLines: [],
-              saved: { body: 'Hi {{customer_name}}, pay {{total}} here: {{link}}', language: 'en', updatedAt: '2026-10-22T12:00:00Z' },
+              byLanguage: {
+                en: {
+                  ours: `Hi Sam Rivera, your invoice is ready.\nPay here: ${longLink}`,
+                  addedLines: [],
+                  saved: { body: 'Hi {{customer_name}}, pay {{total}} here: {{link}}', updatedAt: '2026-10-22T12:00:00Z' },
+                },
+                es: {
+                  ours: `Hola Sam Rivera, su factura está lista.\nPague aquí: ${longLink}`,
+                  addedLines: [],
+                  saved: null,
+                },
+              },
             },
           ],
         }),
@@ -283,7 +293,8 @@ test.describe('settings — mobile viewport', () => {
 
     await page.getByRole('button', { name: /text wording/i }).first().click();
     const dialog = page.getByRole('dialog', { name: /Text wording/i });
-    await expect(dialog.getByTestId('wording-invoice_text-preview')).toContainText(longLink);
+    await expect(dialog.getByTestId('wording-invoice_text-en-preview')).toContainText(longLink);
+    await expect(dialog.getByRole('button', { name: /English \(main\)/ })).toBeVisible();
     const buttons = dialog.getByRole('button');
     const count = await buttons.count();
     expect(count).toBeGreaterThanOrEqual(8);
