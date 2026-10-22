@@ -1397,10 +1397,13 @@ export class TwilioGatherAdapter {
     this.sweepPendingConsentCommits();
     this.pendingConsentCommit.set(session.id, async () => {
       // The point of evidence for the greeting is the point the caller heard
-      // the assistant notice; a later degrade reads this latch.
+      // the assistant notice; a later degrade reads this latch. A replay or a
+      // fallback that already spoke (and ledgered) the notice set it first,
+      // so the notice is not ledgered twice.
+      const noticeAlreadyLedgered = session.assistantNoticeHeard === true;
       session.assistantNoticeHeard = true;
       await disclosure.commitConsentLedger();
-      await assistantNotice.commitDisclosureLedger();
+      if (!noticeAlreadyLedgered) await assistantNotice.commitDisclosureLedger();
     });
     // #1223 — an approver caller-ID that was not A-attested runs as a caller;
     // say so, so a genuine owner on a partially-attested route knows why owner
@@ -2243,23 +2246,57 @@ export class TwilioGatherAdapter {
       // carries the virtual-assistant and recording notices). A retry that
       // lands while the first attempt is still establishing says both notices
       // ahead of the hold line.
-      const replayLanguage = session.language ?? 'en';
-      const replayText =
-        session.greetingText ??
-        [
-          buildAiDisclosureText({ businessName: this.deps.businessName, language: replayLanguage }),
-          t('disclose.two_party', replayLanguage),
-          t('greeting.one_moment', replayLanguage),
-        ].join(' ');
-      return buildTwiML(
+      if (session.greetingText) {
+        return buildTwiML(
+          [{ type: 'tts_play', payload: { text: session.greetingText } }],
+          {
+            gatherActionUrl: this.gatherUrl(session.id),
+            ...(session.language ? { language: session.language } : {}),
+            ...(session.ttsVoice ? { voiceOverride: session.ttsVoice } : {}),
+            ...(replayHints ? { hints: replayHints } : {}),
+          },
+        );
+      }
+      // Establishment has not pinned the language yet: resolve the tenant's
+      // own (never assume English), without pinning it on the session —
+      // bootstrap still owns that.
+      const pinned =
+        session.language === 'en' || session.language === 'es' ? session.language : undefined;
+      const { language: replayLanguage, ttsVoice: replayVoice } = await this.resolveTenantLanguage(
+        opts.tenantId,
+        pinned,
+      );
+      // This document is the evidence the caller heard the notice, so it is
+      // ledgered here; the latch stops the first attempt's deferred commit
+      // from writing a second row.
+      const replayNotice = discloseAiIdentity({
+        tenantId: opts.tenantId,
+        businessName: this.deps.businessName,
+        language: replayLanguage,
+        ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
+        voiceSessionId: session.id,
+        actorId: this.deps.systemActorId ?? 'system:inbound-call',
+        channel: session.channel,
+      });
+      const replayText = [
+        replayNotice.disclosureText,
+        t('disclose.two_party', replayLanguage),
+        t('greeting.one_moment', replayLanguage),
+      ].join(' ');
+      const twiml = buildTwiML(
         [{ type: 'tts_play', payload: { text: replayText } }],
         {
           gatherActionUrl: this.gatherUrl(session.id),
-          ...(session.language ? { language: session.language } : {}),
-          ...(session.ttsVoice ? { voiceOverride: session.ttsVoice } : {}),
+          language: replayLanguage,
+          ...(replayVoice ? { voiceOverride: replayVoice } : {}),
           ...(replayHints ? { hints: replayHints } : {}),
         },
       );
+      if (!session.assistantNoticeHeard) {
+        session.assistantNoticeHeard = true;
+        void replayNotice.commitDisclosureLedger();
+      }
+      return twiml;
     }
 
     // WS16b — Phase B (shared): language pin + disclosure + identify + FSM

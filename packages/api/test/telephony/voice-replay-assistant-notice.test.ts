@@ -85,4 +85,65 @@ describe('PRIV-4 — a /voice retry still carries the virtual-assistant notice',
     releasePersona(null);
     await firstPending;
   });
+
+  it("a retry during establishment speaks the tenant's own language and the notice is ledgered once in all", async () => {
+    // Codex review on cc8cc8bc: the establishing-retry branch assumed English
+    // when bootstrap had not pinned a language yet, and its notice wrote no
+    // ledger row of its own.
+    const store = new VoiceSessionStore({ startInterval: false });
+    const auditRepo = { create: vi.fn(async () => undefined) };
+    // Hold the first attempt's language lookup in bootstrap, so the retry
+    // lands before the session has a language; the retry's own lookups answer
+    // at once.
+    let releaseSettings!: () => void;
+    const settingsGate = new Promise<void>((resolve) => {
+      releaseSettings = resolve;
+    });
+    let retrying = false;
+    let held = 0;
+    const settingsRepo = {
+      findByTenant: async () => {
+        const fromLanguagePin = (new Error().stack ?? '').includes('resolveTenantLanguage');
+        if (!retrying && fromLanguagePin) {
+          held += 1;
+          await settingsGate;
+        }
+        return { defaultLanguage: 'es' };
+      },
+    };
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: gateway(),
+      businessName: 'Plomería Sol',
+      publicBaseUrl: 'https://example.com',
+      settingsRepo: settingsRepo as never,
+      auditRepo: auditRepo as never,
+    });
+    const noticeRows = () =>
+      auditRepo.create.mock.calls.filter(
+        (c: unknown[]) => (c[0] as { eventType: string }).eventType === 'virtual_assistant_notice.played',
+      );
+
+    const firstPending = adapter.handleInbound(call);
+    for (let i = 0; i < 50 && !(store.findByCallSid(call.callSid) && held > 0); i++) {
+      await new Promise<void>((r) => {
+        setTimeout(r, 0);
+      });
+    }
+    retrying = true;
+    const replay = await adapter.handleInbound(call);
+    expect(store.findByCallSid(call.callSid)?.language).toBeUndefined();
+    expect(says(replay)[0]).toContain('Para que lo sepa, soy un asistente virtual, no una persona real.');
+    expect(says(replay)[0]).not.toContain(NOTICE);
+    await vi.waitFor(() => expect(noticeRows()).toHaveLength(1));
+    expect((noticeRows()[0][0] as { metadata: { language: string } }).metadata.language).toBe('es');
+
+    // The first attempt finishes and commits its greeting: no second row.
+    releaseSettings();
+    await firstPending;
+    await new Promise<void>((r) => {
+      setTimeout(r, 0);
+    });
+    expect(noticeRows()).toHaveLength(1);
+  });
 });
