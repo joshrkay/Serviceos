@@ -4099,7 +4099,8 @@ export function createVoiceTurnProcessor(
    * `resolveOwnerLineApprover`) at the start of every turn and before every
    * approval step: while it resolves, the line keeps what it was granted at
    * pick-up; on a turn where it does not (the backup deactivated or replaced
-   * mid-call, the owner phone changed, the lookup failed) the caller is an
+   * mid-call, the owner phone changed, the lookup failed, or it now resolves
+   * to someone other than who the line was picked up as) the caller is an
    * unrecognised caller for that turn: no owner session, no extended
    * lookups, no actor. A later turn that resolves the line again restores
    * them. Returns who the line approves as now, null when it no longer
@@ -4116,7 +4117,7 @@ export function createVoiceTurnProcessor(
       extendedIntents: session.machine.currentContext.extendedIntents === true,
       ...(session.actorUserId ? { actorUserId: session.actorUserId } : {}),
     });
-    const now = await resolveOwnerLineApprover(
+    const resolved = await resolveOwnerLineApprover(
       {
         ...(deps.settingsRepo ? { settingsRepo: deps.settingsRepo } : {}),
         ...(deps.userRepo ? { userRepo: deps.userRepo } : {}),
@@ -4124,6 +4125,11 @@ export function createVoiceTurnProcessor(
       tenantId,
       session.callerPhone,
     );
+    // The grant belongs to whoever the line was picked up as: the owner phone
+    // (no user id) or that one backup. A caller-ID that now resolves to
+    // someone else (the owner phone moved to the backup's mobile) is not that
+    // line, so it gets nothing this call; calling back picks it up afresh.
+    const now = resolved && resolved.userId === session.ownerLineApprover.userId ? resolved : null;
     session.machine.setOwnerLinePrivileges({
       ownerSession: now !== null,
       extendedIntents: now !== null && grant.extendedIntents,

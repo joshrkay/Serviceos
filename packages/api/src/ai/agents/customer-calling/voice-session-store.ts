@@ -408,8 +408,10 @@ export interface VoiceSession {
    * (`actorUserId`, the subject every owner lookup is authorised by). The
    * turn processor's per-turn re-check (`refreshOwnerLine`) records it the
    * first time it runs, drops all of it for a turn whose re-check no longer
-   * resolves the line, and restores it on a later turn that does. Absent on
-   * a session that carries no `ownerLineApprover`.
+   * resolves the line (or resolves it to someone other than
+   * `ownerLineApprover`), and restores it on a later turn that resolves it
+   * to the same approver again. Absent on a session that carries no
+   * `ownerLineApprover`.
    */
   ownerLineGrant?: { extendedIntents: boolean; actorUserId?: string };
   /**

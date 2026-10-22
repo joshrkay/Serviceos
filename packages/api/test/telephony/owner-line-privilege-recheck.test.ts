@@ -183,6 +183,9 @@ describe('B3-1 — a backup who loses the owner line mid-call loses its lookups 
   const changes = [
     ['deactivated', (h: Awaited<ReturnType<typeof harness>>) => (h.backup.status = 'suspended')],
     ['replaced as backup', (h: Awaited<ReturnType<typeof harness>>) => (h.tenantSettings.backupSupervisorUserId = 'someone-else')],
+    // The line now resolves, but to someone else: the owner phone. What the
+    // backup was granted at pick-up is theirs, not the owner's.
+    ['whose mobile became the owner phone', (h: Awaited<ReturnType<typeof harness>>) => (h.tenantSettings.ownerPhone = BACKUP_MOBILE)],
   ] as const;
 
   describe.each(changes)('a backup %s between turns', (label, change) => {

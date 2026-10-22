@@ -734,6 +734,9 @@ describe('B1 follow-up — the owner line re-checks its approver at every approv
     ['demoted to technician', (m: ReturnType<typeof mutableBackupHarness>) => (m.backup.role = 'technician')],
     ['deactivated', (m: ReturnType<typeof mutableBackupHarness>) => (m.backup.status = 'suspended')],
     ['replaced as backup', (m: ReturnType<typeof mutableBackupHarness>) => (m.tenantSettings.backupSupervisorUserId = 'someone-else')],
+    // The caller-ID now names the owner phone: someone else than the backup
+    // this call was picked up as, so not an owner yes from this call.
+    ['whose mobile became the owner phone', (m: ReturnType<typeof mutableBackupHarness>) => (m.tenantSettings.ownerPhone = BACKUP_MOBILE)],
   ])('a backup %s between the readback and the yes is refused; nothing is approved', async (_label, change) => {
     const m = mutableBackupHarness([APPROVE_CLASSIFICATION]);
     const proposal = await seedPending(m.proposalRepo);
