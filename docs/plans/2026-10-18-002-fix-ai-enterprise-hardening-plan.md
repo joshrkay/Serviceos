@@ -1199,6 +1199,26 @@ flowchart LR
       id. The status-callback handler is built on the webhook base (P0-014) and signature-checked.
       It records the SID on that row even when our create call timed out. A row linked this way is
       deleted like any linked SID.
+    - **Email needs its own correlation, and its own erase outcome.** The SMS callback above
+      doesn't cover email. When SendGrid or Twilio Email accepts a request but our client times out,
+      the provider id (SendGrid's `x-message-id`, Twilio Email's `operationId`) arrives only in the
+      lost response (`twilio-delivery-provider.ts:361-380`, `twilio-email-delivery-provider.ts:215-231`).
+      So:
+      - Each email send carries the write-ahead row's id in the provider's per-message custom
+        metadata. For SendGrid that is `custom_args`, which its Event Webhook echoes back.
+      - A signature-checked event handler, built on the webhook base (P0-014), records the
+        provider message id on that row from the first event.
+      - If a provider can't echo per-message metadata, its ambiguous rows can't be linked. They are
+        never matched by recipient alone.
+      - **Erase outcome.** Neither email provider offers a per-message delete. The manifest
+        classifies their activity logs as provider-retained, under the provider's own retention.
+        So an ambiguous email row ends `provider_retained` once the provider's event window has
+        passed, linked or not. It can't block the erase forever.
+      - The erase result lists those rows as retained by the provider, with that retention period,
+        and never as deleted.
+      - Test: an email send whose response is lost is linked by its event, and resolves
+        `provider_retained`. An unlinked one resolves `provider_retained` after the window. The
+        erase completes, listing both as provider-retained.
     - **Rows the callback never linked fall back to a strict content match.** The erase reconciles
       them against Twilio Messages, filtered by the row's From and To over a `DateSent` window and
       matched by the body hash. It accepts the match automatically only when both hold:
@@ -1339,16 +1359,23 @@ flowchart LR
       recompute inside the reserve transaction can't serialize with an old-version write it never
       sees under `READ COMMITTED`, because old code takes no lock. Old-version processes can't be
       proven gone either, because they predate any heartbeat. So:
-      - Each `ai_runs` row records the `attempt_id` of its reservation. Every ledger-era run is
-        tagged from the day the ledger ships.
+      - Every ledger-era `ai_runs` row carries a ledger tag from the day the ledger ships:
+        - a dispatched run records the `attempt_id` of its reservation
+        - a run that makes no provider attempt records an explicit exemption instead, such as
+          `spend_exempt = 'cache_hit'`. A cache hit still writes an `ai_runs` audit row
+          (`ai/gateway/cache.ts:191-224`), but it costs nothing and has no reservation.
       - A cap can be enabled from the first full calendar month after the ledger ships. Every run
         in that month, and in every month after it, was written by ledger-era code, so `spent` is
         the month's real spend. During the ship month, the settings write that enables a cap is
         refused, with a plain "available from <date>".
       - **A tripwire stays in place.** A capped tenant's reserve transaction checks a partial index
-        on `ai_runs (tenant_id, created_at) WHERE attempt_id IS NULL` for the current month. Any
-        untagged row means an old-version writer is still alive, weeks after the ship. The capped
-        reservation is then refused, and `alertOperator` fires.
+        for the current month:
+        `ai_runs (tenant_id, created_at) WHERE attempt_id IS NULL AND spend_exempt IS NULL`.
+        - A row with neither tag means an old-version writer is still alive, weeks after the ship.
+          The capped reservation is then refused, and `alertOperator` fires.
+        - Cache hits and other zero-cost runs carry their exemption, so they never trip it.
+        - Test: a capped tenant's cache hit writes a `cache_hit` row, and the next capped request is
+          admitted.
       - The conditional reserve therefore compares `spent + reserved + $cost` with the cap. There is
         no `pre_ledger_spent`.
     - **Unpriced usage fails closed; it is not shown as a floor.** `SUM(cost_micro_cents)` skips
