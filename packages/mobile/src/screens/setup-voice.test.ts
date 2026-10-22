@@ -19,7 +19,7 @@ const h = vi.hoisted(() => ({
 vi.mock('expo-router', () => ({
   useRouter: () => ({ push: h.push, replace: h.replace, back: vi.fn() }),
 }));
-vi.mock('@clerk/clerk-expo', () => ({ useAuth: () => ({ userId: 'user_owner' }) }));
+vi.mock('@clerk/expo', () => ({ useAuth: () => ({ userId: 'user_owner' }) }));
 vi.mock('../hooks/useOnboardingStatus', () => ({ skipSetupGateForSession: h.skip }));
 vi.mock('../hooks/usePendingProposals', () => ({
   usePendingProposals: () => ({ proposals: h.proposals, count: h.proposals.length, isLoading: false, error: null, refresh: h.refresh }),
