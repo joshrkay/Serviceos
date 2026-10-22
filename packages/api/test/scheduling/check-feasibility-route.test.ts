@@ -8,7 +8,7 @@ import { noSkillConstraints } from '../helpers/no-skill-constraints';
 import { HaversineFallbackProvider } from '../../src/scheduling/travel-time/haversine-fallback';
 
 function fakeAuth(req: any, _res: any, next: any) {
-  req.auth = { tenantId: 't-1', userId: 'u-1', role: 'dispatcher' };
+  req.auth = { tenantId: 't-1', userId: 'u-1', role: req.headers['x-test-role'] ?? 'dispatcher' };
   next();
 }
 
@@ -100,5 +100,89 @@ describe('POST /api/dispatch/check-feasibility', () => {
       proposedScheduledEnd: '2026-05-17T11:00:00Z',
     });
     expect(res.status).toBe(400);
+  });
+});
+
+describe('GET /api/dispatch/appointments/:id/suggested-technicians', () => {
+  const APPT_ID = '11111111-1111-4111-8111-111111111111';
+
+  function suggestApp(appts: Appointment[], users: any[], primaryTechId?: string, crewTechId?: string) {
+    const deps: FeasibilityDependencies = {
+      assignmentRepo: {
+        findByTechnician: async () => [],
+        findByAppointment: async () => [
+          ...(primaryTechId ? [{ appointmentId: APPT_ID, technicianId: primaryTechId, isPrimary: true }] : []),
+          ...(crewTechId ? [{ appointmentId: APPT_ID, technicianId: crewTechId, isPrimary: false }] : []),
+        ],
+      } as any,
+      appointmentRepo: {
+        findById: async (_t: string, id: string) => appts.find((a) => a.id === id) ?? null,
+      } as any,
+      jobRepo: { findById: async () => null } as any,
+      locationRepo: { findById: async () => null } as any,
+      workingHoursRepo: { findByTechnician: async () => [] } as any,
+      unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
+      travelTimeProvider: new HaversineFallbackProvider(),
+      skillMatcher: noSkillConstraints(),
+    };
+    const userRepo = {
+      findByTenant: async (_t: string, opts?: { role?: string }) =>
+        users.filter((u) => !opts?.role || u.role === opts.role),
+    } as any;
+    const app = express();
+    app.use(express.json());
+    app.use(fakeAuth);
+    app.use('/api/dispatch', createSchedulingRouter(deps, userRepo));
+    return app;
+  }
+
+  const tech = (id: string, firstName: string) => ({
+    id, tenantId: 't-1', email: `${id}@x.test`, role: 'technician', firstName,
+    canFieldServe: false, createdAt: new Date(), updatedAt: new Date(),
+  });
+
+  it('returns active technicians ranked, marking the current primary', async () => {
+    const app = suggestApp(
+      [appt({ id: APPT_ID })],
+      [tech('tech-b', 'Bo'), tech('tech-a', 'Al'), { ...tech('d-1', 'Di'), role: 'dispatcher' }],
+      'tech-b',
+    );
+    const res = await request(app).get(`/api/dispatch/appointments/${APPT_ID}/suggested-technicians`);
+    expect(res.status).toBe(200);
+    expect(res.body.appointmentId).toBe(APPT_ID);
+    expect(res.body).toMatchObject({ totalTechnicians: 2, truncated: false });
+    expect(res.body.suggestions.map((s: any) => s.technicianId)).toEqual(['tech-a', 'tech-b']);
+    expect(res.body.suggestions[1]).toMatchObject({ name: 'Bo', feasible: true, isCurrent: true });
+  });
+
+  it('marks a crew member with no primary as already on the visit, so the board never offers them', async () => {
+    const app = suggestApp([appt({ id: APPT_ID })], [tech('tech-a', 'Al'), tech('tech-c', 'Cy')], undefined, 'tech-c');
+    const res = await request(app).get(`/api/dispatch/appointments/${APPT_ID}/suggested-technicians`);
+    expect(res.status).toBe(200);
+    const byId = Object.fromEntries(res.body.suggestions.map((s: any) => [s.technicianId, s.isCurrent]));
+    expect(byId).toEqual({ 'tech-a': false, 'tech-c': true });
+  });
+
+  it('refuses a technician: the roster and clashing job summaries are dispatch-only', async () => {
+    const app = suggestApp([appt({ id: APPT_ID })], [tech('tech-a', 'Al')]);
+    const res = await request(app)
+      .get(`/api/dispatch/appointments/${APPT_ID}/suggested-technicians`)
+      .set('x-test-role', 'technician');
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('FORBIDDEN');
+  });
+
+  it('returns 404 for an unknown appointment', async () => {
+    const app = suggestApp([], [tech('tech-a', 'Al')]);
+    const res = await request(app).get(`/api/dispatch/appointments/${APPT_ID}/suggested-technicians`);
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('APPOINTMENT_NOT_FOUND');
+  });
+
+  it('returns 404 for a malformed id without touching the repos', async () => {
+    const app = suggestApp([], []);
+    const res = await request(app).get('/api/dispatch/appointments/not-a-uuid/suggested-technicians');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('NOT_FOUND');
   });
 });

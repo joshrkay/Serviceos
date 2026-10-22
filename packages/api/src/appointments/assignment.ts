@@ -419,9 +419,12 @@ export class InMemoryAssignmentRepository implements AssignmentRepository {
   }
 
   async findByTechnician(tenantId: string, technicianId: string): Promise<AppointmentAssignment[]> {
+    // No trigger keeps the denormalised window in step when an appointment is
+    // rescheduled here (Pg's sync_appointment_to_assignments does), so leave
+    // it off: readers that filter on it then fall back to the appointment.
     return Array.from(this.assignments.values())
       .filter((a) => a.tenantId === tenantId && a.technicianId === technicianId)
-      .map((a) => ({ ...a }));
+      .map(({ scheduledStart: _start, scheduledEnd: _end, ...a }) => a);
   }
 
   async delete(tenantId: string, id: string): Promise<boolean> {
