@@ -139,11 +139,8 @@ export function createCustomerTextWordingRouter(deps: {
         language,
         languages: LANGUAGES,
         maxLength: MAX_WORDING_LENGTH,
-        texts: WORDING_PURPOSES.map((purpose) => ({
-          purpose,
-          fillIns: WORDING_FILL_INS[purpose],
-          sampleValues: sampleValues(purpose, businessName, baseUrl),
-          byLanguage: Object.fromEntries(
+        texts: WORDING_PURPOSES.map((purpose) => {
+          const byLanguage = Object.fromEntries(
             LANGUAGES.map((lang) => {
               const mine = saved.find((s) => s.purpose === purpose && s.language === lang);
               return [
@@ -160,8 +157,21 @@ export function createCustomerTextWordingRouter(deps: {
                 },
               ];
             }),
-          ),
-        })),
+          ) as Record<Language, { ours: string; addedLines: string[]; saved: { body: string; updatedAt: string } | null }>;
+          const main = byLanguage[language];
+          return {
+            purpose,
+            fillIns: WORDING_FILL_INS[purpose],
+            sampleValues: sampleValues(purpose, businessName, baseUrl),
+            byLanguage,
+            // The one-language shape, in the business's language, for a
+            // screen still on the previous web bundle during a deploy. Its
+            // save and reset send no language, which means this one.
+            ours: main.ours,
+            addedLines: main.addedLines,
+            saved: main.saved && { ...main.saved, language },
+          };
+        }),
       });
     }),
   );
@@ -206,7 +216,7 @@ export function createCustomerTextWordingRouter(deps: {
       res.json({
         purpose,
         language,
-        saved: { body: saved.body, updatedAt: saved.updatedAt.toISOString() },
+        saved: { body: saved.body, language, updatedAt: saved.updatedAt.toISOString() },
       });
     }),
   );

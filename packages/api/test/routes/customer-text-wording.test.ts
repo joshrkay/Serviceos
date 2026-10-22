@@ -85,6 +85,28 @@ describe('/api/settings/text-wording (D-045)', () => {
     expect(await repo.find(TENANT, 'thank_you_text', 'es')).toMatchObject({ body: '¡Gracias!' });
   });
 
+  it("keeps the one-language fields, in the business's language, for a screen on the previous web", async () => {
+    await settingsRepo.create({
+      id: 's-1', tenantId: TENANT, businessName: 'Acme', timezone: 'America/Chicago', estimatePrefix: 'EST',
+      invoicePrefix: 'INV', nextEstimateNumber: 1, nextInvoiceNumber: 1, defaultPaymentTermDays: 30,
+      defaultLanguage: 'es', createdAt: new Date(), updatedAt: new Date(),
+    });
+    // The previous screen sends no language on save or reset.
+    await request(app).put('/api/settings/text-wording/thank_you_text').send({ body: '¡Gracias!' });
+    await request(app).put('/api/settings/text-wording/thank_you_text').send({ body: 'Thanks!', language: 'en' });
+
+    const list = await request(app).get('/api/settings/text-wording');
+    const thanks = list.body.texts[3];
+    expect(thanks.ours).toBe(thanks.byLanguage.es.ours);
+    expect(thanks.addedLines).toEqual(thanks.byLanguage.es.addedLines);
+    expect(thanks.saved).toMatchObject({ body: '¡Gracias!', language: 'es' });
+    expect(list.body.texts[0].saved).toBeNull();
+
+    await request(app).delete('/api/settings/text-wording/thank_you_text');
+    expect(await repo.find(TENANT, 'thank_you_text', 'es')).toBeNull();
+    expect(await repo.find(TENANT, 'thank_you_text', 'en')).toMatchObject({ body: 'Thanks!' });
+  });
+
   it('saves and resets each language on its own', async () => {
     await request(app).put('/api/settings/text-wording/thank_you_text').send({ body: 'Thanks!', language: 'en' });
     const es = await request(app)
