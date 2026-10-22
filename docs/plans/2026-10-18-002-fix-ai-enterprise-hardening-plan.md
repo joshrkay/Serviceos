@@ -1060,8 +1060,21 @@ flowchart LR
         linked table, the owned-entity link column, such as `invoice_line_items.invoice_id`.
       - Test: after phase 2 has severed an invoice's customer link, an in-flight update that writes a
         description into one of that invoice's `invoice_line_items` rows is refused.
-      - On a match, it raises a dedicated SQLSTATE. A write that only blanks content columns, which
-        is what the erase itself does, passes, because it can't put data back.
+      - **It refuses only writes that would put subject data back, never ordinary updates to retained
+        rows.** Retained financial records keep changing after an erase.
+        `PgInvoiceRepository.incrementAmountPaidAtomic` and `reconcileBalanceAtomic` still update
+        balances and statuses on an erased customer's invoices and payments, and refusing those
+        writes would leave legally retained records wrong. So:
+        - The manifest lists each table's designated PII/content columns.
+        - The trigger compares `NEW` with `OLD` only on those columns. A match raises a dedicated
+          SQLSTATE only when the write would set a designated column to a non-blank value that
+          differs from the scrubbed one. On an `INSERT`, any non-blank designated column counts.
+        - Every other write passes: a balance, status or reconciliation update that leaves the
+          designated columns as they are, and a write that only blanks them, which is what the erase
+          itself does.
+        - Test: after an erase, a payment against the customer's retained invoice still updates
+          `amount_paid` and the status. An update that tries to put a description back on the same
+          invoice is refused.
       - Writers treat that SQLSTATE as "erased, drop the content". It is never an error that
         retries. The transcription worker ends that recording's job without writing.
       - The manifest schema test reads `pg_trigger` in the Docker-gated suite. It fails when any
