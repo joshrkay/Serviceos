@@ -13,7 +13,7 @@ const h = vi.hoisted(() => ({
   makeDirectoryAsync: vi.fn(async () => {}),
 }));
 
-vi.mock('expo-file-system', () => ({
+vi.mock('expo-file-system/legacy', () => ({
   documentDirectory: 'file:///doc/',
   moveAsync: h.moveAsync,
   deleteAsync: h.deleteAsync,

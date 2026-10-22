@@ -8,7 +8,7 @@ function decodeSegment(seg: string): Record<string, unknown> {
 // #1603 — the app sandbox is a system boundary: the Maestro harness writes a
 // dev-auth identity file there (over `adb run-as`) and the shim reads it.
 const h = vi.hoisted(() => ({ getInfo: vi.fn(), read: vi.fn() }));
-vi.mock('expo-file-system', () => ({
+vi.mock('expo-file-system/legacy', () => ({
   documentDirectory: 'file:///data/user/0/com.serviceos.app/files/',
   getInfoAsync: h.getInfo,
   readAsStringAsync: h.read,

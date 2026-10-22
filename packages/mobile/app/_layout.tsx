@@ -10,14 +10,14 @@ import {
   HankenGrotesk_600SemiBold,
   useFonts as useHanken,
 } from '@expo-google-fonts/hanken-grotesk';
-import { ClerkLoaded, ClerkProvider, useAuth } from '@clerk/clerk-expo';
+import { ClerkLoaded, ClerkProvider, useAuth } from '@clerk/expo';
 import { Slot, useRouter, useSegments } from 'expo-router';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect } from 'react';
 import type { ReactNode } from 'react';
 import { ActivityIndicator, View } from 'react-native';
 import { CLERK_PUBLISHABLE_KEY } from '../src/lib/env';
-import { tokenCache } from '../src/lib/tokenCache';
+import { tokenCache } from '@clerk/expo/token-cache';
 import { usePushRegistration } from '../src/hooks/usePushRegistration';
 import { usePendingProposals } from '../src/hooks/usePendingProposals';
 import {

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
-import { useAuth } from '@clerk/clerk-expo';
+import { useAuth } from '@clerk/expo';
 import { useRouter } from 'expo-router';
 import { PrimaryButton } from '../../src/components/Buttons';
 import { skipSetupGateForSession } from '../../src/hooks/useOnboardingStatus';
