@@ -110,6 +110,66 @@ describe('Story 3.2 — useDeepgramDictation', () => {
     expect(trackStop).toHaveBeenCalled();
   });
 
+  it('a start the caller stopped while it waited releases only its own resources, never a retry\'s', async () => {
+    let releaseFirstToken: (v: unknown) => void = () => {};
+    apiFetchMock.mockImplementationOnce(() => new Promise((r) => { releaseFirstToken = r; }));
+    const { result } = renderHook(() => useDeepgramDictation({}));
+
+    let first: Promise<string> = Promise.resolve('');
+    act(() => { first = result.current.start(); });
+    act(() => { result.current.stop(); });
+
+    // The retry connects and records.
+    okToken();
+    await act(async () => { expect(await result.current.start()).toBe('connecting'); });
+    const retrySocket = FakeWebSocket.instances[0];
+    act(() => { retrySocket.onopen?.(); });
+    await waitFor(() => expect(result.current.isRecording).toBe(true));
+
+    // Only now does the first start's token arrive.
+    await act(async () => {
+      releaseFirstToken({ ok: true, status: 200, json: async () => ({ token: 'stale', expiresIn: 30, model: 'nova-3' }) });
+      expect(await first).toBe('cancelled');
+    });
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(retrySocket.readyState).toBe(1);
+    expect(FakeMediaRecorder.instances[0].state).toBe('recording');
+    expect(result.current.isRecording).toBe(true);
+  });
+
+  it('a start superseded while the microphone opened stops that microphone itself', async () => {
+    okToken();
+    let grantMic: (v: unknown) => void = () => {};
+    const staleStop = vi.fn();
+    getUserMedia.mockImplementationOnce(() => new Promise((r) => { grantMic = r; }) as never);
+    const { result } = renderHook(() => useDeepgramDictation({}));
+
+    let first: Promise<string> = Promise.resolve('');
+    await act(async () => { first = result.current.start(); await Promise.resolve(); await Promise.resolve(); });
+    act(() => { result.current.stop(); });
+    await act(async () => {
+      grantMic({ getTracks: () => [{ stop: staleStop }] });
+      expect(await first).toBe('cancelled');
+    });
+    expect(staleStop).toHaveBeenCalled();
+    expect(FakeWebSocket.instances).toHaveLength(0);
+  });
+
+  it('a start stopped while its error body was read reports cancelled and leaves no stale error', async () => {
+    let releaseBody: (v: unknown) => void = () => {};
+    apiFetchMock.mockResolvedValueOnce({ ok: false, status: 500, json: () => new Promise((r) => { releaseBody = r; }) });
+    const { result } = renderHook(() => useDeepgramDictation({}));
+
+    let first: Promise<string> = Promise.resolve('');
+    await act(async () => { first = result.current.start(); await Promise.resolve(); await Promise.resolve(); });
+    act(() => { result.current.stop(); });
+    await act(async () => {
+      releaseBody({ message: 'stale failure' });
+      expect(await first).toBe('cancelled');
+    });
+    expect(result.current.error).toBeNull();
+  });
+
   it('surfaces a 503 (not configured) as an error and does not record', async () => {
     apiFetchMock.mockResolvedValue({ ok: false, status: 503, json: async () => ({}) });
     const { result } = renderHook(() => useDeepgramDictation({}));

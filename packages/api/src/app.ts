@@ -359,6 +359,7 @@ import {
 } from './digest/weekly-feedback-config';
 import { runGoogleReviewsSweep } from './workers/google-reviews';
 import { runThankYouSmsSweep } from './workers/thank-you-sms-worker';
+import { createOutboundMessaging } from './notifications/outbound-messaging';
 import { runReviewRequestSweep } from './workers/review-request-worker';
 import { createLifecycleEmailWorker } from './workers/lifecycle-email-worker';
 import { runSetupReminderSweep } from './workers/setup-reminder-sweep';
@@ -1673,6 +1674,23 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   const feedbackDispatcher = messageDelivery
     ? new MessageDeliveryFeedbackDispatcher(messageDelivery)
     : new NoopFeedbackDispatcher();
+  // D-045 — outbound messaging: senders name the recipient and the message
+  // purpose; consent lookup, quiet hours and dedupe are decided here. Null
+  // without a provider, so a sender reports "not sent" instead of a no-op.
+  const outboundMessaging = messageDelivery
+    ? createOutboundMessaging({
+        delivery: messageDelivery,
+        customerRepo,
+        dncRepo,
+        consentLedger: consentEventRepo,
+        pool: pool ?? null,
+        dispatchRepo,
+        logger: createLogger({
+          service: 'outbound-messaging',
+          environment: process.env.NODE_ENV || 'development',
+        }),
+      })
+    : null;
   const publicBaseUrl = config.publicOrigins.web;
   const sendService = messageDelivery
     ? new SendService({
@@ -7465,8 +7483,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           jobRepo,
           customerRepo,
           settingsRepo,
-          dncRepo,
-          dispatcher: feedbackDispatcher,
+          messaging: outboundMessaging,
           auditRepo,
           logger: thankYouSmsLogger,
           ...(messageDelivery ? { sendWindow: messageDelivery } : {}),

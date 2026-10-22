@@ -758,6 +758,9 @@ describe('I18: owner daily actions ↔ code contract', () => {
       // only when it is tagged life-safety/operator — a message attribute, not a
       // caller role.
       "packages/api/src/notifications/gated-message-delivery.ts :: message.recipientClass === 'owner' &&",
+      // Recipient KIND on an outbound text (D-045) — who the message is to, not
+      // a caller role.
+      "packages/api/src/notifications/outbound-messaging.ts :: if (recipient.kind === 'owner') {",
       // Proposal-level gate for the `adopt_entity_alias` manual type (§5.2),
       // enforced in the approval path, not on an HTTP route.
       "packages/api/src/proposals/actions.ts :: if (proposal.proposalType === 'adopt_entity_alias' && actorRole !== 'owner') {",

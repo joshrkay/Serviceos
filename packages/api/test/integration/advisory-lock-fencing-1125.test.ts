@@ -259,7 +259,11 @@ describe('#1125 — a lost session advisory lock fences the critical section it 
     } as unknown as Proposal);
     proposal = transitionProposal(proposal, 'ready_for_review', 'test');
     proposal = transitionProposal(proposal, 'approved', 'test');
-    return { ...proposal, approvedAt: new Date(Date.now() - 10_000) };
+    const approvedAt = new Date(Date.now() - 10_000);
+    // Persist the approval too: the status-write gate reads the row's real
+    // status, and an in-memory-only 'approved' would leave the row a draft.
+    await proposalRepo.updateStatus(tenantId, proposal.id, 'approved', { approvedAt });
+    return { ...proposal, approvedAt };
   }
 
   function executorOn(

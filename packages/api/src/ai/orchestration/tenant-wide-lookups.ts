@@ -138,6 +138,8 @@ const DOCUMENT_LOOKUP_INTENTS: ReadonlySet<IntentType> = new Set<IntentType>([
   'lookup_jobs',
   'lookup_invoices',
   'lookup_estimates',
+  // "What does INV-0042 owe?" — only an invoice answers a balance by number.
+  'lookup_balance',
 ]);
 
 const DOCUMENT_PERMISSION: Readonly<Record<DocumentKind, Permission>> = {
@@ -203,6 +205,7 @@ export async function answerDocumentLookup(
   if (!DOCUMENT_LOOKUP_INTENTS.has(input.intent)) return null;
   const doc = namedDocument(input.entities, input.message);
   if (!doc) return null;
+  if (input.intent === 'lookup_balance' && doc.kind !== 'invoice') return null;
   const permission = DOCUMENT_PERMISSION[doc.kind];
   if (!(await actorHolds(deps.answers, input.tenantId, input.actorId, permission))) return refused(permission);
   const found = await findDocumentByNumber(

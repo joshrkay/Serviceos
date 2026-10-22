@@ -57,7 +57,7 @@ must not take autonomously).
    then `eas submit`. Paste `packages/mobile/store/app-review-notes.md`
    into App Review Information (it now covers click-to-call and account
    deletion). The store identifier is `com.therivetapp.app` on both
-   platforms and v1 ships without Tap to Pay (D-044).
+   platforms and v1 ships without Tap to Pay (D-046).
 
 ## What shipped in PR #738 (for reference)
 

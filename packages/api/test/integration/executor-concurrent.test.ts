@@ -72,6 +72,11 @@ describe('ProposalExecutor — concurrent idempotency (§11 H1)', () => {
       ...proposal,
       approvedAt: new Date(Date.now() - 10_000),
     };
+    // Persist the approval too: the status-write gate reads the row's real
+    // status, and an in-memory-only 'approved' would leave the row a draft.
+    await proposalRepo.updateStatus(tenant.tenantId, proposal.id, 'approved', {
+      approvedAt: proposal.approvedAt,
+    });
 
     const ctx: ExecutionContext = {
       tenantId: tenant.tenantId,

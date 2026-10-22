@@ -318,6 +318,8 @@ export default defineConfig<DevAuthFixtures>({
               'e1-script-mobile.spec.ts',
               // #1563 — Settings → Phone change-number flow at 320px.
               'phone-settings-mobile.spec.ts',
+              // D-045 — message status bubble, blocked-texts notice, "Not sent" list at 320px.
+              'message-status-mobile.spec.ts',
             ],
             testIgnore: [],
             dependencies: ['devauth-setup'],

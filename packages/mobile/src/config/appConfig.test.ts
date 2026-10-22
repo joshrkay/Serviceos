@@ -27,7 +27,7 @@ describe('app.json — background audio for spoken answers (#1603)', () => {
   });
 });
 
-describe('app.json — store identity and v1 Terminal scope (D-044)', () => {
+describe('app.json — store identity and v1 Terminal scope (D-046)', () => {
   it('uses the same brand identifier on both stores', () => {
     const cfg = loadConfig() as { ios?: { bundleIdentifier?: string }; android?: { package?: string } };
     expect(cfg.ios?.bundleIdentifier).toBe('com.therivetapp.app');

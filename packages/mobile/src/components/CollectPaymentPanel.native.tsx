@@ -51,7 +51,7 @@ function CollectPaymentFallback({
  * Terminal location, discovered over the internet (`easyConnect`). Tap to Pay
  * is deliberately absent from v1: on iOS it needs Apple's proximity-reader
  * distribution entitlement and on Android Stripe's access grant, neither of
- * which the store build has yet (docs/decisions.md D-044). Requires an EAS
+ * which the store build has yet (docs/decisions.md D-046). Requires an EAS
  * build with the Terminal config plugin (not Expo Go).
  */
 function NativeCollectBody({

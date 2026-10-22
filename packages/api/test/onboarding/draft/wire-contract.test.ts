@@ -57,6 +57,7 @@ import { retryFailedDraftProposals } from '../../../src/onboarding/draft/retry';
 import { resetApprovedDraft } from '../../../src/onboarding/draft/reset';
 import { InMemoryProposalRepository } from '../../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
+import { forceStatus } from '../../helpers/proposal-status';
 
 const TENANT_ID = '00000000-0000-0000-0000-0000000000a1';
 const CLE = { standard: { tripFeeCents: 8900, hourlyRateCents: 15000 }, premium: { tripFeeCents: 12900, hourlyRateCents: 18500 } };
@@ -324,7 +325,7 @@ describe('onboarding draft wire contract (api <-> shared)', () => {
     expect(UndoOnboardingDraftResponseSchema.safeParse({ ...(undoWire as object), undoneProposalIds: [] }).success).toBe(false);
 
     const second = await approveDraft(deps, TENANT_ID, owner);
-    for (const id of second.proposalIds) await proposalRepo.update(TENANT_ID, id, { status: 'execution_failed' });
+    for (const id of second.proposalIds) forceStatus(proposalRepo, TENANT_ID, id, 'execution_failed');
     const retried = overTheWire(await retryFailedDraftProposals(deps, TENANT_ID, owner)) as Record<string, unknown>;
     expect(retried).toHaveProperty('undoable', true);
     expect(RetryOnboardingDraftResponseSchema.parse(retried)).toEqual(retried);
@@ -374,7 +375,7 @@ describe('onboarding draft wire contract (api <-> shared)', () => {
     const owner = { userId: 'user-owner-1', role: 'owner' as const };
     const deps = { draftRepo, proposalRepo, auditRepo };
     const approved = await approveDraft(deps, TENANT_ID, owner);
-    await proposalRepo.update(TENANT_ID, approved.proposalIds[0], { status: 'undone' });
+    forceStatus(proposalRepo, TENANT_ID, approved.proposalIds[0], 'undone');
 
     const result = await resetApprovedDraft(deps, TENANT_ID, owner, { expectedVersion: approved.draft.version });
     // The route answers { draft } only.

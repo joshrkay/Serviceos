@@ -19,7 +19,7 @@ See also `app-review-notes.md` for reviewer walkthrough + demo accounts.
 |---|---|
 | App name | **Rivet: AI for Home Services** (≤30 chars) |
 | Short description | **Your AI dispatcher: answer calls, quote jobs, get paid — approve in a tap.** (≤80 chars) |
-| Package name | `com.therivetapp.app` (D-044; package names cannot change after the first Play upload) |
+| Package name | `com.therivetapp.app` (D-046; package names cannot change after the first Play upload) |
 | Category | Business |
 | Tags | Productivity, Tools |
 | Price | Free |

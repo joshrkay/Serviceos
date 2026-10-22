@@ -14,7 +14,7 @@
  *     bottom bar) has no explicit `min-h-11` class (py-3.5/py-3 + text-sm
  *     likely clears 44px in a real browser, but the class contract this
  *     repo's convention checks for is absent);
- *   - the "Note/Photo/Parts/Issue" quick-action chip grid has no explicit
+ *   - the "Note/Photo/Issue" quick-action chip grid has no explicit
  *     `min-h-11` class either.
  * Both are pinned below as the CURRENT (non-compliant) state, not
  * asserted as compliant, so a future fix trips these assertions instead
@@ -115,7 +115,7 @@ describe('TechJobView — glove/daylight class contract (5.1)', () => {
     }
   });
 
-  it('KNOWN GAP: the quick-action chip grid (Note/Photo/Parts/Issue) has no explicit ≥44px class today', async () => {
+  it('KNOWN GAP: the quick-action chip grid (Note/Photo/Issue) has no explicit ≥44px class today', async () => {
     renderView();
     await waitFor(() => expect(screen.getByText('Fix HVAC')).toBeInTheDocument());
 

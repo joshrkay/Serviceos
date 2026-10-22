@@ -23,7 +23,7 @@ See also `app-review-notes.md` for App Review walkthrough + demo accounts.
 |---|---|
 | App name | **Rivet: AI for Home Services** (30-char limit — fallback: "Rivet — AI Dispatcher") |
 | Subtitle | **Answer calls. Quote. Get paid.** (30-char limit) |
-| Bundle ID | `com.therivetapp.app` (D-044; permanent once the App Store Connect record exists) |
+| Bundle ID | `com.therivetapp.app` (D-046; permanent once the App Store Connect record exists) |
 | Primary category | Business |
 | Secondary category | Productivity |
 | Price | Free (subscription managed on the web) |
