@@ -73,9 +73,32 @@ export function extractKeysFromSource(src: string): string[] {
   return keys;
 }
 
-/** Every key NOT present on the base must number strictly past the base tail. */
-export function validateAgainstBase(branchKeys: string[], baseKeys: string[]): string[] {
-  const base = new Set(baseKeys);
+/** Snapshot rows sit as `  ['263_x', '<sha256>'],` in migration-immutability.test.ts. */
+const SNAPSHOT_KEY_RE = /^\s*\['((\d{3})_[a-z0-9_]+)',\s*'[0-9a-f]{64}'\],/gm;
+
+/**
+ * Keys the base's immutability snapshot pins. A pinned key is applied
+ * history: if the base registry lost it (a bad merge dropped
+ * '332_assignment_overlap_accepted' on 2026-10-22 and 335 then failed on a
+ * fresh database), putting it back under its own key is a restoration, not a
+ * new migration, and must not be renumbered past the tail.
+ */
+export function extractPinnedKeysFromSnapshot(src: string): string[] {
+  const keys: string[] = [];
+  for (const m of src.matchAll(SNAPSHOT_KEY_RE)) keys.push(m[1]);
+  return keys;
+}
+
+/**
+ * Every key NOT present on the base must number strictly past the base tail,
+ * unless the base's snapshot still pins it (a restored, already-applied key).
+ */
+export function validateAgainstBase(
+  branchKeys: string[],
+  baseKeys: string[],
+  basePinnedKeys: string[] = [],
+): string[] {
+  const base = new Set([...baseKeys, ...basePinnedKeys]);
   const baseMax = Math.max(0, ...baseKeys.map((k) => Number(k.slice(0, 3))));
   const violations: string[] = [];
   for (const key of branchKeys) {
@@ -118,8 +141,12 @@ function baseSchemaSource(): string | null {
   } catch {
     // offline / no remote — fall through; git show may still hit a local ref
   }
+  return gitShowBase('packages/api/src/db/schema.ts');
+}
+
+function gitShowBase(path: string): string | null {
   try {
-    return execFileSync('git', ['show', 'origin/main:packages/api/src/db/schema.ts'], {
+    return execFileSync('git', ['show', `origin/main:${path}`], {
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
     });
@@ -136,7 +163,14 @@ if (invokedDirectly) {
   if (baseSrc) {
     // On main itself branch == base, so there are no "new" keys and the
     // cross-base check is a natural no-op.
-    violations.push(...validateAgainstBase(keys, extractKeysFromSource(baseSrc)));
+    const baseSnapshot = gitShowBase('packages/api/test/db/migration-immutability.test.ts');
+    violations.push(
+      ...validateAgainstBase(
+        keys,
+        extractKeysFromSource(baseSrc),
+        baseSnapshot ? extractPinnedKeysFromSnapshot(baseSnapshot) : [],
+      ),
+    );
   } else {
     console.log('migration-key guard: origin/main unreachable — intra-file checks only');
   }

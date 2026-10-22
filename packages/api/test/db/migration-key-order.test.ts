@@ -10,6 +10,7 @@ import {
   validateMigrationKeyOrder,
   validateAgainstBase,
   extractKeysFromSource,
+  extractPinnedKeysFromSnapshot,
   GRANDFATHERED_KEYS,
   baseFetchArgs,
 } from '../../scripts/check-migration-keys';
@@ -49,6 +50,26 @@ describe('migration key guard', () => {
     expect(v).toHaveLength(1);
     expect(v[0]).toContain("'196_mine'");
     expect(validateAgainstBase([...base, '267_mine'], base)).toEqual([]);
+  });
+
+  it('a key the base snapshot still pins is a restoration, not a new key, even below the tail', () => {
+    // 2026-10-22: a merge dropped '332_assignment_overlap_accepted' from main's
+    // registry while the snapshot kept its pin; putting it back must pass.
+    const base = ['331_a', '333_b', '334_c', '335_d'];
+    const pinned = ['331_a', '332_restored', '333_b', '334_c', '335_d'];
+    expect(validateAgainstBase([...base, '332_restored'], base, pinned)).toEqual([]);
+    // ...but an unpinned key below the tail is still stale-fork numbering.
+    expect(validateAgainstBase([...base, '332_other'], base, pinned)).toHaveLength(1);
+  });
+
+  it('extractPinnedKeysFromSnapshot reads snapshot rows only', () => {
+    const src =
+      "const SNAPSHOT = [\n" +
+      "  ['332_assignment_overlap_accepted', 'eb06c6a9b4dc679fa9532a486a8941a19abcceb6e95875e0fb9d930b94eef471'],\n" +
+      "  // ['333_commented_out', 'eb06c6a9b4dc679fa9532a486a8941a19abcceb6e95875e0fb9d930b94eef471'],\n" +
+      "  ['334_next', 'a55ccb06da1509baa49df4ff5d76102e8f9ea2115ae2a3f28516b78e7966755c'],\n" +
+      '];\n';
+    expect(extractPinnedKeysFromSnapshot(src)).toEqual(['332_assignment_overlap_accepted', '334_next']);
   });
 
   it('extractKeysFromSource matches registry keys only, never SQL body text', () => {
