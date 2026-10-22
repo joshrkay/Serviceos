@@ -272,7 +272,7 @@ export function createGoogleBusinessOAuthCallbackRouter(
       const reviewCursorReset = selection
         ? await resetReviewCursorIfMoved(deps, consumed.tenantId, previous, selection)
         : false;
-      const reviewUrl = selection
+      const reviewUrl: Awaited<ReturnType<typeof fillReviewUrl>> = selection
         ? await fillReviewUrl(
             deps,
             consumed.tenantId,
@@ -312,7 +312,18 @@ export function createGoogleBusinessOAuthCallbackRouter(
       const back = isSafeRelativePath(consumed.redirectAfter)
         ? `${deps.appBaseUrl ?? ''}${consumed.redirectAfter}`
         : `${deps.appBaseUrl ?? ''}/settings?googlebusiness_connected=1`;
-      res.redirect(back);
+      // The connection succeeded either way; a review link that could not
+      // be written, or was removed, is told to the owner, not just audited.
+      const reviewLinkNote = reviewUrl.reviewUrlError
+        ? 'failed'
+        : reviewUrl.reviewUrlCleared
+          ? 'cleared'
+          : null;
+      res.redirect(
+        reviewLinkNote
+          ? `${back}${back.includes('?') ? '&' : '?'}googlebusiness_review_link=${reviewLinkNote}`
+          : back,
+      );
     } catch (err) {
       const { statusCode, body } = toErrorResponse(err);
       res.status(statusCode).json(body);

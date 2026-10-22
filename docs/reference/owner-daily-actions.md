@@ -94,10 +94,10 @@ and that is a stated ceiling of this pin rather than an oversight.**
 
 | Budget | Count |
 |---|---|
-| Owner-only routes in code | **81** |
+| Owner-only routes in code | **85** |
 | `cadence: daily` | **2** |
 | `cadence: onboarding` | **16** |
-| `cadence: occasional` | **63** |
+| `cadence: occasional` | **67** |
 | `ownerRequiredDailyWebActions` — `daily` ∧ not reachable | **1** |
 | `ownerRequiredOnboardingWebActions` — `onboarding` ∧ not reachable | **16** |
 
@@ -109,10 +109,10 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 
 ```json
 {
-  "ownerOnlyRoutes": 81,
+  "ownerOnlyRoutes": 85,
   "daily": 2,
   "onboarding": 16,
-  "occasional": 63,
+  "occasional": 67,
   "ownerRequiredDailyWebActions": 1,
   "ownerRequiredOnboardingWebActions": 16
 }
@@ -146,6 +146,10 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `PUT /api/settings/texting-registration/` | onboarding | US A2P 10DLC registration (#1564): the owner submits the business's legal name, EIN, address and authorized contact once; Rivet (as ISV) registers the Brand and campaign with the carriers. Until it is approved the tenant's texts are unregistered 10DLC traffic. | false | none | Reviewed: one-time activation. The carriers vet exact legal identity data (legal name must match the EIN record), so this is a deliberate form entry, not a spoken or SMS action; the long carrier review that follows needs no owner action (the worker polls it). |
 | `DELETE /api/googlebusiness-integrations/google` | occasional | Disconnects review monitoring — teardown of an optional integration, never part of a working day. | false | none | |
 | `POST /api/googlebusiness-integrations/google/connect` | occasional | Connects the tenant's Google Business profile for review monitoring. Tenant-wide credential, set once; owner-gated so a member cannot repoint it at an account they control. | false | none | |
+| `GET /api/googlebusiness-integrations/google/locations` | occasional | D-044: lists the Google listings on the connected account so the owner can pick one. Only needed when the account has several, or to change it. | false | none | |
+| `PUT /api/googlebusiness-integrations/google/location` | occasional | D-044: chooses which Google listing the tenant is (fills the review link from it). A one-time setup choice, owner-gated like the connection itself. | false | none | |
+| `GET /api/get-found-online/` | occasional | D-044: the home "Get found online" checklist. A read of setup progress that no working day forces; dispatchers and techs never see the card. | false | none | |
+| `POST /api/get-found-online/dismiss` | occasional | D-044: hides the finished checklist. Optional tidy-up, allowed only once every item is done. | false | none | |
 | `POST /api/integrations/quickbooks/connect` | occasional | Connects the tenant's books to a QuickBooks company. Tenant-wide financial integration set up once; owner-gated so a member cannot sync paid invoices/customers into their own Intuit company. | false | none | |
 | `POST /api/integrations/quickbooks/disconnect` | occasional | QuickBooks teardown — never part of a working day. | false | none | |
 | `POST /api/integrations/quickbooks/sync` | occasional | Manual re-sync to QuickBooks; an optional nudge, not something the day forces. Pushes financial data, so owner-gated like connect. | false | none | |

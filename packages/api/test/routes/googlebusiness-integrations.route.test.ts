@@ -579,6 +579,33 @@ describe('Google Business integrations routes', () => {
       expect(event.metadata).toMatchObject({ reviewUrlFilled: true, locationCount: 1 });
     });
 
+    it('a review link that cannot be saved is reported on the redirect, not swallowed', async () => {
+      const settingsRepo = await settingsWith();
+      vi.spyOn(settingsRepo, 'update').mockRejectedValueOnce(new Error('db down'));
+      const res = await connect({ '123': ONE_LOCATION }, { settingsRepo });
+      expect(res.status).toBe(302);
+      expect(res.headers.location).toBe(
+        'https://app.example.com/settings?googlebusiness_connected=1&googlebusiness_review_link=failed',
+      );
+    });
+
+    it('a reconnect to a listing with no review link reports the removed link', async () => {
+      const settingsRepo = await settingsWith();
+      await connect({ '123': ONE_LOCATION }, { settingsRepo });
+      const res = await connect(
+        { '789': [{ name: 'locations/777', title: 'Acme South' }] },
+        { settingsRepo },
+      );
+      expect(res.headers.location).toContain('googlebusiness_review_link=cleared');
+      expect((await settingsRepo.findByTenant(TENANT))?.googleReviewUrl ?? null).toBeNull();
+    });
+
+    it('a review link that followed the listing adds nothing to the redirect', async () => {
+      const settingsRepo = await settingsWith();
+      const res = await connect({ '123': ONE_LOCATION }, { settingsRepo });
+      expect(res.headers.location).toBe('https://app.example.com/settings?googlebusiness_connected=1');
+    });
+
     it('one location: a review link the owner typed is kept', async () => {
       const settingsRepo = await settingsWith('https://g.page/r/typed-by-owner');
       await connect({ '123': ONE_LOCATION }, { settingsRepo });
