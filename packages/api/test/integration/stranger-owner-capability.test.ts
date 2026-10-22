@@ -14,7 +14,7 @@
  *      `TwilioGatherAdapter.establishInboundSession`
  *      (src/telephony/twilio-adapter.ts:1162), with the owner-line bridge fed
  *      by a real `PgSettingsRepository` read of `tenant_settings.owner_phone`
- *      (`resolveOwnerSession`, src/telephony/twilio-adapter.ts:906 →
+ *      (`resolveOwnerLineApprover`, src/ai/voice-turn/shared/owner-session.ts →
  *      `isApproverPhone`, src/proposals/approver-identity.ts:65).
  *
  *   2. actor → classifier profile:

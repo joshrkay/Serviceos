@@ -78,8 +78,13 @@ const TIMEZONE = 'America/Phoenix';
  * harness uses, so a test can never pass because a fake model volunteered a
  * uuid the real pipeline would have had to resolve.
  */
-function scriptedGateway(script: Array<{ intentType: string; entities?: Record<string, unknown> }>) {
+function scriptedGateway(
+  script: Array<{ intentType: string; entities?: Record<string, unknown> }>,
+  /** OBS-2 / B3 — the ai_runs id each successive DRAFTING call persisted. */
+  draftingRunIds: string[] = [],
+) {
   let i = 0;
+  let drafts = 0;
   let lastEntities: Record<string, unknown> = {};
   const complete = vi.fn(async (req: LLMRequest): Promise<LLMResponse> => {
     if (req.taskType === 'classify_intent') {
@@ -99,6 +104,8 @@ function scriptedGateway(script: Array<{ intentType: string; entities?: Record<s
         latencyMs: 1,
       };
     }
+    const aiRunId = draftingRunIds[drafts];
+    drafts += 1;
     return {
       content: JSON.stringify({
         ...lastEntities,
@@ -109,6 +116,7 @@ function scriptedGateway(script: Array<{ intentType: string; entities?: Record<s
       provider: 'mock',
       tokenUsage: { input: 1, output: 1, total: 2 },
       latencyMs: 1,
+      ...(aiRunId ? { aiRunId } : {}),
     };
   });
   return { complete } as unknown as LLMGateway;
@@ -414,6 +422,49 @@ describe('POST /api/assistant/chat — voice/text parity', () => {
     ).toBe(4);
     expect(rows[0].payload.customerId).toBe(CUSTOMER_ID);
     expect(second.body.message.content).toContain('Updated');
+  });
+
+  // B3 — the rewritten card's payload is the CORRECTION run's output, so the
+  // row must name that run (proposals.ai_run_id) and carry that draft's
+  // confidence factors and explanation, not the first draft's.
+  it('a correction rewrite links the card to the run that drafted the correction', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const update = vi.spyOn(proposalRepo, 'update');
+    const app = buildApp({
+      gateway: scriptedGateway(
+        [
+          bookScript()[0],
+          {
+            intentType: 'create_appointment',
+            entities: {
+              customerName: 'Garcia',
+              dateTimeDescription: 'Thursday at 10 am',
+              jobTitle: 'HVAC install',
+            },
+          },
+        ],
+        ['run-first-draft', 'run-correction'],
+      ),
+      proposalRepo,
+      entityResolver: fixtureResolver(),
+    });
+
+    const first = await chat(app, [BOOK]);
+    expect((await proposalRepo.findById(TENANT, first.body.message.proposal.id))?.aiRunId).toBe(
+      'run-first-draft',
+    );
+    await chat(app, [BOOK, 'no, make it Thursday at 10 am']);
+
+    const rows = await proposalRepo.findByTenant(TENANT);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].aiRunId).toBe('run-correction');
+    const rewrite = update.mock.calls.find(([, id]) => id === first.body.message.proposal.id);
+    expect(rewrite?.[2]).toMatchObject({ aiRunId: 'run-correction' });
+    expect(rewrite?.[2]).toHaveProperty('confidenceFactors');
+    expect(rewrite?.[2]).toHaveProperty('explanation');
+    // Status is not the generic update's to set (Pg ignores it; status moves
+    // only through updateStatus) — the rewrite must not pretend otherwise.
+    expect(rewrite?.[2]).not.toHaveProperty('status');
   });
 
   it('a second, genuinely different booking still gets its own card', async () => {

@@ -264,6 +264,9 @@ describe('voice-action-router — RV-221 chain SMS routing', () => {
     sendSms: ReturnType<typeof vi.fn>,
     recordSmsEvent: ReturnType<typeof vi.fn>,
     gateway: Parameters<typeof createVoiceActionRouterWorker>[0]['gateway'],
+    resolveLinkApprover?: NonNullable<
+      Parameters<typeof createVoiceActionRouterWorker>[0]['unsupervisedRouting']
+    >['resolveLinkApprover'],
   ) {
     return createVoiceActionRouterWorker({
       gateway,
@@ -276,6 +279,7 @@ describe('voice-action-router — RV-221 chain SMS routing', () => {
         buildApproveUrl: (token) => `https://api.example.com/approve?token=${token}`,
         resolveOwnerPhone: async () => '+15125550100',
         resolveRouting: async () => 'queue_and_sms',
+        ...(resolveLinkApprover ? { resolveLinkApprover } : {}),
         recordSmsEvent: recordSmsEvent as unknown as (args: {
           tenantId: string;
           proposalId: string;
@@ -433,6 +437,64 @@ describe('voice-action-router — RV-221 chain SMS routing', () => {
       approveLinkSuppressed: true,
       suppressReason: 'low_confidence',
     });
+  });
+
+  // B1 follow-up — a legacy technician backup (no owner phone, so the chain
+  // SMS goes to the backup) gets no link, and their texted Y / N / EDIT are
+  // all refused: the chain body must not ask them for any of those replies.
+  const technicianBackup = async () =>
+    ({ role: 'technician', userId: 'clerk-tech', via: 'backup_supervisor' }) as const;
+
+  it('a technician backup gets the for-your-info chain form: no Reply Y, no N, no link', async () => {
+    setSupervisorPresenceLoader(async () => false);
+    const { gateway, provider } = createMockLLMGateway();
+    vi.spyOn(provider, 'complete').mockImplementation(chainProviderImpl() as never);
+
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const sendSms = vi.fn(async () => {});
+    const recordSmsEvent = vi.fn(async () => {});
+    const worker = makeRoutedWorker(repo, auditRepo, sendSms, recordSmsEvent, gateway, technicianBackup);
+
+    await worker.handle(
+      makeMessage('create a customer named Jane Doe and open a job for her'),
+      silentLogger(),
+    );
+
+    const head = (await repo.findByTenant('tenant-1')).find((p) => p.proposalType === 'create_customer')!;
+    expect(sendSms).toHaveBeenCalledTimes(1);
+    const [, body] = sendSms.mock.calls[0] as unknown as [string, string];
+    expect(body).toContain('2 linked actions:');
+    expect(body).toContain('For your info — the owner needs to review this in the app.');
+    expect(body).not.toMatch(/Reply Y/i);
+    expect(body).not.toMatch(/reply N/i);
+    expect(body).not.toContain('token=');
+    expect(recordSmsEvent.mock.calls[0][0]).toMatchObject({ proposalId: head.id, kind: 'review_required_rendered' });
+    const routed = auditRepo.getAll().filter((e) => e.eventType === 'unsupervised_proposal_routed');
+    expect(routed[0].metadata).toMatchObject({ approveLinkSuppressed: true, suppressReason: 'recipient_cannot_approve' });
+  });
+
+  it('a technician backup on an already-review-only chain (low confidence) is not told to reply N either', async () => {
+    setSupervisorPresenceLoader(async () => false);
+    const { gateway, provider } = createMockLLMGateway();
+    vi.spyOn(provider, 'complete').mockImplementation(chainProviderImpl({ lowConfidenceJob: true }) as never);
+
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const sendSms = vi.fn(async () => {});
+    const recordSmsEvent = vi.fn(async () => {});
+    const worker = makeRoutedWorker(repo, auditRepo, sendSms, recordSmsEvent, gateway, technicianBackup);
+
+    await worker.handle(
+      makeMessage('create a customer named Jane Doe and draft her an estimate'),
+      silentLogger(),
+    );
+
+    const [, body] = sendSms.mock.calls[0] as unknown as [string, string];
+    expect(body).toContain('For your info — the owner needs to review this in the app.');
+    expect(body).not.toMatch(/reply N/i);
+    const routed = auditRepo.getAll().filter((e) => e.eventType === 'unsupervised_proposal_routed');
+    expect(routed[0].metadata).toMatchObject({ suppressReason: 'low_confidence+recipient_cannot_approve' });
   });
 
   it('supervised: no chain SMS is sent', async () => {

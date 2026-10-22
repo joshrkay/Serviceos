@@ -879,6 +879,63 @@ describe('OVAS-01 — the acceptance-void warning always prints', () => {
     });
   }
 
+  // C-1698-P2 — the review-only forms return early, before the warning was
+  // computed, so an acceptance-voiding card at low confidence (or one not
+  // executable yet) texted no warning at all. The summary still gives way
+  // first: the instructions and the warning both survive a long summary.
+  for (const level of ['low', 'very_low'] as const) {
+    it(`prints the warning on the review-in-app form (overallConfidence=${level})`, () => {
+      const body = renderProposalSms(
+        {
+          proposalType: 'update_estimate',
+          summary: 'Take the disposal fee off the Garcia estimate '.repeat(10),
+          payload: {
+            ...editPayload,
+            _meta: { overallConfidence: level, markers: [ACCEPTANCE_VOID_MARKER] },
+          },
+        },
+        { approveUrl: URL },
+      );
+      expect(body).toContain('Needs review in app before approval — reply N to reject.');
+      expect(body).toContain(`Check: ${ACCEPTANCE_VOID_MARKER.reason}`);
+      expect(body).not.toMatch(/Reply Y/);
+      expect(body).not.toContain(URL);
+      expect(body.length).toBeLessThanOrEqual(PROPOSAL_SMS_MAX_CHARS);
+    });
+  }
+
+  it('prints the warning on the not-executable-yet form (blockedBy)', () => {
+    const ask = "This can't go ahead yet: which estimate did you mean?";
+    const body = renderProposalSms(
+      {
+        proposalType: 'update_estimate',
+        summary: 'Take the disposal fee off the Garcia estimate '.repeat(10),
+        payload: { ...editPayload, _meta: { overallConfidence: 'high', markers: [ACCEPTANCE_VOID_MARKER] } },
+      },
+      { approveUrl: URL, blockedBy: ask },
+    );
+    expect(body).toContain(ask);
+    expect(body).toContain('reply N to reject');
+    expect(body).toContain(`Check: ${ACCEPTANCE_VOID_MARKER.reason}`);
+    expect(body).not.toMatch(/Reply Y/);
+    expect(body).not.toContain(URL);
+    expect(body.length).toBeLessThanOrEqual(PROPOSAL_SMS_MAX_CHARS);
+  });
+
+  it('the review-only forms WITHOUT the marker stay byte-identical (no Check line)', () => {
+    const input = {
+      proposalType: 'update_estimate' as const,
+      summary: 'Take the disposal fee off the Garcia estimate',
+      payload: { ...editPayload, _meta: { overallConfidence: 'low' } },
+    };
+    expect(renderProposalSms(input)).toBe(
+      'Take the disposal fee off the Garcia estimate Needs review in app before approval — reply N to reject.',
+    );
+    expect(renderProposalSms(input, { blockedBy: 'Which one?' })).toBe(
+      'Take the disposal fee off the Garcia estimate Which one? Needs review in app before approval — reply N to reject.',
+    );
+  });
+
   it('a high-confidence card WITHOUT the marker stays byte-identical (no Check line)', () => {
     const body = renderProposalSms(
       {
@@ -906,5 +963,52 @@ describe('OVAS-01 — the acceptance-void warning always prints', () => {
     expect(body).toContain('2) Drop the disposal fee*');
     expect(body).toContain('*Approval follows separately.');
     expect(body).toContain(`Check: ${ACCEPTANCE_VOID_MARKER.reason}`);
+  });
+});
+
+// B1 follow-up — a phone that cannot approve (a legacy technician backup, or
+// an unrecognised recipient) gets no link, and the reply handler refuses its
+// Y, N and EDIT alike. Every form sent to it is for-your-info only.
+describe('B1 — a recipient who cannot approve gets the for-your-info form', () => {
+  const FYI = 'For your info — the owner needs to review this in the app.';
+
+  it.each([
+    ['a capture card', 'create_booking' as const, {}],
+    ['a money card', 'record_payment' as const, { amountCents: 20000 }],
+    ['a low-confidence card', 'create_booking' as const, { _meta: { overallConfidence: 'low' } }],
+  ])('%s: no Reply Y, N, EDIT or link', (_label, proposalType, payload) => {
+    const body = renderProposalSms(
+      { proposalType, summary: 'Book Mrs Lee Tuesday 2pm', payload },
+      { approveUrl: URL, recipientCannotApprove: true },
+    );
+    expect(body).toBe(`Book Mrs Lee Tuesday 2pm ${FYI}`);
+  });
+
+  it('keeps the not-executable-yet ask and the acceptance-void warning, within the cap', () => {
+    const ask = "This can't go ahead yet: what's the service address?";
+    const body = renderProposalSms(
+      {
+        proposalType: 'update_estimate',
+        summary: 'Take the disposal fee off the Garcia estimate '.repeat(10),
+        payload: { _meta: { overallConfidence: 'high', markers: [ACCEPTANCE_VOID_MARKER] } },
+      },
+      { blockedBy: ask, recipientCannotApprove: true },
+    );
+    expect(body).toContain(ask);
+    expect(body).toContain(FYI);
+    expect(body).toContain(`Check: ${ACCEPTANCE_VOID_MARKER.reason}`);
+    expect(body).not.toMatch(/Reply Y|reply N|EDIT/);
+    expect(body.length).toBeLessThanOrEqual(PROPOSAL_SMS_MAX_CHARS);
+  });
+
+  it('a chain: no Reply Y, no star legend, no link', () => {
+    const body = renderChainSms(
+      [
+        { proposalType: 'create_customer', summary: 'Add Jane Doe', payload: {} },
+        { proposalType: 'send_estimate', summary: 'Send Jane the estimate', payload: {} },
+      ],
+      { approveUrl: URL, recipientCannotApprove: true },
+    );
+    expect(body).toBe(`2 linked actions: 1) Add Jane Doe 2) Send Jane the estimate ${FYI}`);
   });
 });

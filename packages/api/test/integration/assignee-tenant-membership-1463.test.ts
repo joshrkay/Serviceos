@@ -444,6 +444,15 @@ describe('Postgres integration — assignee must be an active tenant member (#14
       expect(res.body.error).toBe('VALIDATION_ERROR');
     });
 
+    // B1 — the backup's mobile approves with the backup's own role, so a role
+    // without proposals:approve would be an approval phone that approves nothing.
+    it('refuses an active technician of tenant A with the plain message', async () => {
+      const technician = await makeUser(tenantA.tenantId, 'technician');
+      const res = await request(app).put('/api/settings').send({ backupSupervisorUserId: technician });
+      expect(res.status).toBe(400);
+      expect(res.body.message).toBe("That team member can't approve work, so they can't be your backup.");
+    });
+
     it('accepts an active dispatcher of tenant A, and null clears it', async () => {
       const dispatcher = await makeUser(tenantA.tenantId, 'dispatcher');
       const set = await request(app).put('/api/settings').send({ backupSupervisorUserId: dispatcher });
@@ -453,6 +462,38 @@ describe('Postgres integration — assignee must be an active tenant member (#14
       const cleared = await request(app).put('/api/settings').send({ backupSupervisorUserId: null });
       expect(cleared.status).toBe(200);
       expect(cleared.body.backupSupervisorUserId).toBeNull();
+    });
+
+    // B1 follow-up — a technician named backup before B1 is still on file for
+    // some tenants. Re-sending that unchanged value with a routing change
+    // saves; only making a technician the backup is refused.
+    it('accepts the unchanged legacy technician backup alongside a routing change', async () => {
+      // The settings row exists once any backup has been saved.
+      const first = await request(app)
+        .put('/api/settings')
+        .send({ backupSupervisorUserId: await makeUser(tenantA.tenantId, 'dispatcher') });
+      expect(first.status).toBe(200);
+      const technician = await makeUser(tenantA.tenantId, 'technician');
+      const { rowCount } = await pool.query(
+        `UPDATE tenant_settings SET backup_supervisor_user_id = $1 WHERE tenant_id = $2`,
+        [technician, tenantA.tenantId],
+      );
+      expect(rowCount).toBe(1);
+
+      const res = await request(app)
+        .put('/api/settings')
+        .send({ backupSupervisorUserId: technician, unsupervisedProposalRouting: 'queue_only' });
+      expect(res.status).toBe(200);
+      const { rows } = await pool.query(
+        `SELECT backup_supervisor_user_id, unsupervised_proposal_routing FROM tenant_settings WHERE tenant_id = $1`,
+        [tenantA.tenantId],
+      );
+      expect(rows[0]).toEqual({ backup_supervisor_user_id: technician, unsupervised_proposal_routing: 'queue_only' });
+
+      const other = await makeUser(tenantA.tenantId, 'technician');
+      const changed = await request(app).put('/api/settings').send({ backupSupervisorUserId: other });
+      expect(changed.status).toBe(400);
+      expect(changed.body.message).toBe("That team member can't approve work, so they can't be your backup.");
     });
   });
 

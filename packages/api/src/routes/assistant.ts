@@ -4267,8 +4267,10 @@ async function generateAssistantReply(
         // already pointing at it still resolves), keeps its created-by/at, and
         // — because only a still-reviewable, non-chain draft of the SAME type
         // is eligible — this can never edit a decided record or shred a chain.
-        // D-004 is untouched: the rewrite carries the fresh draft's status, so
-        // a correction can only ever leave the card waiting for the same tap.
+        // D-004 is untouched: the generic update never moves status (status
+        // changes go only through updateStatus), so the rewritten card keeps
+        // its reviewable status and waits for the same tap — even when the
+        // fresh draft's status decision would have auto-approved it.
         const corrected = isDraftCorrection(lastUserText)
           ? await findReplaceableDraft(deps, tenantId, conversationId, proposal.proposalType)
           : undefined;
@@ -4280,6 +4282,12 @@ async function generateAssistantReply(
             ...(proposal.confidenceScore !== undefined
               ? { confidenceScore: proposal.confidenceScore }
               : {}),
+            // B3 — the payload is now the correction run's output: link THAT
+            // run (none when it persisted no ai_runs row — never the first
+            // draft's) and its confidence factors and explanation.
+            aiRunId: proposal.aiRunId,
+            confidenceFactors: proposal.confidenceFactors,
+            explanation: proposal.explanation,
           });
           // Status never rides the generic update (the pg repo has no status
           // column in it); a draft is surfaced for review like a fresh card.
