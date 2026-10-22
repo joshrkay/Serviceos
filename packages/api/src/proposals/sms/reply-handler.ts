@@ -152,6 +152,15 @@ async function resolveSmsApprover(
 const ROLE_CANNOT_APPROVE_REPLY =
   'You can’t approve, reject or change work by text, so nothing changed. Ask the owner to handle it.';
 
+/**
+ * B3-6 — a schedule card whose 48-hour window passed. A Y is told so, the
+ * same words whether this Y found it expiring (handleApprove) or it already
+ * read expired (the first Y, or the hourly sweep, flipped it); it can only
+ * be redone. Any other reply on it changes nothing.
+ */
+const EXPIRED_APPROVE_REPLY = `Can't approve — that one expired. You can redo it in the app.`;
+const EXPIRED_NO_CHANGE_REPLY = `That one expired — this didn't change anything.`;
+
 /** B1 — an approval the sender's role does not reach (a settings change, for a dispatcher). */
 const NEEDS_OWNER_REPLY =
   'You can’t approve this one — the owner needs to. It’s still waiting in the review queue.';
@@ -466,7 +475,7 @@ async function handleApprove(
         heldBy === 'reference_check'
           ? `Can't approve yet — something on it needs fixing first. Open it in the app to fix it.`
           : heldBy === 'expired'
-            ? `Can't approve — that one expired. You can redo it in the app.`
+            ? EXPIRED_APPROVE_REPLY
             : `Can't approve yet — it's missing required info. Open your review queue to finish it.`,
       );
       return { handled: true, handler: HANDLER_NAME, reason: 'approve_blocked' };
@@ -703,10 +712,16 @@ export async function handleProposalSmsReply(
       intent: parsed.intent,
       proposalStatus: target.proposal.status,
     });
+    // B3-6 — nobody handled an expired card; it ran out of time.
+    const expired = target.proposal.status === 'expired';
     await reply(
       deps,
       ctx.fromE164,
-      `"${target.proposal.summary}" was already handled — this didn't change anything. Check your review queue for anything else waiting.`,
+      expired
+        ? parsed.intent === 'approve'
+          ? EXPIRED_APPROVE_REPLY
+          : EXPIRED_NO_CHANGE_REPLY
+        : `"${target.proposal.summary}" was already handled — this didn't change anything. Check your review queue for anything else waiting.`,
     );
     return { handled: true, handler: HANDLER_NAME, reason: 'already_handled' };
   }
