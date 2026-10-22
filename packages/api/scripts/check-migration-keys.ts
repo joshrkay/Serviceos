@@ -16,6 +16,7 @@
  * fetches it; offline runs degrade to intra-file checks only).
  */
 import { execFileSync } from 'node:child_process';
+import { createHash } from 'node:crypto';
 import { MIGRATIONS } from '../src/db/schema';
 
 /**
@@ -73,13 +74,75 @@ export function extractKeysFromSource(src: string): string[] {
   return keys;
 }
 
-/** Every key NOT present on the base must number strictly past the base tail. */
-export function validateAgainstBase(branchKeys: string[], baseKeys: string[]): string[] {
+/** Snapshot rows sit as `  ['263_x', '<sha256>'],` in migration-immutability.test.ts. */
+const SNAPSHOT_ROW_RE = /^\s*\['((\d{3})_[a-z0-9_]+)',\s*'([0-9a-f]{64})'\],/gm;
+
+/** Same digest as test/db/migration-immutability.test.ts pins. */
+export function hashMigration(value: string): string {
+  return createHash('sha256').update(value.replace(/\r\n/g, '\n')).digest('hex');
+}
+
+/**
+ * Key → pinned hash from the base's immutability snapshot. A pinned key is
+ * applied history: if the base registry lost it (a bad merge dropped
+ * '332_assignment_overlap_accepted' on 2026-10-22 and 335 then failed on a
+ * fresh database), putting it back under its own key with the SAME body is a
+ * restoration, not a new migration, and must not be renumbered past the tail.
+ * The hash is what makes it a restoration: a body that differs from the pin
+ * is new DDL wearing an old name.
+ */
+export function extractPinnedHashesFromSnapshot(src: string): Map<string, string> {
+  const pins = new Map<string, string>();
+  for (const m of src.matchAll(SNAPSHOT_ROW_RE)) pins.set(m[1], m[3]);
+  return pins;
+}
+
+/**
+ * Every key NOT present on the base must number strictly past the base tail,
+ * unless the base's snapshot pins it and the branch body hashes to that pin
+ * (a restored, already-applied migration).
+ */
+export function validateAgainstBase(
+  branchKeys: string[],
+  baseKeys: string[],
+  basePins: ReadonlyMap<string, string> = new Map(),
+  branchHashes: ReadonlyMap<string, string> = new Map(),
+): string[] {
   const base = new Set(baseKeys);
+  const branch = new Set(branchKeys);
   const baseMax = Math.max(0, ...baseKeys.map((k) => Number(k.slice(0, 3))));
+  const basePrefixOwner = new Map(baseKeys.map((k) => [k.slice(0, 3), k]));
   const violations: string[] = [];
+  // Every key on the base is applied history; a branch that lacks one has
+  // dropped a migration (what the 2026-10-22 UI merges did). Report it
+  // directly instead of only catching the stale key that took its place.
+  for (const key of baseKeys) {
+    if (!branch.has(key)) {
+      violations.push(
+        `base key '${key}' is missing from this branch — origin/main's registry still has it; ` +
+          `a merge dropped it, put it back`,
+      );
+    }
+  }
   for (const key of branchKeys) {
     if (base.has(key)) continue;
+    const pinned = basePins.get(key);
+    if (pinned !== undefined) {
+      const owner = basePrefixOwner.get(key.slice(0, 3));
+      if (owner !== undefined && owner !== key) {
+        violations.push(
+          `restored key '${key}' would displace base key '${owner}', which already owns prefix ${key.slice(0, 3)} — ` +
+            `keep the base key and put the restoration back under a new key past the tail`,
+        );
+        continue;
+      }
+      if (branchHashes.get(key) === pinned) continue;
+      violations.push(
+        `restored key '${key}' does not match the hash origin/main's snapshot pins for it — ` +
+          `a restoration must carry the applied body byte-for-byte; different DDL needs a new key past the tail`,
+      );
+      continue;
+    }
     if (Number(key.slice(0, 3)) <= baseMax) {
       violations.push(
         `new key '${key}' numbers at or below origin/main's tail (${String(baseMax).padStart(3, '0')}) — ` +
@@ -118,8 +181,12 @@ function baseSchemaSource(): string | null {
   } catch {
     // offline / no remote — fall through; git show may still hit a local ref
   }
+  return gitShowBase('packages/api/src/db/schema.ts');
+}
+
+function gitShowBase(path: string): string | null {
   try {
-    return execFileSync('git', ['show', 'origin/main:packages/api/src/db/schema.ts'], {
+    return execFileSync('git', ['show', `origin/main:${path}`], {
       encoding: 'utf8',
       maxBuffer: 64 * 1024 * 1024,
     });
@@ -136,7 +203,16 @@ if (invokedDirectly) {
   if (baseSrc) {
     // On main itself branch == base, so there are no "new" keys and the
     // cross-base check is a natural no-op.
-    violations.push(...validateAgainstBase(keys, extractKeysFromSource(baseSrc)));
+    const baseSnapshot = gitShowBase('packages/api/test/db/migration-immutability.test.ts');
+    const branchHashes = new Map(Object.entries(MIGRATIONS).map(([k, v]) => [k, hashMigration(v)]));
+    violations.push(
+      ...validateAgainstBase(
+        keys,
+        extractKeysFromSource(baseSrc),
+        baseSnapshot ? extractPinnedHashesFromSnapshot(baseSnapshot) : new Map(),
+        branchHashes,
+      ),
+    );
   } else {
     console.log('migration-key guard: origin/main unreachable — intra-file checks only');
   }

@@ -13,7 +13,7 @@ import { MIGRATIONS } from '../../src/db/schema';
 
 /**
  * Dispatch FR-2 phase 3c — "Allow overlap if select by user", pinned against
- * REAL Postgres (migrations 332 + 335):
+ * REAL Postgres (migrations 346 + 349, originally shipped as 332 + 335):
  *
  *  - an `acceptOverlap` assignment lands with overlap_accepted = true and the
  *    `no_double_booking` EXCLUDE constraint lets it through;
@@ -22,7 +22,7 @@ import { MIGRATIONS } from '../../src/db/schema';
  *  - rescheduling the accepted visit clears the mark via the sync trigger, so
  *    the acceptance never outlives the window it was given for, and moving it
  *    back onto a clash is refused again;
- *  - rows 332 marked before 335 existed (empty overlap_accepted_with) are
+ *  - rows 346 marked before 349 existed (empty overlap_accepted_with) are
  *    backfilled with the visits they overlap, so their next status change is
  *    not refused by the stricter guard.
  */
@@ -144,11 +144,11 @@ describe('Postgres integration — dispatcher-accepted overlap (FR-2 phase 3c)',
       assignmentRepo, { appointmentRepo, auditRepo, actorRole: 'owner' },
     );
     expect(stacked.overlapAccepted).toBe(true);
-    const { rows } = await pool.query<{ overlap_accepted_with: string[] }>(
+    const { rows: stackedRows } = await pool.query<{ overlap_accepted_with: string[] }>(
       `SELECT overlap_accepted_with FROM appointment_assignments WHERE tenant_id = $1 AND appointment_id = $2`,
       [tenant.tenantId, onlyAccepted],
     );
-    expect(rows[0].overlap_accepted_with).toEqual([clash]);
+    expect(stackedRows[0].overlap_accepted_with).toEqual([clash]);
   });
 
   it('two racing unmarked bookings that overlap only an accepted visit are both refused (the guard serialises them)', async () => {
@@ -228,7 +228,7 @@ describe('Postgres integration — dispatcher-accepted overlap (FR-2 phase 3c)',
     await expect(appointmentRepo.update(tenant.tenantId, clash, { status: 'confirmed' })).rejects.toBeInstanceOf(ConflictError);
 
     // Re-running 335 (the runner replays every migration on boot) fills it in.
-    await pool.query(MIGRATIONS['335_assignment_overlap_accepted_with']);
+    await pool.query(MIGRATIONS['349_assignment_overlap_accepted_with']);
     const { rows } = await pool.query<{ overlap_accepted: boolean; overlap_accepted_with: string[] }>(
       `SELECT overlap_accepted, overlap_accepted_with FROM appointment_assignments WHERE tenant_id = $1 AND appointment_id = $2`,
       [tenant.tenantId, clash],
