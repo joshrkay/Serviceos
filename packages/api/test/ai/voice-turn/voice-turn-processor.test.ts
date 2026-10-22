@@ -49,6 +49,7 @@ import { classifyCallerSafety } from '../../../src/ai/agents/customer-calling/em
 import { EMERGENCY_SAFETY_LINE } from '../../../src/ai/agents/customer-calling/emergency-detector';
 import { UpdateBrandVoiceExecutionHandler } from '../../../src/proposals/execution/brand-voice-handler';
 import { InMemoryBrandVoiceRepository } from '../../../src/tenants/brand/in-memory-brand-voice-repository';
+import { markExecuted } from '../../helpers/proposal-status';
 
 /** A configured (opted-in) discount policy + a grounded $250 quote, for U6 tests. */
 const u6DiscountDeps = {
@@ -2265,7 +2266,7 @@ describe('ANS-001 — E1 booking revocation (conditional write + compensation)',
         createdBy: 'voice',
       }),
     );
-    await proposalRepo.updateStatus('tenant-e1', booking.id, 'executed', {
+    await markExecuted(proposalRepo, 'tenant-e1', booking.id, {
       resultEntityId: 'appt-77',
     });
     session.proposalIds.push(booking.id);
@@ -2566,7 +2567,7 @@ describe('ANS-001 — E1 tenant alert (owner cell, durable fallback, push fan-ou
         createdBy: 'voice',
       }),
     );
-    await proposalRepo.updateStatus('tenant-e1', booking.id, 'executed');
+    await markExecuted(proposalRepo, 'tenant-e1', booking.id);
     session.proposalIds.push(booking.id);
 
     // Same order the FSM emits them in.

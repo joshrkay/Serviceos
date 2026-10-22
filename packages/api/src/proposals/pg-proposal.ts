@@ -1,6 +1,7 @@
 import { Pool, PoolClient } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
 import { ConflictError } from '../shared/errors';
+import { assertStatusWrite } from './lifecycle';
 import { PgBaseRepository } from '../db/pg-base';
 import { currentTenantContext } from '../middleware/tenant-context';
 import {
@@ -438,10 +439,11 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
   ): Promise<Proposal | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
       const lock = await client.query(
-        'SELECT id FROM proposals WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+        'SELECT status FROM proposals WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
         [tenantId, id]
       );
       if (lock.rows.length === 0) return null;
+      assertStatusWrite(lock.rows[0].status as ProposalStatus, status);
 
       const setClauses = ['status = $3', 'updated_at = NOW()'];
       const params: unknown[] = [tenantId, id, status];
@@ -499,6 +501,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
       >
     >
   ): Promise<Proposal | null> {
+    for (const from of fromStatuses) assertStatusWrite(from, to);
     return this.withTenant(tenantId, async (client) => {
       const setClauses = ['status = $4', 'updated_at = NOW()'];
       const params: unknown[] = [tenantId, id, fromStatuses, to];
@@ -549,7 +552,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
   async update(
     tenantId: string,
     id: string,
-    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt'>>
+    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt' | 'status'>>
   ): Promise<Proposal | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
       // Status transitions MUST go through updateStatus() which uses

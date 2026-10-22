@@ -128,3 +128,45 @@ Terms for how the product states what it can prove about itself. The PRD's
 - **Unlit-able** — a capability no surface can switch on at all, as opposed
   to one that is merely off by default or lacks an owner-facing control. It
   caps at 4 regardless of how well it is tested.
+
+## Getting found online (D-044)
+
+- **Tenant site** — the one-page public website we host for a tenant, built
+  from tenant settings, on a subdomain of the domain reserved for tenant sites.
+  _Avoid_: landing page, microsite, website builder.
+- **Connected domain** — a domain the owner already owns and points at their
+  tenant site. We verify it and serve HTTPS; we never sell or renew it.
+  _Avoid_: custom domain purchase.
+- **Google listing** — the one Google Business Profile location a tenant has
+  connected. Its review link is read from it; the website and booking link
+  are written to it, only through an owner-approved card.
+  _Avoid_: GBP account (an account can hold many locations).
+- **Forwarding mode** — how the owner's existing number reaches the AI:
+  *missed calls only* (default) or *all calls*. Porting is not a mode.
+- **Forwarding check** — a call from our line to the owner's business number
+  that passes when it arrives back on our number.
+- **Get found online checklist** — the derived home-page checklist of
+  web-presence setup. Separate from onboarding steps, which gate activation.
+
+## Outbound messaging and drafting (D-045)
+
+- **Outbound messaging** — the one module every customer or owner text goes
+  through. A sender names the recipient and the message purpose; the module
+  decides consent, quiet hours, duplicates and channel, and records the
+  outcome. _Avoid_: notification service, SMS sender.
+- **Message purpose** — why a message goes out, which decides when it may:
+  *transactional* (invoice, estimate, confirmation) and *reply* (to someone
+  who just contacted us) send now; *automated nudge* (thank-you, review
+  request, reminder) and *marketing* wait for the customer's daytime window,
+  and marketing also needs marketing consent.
+- **Send outcome** — what outbound messaging returns and records for every
+  message: *sent*, *scheduled* (with the time), or *blocked* (with the
+  reason). Never silent; the record links the customer and, when there is
+  one, the job and the invoice or estimate.
+- **Status-write gate** — the lifecycle check every proposal status write
+  runs inside the repository (`proposals/lifecycle.ts#assertStatusWrite`).
+  A move the transition table does not list is refused; a caller cannot
+  route around it by writing the status directly.
+- **Draft outcome** — what drafting a proposal returns to a surface: a
+  *proposal*, a *clarification* question, or a *refusal* with a reason. The
+  surface only decides how to say it.
