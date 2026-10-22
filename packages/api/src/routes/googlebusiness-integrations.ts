@@ -475,8 +475,15 @@ export function createGoogleBusinessIntegrationsRouter(
           // The saved listing was removed or this connection lost access:
           // stop polling it, ask for a pick, and clear a review link the
           // app filled from it (a typed one stays).
-          const forgotten = await deps.integrationRepo.forgetLocation(tenantId, locations.length);
+          // Link first: once the listing is forgotten a retry no longer
+          // sees it gone, so a failed link write must stop here.
           const reviewUrl = await fillReviewUrl(deps, tenantId, current.reviewUrl, null);
+          if (reviewUrl.reviewUrlError) {
+            throw new Error(
+              `Your saved Google location is gone, but the old review link could not be removed: ${reviewUrl.reviewUrlError}`,
+            );
+          }
+          const forgotten = await deps.integrationRepo.forgetLocation(tenantId, locations.length);
           if (deps.auditRepo && forgotten) {
             await deps.auditRepo.create(
               createAuditEvent({
@@ -493,11 +500,6 @@ export function createGoogleBusinessIntegrationsRouter(
                   ...reviewUrl,
                 },
               }),
-            );
-          }
-          if (reviewUrl.reviewUrlError) {
-            throw new Error(
-              `Your saved Google location is gone, but the old review link could not be removed: ${reviewUrl.reviewUrlError}`,
             );
           }
           const pollState = deps.pollStateRepo
@@ -531,8 +533,15 @@ export function createGoogleBusinessIntegrationsRouter(
             saved.reviewUrl !== current.reviewUrl ||
             saved.title !== current.locationTitle)
         ) {
-          const refreshed = await deps.integrationRepo.selectLocation(tenantId, toSelection(saved));
+          // Link first, for the same reason: after the refresh a retry
+          // sees nothing new.
           const reviewUrl = await fillReviewUrl(deps, tenantId, current.reviewUrl, saved.reviewUrl);
+          if (reviewUrl.reviewUrlError) {
+            throw new Error(
+              `Google updated your location, but the review link could not be: ${reviewUrl.reviewUrlError}`,
+            );
+          }
+          const refreshed = await deps.integrationRepo.selectLocation(tenantId, toSelection(saved));
           if (deps.auditRepo && refreshed) {
             await deps.auditRepo.create(
               createAuditEvent({
@@ -544,11 +553,6 @@ export function createGoogleBusinessIntegrationsRouter(
                 entityId: refreshed.id,
                 metadata: { provider: 'google_business', locationId: saved.locationId, ...reviewUrl },
               }),
-            );
-          }
-          if (reviewUrl.reviewUrlError) {
-            throw new Error(
-              `Your Google location was updated, but the review link could not be: ${reviewUrl.reviewUrlError}`,
             );
           }
           const pollState = deps.pollStateRepo

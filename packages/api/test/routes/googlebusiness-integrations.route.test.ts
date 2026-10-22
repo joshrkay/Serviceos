@@ -730,6 +730,26 @@ describe('Google Business integrations routes', () => {
       expect(events.map((e) => e.eventType)).toContain('googlebusiness_integration.location_lost');
     });
 
+    it('a failed link clear keeps the lost listing, so a retry still clears it', async () => {
+      const settingsRepo = await settingsWith();
+      await connect({ '123': ONE_LOCATION }, { settingsRepo });
+      const app = buildApp({
+        integrationRepo,
+        stateRepo,
+        googleConfig: GOOGLE_CONFIG,
+        googleFetch: makeConnectFetch({ '123': [] }) as unknown as typeof fetch,
+        settingsRepo,
+      });
+      vi.spyOn(settingsRepo, 'update').mockRejectedValueOnce(new Error('db down'));
+      const failed = await request(app).get('/api/googlebusiness-integrations/google/locations');
+      expect(failed.status).toBe(500);
+      expect((await integrationRepo.get(TENANT))?.locationId).toBe('999');
+
+      const retried = await request(app).get('/api/googlebusiness-integrations/google/locations');
+      expect(retried.body).toMatchObject({ listingRemoved: true, reviewUrlCleared: true });
+      expect((await settingsRepo.findByTenant(TENANT))?.googleReviewUrl ?? null).toBeNull();
+    });
+
     it('the picker finding no locations moves a lost listing to waiting on Google and keeps a typed link', async () => {
       const settingsRepo = await settingsWith('https://g.page/r/typed-by-owner');
       await connect({ '123': ONE_LOCATION }, { settingsRepo });
