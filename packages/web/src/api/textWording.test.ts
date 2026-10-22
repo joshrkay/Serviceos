@@ -66,4 +66,25 @@ describe('fetchTextWording (D-045)', () => {
       ],
     });
   });
+
+  it('does not show an old-API row saved in another language as this language', async () => {
+    vi.mocked(apiFetch).mockResolvedValueOnce(
+      ok({
+        language: 'es',
+        maxLength: 480,
+        texts: [
+          {
+            purpose: 'thank_you_text',
+            fillIns: [],
+            sampleValues: {},
+            ours: 'Gracias',
+            addedLines: [],
+            saved: { body: 'Thanks!', language: 'en', updatedAt: 't' },
+          },
+        ],
+      }),
+    );
+    const state = await fetchTextWording();
+    expect(state.texts[0].byLanguage.es.saved).toBeNull();
+  });
 });

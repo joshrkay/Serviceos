@@ -58,7 +58,8 @@ interface SingleLanguageText {
   sampleValues: Record<string, string>;
   ours: string;
   addedLines: string[];
-  saved: SavedWording | null;
+  /** The previous API kept one row per text, in whichever language it was saved in. */
+  saved: (SavedWording & { language: WordingLanguage }) | null;
 }
 
 /**
@@ -80,7 +81,13 @@ export function normalizeTextWording(
       fillIns,
       sampleValues,
       byLanguage: {
-        [language]: { ours, addedLines, saved: saved && { body: saved.body, updatedAt: saved.updatedAt } },
+        // A row saved before the business changed language isn't wording in
+        // this language: showing it here would let Reset delete it.
+        [language]: {
+          ours,
+          addedLines,
+          saved: saved && saved.language === language ? { body: saved.body, updatedAt: saved.updatedAt } : null,
+        },
       } as Record<WordingLanguage, WordingVersion>,
     })),
   };
