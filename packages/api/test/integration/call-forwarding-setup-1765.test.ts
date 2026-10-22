@@ -13,6 +13,18 @@ import { closeSharedTestDb, createTestTenant, getSharedTestDb } from './shared';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { PgCallForwardingRepository } from '../../src/onboarding/call-forwarding';
 
+// The Rivet number a pass is recorded against; unique per tenant because
+// migration 274 makes a Twilio DID unique across tenants.
+async function liveLine(pool: Pool, tenantId: string): Promise<string> {
+  const phoneE164 = `+1737${String(Math.floor(Math.random() * 1e7)).padStart(7, '0')}`;
+  await pool.query(
+    `INSERT INTO tenant_integrations (id, tenant_id, provider, status, provider_data)
+     VALUES (gen_random_uuid(), $1, 'twilio', 'full_readiness', $2::jsonb)`,
+    [tenantId, JSON.stringify({ phoneE164 })],
+  );
+  return phoneE164;
+}
+
 describe('#1765 call forwarding setup (real Postgres)', () => {
   let pool: Pool;
 
@@ -28,7 +40,7 @@ describe('#1765 call forwarding setup (real Postgres)', () => {
     const repo = new PgCallForwardingRepository(pool);
     expect(await repo.get(tenantId)).toBeNull();
     expect(await repo.save(tenantId, { carrier: 'att', mode: 'all' })).toBeUndefined();
-    expect(await repo.recordCheckPassed(tenantId, new Date())).toBe(false);
+    expect(await repo.recordCheckPassed(tenantId, new Date(), await liveLine(pool, tenantId))).toBe(false);
   });
 
   it('round-trips carrier and mode and returns the previous setup', async () => {
@@ -50,9 +62,12 @@ describe('#1765 call forwarding setup (real Postgres)', () => {
     await new PgSettingsRepository(pool).upsertIdentityFields(tenantId, { businessName: 'Acme' });
     const repo = new PgCallForwardingRepository(pool);
     const at = new Date('2026-10-22T10:00:00.000Z');
+    const rivet = await liveLine(pool, tenantId);
 
     await repo.save(tenantId, { carrier: 'att', mode: 'missed' });
-    expect(await repo.recordCheckPassed(tenantId, at)).toBe(true);
+    expect(await repo.recordCheckPassed(tenantId, at, '+15550000000')).toBe(false);
+    expect((await repo.get(tenantId))?.checkPassedAt).toBeNull();
+    expect(await repo.recordCheckPassed(tenantId, at, rivet)).toBe(true);
     expect((await repo.get(tenantId))?.checkPassedAt).toEqual(at);
 
     await repo.save(tenantId, { carrier: 'att', mode: 'missed' });
@@ -61,7 +76,7 @@ describe('#1765 call forwarding setup (real Postgres)', () => {
     await repo.save(tenantId, { carrier: 'att', mode: 'all' });
     expect((await repo.get(tenantId))?.checkPassedAt).toBeNull();
 
-    await repo.recordCheckPassed(tenantId, at);
+    await repo.recordCheckPassed(tenantId, at, rivet);
     await repo.save(tenantId, { carrier: 'other', mode: 'all' });
     expect((await repo.get(tenantId))?.checkPassedAt).toBeNull();
   });

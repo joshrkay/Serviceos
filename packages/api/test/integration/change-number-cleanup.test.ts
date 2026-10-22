@@ -31,7 +31,6 @@ import { InMemoryAuditRepository } from '../../src/audit/audit';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 import type { VapiClient } from '../../src/integrations/vapi/client';
 import { runOrphanedNumberSweep } from '../../src/workers/orphaned-number-sweep';
-import { loadGetFoundFacts } from '../../src/get-found/load-facts';
 import type { OperatorAlert } from '../../src/monitoring/alert-operator';
 
 const KEY = 'a'.repeat(64);
@@ -244,37 +243,46 @@ describe('Postgres integration — change-number cleanup (#1575)', () => {
     expect(line.body).toMatchObject({ state: 'active', phoneNumber: THIRD_PICK, changeError: null });
   });
 
-  it('a number change voids the call-routing proof until the new number proves itself (#1750)', async () => {
+  it('a number change voids the call-forwarding proof and fails a check still in flight (D-044)', async () => {
     const { tenantId, queue, app } = await activeTenantWithVapi(fakeVapi().client);
     await pool.query(
       `UPDATE tenant_settings
-          SET activated_at = now() - interval '1 day', forwarding_verified_at = now() - interval '1 day',
-              forwarding_generation = 2
+          SET call_forwarding_carrier = 'verizon', call_forwarding_mode = 'missed',
+              call_forwarding_verified_at = now() - interval '1 day'
         WHERE tenant_id = $1`,
       [tenantId],
     );
+    const pendingId = crypto.randomUUID();
+    const settledId = crypto.randomUUID();
     await pool.query(
-      `INSERT INTO voice_sessions (id, tenant_id, channel, state, started_at, ended_at)
-       VALUES (gen_random_uuid(), $1, 'voice_inbound', 'ended', now() - interval '1 day', now() - interval '1 day')`,
-      [tenantId],
+      `INSERT INTO call_forwarding_checks (id, tenant_id, status, mode, rivet_number, business_number, expires_at, completed_at)
+       VALUES ($1, $3, 'pending', 'missed', '+15550000001', '+15550000002', now() + interval '2 minutes', NULL),
+              ($2, $3, 'passed',  'missed', '+15550000001', '+15550000002', now() - interval '1 day', now() - interval '1 day')`,
+      [pendingId, settledId, tenantId],
     );
 
     await request(app).post('/api/onboarding/phone/change').send({ phoneNumber: SECOND_PICK });
     await drain(queue, pool);
 
-    const after = await loadGetFoundFacts(pool, tenantId);
-    expect(after.forwardingCheckPassedAt).toBeNull();
-    expect(after.firstRealCallReceived).toBe(false);
-    const { rows } = await pool.query(`SELECT forwarding_generation AS g FROM tenant_settings WHERE tenant_id = $1`, [tenantId]);
-    expect(rows[0].g).toBe(3);
-
-    // A call that reaches the NEW number proves it again.
-    await pool.query(
-      `INSERT INTO voice_sessions (id, tenant_id, channel, state, started_at, ended_at)
-       VALUES (gen_random_uuid(), $1, 'voice_inbound', 'ended', now() + interval '1 second', now() + interval '2 seconds')`,
+    const settings = await pool.query(
+      `SELECT call_forwarding_verified_at, call_forwarding_carrier, call_forwarding_mode FROM tenant_settings WHERE tenant_id = $1`,
       [tenantId],
     );
-    expect((await loadGetFoundFacts(pool, tenantId)).firstRealCallReceived).toBe(true);
+    // The proof reopens; the owner's carrier and mode choices are kept.
+    expect(settings.rows[0]).toEqual({
+      call_forwarding_verified_at: null,
+      call_forwarding_carrier: 'verizon',
+      call_forwarding_mode: 'missed',
+    });
+    const checks = await pool.query<{ id: string; status: string; completed_at: Date | null }>(
+      `SELECT id, status, completed_at FROM call_forwarding_checks WHERE tenant_id = $1`,
+      [tenantId],
+    );
+    const byId = new Map(checks.rows.map((r) => [r.id, r]));
+    expect(byId.get(pendingId)?.status).toBe('failed');
+    expect(byId.get(pendingId)?.completed_at).not.toBeNull();
+    // A check that already settled is history, left as it was.
+    expect(byId.get(settledId)?.status).toBe('passed');
   });
 
   function sweepDeps(tenantId: string) {
