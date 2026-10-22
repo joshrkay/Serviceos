@@ -53,9 +53,10 @@ import {
   PgTenantTransactionRunner,
   type TenantTransactionRunner,
 } from '../../db/tenant-transaction';
-import { tenantContextStore } from '../../middleware/tenant-context';
+import { currentTenantContext } from '../../middleware/tenant-context';
 import type { ApprovalReferenceCheck } from '../../proposals/approval-reference-checks';
 import { appendAgentTts, callerTranscriptText } from './transcript-append';
+import { redactCardNumbers } from '../privacy/pan-redact';
 import {
   classifyIntent,
   isLookupIntent,
@@ -332,12 +333,14 @@ import {
   type SpeechTurnHandler,
 } from '../../telephony/media-streams/mediastream-adapter';
 import {
-  LOW_STT_LADDER_TERMINAL_REASON,
   createLowSttStreak,
   clearLowSttStreak,
   isLowSttConfidence,
   runLowSttConfidenceLadder as sharedLowSttLadder,
   recordLowSttLadderError,
+  parkedHandoffKind,
+  noHandoffCloseEffects,
+  type LowSttStrikeCause,
 } from './shared/low-stt-ladder';
 import { createLogger } from '../../logging/logger';
 import {
@@ -1325,7 +1328,7 @@ export interface VoiceTurnProcessor {
   maybeHandleLowSttConfidence(
     session: VoiceSession,
     confidence: number | undefined,
-  ): SideEffect[] | null;
+  ): Promise<SideEffect[] | null>;
 }
 
 export function createVoiceTurnProcessor(
@@ -3575,7 +3578,7 @@ export function createVoiceTurnProcessor(
     : new InMemoryTransactionRunner();
   const revocationTx: Pick<TenantTransactionRunner, 'run'> = {
     run: (tenantId, fn) =>
-      tenantContextStore.getStore()?.tenantId === tenantId
+      currentTenantContext()?.tenantId === tenantId
         ? new InMemoryTransactionRunner().run(tenantId, fn)
         : ownRevocationTx.run(tenantId, fn),
   };
@@ -5579,22 +5582,41 @@ export function createVoiceTurnProcessor(
    * inside `speechTurn`) and low acoustic confidence (via
    * `maybeHandleLowSttConfidence`). One streak for both, so a caller
    * alternating silence and mumbling still terminates at
-   * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS}. At the cap this path
-   * never touches the FSM, so the terminated-session finalize is called
-   * explicitly here (the same pattern Gather's ladder uses). The
+   * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS}. LCR-02: the cap is split
+   * on the capping strike's cause — silence closes with a call-us-back line
+   * and pages nobody; low confidence dispatches the FSM's system_failure.
+   * The FSM never reaches `terminated` here, so the terminal finalize is
+   * called explicitly (the same pattern Gather's ladder uses). The
    * `recordVoiceError` channel stays 'gather' — the only surface whose cell
    * declares this branch today.
    */
-  function runLowSttConfidenceLadder(session: VoiceSession): SideEffect[] {
+  async function runLowSttConfidenceLadder(
+    session: VoiceSession,
+    cause: LowSttStrikeCause,
+    tenantId: string,
+  ): Promise<SideEffect[]> {
     // #1601 step 2 — the rules are the shared ladder's; this owns the
     // processor's streak map and the terminal finalize.
-    const { effects, step } = sharedLowSttLadder(session, lowConfidenceStreak);
-    if (step.escalate && !session.ended) {
+    const { effects, step } = sharedLowSttLadder(session, lowConfidenceStreak, cause);
+    let out = effects;
+    let terminalReason: string | undefined = step.kind === 'silence_close' ? step.reason : undefined;
+    if (step.kind === 'system_failure') {
+      // LCR-02 — page through the FSM's own escalation. A parked <Dial> is
+      // handed back by the transport in place of the "connect you" line; a
+      // parked no-one-available message ends the call; with nothing parked
+      // the caller hears that nobody could be reached (this host builds no
+      // voicemail TwiML), never a transfer promise.
+      await executeSideEffects(session, effects, tenantId);
+      const parked = parkedHandoffKind(pendingTransferTwiml.get(session.id));
+      if (parked === 'none') out = noHandoffCloseEffects(session, step.reason);
+      if (parked !== 'dial') terminalReason = step.reason;
+    }
+    if (terminalReason !== undefined) {
       session.ended = true;
-      finalizeTerminatedSession(session, effects, LOW_STT_LADDER_TERMINAL_REASON);
+      finalizeTerminatedSession(session, [{ type: 'end_session', payload: { reason: terminalReason } }], terminalReason);
     }
     recordLowSttLadderError(step, 'gather', { callSid: session.callSid, tenantId: session.tenantId });
-    return effects;
+    return out;
   }
 
   /**
@@ -5604,10 +5626,10 @@ export function createVoiceTurnProcessor(
    * surface whose ladder lives elsewhere (media-streams' adapter-side A3)
    * is never double-gated.
    */
-  function maybeHandleLowSttConfidence(
+  async function maybeHandleLowSttConfidence(
     session: VoiceSession,
     confidence: number | undefined,
-  ): SideEffect[] | null {
+  ): Promise<SideEffect[] | null> {
     if (!servesFamilyHere('silence_low_stt_ladder')) return null;
     if (!isLowSttConfidence(confidence)) {
       // High confidence (or no signal at all) clears the streak so a later
@@ -5616,7 +5638,7 @@ export function createVoiceTurnProcessor(
       return null;
     }
 
-    return runLowSttConfidenceLadder(session);
+    return runLowSttConfidenceLadder(session, 'low_confidence', session.tenantId);
   }
 
   /**
@@ -5803,6 +5825,13 @@ export function createVoiceTurnProcessor(
     tenantId,
     transcriptAppended = false,
   }): Promise<SideEffect[]> => {
+    // PRIV-3 — a recited card number is scrubbed where the caller's words
+    // enter the turn: the FSM events built from `speechResult` (their
+    // `utterance` feeds the complaint callback transcript, lastUtterance and
+    // the proposal payload fallbacks), held utterances and every task handler
+    // see `[card number]`, never the digits. A voice-approval challenge is a
+    // short code, never a 13–19 digit run, so its comparison is unaffected.
+    speechResult = redactCardNumbers(speechResult);
     // Note: `processCallerUtterance` historically took `sessionId` and
     // looked up the session via the store. The mediastream adapter
     // already resolves the session before invoking us, so we accept it
@@ -5889,7 +5918,7 @@ export function createVoiceTurnProcessor(
       // keeps today's `confidence_low` dispatch (media-streams' own ladder
       // is adapter-side).
       if (servesFamilyHere('silence_low_stt_ladder')) {
-        const ladderFx = runLowSttConfidenceLadder(session);
+        const ladderFx = await runLowSttConfidenceLadder(session, 'silence', tenantId);
         appendAgentTts(deps.store, session.id, ladderFx);
         return ladderFx;
       }

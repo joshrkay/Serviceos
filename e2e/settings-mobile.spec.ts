@@ -247,5 +247,55 @@ test.describe('settings — mobile viewport', () => {
     }));
     await expectNoHorizontalOverflow(scrollWidth, clientWidth);
   });
-});
 
+  // D-045 — the Text wording sheet fits 320px; every control clears 44px.
+  // The wording is mocked with long, unbroken values so the layout is
+  // measured against the worst a business name or link can do.
+  test('Text wording sheet fits 320px and its controls clear 44px (D-045)', async ({ page }) => {
+    const longLink = `https://app.example.com/pay/${'x'.repeat(60)}`;
+    await page.route('**/api/settings/text-wording', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          language: 'en',
+          maxLength: 480,
+          texts: [
+            {
+              purpose: 'invoice_text',
+              fillIns: ['customer_name', 'business_name', 'number', 'total', 'link'],
+              sampleValues: {
+                customer_name: 'Sam Rivera',
+                business_name: 'Northwest Heating, Cooling & Plumbing Services LLC',
+                number: 'INV-1042',
+                total: '$485.00',
+                link: longLink,
+              },
+              ours: `Hi Sam Rivera, your invoice is ready.\nPay here: ${longLink}`,
+              addedLines: [],
+              saved: { body: 'Hi {{customer_name}}, pay {{total}} here: {{link}}', language: 'en', updatedAt: '2026-10-22T12:00:00Z' },
+            },
+          ],
+        }),
+      });
+    });
+    await openSettingsSettled(page);
+
+    await page.getByRole('button', { name: /text wording/i }).first().click();
+    const dialog = page.getByRole('dialog', { name: /Text wording/i });
+    await expect(dialog.getByTestId('wording-invoice_text-preview')).toContainText(longLink);
+    const buttons = dialog.getByRole('button');
+    const count = await buttons.count();
+    expect(count).toBeGreaterThanOrEqual(8);
+    for (let i = 0; i < count; i++) {
+      expect((await buttons.nth(i).boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
+    }
+    const { scrollWidth, clientWidth } = await page.evaluate(() => ({
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+    }));
+    await expectNoHorizontalOverflow(scrollWidth, clientWidth);
+    const sheet = await dialog.locator('> div').first().evaluate((el) => ({ sw: el.scrollWidth, cw: el.clientWidth }));
+    expect(sheet.sw).toBeLessThanOrEqual(sheet.cw + 1);
+  });
+});

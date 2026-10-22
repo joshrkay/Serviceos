@@ -131,6 +131,8 @@ a one-time manual re-point at the voice domain in the Twilio console. See
 | Variable | Notes |
 |----------|-------|
 | `SENTRY_DSN` | Error tracking; no-op without it |
+| `DB_SSL_CA` | Provider CA certificate (PEM) for Postgres TLS. When set, every pool verifies the server certificate (`rejectUnauthorized: true`, audit T4-F13); unset keeps the historic encrypted-but-unverified connection and logs one boot warning. Railway: Postgres → Connect → download the CA, paste with `\n` escapes. |
+| `CLERK_AUTHORIZED_PARTIES` | Comma-separated frontend origins whose Clerk session tokens the API accepts (checked against the token's `azp`). Set to the web origin(s), e.g. `https://app.therivetapp.com`; unset = any `azp` (historic behaviour). |
 | `DEEPGRAM_API_KEY` | Streaming STT for inbound voice **and** browser dictation (`POST /api/voice/stream-token` → Deepgram `/v1/auth/grant`). Must be a key with **Member** (or higher) permissions — a usage-only key returns `403 Insufficient permissions` on grant and breaks AI conversation dictation. Create via Deepgram Console → API Keys → Create Key → Advanced → Member. |
 | `TTS_PROVIDER` / `ELEVENLABS_API_KEY` | TTS when not using OpenAI default |
 | `TWILIO_MEDIA_STREAMS_ENABLED` | Realtime voice master switch (WS7). `false`=Gather-only kill switch; `true`=forced on (requires `TTS_PROVIDER=elevenlabs`+`ELEVENLABS_API_KEY`); **unset/`auto`**=on iff `TTS_PROVIDER=elevenlabs`+`ELEVENLABS_API_KEY`+`DEEPGRAM_API_KEY` all set. See `docs/runbooks/voice-realtime-rollout.md`. |

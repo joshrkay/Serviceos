@@ -30,6 +30,7 @@ import type { SupervisorReview } from '../ai/supervisor/types';
 import type { AuditRepository } from '../audit/audit';
 import { prioritizeProposals } from '../proposals/prioritization';
 import { AUTO_APPROVE_BLOCKING_CONFIDENCE_LEVELS } from '../proposals/auto-approve';
+import { voidsCustomerAcceptance } from '../proposals/acceptance-void';
 import { findJobsRequiringInvoicing } from '../invoices/invoicing-queue';
 import {
   resolveDayWindow,
@@ -60,12 +61,20 @@ export interface DigestPendingApproval {
    */
   overallConfidence?: string;
   /**
-   * True when the proposal's confidence is too low for a one-tap link.
+   * True when the proposal's confidence is too low for a one-tap link, or
+   * when approving it voids a customer's signed acceptance (OVAS-01).
    * The web digest view uses this to route the operator to the in-app
    * review flow instead of offering a one-tap approve button.
    * Absent (falsy) when one-tap is allowed.
    */
   reviewInApp?: true;
+  /**
+   * OVAS-01 — true when the payload carries the RV-042 acceptance-void
+   * marker: approving voids the customer's signed acceptance. The worker
+   * keeps such a proposal out of the one-tap links and the APPROVE ALL set
+   * so a human sees the warning before it can execute. Absent otherwise.
+   */
+  voidsAcceptance?: true;
   /**
    * True when the proposal has unresolved `missingFields` (e.g. an ambiguous
    * catalog line on a draft estimate). `approveProposal` rejects such
@@ -411,6 +420,7 @@ export function summarizeProposalForDigest(proposal: Proposal): DigestPendingApp
   const customerName = extractCustomerName(proposal);
   const overallConfidence = extractOverallConfidence(proposal.payload ?? {});
   const hasMissingFields = missingFieldsFor(proposal).length > 0;
+  const voidsAcceptance = voidsCustomerAcceptance(proposal.payload);
   return {
     proposalId: proposal.id,
     proposalType: proposal.proposalType,
@@ -418,8 +428,11 @@ export function summarizeProposalForDigest(proposal: Proposal): DigestPendingApp
     ...(customerName !== undefined ? { customerName } : {}),
     ...(amountCents !== undefined ? { amountCents } : {}),
     ...(overallConfidence !== undefined ? { overallConfidence } : {}),
-    ...(isBlockingConfidence(overallConfidence) ? { reviewInApp: true as const } : {}),
+    ...(isBlockingConfidence(overallConfidence) || voidsAcceptance
+      ? { reviewInApp: true as const }
+      : {}),
     ...(hasMissingFields ? { hasMissingFields: true as const } : {}),
+    ...(voidsAcceptance ? { voidsAcceptance: true as const } : {}),
   };
 }
 

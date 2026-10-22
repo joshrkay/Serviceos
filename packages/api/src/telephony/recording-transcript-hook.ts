@@ -24,6 +24,10 @@
  *   4. When neither persisted rows nor a session exist, the transcript is
  *      genuinely gone: emit audit `voice.transcript_unrecoverable` so the
  *      loss is visible instead of silent.
+ *   5. PRIV-3 — when a caller turn carries the `[card number]` marker (a card
+ *      was recited; `callerTranscriptText` replaced the digits), flag the
+ *      recording `pci_detected` so the retention sweep deletes its audio
+ *      promptly. Runs whether or not the ingestion worker is registered.
  *
  * Failure-soft throughout — the recording is already on disk by the time
  * this runs, and the router 200s Twilio regardless.
@@ -32,6 +36,9 @@ import type { VoiceSessionStore } from '../ai/agents/customer-calling/voice-sess
 import { createAuditEvent, type AuditRepository } from '../audit/audit';
 import type { Logger } from '../logging/logger';
 import type { Queue } from '../queues/queue';
+import { containsCardNumber } from '../ai/privacy/pan-redact';
+import { flagCardNumberRecording } from '../voice/card-number-recording';
+import type { VoiceRepository } from '../voice/voice-service';
 import {
   parseTranscriptLine,
   type CallTranscriptTurnRepository,
@@ -45,6 +52,8 @@ import type { RecordingPersistedEvent } from './recording-webhook';
 export interface RecordingTranscriptHookDeps {
   store: Pick<VoiceSessionStore, 'findByCallSidIncludingEnded'>;
   callTranscriptTurnRepo: Pick<CallTranscriptTurnRepository, 'attachRecording' | 'listByCallSid'>;
+  /** PRIV-3 — flags a recording whose transcript carries a card number. */
+  voiceRepo: Pick<VoiceRepository, 'markCardNumberDetected'>;
   auditRepo: Pick<AuditRepository, 'create'>;
   /** Omit when no transcript-ingestion worker is registered (no embedding provider). */
   queue?: Pick<Queue, 'send'>;
@@ -56,7 +65,7 @@ export const TRANSCRIPT_UNRECOVERABLE_EVENT = 'voice.transcript_unrecoverable';
 export function createRecordingTranscriptHook(
   deps: RecordingTranscriptHookDeps,
 ): (event: RecordingPersistedEvent) => Promise<void> {
-  const { store, callTranscriptTurnRepo, auditRepo, queue, logger } = deps;
+  const { store, callTranscriptTurnRepo, voiceRepo, auditRepo, queue, logger } = deps;
 
   return async (event) => {
     if (!event.inserted) return;
@@ -152,6 +161,14 @@ export function createRecordingTranscriptHook(
         voiceRecordingId,
       });
       return;
+    }
+
+    // PRIV-3 — the transcript holds the marker, the audio still holds the digits.
+    if (turns.some((t) => t.speaker === 'caller' && containsCardNumber(t.text))) {
+      await flagCardNumberRecording(
+        { voiceRepo, auditRepo, logger },
+        { tenantId, voiceRecordingId, actorId: 'recording_webhook', source: 'call_transcript' },
+      );
     }
 
     if (!queue) return; // no ingestion worker registered (no embedding provider)

@@ -76,6 +76,38 @@ describe('GET /api/health/ai/completion', () => {
     expect(res.body.completionProbe.errorCode).toBe('model_not_found');
   });
 
+  it('keeps the raw provider text behind the METRICS_TOKEN gate (GATEWAY-07)', async () => {
+    process.env.METRICS_TOKEN = 'secret-metrics';
+    const reg = new CircuitBreakerRegistry(DEFAULT_BREAKER);
+    await reg
+      .run({ provider: 'api.openai.com', modelFamily: 'gpt' }, async () => {
+        throw Object.assign(new Error('Rate limit reached in organization org-abc123'), {
+          status: 429,
+        });
+      })
+      .catch(() => undefined);
+    const app = express();
+    app.use('/api/health', createAiHealthRouter(reg, [], {
+      gateway: {
+        complete: async (): Promise<LLMResponse> => ({
+          content: 'ok',
+          model: 'gpt-4o-mini',
+          tokenUsage: { input: 1, output: 1, total: 2 },
+        }),
+      },
+    }));
+
+    const gated = await request(app)
+      .get('/api/health/ai/completion')
+      .set('Authorization', 'Bearer secret-metrics');
+    expect(gated.status).toBe(200);
+    expect(gated.body.completionProbe.providers[0].lastError).toContain('org-abc123');
+
+    const publicListing = await request(app).get('/api/health/ai');
+    expect(JSON.stringify(publicListing.body)).not.toContain('org-abc123');
+    expect(publicListing.body.providers[0].lastErrorCode).toBe('rate_limited');
+  });
+
   it('503 when gateway not wired', async () => {
     const reg = new CircuitBreakerRegistry(DEFAULT_BREAKER);
     const app = express();

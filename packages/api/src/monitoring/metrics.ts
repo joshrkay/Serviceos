@@ -298,8 +298,53 @@ export const wsReconnectRejectTotal = new Counter({
  */
 export const voiceTurnLatencyMs = new Histogram({
   name: 'voice_turn_latency_ms',
-  help: 'Voice turn latency (ms): STT-final transcript → first outbound TTS chunk of the reply, media-streams path. Excludes filler chunks.',
+  help: 'Voice turn latency (ms): STT-final transcript → first AUDIBLE outbound chunk of the reply (filler included), media-streams path, measured at enqueue. The caller-perceived reply gap is voice_reply_gap_ms.',
   buckets: [250, 500, 1000, 1500, 2000, 2500, 3000, 3500, 5000, 7500, 10_000],
+  registers: [metricsRegistry],
+});
+
+/**
+ * Voice parity U1 — the caller-perceived reply gap: the caller's LAST WORD →
+ * the first REAL (non-filler) reply frame as Twilio ACKED the mark behind it
+ * (playout reached it), media-streams path. Same buckets as
+ * `voice_turn_latency_ms` so the two can be read side by side.
+ *
+ * `anchor` keeps the two populations apart: `last_word` is the SLO (Deepgram
+ * word timing anchored to wall clock at the first forwarded sample);
+ * `stt_final` is the fallback for a final that carried no timing — measured
+ * from the recogniser's endpoint, it understates the gap by the endpoint delay
+ * and is never mixed into the `last_word` percentile.
+ */
+export const voiceReplyGapMs = new Histogram({
+  name: 'voice_reply_gap_ms',
+  help: "Caller-perceived reply gap (ms): caller's last word (anchor=last_word) or STT-final (anchor=stt_final) → first REAL reply frame acked by Twilio, media-streams path.",
+  labelNames: ['anchor'] as const,
+  buckets: [250, 500, 1000, 1500, 2000, 2500, 3000, 3500, 5000, 7500, 10_000],
+  registers: [metricsRegistry],
+});
+
+/**
+ * U1 — replies whose first real frame was enqueued but never acknowledged by
+ * Twilio: the mark came back as a `clear` echo (barge-in), no ack within 5 s,
+ * or the stream closed first. These are exactly the turns on which the caller
+ * heard a long delay or nothing, so they are counted beside the histogram
+ * rather than dropped from it — the SLO is the p95 AND this rate.
+ */
+export const voiceReplyUnackedTotal = new Counter({
+  name: 'voice_reply_unacked_total',
+  help: 'Replies whose first real frame was enqueued but never acked by Twilio (reason=clear_echo|ack_timeout|stream_closed).',
+  labelNames: ['reason'] as const,
+  registers: [metricsRegistry],
+});
+
+/**
+ * U1 — a reply-audio stamp (`markReplyAudio`) that updated zero rows: the
+ * call_transcript_turns row was deleted underneath the chained update. Logged
+ * with the key as well, so a silent drop is visible rather than assumed away.
+ */
+export const voiceReplyStampLostTotal = new Counter({
+  name: 'voice_reply_stamp_lost_total',
+  help: 'Reply-audio stamps whose call_transcript_turns UPDATE affected zero rows (row deleted underneath).',
   registers: [metricsRegistry],
 });
 
@@ -361,6 +406,18 @@ export const aiTaskRunsObserved = new Gauge({
 });
 
 /**
+ * OBS-4 — platform-wide ai_runs spend (micro-cents; divide by 1,000,000 for
+ * cents) over the last evaluated failure-monitor window. Unlabelled on
+ * purpose: per-tenant attribution rides in the alert details, never in a
+ * metric label (raw tenant_id is deliberately not a label anywhere here).
+ */
+export const aiSpendWindowMicroCents = new Gauge({
+  name: 'ai_spend_window_micro_cents',
+  help: 'SUM(ai_runs.cost_micro_cents) over the last evaluated failure-monitor window, platform-wide (unpriced runs count 0)',
+  registers: [metricsRegistry],
+});
+
+/**
  * FAIL-VIS — silent proposal-execution findings. `check` is
  * `stalled_executing` (stuck in `executing` past the staleness bound) or
  * `failed_without_error` (terminal `execution_failed` carrying a NULL
@@ -373,11 +430,27 @@ export const proposalSilentFailureFindings = new Gauge({
   registers: [metricsRegistry],
 });
 
-/** WS15 — operator alerts actually dispatched, per channel (post-cooldown). */
+/**
+ * WS15 — operator alerts actually dispatched, per channel (post-cooldown).
+ * `rule` is OperatorAlert.metricRule when set: a per-tenant rule keys its
+ * cooldown by tenant but labels this series by task family only, so no
+ * tenant id ever lands in a label here.
+ */
 export const sloAlertsSentTotal = new Counter({
   name: 'slo_alerts_sent_total',
   help: 'Operator alerts dispatched by alertOperator, by rule and channel (sentry|sms)',
   labelNames: ['rule', 'channel'],
+  registers: [metricsRegistry],
+});
+
+/**
+ * U7 (S6-2) — demo-call reservations refused because the day's call or cost
+ * cap is reached. The crossing that filled the cap paged once; refusals after
+ * it only count here, so a busy day never pages again.
+ */
+export const demoCallBudgetRefusalsTotal = new Counter({
+  name: 'demo_call_budget_refusals_total',
+  help: 'Demo-call budget reservations refused because the UTC day is at its call or cost cap',
   registers: [metricsRegistry],
 });
 

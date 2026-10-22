@@ -1,14 +1,22 @@
-import { Invoice, InvoiceRepository } from './invoice';
+import type { AttachPaymentLinkResult, Invoice, InvoiceRepository } from './invoice';
 import type { PaymentLinkProvider } from '../payments/payment-link-provider';
 import { PaymentRepository } from './payment';
 import { CustomerRepository } from '../customers/customer';
 import { JobRepository } from '../jobs/job';
-import { SettingsRepository } from '../settings/settings';
+import { SettingsRepository, TenantSettings } from '../settings/settings';
 import { ValidationError, NotFoundError } from '../shared/errors';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { publicActorFromToken } from '../feedback/feedback-response';
 import { timedFetch } from '../shared/timed-fetch';
 import type { CatalogUnitValue } from '@ai-service-os/shared';
+import { retireCheckoutLink } from './invoice-payment-link';
+import {
+  auditPaymentModeUnavailable,
+  CollectOnSiteError,
+  PaymentModeUnavailableError,
+  readPaymentCollectionMode,
+  type PaymentCollectionModeView,
+} from './payment-collection-mode';
 
 export interface StripeConfig {
   apiKey: string;
@@ -50,8 +58,18 @@ export interface PublicInvoiceView {
   customerMessage?: string;
   isPaid: boolean;
   viewCount: number;
-  /** Stripe-hosted checkout URL, populated once the customer requests checkout. */
+  /**
+   * Stripe-hosted checkout URL, populated once the customer requests checkout.
+   * S5a-1 (U8): present only when `paymentCollectionMode` is `pay_link`.
+   */
   stripePaymentLinkUrl?: string;
+  /**
+   * S5a-1 (U8) — the payment policy the page must honour: `pay_link` renders
+   * the payment form; `collect_on_site` renders the in-person note; and
+   * `unavailable` (the policy could not be read) renders no payment at all —
+   * the API already made the fail-closed decision, the page only shows it.
+   */
+  paymentCollectionMode: PaymentCollectionModeView;
   /**
    * Tier 4 (Deposit rules — PR 3c). Total deposit credit applied to
    * this invoice (in cents). Surfaced so the customer page can render
@@ -153,6 +171,53 @@ export class PublicInvoiceService {
       .catch(() => undefined);
   }
 
+  /**
+   * S5a-4 (U8) — the direct-Stripe path's version of `retireCheckoutLink`:
+   * that path mints with a raw fetch and has no provider, so it keeps its
+   * own deactivation call (same Stripe-Account scope as the mint) and here
+   * emits the same audit events with the same reason, and on success runs
+   * the CAS clear so an attach whose acknowledgement was lost never leaves a
+   * dead link stored. Best-effort: never throws.
+   */
+  private async auditLinkDeactivation(
+    invoice: Invoice,
+    linkId: string,
+    deactivated: boolean,
+  ): Promise<void> {
+    if (deactivated) {
+      await this.deps.invoiceRepo.clearPaymentLinkIfMatches?.(invoice.tenantId, invoice.id, linkId).catch(() => false);
+    }
+    if (!this.deps.auditRepo) return;
+    await this.deps.auditRepo
+      .create(
+        createAuditEvent({
+          tenantId: invoice.tenantId,
+          actorId: 'system',
+          actorRole: 'system',
+          eventType: deactivated ? 'invoice.payment_link_deactivated' : 'invoice.payment_link_deactivation_failed',
+          entityType: 'invoice',
+          entityId: invoice.id,
+          metadata: {
+            stripePaymentLinkId: linkId,
+            reason: 'payment_mode_changed_during_checkout',
+            ...(deactivated ? {} : { error: 'Stripe deactivation failed for a link minted across a payment-mode change' }),
+          },
+        }),
+      )
+      .catch(() => undefined);
+  }
+
+  /** S5a-4 — an attach that threw is an unreadable mode: audit it and answer 503. */
+  private async failClosedOnUnreadableAttach(invoice: Invoice, error: unknown): Promise<never> {
+    await auditPaymentModeUnavailable(this.deps.auditRepo, {
+      tenantId: invoice.tenantId,
+      invoiceId: invoice.id,
+      surface: 'checkout',
+      error,
+    });
+    throw new PaymentModeUnavailableError();
+  }
+
   async getByToken(token: string): Promise<PublicInvoiceView> {
     const invoice = await this.lookupByToken(token);
     return this.toView(invoice);
@@ -182,6 +247,24 @@ export class PublicInvoiceService {
    */
   async getOrCreateCheckoutUrl(token: string): Promise<{ url: string }> {
     const invoice = await this.lookupByToken(token);
+
+    // S5a-1 (U8) — policy before state, and before the stored-URL early
+    // return: a collect-on-site tenant serves no link even while the switch
+    // cleanup (S5a-5) has not yet retired a stored one, and an unreadable
+    // policy is a retryable 503, never a mint.
+    const mode = await readPaymentCollectionMode(this.deps.settingsRepo, invoice.tenantId);
+    if (!mode.ok) {
+      await auditPaymentModeUnavailable(this.deps.auditRepo, {
+        tenantId: invoice.tenantId,
+        invoiceId: invoice.id,
+        surface: 'checkout',
+        error: mode.error,
+      });
+      throw new PaymentModeUnavailableError();
+    }
+    if (mode.mode === 'collect_on_site') {
+      throw new CollectOnSiteError();
+    }
 
     if (!this.deps.stripeConfig?.apiKey && !this.deps.paymentLinkProvider) {
       throw new ValidationError('Payment processing is not configured');
@@ -215,17 +298,40 @@ export class PublicInvoiceService {
       });
       // P0-9 (mint leg) — persist only while the invoice still prices this
       // link; a void/credit landing during the mint wins and the fresh link
-      // is deactivated instead of attached (see setPaymentLinkIfPayable).
-      const persisted = await this.deps.invoiceRepo.setPaymentLinkIfPayable(
-        invoice.tenantId,
-        invoice.id,
-        { linkId: link.linkId, linkUrl: link.linkUrl },
-        invoice.amountDueCents,
-        new Date(),
-      );
-      if (!persisted) {
+      // is deactivated instead of attached (see attachPaymentLink). S5a-4 —
+      // and only while the mode is still pay_link: a switch to collect on
+      // site during the mint (or an unreadable mode) retires the link.
+      const provider = this.deps.paymentLinkProvider;
+      const retire = () =>
+        retireCheckoutLink({
+          tenantId: invoice.tenantId,
+          invoice,
+          linkId: link.linkId,
+          invoiceRepo: this.deps.invoiceRepo,
+          provider,
+          connectAccountResolver: this.deps.connectAccountResolver,
+          auditRepo: this.deps.auditRepo,
+        });
+      let attached: AttachPaymentLinkResult;
+      try {
+        attached = await this.deps.invoiceRepo.attachPaymentLink(
+          invoice.tenantId,
+          invoice.id,
+          { linkId: link.linkId, linkUrl: link.linkUrl },
+          invoice.amountDueCents,
+          new Date(),
+        );
+      } catch (error) {
+        await retire();
+        return await this.failClosedOnUnreadableAttach(invoice, error);
+      }
+      if (!attached.ok && attached.reason === 'mode_not_pay_link') {
+        await retire();
+        throw new CollectOnSiteError();
+      }
+      if (!attached.ok) {
         try {
-          await this.deps.paymentLinkProvider.deactivateLink(link.linkId);
+          await provider.deactivateLink(link.linkId);
         } catch (err) {
           await this.auditLoserLinkCleanupFailure(invoice, link.linkId, err);
         }
@@ -323,29 +429,36 @@ export class PublicInvoiceService {
       }
     };
 
-    let persisted: Invoice | null;
+    let attached: AttachPaymentLinkResult;
     try {
       // P0-9 (mint leg) — the Stripe mint above is slow; a void, a credit, or
       // a competing mint can land after the payable read at the top. The
       // guarded persist attaches the link only while the invoice still owes
-      // exactly what the link charges and carries no other link.
-      persisted = await this.deps.invoiceRepo.setPaymentLinkIfPayable(
+      // exactly what the link charges and carries no other link, and
+      // (S5a-4) while the mode, re-read under the payment-mode lock, is
+      // still pay_link.
+      attached = await this.deps.invoiceRepo.attachPaymentLink(
         invoice.tenantId,
         invoice.id,
         { linkId: data.id, linkUrl: data.url },
         invoice.amountDueCents,
         new Date(),
       );
-    } catch (dbErr) {
-      // The Stripe link was created but we can't persist the URL. Deactivate
-      // it (best-effort) so it isn't an orphaned charge vector, then re-throw.
-      // The link ID is included in the error message so it can be recovered
-      // manually if deactivation also fails.
-      await deactivateMintedLink();
-      const msg = dbErr instanceof Error ? dbErr.message : String(dbErr);
-      throw new Error(`Failed to persist Stripe payment link ${data.id}: ${msg}`);
+    } catch (error) {
+      // The Stripe link was created but the attach threw: the mode is
+      // unreadable, so fail closed. The link dies (audited with its id, so a
+      // failed deactivation can still be finished by hand) and the customer
+      // gets a retryable 503 — never a stored or served link.
+      await this.auditLinkDeactivation(invoice, data.id, await deactivateMintedLink());
+      return await this.failClosedOnUnreadableAttach(invoice, error);
     }
-    if (!persisted) {
+    if (!attached.ok && attached.reason === 'mode_not_pay_link') {
+      // The owner switched to "Collect on the spot" while Stripe was minting.
+      // Not a lost mint race: no "invoice changed", no competing link.
+      await this.auditLinkDeactivation(invoice, data.id, await deactivateMintedLink());
+      throw new CollectOnSiteError();
+    }
+    if (!attached.ok) {
       // Guard lost: the invoice was voided, repriced, or another mint won
       // while Stripe was creating this link. The fresh link prices a state
       // that no longer exists — kill it, then either serve the winner's link
@@ -416,7 +529,26 @@ export class PublicInvoiceService {
     const customer = job
       ? await this.deps.customerRepo.findById(invoice.tenantId, job.customerId)
       : null;
-    const settings = await this.deps.settingsRepo.findByTenant(invoice.tenantId);
+    // S5a-1 (U8) — one settings read gives the business context AND the
+    // payment policy. A read that throws no longer fails the page: the
+    // customer still sees their invoice, with no payment facts and
+    // `paymentCollectionMode: 'unavailable'`, and the occurrence is audited.
+    const modeRead = await readPaymentCollectionMode(this.deps.settingsRepo, invoice.tenantId);
+    let paymentCollectionMode: PaymentCollectionModeView;
+    let settings: TenantSettings | null;
+    if (modeRead.ok) {
+      paymentCollectionMode = modeRead.mode;
+      settings = modeRead.settings;
+    } else {
+      paymentCollectionMode = 'unavailable';
+      settings = null;
+      await auditPaymentModeUnavailable(this.deps.auditRepo, {
+        tenantId: invoice.tenantId,
+        invoiceId: invoice.id,
+        surface: 'public_page',
+        error: modeRead.error,
+      });
+    }
 
     // Tier 4 (Deposit rules — PR 3c). Sum payments tagged
     // providerReference='deposit_credit' for this invoice. The credit
@@ -467,7 +599,11 @@ export class PublicInvoiceService {
       customerMessage: invoice.customerMessage,
       isPaid: invoice.status === 'paid' || invoice.amountDueCents <= 0,
       viewCount: invoice.viewCount ?? 0,
-      stripePaymentLinkUrl: invoice.stripePaymentLinkUrl,
+      // A leftover link on a collect-on-site (or unreadable) tenant is never
+      // shown — the policy holds for old URLs as well as new ones.
+      stripePaymentLinkUrl:
+        paymentCollectionMode === 'pay_link' ? invoice.stripePaymentLinkUrl : undefined,
+      paymentCollectionMode,
       depositCreditCents,
     };
   }

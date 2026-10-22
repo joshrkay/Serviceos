@@ -2,7 +2,7 @@ import { describe, it, expect } from 'vitest';
 import { checkFeasibility } from '../../src/scheduling/feasibility';
 import { FeasibilityDependencies } from '../../src/scheduling/feasibility-types';
 import { Appointment } from '../../src/appointments/appointment';
-import { StubSkillMatcher } from '../../src/scheduling/skill-matcher';
+import { noSkillConstraints } from '../helpers/no-skill-constraints';
 import { TravelTimeProvider } from '../../src/scheduling/travel-time/provider';
 import { HaversineFallbackProvider } from '../../src/scheduling/travel-time/haversine-fallback';
 
@@ -23,7 +23,7 @@ function mkAppt(over: Partial<Appointment> = {}): Appointment {
 function depsWithNeighbor(opts: {
   neighbor?: Appointment & { locationId?: string };
   targetLocationId?: string;
-  locations?: Record<string, { latitude?: number; longitude?: number }>;
+  locations?: Record<string, { latitude?: number; longitude?: number; geocodeStatus?: string }>;
   jobs?: Record<string, { locationId?: string }>;
   travelSeconds?: number;
 }): FeasibilityDependencies {
@@ -49,7 +49,7 @@ function depsWithNeighbor(opts: {
     workingHoursRepo: { findByTechnician: async () => [] } as any,
     unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
     travelTimeProvider: provider,
-    skillMatcher: new StubSkillMatcher(),
+    skillMatcher: noSkillConstraints(),
   };
 }
 
@@ -96,6 +96,28 @@ describe('checkFeasibility — travel-time sub-check', () => {
     expect(r.info.some((i) => i.check === 'travel_time' && (i.metadata as any)?.reason === 'missing_coords')).toBe(true);
   });
 
+  // Dispatch FR-2 — an address the geocode sweep gave up on is named as such.
+  it('says the address could not be found when the geocode sweep failed it', async () => {
+    const target = mkAppt({ jobId: 'j-target' });
+    const prev = mkAppt({
+      id: 'a-prev', jobId: 'j-prev',
+      scheduledStart: new Date('2026-05-17T08:00:00Z'),
+      scheduledEnd: new Date('2026-05-17T09:30:00Z'),
+    });
+    const r = await checkFeasibility(
+      { tenantId: 't-1', appointment: target, proposedTechnicianId: 'tech-1',
+        proposedScheduledStart: target.scheduledStart, proposedScheduledEnd: target.scheduledEnd },
+      depsWithNeighbor({
+        neighbor: prev,
+        jobs: { 'j-target': { locationId: 'L-target' }, 'j-prev': { locationId: 'L-prev' } },
+        locations: { 'L-target': SF, 'L-prev': { geocodeStatus: 'failed' } },
+      }),
+    );
+    const info = r.info.find((i) => i.check === 'travel_time');
+    expect((info?.metadata as any)?.reason).toBe('address_not_found');
+    expect(info?.message).toMatch(/could not be found on the map/);
+  });
+
   // #1478 — a canceled visit is not a stop the technician drives from/to.
   it('ignores a canceled appointment as a travel neighbor', async () => {
     const target = mkAppt({ jobId: 'j-target' });
@@ -130,7 +152,7 @@ describe('checkFeasibility — travel-time sub-check', () => {
       }),
     );
     expect(r.travelTime).toEqual({
-      fromPrevSeconds: null, toNextSeconds: null,
+      fromPrevSeconds: null, prevEndsAt: null, toNextSeconds: null,
       estimateSource: 'unknown', degraded: false,
     });
   });

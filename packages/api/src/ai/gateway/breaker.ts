@@ -28,6 +28,7 @@ import {
   breakerHalfOpenProbeSuccessRatio,
 } from '../../monitoring/metrics';
 import { isLocalDeadlineOrAbort } from './deadline';
+import { classifyError, type ErrorClass } from './retry';
 
 export type BreakerStateName = 'closed' | 'open' | 'half-open';
 
@@ -110,6 +111,11 @@ class BreakerCell {
 
   /** Last failure message recorded via onResult(false). */
   private lastErrorMessage: string | undefined;
+  /**
+   * Stable class of that failure (classifyError). The public health listing
+   * shows only this — the message can carry the provider's raw text (GATEWAY-07).
+   */
+  private lastErrorClass: ErrorClass | undefined;
   /** Timestamp of the last recorded success. */
   private lastSuccessAt: Date | undefined;
 
@@ -129,6 +135,11 @@ class BreakerCell {
   /** Expose last recorded failure message (undefined if no failure yet). */
   getLastError(): string | undefined {
     return this.lastErrorMessage;
+  }
+
+  /** Stable class of the last recorded failure (undefined if no failure yet). */
+  getLastErrorCode(): ErrorClass | undefined {
+    return this.lastErrorClass;
   }
 
   /** Expose timestamp of the last recorded success (undefined if no success yet). */
@@ -193,6 +204,7 @@ class BreakerCell {
           : typeof err === 'string'
           ? err
           : 'unknown error';
+      this.lastErrorClass = classifyError(err);
     } else {
       this.lastSuccessAt = new Date();
     }
@@ -343,8 +355,13 @@ export interface ProviderHealthState {
   provider: string;
   /** Most-degraded breaker state across all cells for this provider. */
   breakerState: BreakerStateName;
-  /** Most recent failure message across all cells, if any. */
+  /**
+   * Most recent failure message across all cells, if any. Raw provider text —
+   * only for gated surfaces (METRICS_TOKEN), never the public listing.
+   */
   lastError: string | undefined;
+  /** Stable class of that failure (rate_limited | timeout | transient | permanent). */
+  lastErrorCode: ErrorClass | undefined;
   /** Most recent success timestamp across all cells, if any. */
   lastSuccessAt: Date | undefined;
 }
@@ -371,7 +388,8 @@ export class CircuitBreakerRegistry {
    * collapsed to one entry per provider name (the first segment of the cell
    * key). Aggregation rules:
    *   - breakerState: most-degraded wins (open > half-open > closed).
-   *   - lastError:    most-recently recorded failure message across cells.
+   *   - lastError:    most-recently recorded failure message across cells
+   *                   (lastErrorCode is taken from the same cell).
    *   - lastSuccessAt: latest recorded success timestamp across cells.
    */
   getProviderStates(): ProviderHealthState[] {
@@ -382,6 +400,7 @@ export class CircuitBreakerRegistry {
       const providerName = cell.key.split('|')[0];
       const cellState = cell.getState();
       const cellLastError = cell.getLastError();
+      const cellLastErrorCode = cell.getLastErrorCode();
       const cellLastSuccessAt = cell.getLastSuccessAt();
 
       const existing = byProvider.get(providerName);
@@ -390,6 +409,7 @@ export class CircuitBreakerRegistry {
           provider: providerName,
           breakerState: cellState,
           lastError: cellLastError,
+          lastErrorCode: cellLastErrorCode,
           lastSuccessAt: cellLastSuccessAt,
         });
       } else {
@@ -409,6 +429,7 @@ export class CircuitBreakerRegistry {
         // unless this cell has one and existing doesn't.
         if (cellLastError !== undefined && existing.lastError === undefined) {
           existing.lastError = cellLastError;
+          existing.lastErrorCode = cellLastErrorCode;
         }
       }
     }

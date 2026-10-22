@@ -3,7 +3,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
-import { createNoteSchema } from '../shared/contracts';
+import { createNoteSchema, updateNoteSchema } from '../shared/contracts';
 import { OwnedEntityType, TenantOwnership } from '../shared/tenant-ownership';
 import { createNote, updateNote, deleteNote, listNotes, NoteRepository } from '../notes/note';
 import { AuditRepository } from '../audit/audit';
@@ -69,11 +69,7 @@ export function createNoteRouter(
     requirePermission('notes:update'),
     notFoundOnMalformedId('Note not found'),
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const { content } = req.body;
-      if (!content) {
-        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'content is required' });
-        return;
-      }
+      const { content } = updateNoteSchema.parse(req.body ?? {});
       const result = await updateNote(
         req.auth!.tenantId,
         routeParam(req, 'id'),

@@ -38,8 +38,10 @@ const CARRIERS: CarrierTip[] = [
 const BLOCKER_COPY: Record<string, string> = {
   twilio_provisioning_failed:
     "We couldn't claim a phone number for you. Our team has been alerted.",
+  // Reachable on the live wizard since the status puts the failure's own
+  // blocker first (S5b-1): plain words, no vendor or system names.
   twilio_credentials_missing:
-    'Twilio is not configured for this environment. Contact support to enable phone provisioning.',
+    "We can't set up phone numbers on your account yet. Please contact support.",
   area_code_unavailable:
     'No numbers were available in the area code we tried. Hit Retry — we will try the next one.',
   rate_limited:

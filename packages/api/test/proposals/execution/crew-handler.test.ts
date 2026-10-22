@@ -7,7 +7,7 @@ import { Proposal, ProposalType } from '../../../src/proposals/proposal';
 import { InMemoryAppointmentRepository, createAppointment } from '../../../src/appointments/appointment';
 import { InMemoryAssignmentRepository } from '../../../src/appointments/assignment';
 import { FeasibilityDependencies } from '../../../src/scheduling/feasibility-types';
-import { StubSkillMatcher } from '../../../src/scheduling/skill-matcher';
+import { noSkillConstraints } from '../../helpers/no-skill-constraints';
 import { HaversineFallbackProvider } from '../../../src/scheduling/travel-time/haversine-fallback';
 
 const tenantId = '550e8400-e29b-41d4-a716-446655440000';
@@ -33,7 +33,7 @@ function feasibilityDeps(
     workingHoursRepo,
     unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
     travelTimeProvider: new HaversineFallbackProvider(),
-    skillMatcher: new StubSkillMatcher(),
+    skillMatcher: noSkillConstraints(),
   };
 }
 

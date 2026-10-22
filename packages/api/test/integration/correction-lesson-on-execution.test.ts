@@ -79,6 +79,13 @@ describe('Postgres integration — correction lessons on execution (U7)', () => 
     // Pin the id so the execution + lesson link to a known proposal.
     const proposal = { ...draft, id: proposalId };
     await proposalRepo.create(proposal);
+    // PI-3 — the owner's approval, as approveProposal stamps it: the cascade
+    // runs under the approver's settings:update authority.
+    await proposalRepo.updateStatus(tenant.tenantId, proposalId, 'approved', {
+      approvedAt: executedAt,
+      executedBy: tenant.userId,
+      executedByRole: 'owner',
+    });
 
     await executionRepo.recordExecution({
       tenantId: tenant.tenantId,

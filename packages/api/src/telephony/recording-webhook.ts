@@ -14,12 +14,21 @@
  *      our session map is the only safe cross-tenant boundary.
  *   3. Fetches the recording bytes from Twilio's signed URL using the
  *      `TWILIO_ACCOUNT_SID` / `TWILIO_AUTH_TOKEN` HTTP basic credentials.
- *   4. Presigns an S3 PUT for `<bucket>/<tenant_id>/<call_sid>.mp3` and
- *      uploads the bytes via `fetch(url, { method: 'PUT' })`.
+ *   4. Presigns an S3 PUT for
+ *      `<bucket>/<tenant_id>/<call_sid>-<recording_sid>.mp3` (one object per
+ *      recording: a call can deliver more than one here) and uploads the
+ *      bytes via `fetch(url, { method: 'PUT' })`.
  *   5. Inserts a `voice_recordings` row through `recordInboundCall`,
  *      which is idempotent on `(tenant_id, call_sid, recording_url)` —
- *      per-recording identity, so the voicemail leg's row for the same
- *      call (delivered to /voicemail-status) never collides with this one.
+ *      per-recording identity, so a second recording of the same call
+ *      (the dial-result voicemail at /voicemail-status, or a
+ *      patch-owner-through voicemail whose callback is THIS route) never
+ *      collides with this one, in the table or in storage.
+ *   6. PRIV-2 — deletes the Twilio-hosted copy (`twilioCopyRemover`) once
+ *      the S3 PUT and the row insert have both succeeded: our copy is the
+ *      one the app plays and the retention sweep purges. Failure-soft; an
+ *      unconfirmed delete is retried by the sweep. `recording_url` stays on
+ *      the row (it is the idempotency key above).
  *
  * Logging discipline
  * ──────────────────
@@ -41,7 +50,9 @@ import {
 import type { VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
 import type { StorageProvider } from '../files/file-service';
 import { recordInboundCall } from '../voice/voice-service';
+import type { TwilioCopyRemover } from './twilio-recording-deleter';
 import { createLogger } from '../logging/logger';
+import { assertTwilioMediaUrl } from './twilio-media-url';
 
 const logger = createLogger({
   service: 'telephony.recording-webhook',
@@ -91,9 +102,20 @@ export interface RecordingWebhookDeps {
  * Build the storage key for an inbound recording. Tenant is the first
  * path segment so an S3 ACL/IAM scope can be carved by prefix and so
  * cross-tenant access is impossible by construction.
+ *
+ * PRIV-2 — one key per RECORDING, not per call. One call can deliver two
+ * recordings here (the `<Start><Record>` of the live leg, and the voicemail
+ * a patch-owner-through falls back to, whose callback is also /recording).
+ * With a per-call key the second PUT overwrote the first object, and since
+ * each Twilio copy is deleted once its own PUT and row land, the first
+ * recording then existed nowhere.
  */
-export function buildRecordingStorageKey(tenantId: string, callSid: string): string {
-  return `${tenantId}/${callSid}.mp3`;
+export function buildRecordingStorageKey(
+  tenantId: string,
+  callSid: string,
+  recordingSid: string,
+): string {
+  return `${tenantId}/${callSid}-${recordingSid}.mp3`;
 }
 
 /**
@@ -136,12 +158,18 @@ export async function fetchRecordingBytes(
   recordingUrl: string,
   accountSid: string,
   authToken: string,
+  fetchFn: typeof fetch = fetch,
 ): Promise<Buffer> {
+  // Hardening sweep 2026-10 — the URL is caller-supplied (webhook body) and
+  // the request below carries the deployment's Twilio credential. Refuse any
+  // host that is not Twilio's, and never follow a redirect off it.
+  assertTwilioMediaUrl(recordingUrl, 'RecordingUrl');
   const url = recordingUrl.endsWith('.mp3') ? recordingUrl : `${recordingUrl}.mp3`;
   const basic = Buffer.from(`${accountSid}:${authToken}`).toString('base64');
-  const res = await fetch(url, {
+  const res = await fetchFn(url, {
     method: 'GET',
     headers: { Authorization: `Basic ${basic}`, Accept: 'audio/mpeg' },
+    redirect: 'manual',
     signal: AbortSignal.timeout(MEDIA_TRANSFER_TIMEOUT_MS),
   });
   if (!res.ok) {
@@ -149,6 +177,13 @@ export async function fetchRecordingBytes(
     // auth token before this string ever lands in a log line.
     const bodyText = await res.text().catch(() => '');
     throw new Error(`Twilio recording fetch failed ${res.status}: ${bodyText.slice(0, 200)}`);
+  }
+  // Second layer behind the URL shape check: a recording is audio. Anything
+  // else (JSON from an API resource, an HTML error page) is never buffered or
+  // stored as one.
+  const contentType = res.headers.get('content-type');
+  if (contentType && !contentType.toLowerCase().startsWith('audio/')) {
+    throw new Error(`Twilio recording fetch returned non-audio content-type: ${contentType.slice(0, 60)}`);
   }
   const contentLength = Number(res.headers.get('content-length'));
   if (Number.isFinite(contentLength) && contentLength > MAX_RECORDING_BYTES) {
@@ -214,6 +249,12 @@ export interface RecordingHandlerOptions {
    * never fail the webhook — the recording is already persisted.
    */
   onPersisted?: (event: RecordingPersistedEvent) => Promise<void> | void;
+  /**
+   * PRIV-2 — deletes the Twilio-hosted copy after the S3 PUT and the row
+   * insert succeed. Never throws. Absent (no Twilio credentials, tests) →
+   * the copy stays until the retention sweep's retry phase deletes it.
+   */
+  twilioCopyRemover?: TwilioCopyRemover;
 }
 
 /**
@@ -225,17 +266,20 @@ export function createRecordingRouter(
   options: RecordingHandlerOptions = {},
 ): Router {
   const router = Router();
-  router.use(express.urlencoded({ extended: false }));
-  router.use(
+  // LCR-04 — parser and signature check scoped to /recording: this router is
+  // mounted with no path, so a router-level `use` ran the check (and its
+  // credential lookup) on every telephony request.
+  const parseAndVerify = [
+    express.urlencoded({ extended: false }),
     requireTwilioSignature(deps.authTokenGetter, {
       publicBaseUrl: deps.publicBaseUrl,
     }),
-  );
+  ];
 
   const fetchRecording = options.fetchRecording ?? fetchRecordingBytes;
   const uploadObject = options.uploadObject ?? uploadToS3;
 
-  router.post('/recording', async (req: Request, res: Response) => {
+  router.post('/recording', ...parseAndVerify, async (req: Request, res: Response) => {
     const body = req.body as Record<string, string | undefined>;
     const callSid = body.CallSid ?? '';
     const recordingSid = body.RecordingSid ?? '';
@@ -330,7 +374,7 @@ export function createRecordingRouter(
       return;
     }
 
-    const storageKey = buildRecordingStorageKey(tenantId, callSid);
+    const storageKey = buildRecordingStorageKey(tenantId, callSid, recordingSid);
     const contentType = 'audio/mpeg';
 
     try {
@@ -401,6 +445,18 @@ export function createRecordingRouter(
             error: error.message,
           });
         }
+      }
+
+      // PRIV-2 — the recording is in our storage and our row: delete the
+      // Twilio copy. Never throws; an unconfirmed delete is retried by the
+      // retention sweep. Runs on a replay too (the stamp is idempotent).
+      if (options.twilioCopyRemover) {
+        await options.twilioCopyRemover({
+          tenantId,
+          voiceRecordingId: result.voiceRecordingId,
+          callSid,
+          recordingUrl,
+        });
       }
 
       res.status(200).type('text/plain').send('OK');

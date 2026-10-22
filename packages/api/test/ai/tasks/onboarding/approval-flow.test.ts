@@ -101,13 +101,13 @@ describe('T5 — Review and Approval Flow Tests', () => {
     await proposalRepo.create(sampleProposal);
 
     // Edit the price
-    const updated = await proposalRepo.update('tenant-001', sampleProposal.id, {
+    await proposalRepo.update('tenant-001', sampleProposal.id, {
       payload: {
         ...sampleProposal.payload,
         lineItems: [{ description: 'Diagnostic Fee', defaultQuantity: 1, defaultUnitPriceCents: 9500, taxable: true, sortOrder: 0 }],
       },
-      status: 'approved',
     });
+    const updated = await proposalRepo.updateStatus('tenant-001', sampleProposal.id, 'approved');
 
     expect(updated).not.toBeNull();
     expect(updated!.status).toBe('approved');

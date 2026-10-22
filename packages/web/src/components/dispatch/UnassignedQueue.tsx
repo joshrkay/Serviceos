@@ -1,5 +1,6 @@
 import React from 'react';
 import { AppointmentCard, AppointmentCardData } from './AppointmentCard';
+import { SuggestedTechnicians } from './SuggestedTechnicians';
 
 export interface UnassignedQueueProps {
   appointments: AppointmentCardData[];
@@ -11,6 +12,8 @@ export interface UnassignedQueueProps {
   onDrop?: (e: React.DragEvent) => void;
   /** P6-026 — conflicting appointment ids; forwarded to AppointmentCard. */
   conflictIds?: ReadonlySet<string>;
+  /** FR-2 phase 3 — when set, each card offers ranked technician suggestions. */
+  onPickSuggestion?: (appointmentId: string, technicianId: string, technicianName: string) => void;
 }
 
 export function UnassignedQueue({
@@ -21,6 +24,7 @@ export function UnassignedQueue({
   onDragLeave,
   onDrop,
   conflictIds,
+  onPickSuggestion,
 }: UnassignedQueueProps) {
   return (
     <div
@@ -45,13 +49,17 @@ export function UnassignedQueue({
           </div>
         ) : (
           appointments.map((appointment) => (
-            <AppointmentCard
-              key={appointment.id}
-              appointment={appointment}
-              draggable={true}
-              onDragStart={onDragStart}
-              hasConflict={conflictIds?.has(appointment.id) ?? false}
-            />
+            <div key={appointment.id}>
+              <AppointmentCard
+                appointment={appointment}
+                draggable={true}
+                onDragStart={onDragStart}
+                hasConflict={conflictIds?.has(appointment.id) ?? false}
+              />
+              {onPickSuggestion && (
+                <SuggestedTechnicians appointmentId={appointment.id} onPick={onPickSuggestion} />
+              )}
+            </div>
           ))
         )}
       </div>

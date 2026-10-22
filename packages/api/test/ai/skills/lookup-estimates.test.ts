@@ -140,4 +140,16 @@ describe('VQ-006 — lookupEstimates skill', () => {
     expect(rows[0].intent).toBe('lookup_estimates');
     expect(rows[0].sessionId).toBe('sess-7');
   });
+
+  it('narrows to one job when the question was about that job', async () => {
+    const a = await seedEstimateForCustomer({ estimateNumber: 'EST-A', totalCents: 1000 });
+    await seedEstimateForCustomer({ estimateNumber: 'EST-B', totalCents: 2000 });
+    const result = await lookupEstimates(
+      { tenantId: 'tenant-1', customerId: 'cust-1', jobId: a.jobId },
+      { jobRepo, estimateRepo, lookupEvents },
+    );
+    expect(result.status).toBe('found');
+    if (result.status !== 'found') return;
+    expect(result.data.estimates.map((e) => e.estimateNumber)).toEqual(['EST-A']);
+  });
 });

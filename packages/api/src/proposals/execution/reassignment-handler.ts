@@ -138,7 +138,11 @@ export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
         technicianRole: 'technician',
         isPrimary: true,
         assignedBy: context.executedBy,
-      }, this.assignmentRepo, { appointmentRepo: this.appointmentRepo, auditRepo: this.auditRepo });
+      }, this.assignmentRepo, {
+        appointmentRepo: this.appointmentRepo,
+        auditRepo: this.auditRepo,
+        skillMatcher: this.feasibilityDeps?.skillMatcher,
+      });
 
       if (this.analyticsRepo) {
         await captureDispatchEvent(this.analyticsRepo, context.tenantId, 'reassigned', {

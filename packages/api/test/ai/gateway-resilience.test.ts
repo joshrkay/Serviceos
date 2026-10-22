@@ -944,10 +944,26 @@ describe('gateway_retry_attempts_total labels (spec gap 2)', () => {
   });
 });
 
-// ─── Spec gap 3: /api/health/ai includes lastError and lastSuccessAt ──────────
+// ─── Spec gap 3: /api/health/ai includes lastErrorCode and lastSuccessAt ──────
+// GATEWAY-07: the listing is public (no auth), so it carries a stable error
+// CODE, never the provider's raw message — OpenAI's 429 text names the org id
+// and live quota use. The raw text stays behind METRICS_TOKEN on /ai/completion.
 
-describe('GET /api/health/ai — lastError and lastSuccessAt (spec gap 3)', () => {
-  it('includes lastError after a recorded failure', async () => {
+describe('GET /api/health/ai — lastErrorCode and lastSuccessAt (spec gap 3)', () => {
+  it.each([
+    [
+      'a provider throttle',
+      Object.assign(
+        new Error(
+          '429 Rate limit reached for gpt-4o-mini in organization org-abc123 on requests ' +
+            'per day (RPD): Limit 10000, Used 9990, Requested 1.',
+        ),
+        { status: 429 },
+      ),
+      'rate_limited',
+    ],
+    ['an upstream 5xx', Object.assign(new Error('test failure message'), { status: 503 }), 'transient'],
+  ])('reports a stable lastErrorCode, never the raw text, after %s', async (_label, failure, code) => {
     const reg = new CircuitBreakerRegistry({
       ...DEFAULT_BREAKER,
       consecutiveFailureThreshold: 100, // don't trip
@@ -956,7 +972,7 @@ describe('GET /api/health/ai — lastError and lastSuccessAt (spec gap 3)', () =
     const parts = { provider: 'prov-lasterr', modelFamily: 'default' };
 
     // Record a failure via run()
-    await reg.run(parts, async () => { throw Object.assign(new Error('test failure message'), { status: 503 }); }).catch(() => {});
+    await reg.run(parts, async () => { throw failure; }).catch(() => {});
 
     const app = express();
     app.use('/api/health', createAiHealthRouter(reg, [
@@ -967,8 +983,29 @@ describe('GET /api/health/ai — lastError and lastSuccessAt (spec gap 3)', () =
     expect(res.status).toBe(200);
     const provider = res.body.providers.find((p: { name: string }) => p.name === 'prov-lasterr');
     expect(provider).toBeDefined();
-    expect(provider.lastError).toBe('test failure message');
+    expect(provider.lastErrorCode).toBe(code);
+    expect(provider.lastError).toBeUndefined();
+    expect(JSON.stringify(res.body)).not.toContain(failure.message);
+    expect(JSON.stringify(res.body)).not.toContain('org-abc123');
     expect(provider.lastSuccessAt).toBeUndefined();
+  });
+
+  it('reports the code on the descriptor-only path too', async () => {
+    const reg = new CircuitBreakerRegistry(DEFAULT_BREAKER);
+    const parts = { provider: 'prov-desc', modelFamily: 'gpt' };
+    await reg
+      .run(parts, async () => { throw Object.assign(new Error('org-secret'), { status: 503 }); })
+      .catch(() => {});
+    const app = express();
+    // The descriptor's name has no registry entry of its own, so the router
+    // reads the cell through the descriptor (extra-entries) path.
+    app.use('/api/health', createAiHealthRouter(reg, [
+      { name: 'prov-desc-alias', isAvailable: async () => true, breakerKeyParts: parts },
+    ]));
+    const res = await request(app).get('/api/health/ai');
+    const alias = res.body.providers.find((p: { name: string }) => p.name === 'prov-desc-alias');
+    expect(alias.lastErrorCode).toBe('transient');
+    expect(JSON.stringify(res.body)).not.toContain('org-secret');
   });
 
   it('includes lastSuccessAt after a recorded success', async () => {
@@ -991,7 +1028,7 @@ describe('GET /api/health/ai — lastError and lastSuccessAt (spec gap 3)', () =
     // Should be a valid ISO 8601 string
     expect(() => new Date(provider.lastSuccessAt)).not.toThrow();
     expect(new Date(provider.lastSuccessAt).getFullYear()).toBeGreaterThan(2020);
-    expect(provider.lastError).toBeUndefined();
+    expect(provider.lastErrorCode).toBeUndefined();
   });
 
   it('omits both fields when no activity recorded', async () => {
@@ -1008,7 +1045,7 @@ describe('GET /api/health/ai — lastError and lastSuccessAt (spec gap 3)', () =
     expect(res.status).toBe(200);
     const provider = res.body.providers.find((p: { name: string }) => p.name === 'prov-pristine');
     expect(provider).toBeDefined();
-    expect(provider.lastError).toBeUndefined();
+    expect(provider.lastErrorCode).toBeUndefined();
     expect(provider.lastSuccessAt).toBeUndefined();
   });
 });

@@ -90,6 +90,17 @@ async function loadModeWithCache(
   return mode;
 }
 
+/**
+ * OVAS-04 — a member's current_mode through the SAME loader + 60s cache
+ * `requireTenant` uses for `req.auth.mode`, for surfaces with no request
+ * (the voice-memo router threads the memo creator's mode with it). `userId`
+ * is the Clerk subject. Defaults to 'supervisor' exactly as the request path
+ * does.
+ */
+export function resolveUserMode(userId: string, tenantId: string): Promise<Mode> {
+  return loadModeWithCache(userId, tenantId);
+}
+
 /** Test-only: prime the cache for a user (used by /api/me POST handler too). */
 export function setCachedMode(
   userId: string,

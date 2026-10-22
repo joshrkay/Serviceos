@@ -729,3 +729,150 @@ describe('PUT /api/jobs/:id — assignedTechnicianId is derived, never written d
     expect(res.body.summary).toBe('After');
   });
 });
+
+describe('PUT /api/jobs/:id — strict body allowlist (hardening sweep 2026-10)', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  async function createJob(): Promise<string> {
+    const created = await request(app).post('/api/jobs').send({
+      customerId: 'cust-1',
+      locationId: 'loc-1',
+      summary: 'Strict body',
+    });
+    expect(created.status).toBe(201);
+    return created.body.id as string;
+  }
+
+  it.each([
+    ['depositPaidCents', { depositPaidCents: 100000 }],
+    ['depositStatus', { depositStatus: 'paid' }],
+    ['moneyState', { moneyState: 'paid' }],
+    ['status (governed transition only)', { status: 'completed' }],
+    ['customerId', { customerId: 'cust-other' }],
+    ['depositStripePaymentLinkUrl', { depositStripePaymentLinkUrl: 'https://evil.example/pay' }],
+    ['completedAt', { completedAt: new Date().toISOString() }],
+  ])('rejects %s with 400 and writes nothing', async (_label, body) => {
+    const id = await createJob();
+    const res = await request(app).put(`/api/jobs/${id}`).send(body);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+
+    const after = await request(app).get(`/api/jobs/${id}`);
+    expect(after.body.summary).toBe('Strict body');
+    expect(after.body.status).toBe('new');
+    expect(after.body.depositPaidCents ?? 0).toBe(0);
+    expect(after.body.depositStatus).not.toBe('paid');
+    expect(after.body.moneyState).not.toBe('paid');
+    expect(after.body.customerId).toBe('cust-1');
+    expect(after.body.depositStripePaymentLinkUrl).toBeUndefined();
+    expect(after.body.completedAt).toBeUndefined();
+  });
+
+  it('rejects a non-string summary and a float-shaped priority', async () => {
+    const id = await createJob();
+    expect((await request(app).put(`/api/jobs/${id}`).send({ summary: 42 })).status).toBe(400);
+    expect((await request(app).put(`/api/jobs/${id}`).send({ priority: 'asap' })).status).toBe(400);
+  });
+
+  it('accepts the allowlisted fields together', async () => {
+    const id = await createJob();
+    const res = await request(app)
+      .put(`/api/jobs/${id}`)
+      .send({ summary: 'Edited', problemDescription: 'Leaking valve', priority: 'high' });
+    expect(res.status).toBe(200);
+    expect(res.body.summary).toBe('Edited');
+    expect(res.body.problemDescription).toBe('Leaking valve');
+    expect(res.body.priority).toBe('high');
+  });
+});
+
+describe('PUT /api/jobs/:id — requiredSkills (Dispatch FR-2 phase 2)', () => {
+  function appAs(role: 'owner' | 'dispatcher' | 'technician', jobRepo: InMemoryJobRepository): Express {
+    const app = express();
+    app.use(express.json());
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = {
+        userId: TEST_USER_ID,
+        sessionId: 'session-skills',
+        tenantId: TEST_TENANT_ID,
+        role,
+      };
+      next();
+    });
+    const ownership: TenantOwnership = {
+      async requireExists() {},
+      async requireExistsAndLoad() {
+        return undefined;
+      },
+    };
+    app.use(
+      '/api/jobs',
+      createJobRouter(
+        jobRepo,
+        new InMemoryJobTimelineRepository(),
+        new InMemoryAuditRepository(),
+        ownership,
+        new InMemoryQueue(),
+        new NoopFeedbackDispatcher(),
+      ),
+    );
+    return app;
+  }
+
+  async function seedJob(jobRepo: InMemoryJobRepository): Promise<string> {
+    const job = {
+      id: '0b3c1f5e-6a7d-4e8f-9a0b-1c2d3e4f5a6b',
+      tenantId: TEST_TENANT_ID,
+      customerId: 'cust-1',
+      locationId: 'loc-1',
+      jobNumber: 'JOB-1',
+      summary: 'Furnace swap',
+      status: 'new',
+      priority: 'normal',
+      createdBy: TEST_USER_ID,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    } as Job;
+    await jobRepo.create(job);
+    return job.id;
+  }
+
+  it.each(['owner', 'dispatcher'] as const)('lets a %s set required skills, stored in canonical form', async (role) => {
+    const jobRepo = new InMemoryJobRepository();
+    const id = await seedJob(jobRepo);
+    const res = await request(appAs(role, jobRepo))
+      .put(`/api/jobs/${id}`)
+      .send({ requiredSkills: ['Gas Certified', 'hvac', 'HVAC'] });
+    expect(res.status).toBe(200);
+    expect(res.body.requiredSkills).toEqual(['gas_certified', 'hvac']);
+    expect((await jobRepo.findById(TEST_TENANT_ID, id))?.requiredSkills).toEqual(['gas_certified', 'hvac']);
+  });
+
+  it('refuses a technician with 403 and leaves the tags unchanged', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    const id = await seedJob(jobRepo);
+    await jobRepo.update(TEST_TENANT_ID, id, { requiredSkills: ['gas_certified'] });
+    const res = await request(appAs('technician', jobRepo)).put(`/api/jobs/${id}`).send({ requiredSkills: [] });
+    expect(res.status).toBe(403);
+    expect((await jobRepo.findById(TEST_TENANT_ID, id))?.requiredSkills).toEqual(['gas_certified']);
+  });
+
+  it('still lets a technician edit ordinary fields', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    const id = await seedJob(jobRepo);
+    const res = await request(appAs('technician', jobRepo)).put(`/api/jobs/${id}`).send({ summary: 'Edited' });
+    expect(res.status).toBe(200);
+  });
+
+  it('rejects a tag that cannot be normalized with 400', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    const id = await seedJob(jobRepo);
+    const res = await request(appAs('owner', jobRepo)).put(`/api/jobs/${id}`).send({ requiredSkills: ['R&D'] });
+    expect(res.status).toBe(400);
+    expect((await jobRepo.findById(TEST_TENANT_ID, id))?.requiredSkills).toBeUndefined();
+  });
+});

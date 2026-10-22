@@ -74,6 +74,7 @@ import { InMemoryLocationRepository } from '../../src/locations/location';
 import { InMemoryJobRepository } from '../../src/jobs/job';
 import { InMemoryAppointmentRepository } from '../../src/appointments/appointment';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { markApproved } from '../helpers/proposal-status';
 
 // Slots here are drafted against fixed JAN_NOW/JUL_NOW clocks (2026). #1402 refuses to book or move a visit to a start in the past, so pin
 // the wall clock before every fixture slot — these tests describe behaviour at
@@ -509,7 +510,7 @@ describe('a customer with no service_locations row (nothing stubbed)', () => {
     let approved = transitionProposal(unblocked!, 'ready_for_review', APPROVER);
     approved = transitionProposal(approved, 'approved', APPROVER);
     approved = { ...approved, approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100) };
-    await w.proposalRepo.update(TENANT, result.proposal.id, approved);
+    await markApproved(w.proposalRepo, TENANT, approved);
 
     const { result: exec } = await w.executor.execute(approved, {
       tenantId: TENANT,

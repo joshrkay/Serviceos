@@ -1,8 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
 import {
   ArrowLeft, Navigation, Phone, MapPin, Clock,
-  CheckCircle2, Package, FileText, Camera, Mic,
-  AlertTriangle, X, Zap, Plus, Minus, StopCircle,
+  CheckCircle2, FileText, Camera, Mic,
+  AlertTriangle, X, Zap, StopCircle,
   Sparkles, ChevronDown, ChevronUp, RotateCcw,
   MessageSquare, Check, Pencil,
 } from 'lucide-react';
@@ -16,7 +16,14 @@ import type { CapturedMedia } from '../shared/CameraCapture';
 import { useApiClient } from '../../lib/apiClient';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatDateInTenantTz, formatTimeInTenantTz } from '../../utils/formatInTenantTz';
-import type { JobActivity, MaterialItem, ServiceType } from '../../types/job-ui';
+import type { JobActivity, ServiceType } from '../../types/job-ui';
+import {
+  needsFieldNote,
+  sendTechVoiceUpdate,
+  suggestTechStatus,
+  type TechStatus,
+  type TechVoiceOutcome,
+} from './tech-voice';
 import { JobPhotoGallery } from './JobPhotoGallery';
 import {
   uploadJobPhoto as uploadJobPhotoApi,
@@ -64,16 +71,17 @@ interface ApiNote {
 }
 
 // ─── Types ─────────────────────────────────────────────────────────────────────
-type TechStatus  = 'en_route' | 'on_site' | 'in_progress' | 'waiting' | 'complete';
 type VoiceState  = 'idle' | 'recording' | 'processing' | 'result';
 type TechSheet   = 'cancel' | 'call' | 'text' | 'camera' | null;
 
 interface FieldNote  { id: string; text: string; time: string; source: 'voice' | 'typed'; }
 interface VoiceResult {
   transcript: string;
-  notes:   FieldNote[];
-  parts:   MaterialItem[];
+  durationSeconds: number;
+  /** Ticked on the confirm card; unticked means leave the status alone. */
   statusUpdate?: TechStatus;
+  /** The confirm card offered a status for these words, ticked or not. */
+  statusOffered: boolean;
 }
 
 // ─── Status flow ───────────────────────────────────────────────────────────────
@@ -125,87 +133,6 @@ function defaultPhotoCategoryForJobStatus(status: string): JobPhotoCategory {
   return status === 'scheduled' ? 'before' : 'after';
 }
 
-// ─── Parts catalog for voice parsing ──────────────────────────────────────────
-const PARTS_CATALOG: {
-  keywords: string[];
-  entry: Omit<MaterialItem, 'id' | 'qty'>;
-}[] = [
-  { keywords: ['capacitor', 'cap', '35/5', '45/5', 'run cap'],
-    entry: { name: '45/5 MFD Dual Run Capacitor', partNumber: 'CAP-45-5-440V', unitCost: 28.50, category: 'Part' } },
-  { keywords: ['contactor', 'relay'],
-    entry: { name: 'Contactor 40A 24V Coil', partNumber: 'CONT-2P-40A', unitCost: 22.00, category: 'Part' } },
-  { keywords: ['refrigerant', 'r-410a', 'freon', 'recharge'],
-    entry: { name: '1-Ton R-410A Refrigerant (lb)', partNumber: 'R410A-LB', unitCost: 18.00, category: 'Material' } },
-  { keywords: ['filter', 'air filter'],
-    entry: { name: '16x25x1 MERV-8 Filter', partNumber: 'FILT-16251', unitCost: 9.50, category: 'Part' } },
-  { keywords: ['thermostat', 'nest'],
-    entry: { name: 'Nest Learning Thermostat', partNumber: 'NEST-GEN4', unitCost: 199.00, category: 'Equipment' } },
-  { keywords: ['drain tab', 'drain pill'],
-    entry: { name: 'Drain Pan Treatment Tablets', partNumber: 'DRAIN-TAB-12', unitCost: 14.00, category: 'Material' } },
-  { keywords: ['p-trap', 'ptrap'],
-    entry: { name: 'P-Trap 1.5" ABS', partNumber: 'PTRAP-15', unitCost: 6.25, category: 'Part' } },
-  { keywords: ['wax ring', 'wax seal'],
-    entry: { name: 'Wax Ring w/ Bolts', partNumber: 'WAX-RING', unitCost: 7.50, category: 'Part' } },
-  { keywords: ['flapper', 'toilet flapper'],
-    entry: { name: 'Toilet Flapper Valve', partNumber: 'FLAP-STD', unitCost: 5.50, category: 'Part' } },
-  { keywords: ['primer', 'prime'],
-    entry: { name: 'Premium Primer (gal)', partNumber: 'PRIM-GAL', unitCost: 34.00, category: 'Material' } },
-  { keywords: ['caulk', 'sealant'],
-    entry: { name: 'Silicone Sealant', partNumber: 'SEAL-01', unitCost: 8.00, category: 'Material' } },
-];
-
-const STATUS_PATTERNS: [RegExp, TechStatus][] = [
-  [/\b(done|finish|finished|completed|all done|wrapping up|signed off|that'?s? it)\b/i, 'complete'],
-  [/\b(starting|started|beginning|kicking off|on site|arrived|here now|let me in)\b/i, 'in_progress'],
-  [/\b(on my way|heading|leaving|en route|driving)\b/i, 'en_route'],
-  [/\b(waiting|need to order|ordered|back.?order|getting parts|parts coming)\b/i, 'waiting'],
-];
-
-function extractQty(text: string, keyword: string): number {
-  const t = text.toLowerCase();
-  const patterns = [
-    new RegExp(`(\\d+)\\s*(?:lbs?|units?|pcs?|pieces?|of)?\\s*(?:more\\s*)?${keyword}`, 'i'),
-    new RegExp(`(\\d+)\\s+${keyword}`, 'i'),
-    new RegExp(`${keyword}s?\\s*[x×]?\\s*(\\d+)`, 'i'),
-  ];
-  for (const p of patterns) {
-    const m = t.match(p);
-    if (m) return Math.min(parseInt(m[1]), 20);
-  }
-  return 1;
-}
-
-function parseVoice(text: string): VoiceResult {
-  const t   = text.toLowerCase();
-  const now = new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
-
-  let statusUpdate: TechStatus | undefined;
-  for (const [pattern, status] of STATUS_PATTERNS) {
-    if (pattern.test(t)) { statusUpdate = status; break; }
-  }
-
-  const parts: MaterialItem[] = [];
-  const seen = new Set<string>();
-  for (const { keywords, entry } of PARTS_CATALOG) {
-    for (const kw of keywords) {
-      if (t.includes(kw) && !seen.has(entry.partNumber ?? '')) {
-        seen.add(entry.partNumber ?? '');
-        parts.push({ id: `vp-${Date.now()}-${kw}`, qty: extractQty(text, kw), ...entry });
-        break;
-      }
-    }
-  }
-
-  const notes: FieldNote[] = [{
-    id: `vn-${Date.now()}`,
-    text: text.charAt(0).toUpperCase() + text.slice(1),
-    time: now,
-    source: 'voice',
-  }];
-
-  return { transcript: text, notes, parts, statusUpdate };
-}
-
 // ─── Waveform ──────────────────────────────────────────────────────────────────
 function Waveform({ active }: { active: boolean }) {
   return (
@@ -225,16 +152,25 @@ function Waveform({ active }: { active: boolean }) {
 }
 
 // ─── Voice Hero ────────────────────────────────────────────────────────────────
+// One spoken update: transcribed, shown back for a quick edit, then handed to
+// the assistant with this job pinned (tech-voice.ts). The only thing decided
+// here is a suggested status change, which the tech can untick.
 function VoiceHero({
   onResult,
   apiFetch,
+  reply,
 }: {
-  onResult: (r: VoiceResult, applied: boolean) => void;
+  onResult: (r: VoiceResult) => Promise<void>;
   apiFetch: (url: string, init?: RequestInit) => Promise<Response>;
+  /** The assistant's answer to the last update, shown under the mic. */
+  reply: string | null;
 }) {
   const [phase,   setPhase]   = useState<VoiceState>('idle');
   const [seconds, setSeconds] = useState(0);
-  const [result,  setResult]  = useState<VoiceResult | null>(null);
+  const [transcript, setTranscript] = useState('');
+  const [suggested, setSuggested] = useState<TechStatus | undefined>(undefined);
+  const [applyStatus, setApplyStatus] = useState(true);
+  const [sending, setSending] = useState(false);
   const [micError, setMicError] = useState<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
@@ -283,36 +219,62 @@ function VoiceHero({
         const res = await apiFetch('/api/voice/transcribe', { method: 'POST', body: formData });
         if (res.ok) {
           const data = await res.json() as { transcript?: string };
-          const transcript = data.transcript?.trim() ?? '';
-          if (transcript) {
-            setResult(parseVoice(transcript));
+          const text = data.transcript?.trim() ?? '';
+          if (text) {
+            setTranscript(text);
+            setSuggested(suggestTechStatus(text));
+            setApplyStatus(true);
             setPhase('result');
             return;
           }
         }
       } catch {
-        // Fall back to mic prompt message if transcription fails
+        // Reported below.
       }
-      // If transcription not available, show a generic placeholder result
-      const fallback = 'Voice update recorded.';
-      setResult(parseVoice(fallback));
-      setPhase('result');
+      // Never save a placeholder in the tech's name: say what happened.
+      setMicError("Couldn't transcribe that, and nothing was saved. Please try again.");
+      setPhase('idle');
     };
 
     if (mr.state !== 'inactive') mr.stop();
   }
 
-  function confirm() {
-    if (result) { onResult(result, true); setPhase('idle'); setResult(null); }
+  // The suggestion always follows the words being sent: fixing "all done" to
+  // "not done, waiting on parts" must not still complete the job.
+  function editTranscript(value: string) {
+    setTranscript(value);
+    const next = suggestTechStatus(value);
+    if (next !== suggested) {
+      setSuggested(next);
+      setApplyStatus(true);
+    }
   }
-  function discard() { setPhase('idle'); setResult(null); }
+
+  async function confirm() {
+    const text = transcript.trim();
+    if (!text || sending) return;
+    setSending(true);
+    try {
+      await onResult({
+        transcript: text,
+        durationSeconds: seconds,
+        statusOffered: suggested !== undefined,
+        ...(suggested && applyStatus ? { statusUpdate: suggested } : {}),
+      });
+    } finally {
+      setSending(false);
+      setPhase('idle');
+      setTranscript('');
+    }
+  }
+  function discard() { setPhase('idle'); setTranscript(''); }
 
   const fmt = (s: number) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 
   if (phase === 'idle') return (
     <div className="flex flex-col items-center gap-4 py-6">
       {micError && (
-        <div className="rounded-lg bg-destructive/10 border border-destructive/30 px-3 py-2 text-xs text-destructive">
+        <div role="alert" className="rounded-lg bg-destructive/10 border border-destructive/30 px-3 py-2 text-xs text-destructive">
           {micError}
         </div>
       )}
@@ -327,9 +289,15 @@ function VoiceHero({
         </div>
         <div className="text-center">
           <p className="text-sm text-foreground">Tap to add by voice</p>
-          <p className="text-xs text-muted-foreground mt-0.5">note · part · status update</p>
+          <p className="text-xs text-muted-foreground mt-0.5">note · parts &amp; labor · quote · status</p>
         </div>
       </button>
+      {reply && (
+        <div data-testid="tech-voice-reply" className="w-full flex items-start gap-2.5 rounded-xl border border-primary/20 bg-primary/10 px-3.5 py-2.5">
+          <Sparkles size={13} className="text-primary shrink-0 mt-0.5" />
+          <p className="text-sm text-foreground leading-snug break-words min-w-0">{reply}</p>
+        </div>
+      )}
     </div>
   );
 
@@ -341,7 +309,7 @@ function VoiceHero({
       </div>
       <Waveform active />
       <button onClick={stopRecording}
-        className="flex items-center gap-2 bg-destructive text-primary-foreground rounded-full px-6 py-2.5 text-sm hover:bg-destructive/90 active:scale-95 transition-all shadow-lg shadow-destructive/30">
+        className="flex items-center gap-2 min-h-11 bg-destructive text-primary-foreground rounded-full px-6 py-2.5 text-sm hover:bg-destructive/90 active:scale-95 transition-all shadow-lg shadow-destructive/30">
         <StopCircle size={15} /> Done talking
       </button>
       <p className="text-xs text-muted-foreground">Auto-stops at 30s</p>
@@ -357,53 +325,45 @@ function VoiceHero({
     </div>
   );
 
-  if (phase === 'result' && result) return (
+  if (phase === 'result') return (
     <div className="flex flex-col gap-3 py-3" style={{ animation: 'fadeUp 0.2s ease' }}>
-      <div className="flex items-start gap-2.5">
-        <div className="flex size-7 items-center justify-center rounded-full bg-primary shrink-0">
-          <Mic size={11} className="text-primary-foreground" />
-        </div>
-        <div className="flex-1 bg-secondary rounded-2xl rounded-tl-sm px-3.5 py-2.5">
-          <p className="text-xs text-muted-foreground mb-0.5">Transcript</p>
-          <p className="text-sm text-foreground italic leading-relaxed">"{result.transcript}"</p>
-        </div>
-      </div>
+      <label className="flex flex-col gap-1.5">
+        <span className="text-xs text-muted-foreground">What you said (edit if needed)</span>
+        <Textarea
+          value={transcript}
+          onChange={(e) => editTranscript(e.target.value)}
+          aria-label="What you said"
+          rows={3}
+          className="text-sm"
+        />
+      </label>
 
-      <div className="rounded-xl border border-primary/20 bg-primary/10 px-4 py-3 flex flex-col gap-2">
-        <p className="text-xs text-primary">AI parsed</p>
-        {result.statusUpdate && (
-          <div className="flex items-center gap-2">
-            <CheckCircle2 size={13} className="text-primary shrink-0" />
-            <p className="text-sm text-primary">
-              Status → <span className="font-medium">{statusStep(result.statusUpdate).label}</span>
-            </p>
-          </div>
-        )}
-        {result.notes.map(n => (
-          <div key={n.id} className="flex items-start gap-2">
-            <FileText size={13} className="text-primary shrink-0 mt-0.5" />
-            <p className="text-sm text-primary leading-snug">{n.text.length > 80 ? n.text.slice(0, 80) + '…' : n.text}</p>
-          </div>
-        ))}
-        {result.parts.map(p => (
-          <div key={p.id} className="flex items-center gap-2">
-            <Package size={13} className="text-primary shrink-0" />
-            <p className="text-sm text-primary">
-              {p.name} <span className="text-primary">× {p.qty}</span>
-              <span className="text-primary ml-1">· ${(p.qty * p.unitCost).toFixed(2)}</span>
-            </p>
-          </div>
-        ))}
-      </div>
+      {suggested && (
+        <label className="flex items-center gap-3 min-h-11 rounded-xl border border-primary/20 bg-primary/10 px-4">
+          <input
+            type="checkbox"
+            checked={applyStatus}
+            onChange={(e) => setApplyStatus(e.target.checked)}
+            className="size-5 accent-primary"
+          />
+          <span className="text-sm text-primary">
+            Also mark the job: <span className="font-medium">{statusStep(suggested).label}</span>
+          </span>
+        </label>
+      )}
+
+      <p className="text-xs text-muted-foreground">
+        Rivet drafts anything that needs a price or a send (parts, labor, quotes) for review. Your words are saved as a job note.
+      </p>
 
       <div className="flex gap-2">
-        <button onClick={discard}
-          className="flex items-center gap-1.5 rounded-xl border border-border px-3 py-2.5 text-sm text-foreground hover:bg-secondary transition-colors">
+        <button onClick={discard} disabled={sending}
+          className="flex items-center gap-1.5 min-h-11 rounded-xl border border-border px-3 text-sm text-foreground hover:bg-secondary transition-colors disabled:opacity-50">
           <RotateCcw size={12} /> Discard
         </button>
-        <button onClick={confirm}
-          className="flex-1 flex items-center justify-center gap-1.5 rounded-xl bg-primary text-primary-foreground py-2.5 text-sm hover:bg-primary/90 transition-colors">
-          <Check size={14} /> Add all
+        <button onClick={() => void confirm()} disabled={sending || !transcript.trim()}
+          className="flex-1 flex items-center justify-center gap-1.5 min-h-11 rounded-xl bg-primary text-primary-foreground text-sm hover:bg-primary/90 transition-colors disabled:opacity-50">
+          <Check size={14} /> {sending ? 'Sending…' : 'Send to Rivet'}
         </button>
       </div>
     </div>
@@ -564,93 +524,6 @@ function PhotosSection({
   );
 }
 
-// ─── Materials section ──────────────────────────────────────────────────────────
-function MaterialsSection({ materials, onUpdate }: {
-  materials: MaterialItem[];
-  onUpdate: (updated: MaterialItem[]) => void;
-}) {
-  const [open, setOpen] = useState(true);
-  const total = materials.reduce((s, m) => s + m.qty * m.unitCost, 0);
-
-  function setQty(id: string, delta: number) {
-    onUpdate(materials.map(m => m.id === id
-      ? { ...m, qty: Math.max(0, m.qty + delta) }
-      : m
-    ).filter(m => m.qty > 0));
-  }
-  function remove(id: string) { onUpdate(materials.filter(m => m.id !== id)); }
-
-  const CATEGORY_COLORS: Record<string, string> = {
-    Part:      'bg-primary/15 text-primary',
-    Material:  'bg-success/15 text-success',
-    Labor:     'bg-primary/15 text-primary',
-    Equipment: 'bg-warning/15 text-warning',
-  };
-
-  return (
-    <div className="rounded-2xl bg-card border border-border overflow-hidden">
-      <button onClick={() => setOpen(o => !o)}
-        className="w-full flex items-center gap-3 px-4 py-3.5 text-left hover:bg-secondary transition-colors">
-        <div className="flex size-7 items-center justify-center rounded-lg bg-warning/15 shrink-0">
-          <Package size={13} className="text-warning" />
-        </div>
-        <p className="flex-1 text-sm text-foreground">Materials &amp; Parts</p>
-        {materials.length > 0 && (
-          <span className="text-xs bg-warning/15 text-warning rounded-full px-2 py-0.5">{materials.length}</span>
-        )}
-        {open ? <ChevronUp size={14} className="text-muted-foreground shrink-0" /> : <ChevronDown size={14} className="text-muted-foreground shrink-0" />}
-      </button>
-
-      {open && (
-        <div className="border-t border-border">
-          {materials.length === 0 ? (
-            <p className="text-xs text-muted-foreground px-4 py-3 italic">No parts logged yet — use voice to add</p>
-          ) : (
-            <>
-              <div className="divide-y divide-border">
-                {materials.map(m => (
-                  <div key={m.id} className="flex items-center gap-3 px-4 py-3">
-                    <div className="flex-1 min-w-0">
-                      <p className="text-sm text-foreground leading-snug">{m.name}</p>
-                      <div className="flex items-center gap-2 mt-1">
-                        <span className={`text-xs rounded-full px-2 py-0.5 ${CATEGORY_COLORS[m.category] ?? 'bg-secondary text-muted-foreground'}`}>
-                          {m.category}
-                        </span>
-                        <span className="text-xs text-muted-foreground">${m.unitCost.toFixed(2)}/ea</span>
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-1.5 shrink-0">
-                      <button onClick={() => setQty(m.id, -1)}
-                        className="flex size-7 items-center justify-center rounded-lg border border-border hover:bg-secondary active:scale-90 transition-all">
-                        <Minus size={11} className="text-foreground" />
-                      </button>
-                      <span className="w-6 text-center text-sm text-foreground">{m.qty}</span>
-                      <button onClick={() => setQty(m.id, +1)}
-                        className="flex size-7 items-center justify-center rounded-lg border border-border hover:bg-secondary active:scale-90 transition-all">
-                        <Plus size={11} className="text-foreground" />
-                      </button>
-                    </div>
-                    <p className="w-14 text-right text-sm text-foreground shrink-0">
-                      ${(m.qty * m.unitCost).toFixed(2)}
-                    </p>
-                    <button onClick={() => remove(m.id)} className="text-muted-foreground hover:text-destructive transition-colors shrink-0">
-                      <X size={13} />
-                    </button>
-                  </div>
-                ))}
-              </div>
-              <div className="flex items-center justify-between px-4 py-3 border-t border-border bg-secondary">
-                <p className="text-xs text-muted-foreground">Total materials</p>
-                <p className="text-sm text-foreground">${total.toFixed(2)}</p>
-              </div>
-            </>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
 // ─── SVC config maps ────────────────────────────────────────────────────────────
 const SVC_ICON: Record<string, string> = { HVAC: '❄️', Plumbing: '🔧', Painting: '🎨' };
 const SVC_BG: Record<string, string> = {
@@ -693,7 +566,7 @@ export function TechJobView({
   const [statusError, setStatusError] = useState<string | null>(null);
   const [sheet,      setSheet]      = useState<TechSheet>(null);
   const [activities, setActivities] = useState<JobActivity[]>([]);
-  const [materials,  setMaterials]  = useState<MaterialItem[]>([]);
+  const [voiceReply, setVoiceReply] = useState<string | null>(null);
   // U9 (E7): persisted photos load from the backend and refetch after capture.
   const [photos,       setPhotos]       = useState<JobPhoto[]>([]);
   const [photoCategory, setPhotoCategory] = useState<JobPhotoCategory | 'all'>('all');
@@ -948,35 +821,76 @@ export function TechJobView({
     return null;
   }
 
-  function handleVoiceResult(result: VoiceResult) {
-    const t = now();
-    if (result.statusUpdate) {
-      setTechStatus(result.statusUpdate);
-      const apiStatus = statusStep(result.statusUpdate).apiStatus;
-      // Skip when unchanged — the API rejects self-transitions (e.g. 'waiting'
-      // is a local branch of the server's in_progress).
-      if (jobData && jobData.status !== apiStatus) {
-        void apiFetch(`/api/jobs/${id}/transition`, {
+  // A status the tech confirmed on the voice card: the same audited
+  // transition the status buttons post, with the same error handling.
+  /** True when the job now has the status (applied, or already there). */
+  async function applyVoiceStatus(status: TechStatus): Promise<boolean> {
+    setStatusError(null);
+    const apiStatus = statusStep(status).apiStatus;
+    // Skip when unchanged — the API rejects self-transitions (e.g. 'waiting'
+    // is a local branch of the server's in_progress).
+    if (jobData && jobData.status !== apiStatus) {
+      try {
+        const res = await apiFetch(`/api/jobs/${id}/transition`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ status: apiStatus }),
         });
+        if (!res.ok) {
+          const json = await res.json().catch(() => ({}));
+          throw new Error(json?.message ?? `Failed to update status: HTTP ${res.status}`);
+        }
+        setJobData({ ...jobData, status: apiStatus });
+      } catch (err) {
+        setStatusError(err instanceof Error ? err.message : 'Failed to update status');
+        return false;
       }
     }
-    if (result.notes.length > 0) {
-      const newNotes = result.notes.map(n => ({ ...n, source: 'voice' as const }));
-      setNotes(prev => [...prev, ...newNotes]);
-      // Persist each voice note
-      result.notes.forEach(n => void saveNoteToApi(n.text, 'voice'));
+    setTechStatus(status);
+    logStatusActivity(`Marked by voice: ${statusStep(status).label}`);
+    return true;
+  }
+
+  async function handleVoiceResult(result: VoiceResult) {
+    // Status is handled here only when the tech unticked it or it applied: a
+    // ticked status whose transition failed stays with the assistant, which
+    // can draft it for approval instead of dropping it.
+    const statusHandled = result.statusUpdate
+      ? await applyVoiceStatus(result.statusUpdate)
+      : result.statusOffered;
+
+    const outcome: TechVoiceOutcome = await sendTechVoiceUpdate(
+      apiFetch,
+      id,
+      result.transcript,
+      statusHandled,
+    );
+    let noteFailed = false;
+    if (needsFieldNote(outcome)) {
+      const savedId = await saveNoteToApi(result.transcript, 'voice');
+      if (savedId) {
+        setNotes(prev => [...prev, { id: savedId, text: result.transcript, time: now(), source: 'voice' }]);
+      } else {
+        noteFailed = true;
+      }
     }
-    if (result.parts.length > 0) setMaterials(prev => [...prev, ...result.parts.map(p => ({ ...p, id: `vp-${Date.now()}-${Math.random()}` }))]);
+    // Never claim a save that did not happen: a failed note keeps the words
+    // on screen so the tech can try again.
+    const unsaved = `The job note didn't save, so please try again: "${result.transcript}"`;
+    setVoiceReply(
+      outcome.ok
+        ? noteFailed ? `${outcome.reply} ${unsaved}` : outcome.reply
+        : noteFailed
+          ? `Rivet couldn't draft anything from it right now. ${unsaved}`
+          : "Saved as a job note. Rivet couldn't draft anything from it right now.",
+    );
     setActivities(prev => [...prev, {
       id: `va-${Date.now()}`, type: 'voice',
       content: `"${result.transcript.slice(0, 80)}${result.transcript.length > 80 ? '…' : ''}"`,
-      time: t, author: techName,
+      time: now(), author: techName,
       authorInitials: techInitials,
       authorColor: techColor,
-      voiceDuration: 8 + Math.floor(Math.random() * 6),
+      voiceDuration: result.durationSeconds,
     }]);
   }
 
@@ -1159,7 +1073,8 @@ export function TechJobView({
                 </div>
               </div>
               <VoiceHero
-                onResult={(result, applied) => { if (applied) handleVoiceResult(result); }}
+                onResult={handleVoiceResult}
+                reply={voiceReply}
                 apiFetch={apiFetch}
               />
             </div>
@@ -1216,11 +1131,10 @@ export function TechJobView({
                 )}
               </div>
               <p className="text-xs text-muted-foreground mb-2 px-1">Or tap to add manually</p>
-              <div className="grid grid-cols-4 gap-2">
+              <div className="grid grid-cols-3 gap-2">
                 {[
                   { icon: Pencil,        label: 'Note',    bg: 'bg-secondary',  color: 'text-foreground', onClick: () => {} },
                   { icon: Camera,        label: 'Photo',   bg: 'bg-primary/15',    color: 'text-primary',   onClick: () => setCam(true) },
-                  { icon: Package,       label: 'Parts',   bg: 'bg-warning/15',  color: 'text-warning', onClick: () => {} },
                   { icon: AlertTriangle, label: 'Issue',   bg: 'bg-destructive/15',    color: 'text-destructive',   onClick: () => setSheet('cancel') },
                 ].map(({ icon: Icon, label, bg, color, onClick }) => (
                   <button key={label} onClick={onClick}
@@ -1245,7 +1159,6 @@ export function TechJobView({
                 saving={photoSaving}
                 error={photoError}
               />
-              <MaterialsSection materials={materials} onUpdate={setMaterials} />
 
               {activities.length > 0 && (
                 <div className="rounded-2xl bg-card border border-border px-4 py-4">

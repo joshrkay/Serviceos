@@ -156,6 +156,54 @@ export function serviceLocationReferenceCheck(
 }
 
 /**
+ * OVAS-03 — proposal types whose executor writes a present job id onto the
+ * new record as its container (skipping the auto-open path): the estimate /
+ * invoice it creates, or the job a booking attaches to. The job decides who
+ * the document belongs to (an estimate carries no customer of its own), and
+ * `estimates.job_id` has no tenant-composite FK, so the id must name THIS
+ * tenant's job, and — when the card names a customer — that customer's job.
+ * A create_appointment revisit books against `linkedJobId`, which overrides
+ * `jobId` in its executor, so that is the field checked when present.
+ */
+const JOB_CONTAINER_PROPOSAL_TYPES: ReadonlySet<ProposalType> = new Set<ProposalType>([
+  'draft_estimate',
+  'draft_invoice',
+  'create_appointment',
+]);
+
+export function jobReferenceCheck(jobRepo: Pick<JobRepository, 'findById'>): ApprovalReferenceCheck {
+  return async (tenantId, proposal) => {
+    if (!JOB_CONTAINER_PROPOSAL_TYPES.has(proposal.proposalType)) return [];
+    const { payload } = proposal;
+    const field =
+      proposal.proposalType === 'create_appointment' &&
+      typeof payload.linkedJobId === 'string' &&
+      payload.linkedJobId.length > 0
+        ? 'linkedJobId'
+        : 'jobId';
+    const id = payload[field];
+    if (typeof id !== 'string' || id.length === 0 || isChainRefToken(id)) return [];
+    if (!UUID_RE.test(id)) return [field];
+    const job = await jobRepo.findById(tenantId, id);
+    if (!job) return [field];
+    const { customerId } = payload;
+    if (
+      typeof customerId === 'string' &&
+      customerId.length > 0 &&
+      !isChainRefToken(customerId) &&
+      job.customerId !== customerId
+    ) {
+      return [JOB_CUSTOMER_MISMATCH];
+    }
+    return [];
+  };
+}
+
+const JOB_CUSTOMER_MISMATCH = 'jobCustomerMismatch';
+const JOB_CUSTOMER_MISMATCH_SENTENCE =
+  "the job belongs to a different customer than the one on this card — pick that customer's job, or the right customer, before approving";
+
+/**
  * #1463 — payload fields that ASSIGN a technician, per proposal type. Their
  * executors write the assignment with a hardcoded technician role and never
  * look the user up, so approval is where a uuid naming another tenant's user,
@@ -223,9 +271,9 @@ export function sendRecipientReferenceCheck(deps: {
   customerRepo: Pick<CustomerRepository, 'findById'>;
   /**
    * #1524 — the outbound SMS gate, asked whether a text to the customer's
-   * phone would go out. When a send with no channel named falls back to SMS,
-   * a text the gate would suppress is refused here with its reason. Absent
-   * (no delivery wired) → not asked.
+   * phone would go out. When a send with no channel named goes by text and
+   * there is no email to fall back to (D-045), a text the gate would suppress
+   * is refused here with its reason. Absent (no delivery wired) → not asked.
    */
   smsPreflight?: Pick<GatedMessageDelivery, 'preflightCustomerSms'>;
 }): ApprovalReferenceCheck {
@@ -261,7 +309,9 @@ export function sendRecipientReferenceCheck(deps: {
         to: customer.primaryPhone,
         smsConsent: customer.smsConsent === true,
       });
-      return blocked ? [SMS_BLOCKED_GAP[blocked]] : [];
+      // D-045 — a refused text falls back to the email on file, if any.
+      if (!blocked || onFile(customer.email)) return [];
+      return [SMS_BLOCKED_GAP[blocked]];
     }
     return onFile(channel === 'email' ? customer.email : customer.primaryPhone) ? [] : ['recipient'];
   };
@@ -330,6 +380,7 @@ const SENTENCE_GAPS: ReadonlySet<string> = new Set([
   'recipient',
   'customerId',
   ESTIMATE_ALREADY_INVOICED,
+  JOB_CUSTOMER_MISMATCH,
   ...SMS_BLOCKED_SENTENCES.map(([gap]) => gap),
 ]);
 
@@ -355,6 +406,7 @@ export function describeDanglingReferences(fields: readonly string[]): string {
     parts.push('the customer has no service location — add one before approving');
   }
   if (fields.includes(ESTIMATE_ALREADY_INVOICED)) parts.push(ESTIMATE_ALREADY_INVOICED_SENTENCE);
+  if (fields.includes(JOB_CUSTOMER_MISMATCH)) parts.push(JOB_CUSTOMER_MISMATCH_SENTENCE);
   if (fields.includes(INVOICE_NOT_ISSUED)) parts.push(INVOICE_NOT_ISSUED_SENTENCE);
   if (fields.includes(INVOICE_NOT_SENDABLE)) parts.push(INVOICE_NOT_SENDABLE_SENTENCE);
   for (const [gap, sentence] of SMS_BLOCKED_SENTENCES) if (fields.includes(gap)) parts.push(sentence);
@@ -434,6 +486,7 @@ export function askForExecutabilityGaps(
     asks.push("it isn't linked to a customer or a job yet — which customer is it for?");
   }
   if (gaps.includes(ESTIMATE_ALREADY_INVOICED)) asks.push(ESTIMATE_ALREADY_INVOICED_SENTENCE);
+  if (gaps.includes(JOB_CUSTOMER_MISMATCH)) asks.push(JOB_CUSTOMER_MISMATCH_SENTENCE);
   if (gaps.includes(INVOICE_NOT_ISSUED)) asks.push(INVOICE_NOT_ISSUED_SENTENCE);
   if (gaps.includes(INVOICE_NOT_SENDABLE)) asks.push(INVOICE_NOT_SENDABLE_SENTENCE);
   for (const [gap, sentence] of SMS_BLOCKED_SENTENCES) if (gaps.includes(gap)) asks.push(sentence);

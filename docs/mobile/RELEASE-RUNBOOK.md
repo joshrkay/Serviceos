@@ -147,23 +147,19 @@ screen). What changed in the native config, and what a reviewer will ask:
 - No new permission prompt: playback needs none. `NSMicrophoneUsageDescription`
   (recording) is unchanged.
 
-### Android — `shouldPlayInBackground` only on Expo SDK 52 (expo-audio 0.3.5)
-- `shouldPlayInBackground: true` stops expo-audio 0.3.5 from pausing players
-  when the activity goes to the background, so a short answer finishes with the
-  screen off. That is the whole of what this SDK exposes.
-- A **media-playback foreground service** (survives Doze / process trimming
-  for LONG playback, lock-screen controls) does NOT exist in expo-audio 0.3.5.
-  Upstream ships `AudioControlsService` + a config plugin that adds/removes the
-  service and its `FOREGROUND_SERVICE` / `FOREGROUND_SERVICE_MEDIA_PLAYBACK`
-  permissions only in the SDK-numbered expo-audio releases (SDK 54+). We did
-  NOT pre-declare those permissions: Google Play requires a Play Console
-  foreground-service declaration (type + use case + demo video) for every
-  declared FGS type on Android 14 targets, and declaring them with no backing
-  service invites a policy flag for nothing. Follow-up: on the Expo SDK
-  upgrade, enable expo-audio's plugin for the media-playback service and file
-  the Play Console FGS declaration ("Media playback — reads assistant answers
-  aloud") at the same time.
-- Technicians now hold the Voice tab + Assistant screen; no new Android
+### Android — media-playback foreground service (Expo SDK 57, expo-audio 57)
+- The expo-audio config plugin runs with `enableBackgroundPlayback: true`
+  (`app.json`), which declares `AudioControlsService`
+  (`foregroundServiceType="mediaPlayback"`) plus the `FOREGROUND_SERVICE` /
+  `FOREGROUND_SERVICE_MEDIA_PLAYBACK` permissions, so a spoken answer survives
+  Doze / process trimming and gets lock-screen controls. Verify with
+  `npx expo config --type introspect`.
+- Google Play requires a Play Console **foreground-service declaration** (type
+  + use case + short demo video) for every declared FGS type. File it with the
+  first Android upload as "Media playback — reads the assistant's answers aloud
+  so a technician can keep working hands-free; playback is user-started and
+  ends with the clip."
+- Technicians hold the Voice tab + Assistant screen; no other new Android
   permission is requested for either.
 
 ### Review-ready wording (both stores)

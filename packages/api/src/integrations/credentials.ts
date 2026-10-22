@@ -47,6 +47,32 @@ export function flushCredentialCache(tenantId: string): void {
   }
 }
 
+/** The platform account the pre-signup demo call dials from (U7, D-037). */
+export interface PlatformTwilioCreds {
+  accountSid: string;
+  authToken: string;
+  fromE164: string;
+}
+
+/**
+ * The demo call's platform Twilio account, from the explicit
+ * `PLATFORM_TWILIO_ACCOUNT_SID` / `PLATFORM_TWILIO_AUTH_TOKEN` /
+ * `PLATFORM_TWILIO_FROM_NUMBER`, or null when any is missing or blank. Fails
+ * closed and never falls through to the global `TWILIO_*` names or to a
+ * tenant's integration: a demo tenant has none, and the platform number must
+ * never be confused with a customer's account
+ * (docs/solutions/logic-errors/click-to-call-gate-requires-global-twilio-sid.md).
+ */
+export function getPlatformTwilioCreds(
+  env: Record<string, string | undefined> = process.env,
+): PlatformTwilioCreds | null {
+  const accountSid = env.PLATFORM_TWILIO_ACCOUNT_SID?.trim();
+  const authToken = env.PLATFORM_TWILIO_AUTH_TOKEN?.trim();
+  const fromE164 = env.PLATFORM_TWILIO_FROM_NUMBER?.trim();
+  if (!accountSid || !authToken || !fromE164) return null;
+  return { accountSid, authToken, fromE164 };
+}
+
 export async function getTenantTwilioCreds(
   tenantId: string,
   pool: Pool
@@ -158,7 +184,7 @@ type CreateCredentialResolverDeps = {
    * (dev / no PgBouncer). Credential SELECTs keep using `pool`.
    */
   directPool?: Pool;
-  createListener?: (config: string | PoolConfig) => ListenerClient;
+  createListener?: (config: PoolConfig) => ListenerClient;
   sleep?: (ms: number) => Promise<void>;
 };
 
@@ -172,15 +198,15 @@ export function createCredentialResolver({
   const keyOf = (tenantId: string, provider: string): string => `${tenantId}:${provider}`;
 
   // LISTEN must run on a direct (non-PgBouncer) connection — see directPool.
+  // Either way the pool's `ssl` setting (db/pool.ts buildPgSsl) is carried
+  // over explicitly: a bare connectionString would make the LISTEN client fall
+  // back to pg's default (no TLS / no verification) while every pooled
+  // connection verifies the server certificate.
   const listenerSource = directPool ?? pool;
-  const listenerConfig = listenerSource.options.connectionString ?? {
-    host: listenerSource.options.host,
-    port: listenerSource.options.port,
-    user: listenerSource.options.user,
-    password: listenerSource.options.password,
-    database: listenerSource.options.database,
-    ssl: listenerSource.options.ssl,
-  };
+  const { connectionString, host, port, user, password, database, ssl } = listenerSource.options;
+  const listenerConfig: PoolConfig = connectionString
+    ? { connectionString, ssl }
+    : { host, port, user, password, database, ssl };
 
   const listener = createListener(listenerConfig);
   let closed = false;

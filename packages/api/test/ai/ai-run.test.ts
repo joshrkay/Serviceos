@@ -1,6 +1,5 @@
 import {
   createAiRun,
-  startAiRun,
   completeAiRun,
   failAiRun,
   validateAiRunInput,
@@ -23,7 +22,7 @@ describe('P0-015 — AI run logging foundation', () => {
     expect(run.correlationId).toBeTruthy();
   });
 
-  it('happy path — lifecycle: pending → running → completed', () => {
+  it('happy path — lifecycle: pending (started) → completed', () => {
     let run = createAiRun({
       tenantId: 'tenant-1',
       taskType: 'summarize',
@@ -32,9 +31,8 @@ describe('P0-015 — AI run logging foundation', () => {
       createdBy: 'user-1',
     });
 
-    run = startAiRun(run);
-    expect(run.status).toBe('running');
-    expect(run.startedAt).toBeInstanceOf(Date);
+    // The gateway stamps startedAt on the pending row it creates.
+    run = { ...run, startedAt: new Date() };
 
     run = completeAiRun(run, { summary: 'hi' }, { input: 10, output: 5, total: 15 });
     expect(run.status).toBe('completed');
@@ -43,7 +41,7 @@ describe('P0-015 — AI run logging foundation', () => {
     expect(run.durationMs).toBeGreaterThanOrEqual(0);
   });
 
-  it('happy path — lifecycle: pending → running → failed', () => {
+  it('happy path — lifecycle: pending (started) → failed', () => {
     let run = createAiRun({
       tenantId: 'tenant-1',
       taskType: 'summarize',
@@ -52,7 +50,7 @@ describe('P0-015 — AI run logging foundation', () => {
       createdBy: 'user-1',
     });
 
-    run = startAiRun(run);
+    run = { ...run, startedAt: new Date() };
     run = failAiRun(run, 'Model timeout');
     expect(run.status).toBe('failed');
     expect(run.errorMessage).toBe('Model timeout');
@@ -112,7 +110,7 @@ describe('P0-015 — AI run logging foundation', () => {
       inputSnapshot: {},
       createdBy: 'user-1',
     });
-    run = startAiRun(run);
+    run = { ...run, startedAt: new Date() };
     run = failAiRun(run, 'Malformed JSON response from model');
     expect(run.status).toBe('failed');
     expect(run.completedAt).toBeInstanceOf(Date);

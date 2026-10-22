@@ -212,11 +212,10 @@ describe('/public/proposals/one-tap-undo', () => {
     expect((await appointmentRepo.findById(TENANT, appointment.id))?.status).not.toBe('canceled');
 
     // Execution finishes; the same link still works.
-    await proposalRepo.update(TENANT, proposal.id, {
-      status: 'executed',
+    await proposalRepo.updateStatus(TENANT, proposal.id, 'executed', {
       executedAt: new Date(),
       resultEntityId: appointment.id,
-    } as never);
+    });
     const res = await redeem(app, token);
     expect(res.status).toBe(200);
     expect((await appointmentRepo.findById(TENANT, appointment.id))?.status).toBe('canceled');

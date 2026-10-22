@@ -18,7 +18,7 @@ export function greetingEntry(): ChoiceEntry {
   return {
     settingKey: 'greeting',
     question: 'How should I answer your phone?',
-    supportLine: 'Pick the one that sounds right.',
+    supportLine: 'Tap one to hear it. Say "first" or "second" to pick.',
     options: [
       {
         key: 'a',
@@ -145,7 +145,7 @@ export function emergencyEntry(v: TradeVoice): ChoiceEntry {
   return {
     settingKey: 'emergency_target',
     question: 'Who do I ring first when it is an emergency?',
-    supportLine: `Suppose a caller tells me "${v.emergencyExample}". Safety first, then a person. That part I always do. This part is yours.`,
+    supportLine: `Say a caller tells me "${v.emergencyExample}". Safety first, then a person. That part I always do. This part is yours.`,
     options: [
       {
         key: 'a',
@@ -157,7 +157,7 @@ export function emergencyEntry(v: TradeVoice): ChoiceEntry {
       {
         key: 'b',
         label: "Your cell, then text you if you don't pick up",
-        detail: 'If you miss it, the caller hears that you have been paged and I text you their number and the problem.',
+        detail: "If you miss it, the caller hears you've been paged, and I text you their number and the problem.",
         rivetLine: "I'm trying {ownerFirstName} now. If I can't reach them, I'll page them and they'll call you right back.",
         writes: { emergencyTarget: 'owner_cell_then_text' },
       },

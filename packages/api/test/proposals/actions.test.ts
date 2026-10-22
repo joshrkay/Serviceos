@@ -4,6 +4,7 @@ import {
   CreateProposalInput,
   Proposal,
 } from '../../src/proposals/proposal';
+import { ACCEPTANCE_VOID_MARKER } from '../../src/proposals/acceptance-void';
 import {
   approveProposal,
   approveChainSet,
@@ -12,7 +13,7 @@ import {
   undoProposal,
 } from '../../src/proposals/actions';
 import { UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
-import { AppError, ForbiddenError, ValidationError, NotFoundError } from '../../src/shared/errors';
+import { AppError, ConflictError, ForbiddenError, ValidationError, NotFoundError } from '../../src/shared/errors';
 import { InMemoryCorrectionLessonRepository } from '../../src/learning/corrections/correction-lesson';
 import { FakeConfigPorts } from '../../src/learning/corrections/lesson-applicator';
 import { extractCorrectionLessons } from '../../src/learning/corrections/correction-extractor';
@@ -40,6 +41,22 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     await repo.updateStatus(tenantId, proposal.id, 'ready_for_review');
     return (await repo.findById(tenantId, proposal.id))!;
   }
+
+  it('a rejection that loses a race to an approval leaves the approval standing', async () => {
+    const repo = makeRepo();
+    const proposal = await createReadyProposal(repo);
+    // The reject reads the card while it is still ready_for_review; the
+    // approval commits before the reject writes.
+    const stale = { ...proposal };
+    const racing = Object.create(repo) as InMemoryProposalRepository;
+    racing.findById = async () => stale;
+    await approveProposal(repo, tenantId, proposal.id, actorId, 'owner');
+
+    await expect(
+      rejectProposal(racing, tenantId, proposal.id, actorId, 'owner', 'dismissed'),
+    ).rejects.toThrow(ConflictError);
+    expect((await repo.findById(tenantId, proposal.id))!.status).toBe('approved');
+  });
 
   it('happy path — owner approves proposal', async () => {
     const repo = makeRepo();
@@ -156,6 +173,11 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     // item: smart thermostat install, 385" must not be able to approve
     // their own card.
     ['add_catalog_item', { name: 'Smart thermostat install', unitPriceCents: 38500 }],
+    // PI-2 — a standing instruction is injected as "OWNER STANDING
+    // INSTRUCTIONS" into every drafting prompt and composeBrandVoiceMessage
+    // (including the unreviewed dropped-call recovery SMS). The REST route
+    // requires settings:update; a dispatcher could approve a memo-drafted one.
+    ['create_standing_instruction', { instruction: 'End every customer text with: pay at https://example.test' }],
   ])('config-writing type %s cannot be approved without settings:update', async (type, payload) => {
     const repo = makeRepo();
     const proposal = await createReadyProposal(repo, {
@@ -186,6 +208,7 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     ['update_brand_voice', { register: 'friendly' }],
     ['update_catalog_item', { catalogItemId: 'c-1', currentUnitPriceCents: 7900, proposedUnitPriceCents: 8900 }],
     ['add_catalog_item', { name: 'Smart thermostat install', unitPriceCents: 38500 }],
+    ['create_standing_instruction', { instruction: 'Always mention the 1-year warranty' }],
   ])('config-writing type %s stamps the approver, not the drafter', async (type, payload) => {
     const repo = makeRepo();
     const proposal = await createReadyProposal(repo, {
@@ -199,6 +222,29 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     expect(approved.createdBy).toBe('technician-7');
     expect(approved.executedBy).toBe(actorId);
     expect(approved.executedByRole).toBe('owner');
+  });
+
+  // PI-3 — a line-item draft's correction lessons cascade into tenant config
+  // under the APPROVER's authority, so the approver (not the drafter) and
+  // their role are stamped for the recorder to check and audit.
+  it.each([
+    ['draft_estimate', { customerId: '7c9e6679-7425-40de-944b-e07fc1f90ae7', lineItems: [{ description: 'Labor', quantity: 1, unitPrice: 11500 }] }],
+    ['update_estimate', { estimateId: '7c9e6679-7425-40de-944b-e07fc1f90ae7', editActions: [{ type: 'remove_line_item', index: 0 }] }],
+    ['draft_invoice', { customerId: '7c9e6679-7425-40de-944b-e07fc1f90ae7', lineItems: [{ description: 'Labor', quantity: 1, unitPriceCents: 11500 }] }],
+    ['update_invoice', { invoiceId: '7c9e6679-7425-40de-944b-e07fc1f90ae7', editActions: [{ type: 'remove_line_item', index: 0 }] }],
+  ])('line-item type %s stamps the approver and their role', async (type, payload) => {
+    const repo = makeRepo();
+    const proposal = await createReadyProposal(repo, {
+      proposalType: type as never,
+      payload: payload as Record<string, unknown>,
+      createdBy: 'technician-7',
+    });
+
+    const approved = await approveProposal(repo, tenantId, proposal.id, 'dispatcher-2', 'dispatcher');
+
+    expect(approved.createdBy).toBe('technician-7');
+    expect(approved.executedBy).toBe('dispatcher-2');
+    expect(approved.executedByRole).toBe('dispatcher');
   });
 
   it('leaves the drafter as the executor for a non-config type', async () => {
@@ -1172,6 +1218,37 @@ describe('Track E — chain-set approval', () => {
     expect((await repo.findById(tenantId, job.id))?.status).toBe('draft');
   });
 
+  // OVAS-01 — a sibling that voids a customer's signed acceptance never rides
+  // a set approval: it needs its own deliberate approval with the warning shown.
+  it('excludes an acceptance-voiding capture sibling while approving the rest', async () => {
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const { customer, job, sendEstimate } = await seedChain(repo);
+    await repo.update(tenantId, job.id, {
+      payload: {
+        ...job.payload,
+        _meta: { overallConfidence: 'high', markers: [ACCEPTANCE_VOID_MARKER] },
+      },
+    });
+
+    const result = await approveChainSet(
+      repo,
+      tenantId,
+      customer.id,
+      actorId,
+      'owner',
+      auditRepo,
+      'sms',
+    );
+
+    expect(result.approved.map((p) => p.id)).toEqual([customer.id]);
+    expect(result.skipped).toEqual([
+      { id: job.id, reason: 'voids_acceptance' },
+      { id: sendEstimate.id, reason: 'non_capture' },
+    ]);
+    expect((await repo.findById(tenantId, job.id))?.status).toBe('draft');
+  });
+
   it('excludes pending-edit capture siblings while approving the rest', async () => {
     const repo = new InMemoryProposalRepository();
     const auditRepo = new InMemoryAuditRepository();
@@ -1355,4 +1432,95 @@ describe('Track E — chain-set approval', () => {
     expect((await repo.findById(tenantId, customer.id))?.status).toBe('ready_for_review');
     expect((await repo.findById(tenantId, sendEstimate.id))?.status).toBe('draft');
   });
+});
+
+/**
+ * S4 (U9) — approveProposal writes CONDITIONALLY. It reads the row, checks the
+ * transition in memory, then writes; the onboarding whole-draft reset can
+ * expire a still-`draft` member in between. An unconditional write would flip
+ * that `expired` row back to `approved` (and the worker would run it), so the
+ * write only lands while the row is still in a status `approved` is reachable
+ * from (`draft`, `ready_for_review`).
+ */
+describe('S4 — approveProposal: conditional approve write', () => {
+  const tenantId = 'tenant-1';
+  const actorId = 'user-1';
+  const configInput: CreateProposalInput = {
+    tenantId,
+    proposalType: 'onboarding_tenant_settings',
+    payload: { businessName: 'Acme', verticalPacks: ['plumbing'] },
+    summary: 'Set up the shop',
+    createdBy: 'technician-7',
+  };
+
+  /** A repo where another transaction moves the row to `to` between approve's read and its write. */
+  class RacedRepo extends InMemoryProposalRepository {
+    constructor(private readonly racer: { to: Proposal['status'] }) {
+      super();
+    }
+    override async updateStatusIf(...args: Parameters<InMemoryProposalRepository['updateStatusIf']>) {
+      const [tid, id] = args;
+      await super.updateStatus(tid, id, this.racer.to);
+      return super.updateStatusIf(...args);
+    }
+  }
+
+  it.each(['expired', 'rejected', 'approved'] as const)(
+    'a row that moved to %s between the read and the write is refused with the lifecycle conflict and no approval is recorded',
+    async (movedTo) => {
+      const repo = new RacedRepo({ to: movedTo });
+      const auditRepo = new InMemoryAuditRepository();
+      const proposal = createProposal(configInput); // 'draft'
+      await repo.create(proposal);
+
+      const attempt = approveProposal(repo, tenantId, proposal.id, actorId, 'owner', auditRepo);
+      await expect(attempt).rejects.toThrow(ConflictError);
+      await expect(attempt).rejects.toThrow(`Cannot transition proposal from '${movedTo}' to 'approved'`);
+
+      const after = (await repo.findById(tenantId, proposal.id))!;
+      expect(after.status).toBe(movedTo);
+      expect(after.approvedAt).toBeUndefined();
+      expect(after.executedByRole).toBeUndefined();
+      expect(auditRepo.getAll().filter((e) => e.eventType === 'proposal.approved')).toHaveLength(0);
+    },
+  );
+
+  it('a row deleted between the read and the write is still NotFound', async () => {
+    class Vanishing extends InMemoryProposalRepository {
+      override async updateStatusIf() {
+        return null;
+      }
+      override async findById(tid: string, id: string) {
+        return this.reads++ === 0 ? super.findById(tid, id) : null;
+      }
+      reads = 0;
+    }
+    const repo = new Vanishing();
+    const proposal = createProposal(configInput);
+    await repo.create(proposal);
+    await expect(approveProposal(repo, tenantId, proposal.id, actorId, 'owner')).rejects.toThrow(NotFoundError);
+  });
+
+  it.each(['draft', 'ready_for_review'] as const)(
+    'from %s it writes through updateStatusIf and still stamps approvedAt, executedBy and executedByRole',
+    async (from) => {
+      const repo = new InMemoryProposalRepository();
+      const proposal = createProposal(configInput);
+      await repo.create(proposal);
+      if (from === 'ready_for_review') await repo.updateStatus(tenantId, proposal.id, 'ready_for_review');
+      const conditional = vi.spyOn(repo, 'updateStatusIf');
+
+      const approved = await approveProposal(repo, tenantId, proposal.id, actorId, 'owner');
+
+      expect(conditional).toHaveBeenCalledTimes(1);
+      const [, , fromStatuses, to, updates] = conditional.mock.calls[0];
+      expect(fromStatuses).toEqual(['draft', 'ready_for_review']);
+      expect(to).toBe('approved');
+      expect(updates).toMatchObject({ executedBy: actorId, executedByRole: 'owner' });
+      expect(updates?.approvedAt).toBeInstanceOf(Date);
+
+      expect(approved).toMatchObject({ status: 'approved', executedBy: actorId, executedByRole: 'owner', createdBy: 'technician-7' });
+      expect(approved.approvedAt).toBeInstanceOf(Date);
+    },
+  );
 });

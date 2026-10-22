@@ -320,4 +320,13 @@ describe('P11-001 — lookupInvoices skill', () => {
       expect(elapsed).toBeLessThan(500);
     });
   });
+
+  it('narrows to one job when the question was about that job', async () => {
+    const a = await seedOpenInvoice(jobRepo, invoiceRepo, { tenantId: 't-1', customerId: 'c-1', invoiceNumber: 'INV-A', amountCents: 1000 });
+    await seedOpenInvoice(jobRepo, invoiceRepo, { tenantId: 't-1', customerId: 'c-1', invoiceNumber: 'INV-B', amountCents: 2000 });
+    const result = await lookupInvoices({ tenantId: 't-1', customerId: 'c-1', jobId: a.jobId }, { jobRepo, invoiceRepo });
+    expect(result.status).toBe('found');
+    if (result.status !== 'found') return;
+    expect(result.data.invoices.map((i) => i.invoiceNumber)).toEqual(['INV-A']);
+  });
 });

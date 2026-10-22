@@ -17,10 +17,13 @@ import type {
 } from '../../lookup-events/lookup-event-service';
 import { t, type Language } from '../i18n/i18n';
 import { formatCents } from './spoken-format';
+import { customerJobsForLookup } from './customer-jobs';
 
 export interface LookupInvoicesInput {
   tenantId: string;
   customerId: string;
+  /** Only this job's records: the job on screen, or one the operator named and the resolver verified. */
+  jobId?: string;
   /** P11-002: spoken-summary language. Defaults to 'en'. */
   language?: Language;
   /**
@@ -110,7 +113,7 @@ export async function lookupInvoices(
 
   let jobs;
   try {
-    jobs = await deps.jobRepo.findByCustomer(input.tenantId, input.customerId, {
+    jobs = await customerJobsForLookup(deps.jobRepo, input.tenantId, input.customerId, input.jobId, {
       includeArchived: true,
     });
   } catch (err) {

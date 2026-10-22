@@ -3,9 +3,10 @@
  * pending invitations that clear as Clerk webhooks join invitees.
  */
 import { useEffect, useState } from 'react';
-import { X, Users, Pencil, UserPlus, UserX } from 'lucide-react';
+import { X, Users, Pencil, UserPlus, UserX, Wrench } from 'lucide-react';
 import { toast } from 'sonner';
 import { apiFetch } from '../../utils/api-fetch';
+import { SkillChips, SkillTagsEditor } from '../shared/SkillTagsEditor';
 
 type Role = 'owner' | 'dispatcher' | 'technician';
 
@@ -18,6 +19,8 @@ interface TeamUser {
   canFieldServe: boolean;
   /** 'suspended' = deactivated by an owner (#1402 §13); absent ⇒ active. */
   status?: 'active' | 'suspended';
+  /** Dispatch FR-2 phase 2 — skill tags the dispatch skill check compares against a job's required skills. */
+  skills?: string[];
 }
 
 interface PendingInvitation {
@@ -81,6 +84,41 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
   // which one is in flight.
   const [confirmDeactivateId, setConfirmDeactivateId] = useState<string | null>(null);
   const [deactivatingId, setDeactivatingId] = useState<string | null>(null);
+  // Dispatch FR-2 phase 2 — which row's skills are open for editing / saving.
+  const [skillsEditingId, setSkillsEditingId] = useState<string | null>(null);
+  const [skillsSavingId, setSkillsSavingId] = useState<string | null>(null);
+
+  async function saveSkills(u: TeamUser, skills: string[]) {
+    setSkillsSavingId(u.id);
+    setSaveError('');
+    try {
+      const res = await apiFetch(`/api/users/${encodeURIComponent(u.id)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ skills }),
+      });
+      if (!res.ok) {
+        let detail = '';
+        try {
+          const body = await res.json();
+          detail = typeof body?.message === 'string' ? body.message : '';
+        } catch {
+          /* non-JSON body */
+        }
+        throw new Error(detail || `Save failed (${res.status})`);
+      }
+      const updated = (await res.json()) as TeamUser;
+      setUsers((prev) => prev.map((row) => (row.id === u.id ? { ...row, ...updated } : row)));
+      setSkillsEditingId(null);
+      toast.success('Skills updated');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Could not update skills';
+      setSaveError(msg);
+      toast.error(msg);
+    } finally {
+      setSkillsSavingId(null);
+    }
+  }
 
   async function deactivate(u: TeamUser) {
     setDeactivatingId(u.id);
@@ -279,8 +317,8 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
 
         <div className="px-5 py-5 space-y-3">
           <p className="text-xs text-slate-500">
-            Everyone with access to this tenant. Owners can change roles and
-            invite new members.
+            Everyone with access to this tenant. Owners can change roles, set
+            the skills dispatch checks against a job, and invite new members.
           </p>
 
           {loading ? (
@@ -304,6 +342,7 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
                 const isSuspended = u.status === 'suspended';
                 const isConfirming = confirmDeactivateId === u.id;
                 const isDeactivating = deactivatingId === u.id;
+                const isEditingSkills = skillsEditingId === u.id;
                 return (
                   <li
                     key={u.id}
@@ -378,7 +417,23 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
                         )}
                       </>
                     )}
-                    {canEditRoles && !isSuspended && !isEditing && (
+                    {isEditingSkills ? (
+                      <SkillTagsEditor
+                        idPrefix={`team-member-skills-${u.id}`}
+                        label={`Skills for ${displayName(u)}`}
+                        initial={u.skills ?? []}
+                        saving={skillsSavingId === u.id}
+                        onSave={(skills) => saveSkills(u, skills)}
+                        onCancel={() => setSkillsEditingId(null)}
+                      />
+                    ) : (
+                      (u.skills?.length ?? 0) > 0 && (
+                        <div className="w-full">
+                          <SkillChips tags={u.skills ?? []} testId={`team-member-skills-${u.id}`} />
+                        </div>
+                      )
+                    )}
+                    {canEditRoles && !isSuspended && !isEditing && !isEditingSkills && (
                       <div className="w-full flex flex-wrap items-center justify-end gap-2">
                         {isConfirming ? (
                           <>
@@ -404,15 +459,29 @@ export function TeamMembersSheet({ onClose, canEditRoles }: TeamMembersSheetProp
                             </button>
                           </>
                         ) : (
-                          <button
-                            type="button"
-                            onClick={() => setConfirmDeactivateId(u.id)}
-                            aria-label={`Deactivate ${displayName(u)}`}
-                            data-testid={`team-member-deactivate-${u.id}`}
-                            className="min-h-11 min-w-11 flex items-center gap-1.5 rounded-xl px-3 text-xs text-red-700 hover:bg-red-50"
-                          >
-                            <UserX size={14} /> Deactivate
-                          </button>
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setSaveError('');
+                                setSkillsEditingId(u.id);
+                              }}
+                              aria-label={`Edit skills for ${displayName(u)}`}
+                              data-testid={`team-member-edit-skills-${u.id}`}
+                              className="min-h-11 min-w-11 flex items-center gap-1.5 rounded-xl px-3 text-xs text-slate-700 hover:bg-slate-100"
+                            >
+                              <Wrench size={14} /> Skills
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeactivateId(u.id)}
+                              aria-label={`Deactivate ${displayName(u)}`}
+                              data-testid={`team-member-deactivate-${u.id}`}
+                              className="min-h-11 min-w-11 flex items-center gap-1.5 rounded-xl px-3 text-xs text-red-700 hover:bg-red-50"
+                            >
+                              <UserX size={14} /> Deactivate
+                            </button>
+                          </>
                         )}
                       </div>
                     )}

@@ -443,11 +443,24 @@ function InvoiceLineItems({ items, editable, onChange, totals, amountPaidCents, 
 }
 
 // ─── Send Payment Sheet ────────────────────────────────────────────────────
-function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, apiId }: {
+
+// S5a-2 (U8) — the line the sheet shows after a send that carried no pay
+// button (POST /:id/send reports the choice it applied). `null` = today's
+// sheet, nothing extra.
+const SENT_MODE_LINES: Record<'pay_link' | 'collect_on_site', string | null> = {
+  pay_link: null,
+  collect_on_site: 'Sent. Your customer sees the bill with a note that you collect payment in person.',
+};
+
+function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, issued, onIssued, apiId }: {
   inv: InvCompat; amountDueCents: number;
   /** The invoice's real Stripe payment link, when one exists. */
   paymentLink?: string;
   onClose: () => void; onSent: () => void;
+  /** This draft was already issued from a sheet, even if the refetch hasn't landed yet. */
+  issued: boolean;
+  /** The draft was issued here; the parent remembers it and refetches. */
+  onIssued: () => void;
   /** The invoice's API id — the sheet posts to /api/invoices/:id/send
    *  (and /:id/issue first, when the invoice is still a draft). */
   apiId: string;
@@ -459,6 +472,10 @@ function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, a
   const [sendError, setSendError] = useState<string | null>(null);
   // The tokenized pay-page URL minted by POST /:id/send — surfaced post-send.
   const [sentUrl, setSentUrl] = useState<string | null>(null);
+  // S5a-2 (U8) — what the send told the customer about paying, when it was
+  // not a pay button: the business collects in person, or the choice could
+  // not be read (the API then sends no pay button either).
+  const [sentModeLine, setSentModeLine] = useState<string | null>(null);
 
   const [msg, setMsg] = useState('');
 
@@ -468,7 +485,13 @@ function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, a
     recipientEmail?: string;
     customMessage?: string;
   };
-  type SendResp = { viewUrl: string; viewToken: string };
+  type SendResp = {
+    viewUrl: string;
+    viewToken: string;
+    // D-045 — a send whose payment setting can't be read is refused (503 with
+    // the reason), so there is no view-only "unavailable" outcome.
+    paymentCollectionMode?: 'pay_link' | 'collect_on_site';
+  };
   const { mutate: sendInvoice } = useMutation<SendBody, SendResp>(
     'POST',
     `/api/invoices/${apiId}/send`
@@ -491,8 +514,9 @@ function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, a
     setSending(true);
     setSendError(null);
     try {
-      if (inv.status === 'Draft') {
+      if (inv.status === 'Draft' && !issued) {
         await issueInvoice({});
+        onIssued();
       }
       const result = await sendInvoice({
         channel,
@@ -501,9 +525,12 @@ function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, a
         customMessage: msg,
       });
       if (result?.viewUrl) setSentUrl(result.viewUrl);
+      const modeLine = SENT_MODE_LINES[result?.paymentCollectionMode ?? 'pay_link'];
+      setSentModeLine(modeLine);
       setSending(false);
       setSent(true);
-      setTimeout(() => { onSent(); onClose(); }, 1200);
+      // Leave a plain-words line up long enough to read before closing.
+      setTimeout(() => { onSent(); onClose(); }, modeLine ? 4000 : 1200);
     } catch (err) {
       setSending(false);
       setSendError(err instanceof Error ? err.message : 'Send failed');
@@ -610,6 +637,11 @@ function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, a
 
           {sendError && (
             <p className="text-xs text-destructive -mt-2">Send failed: {sendError}</p>
+          )}
+          {sent && sentModeLine && (
+            <p data-testid="send-sheet-payment-mode" role="status" className="text-xs text-muted-foreground -mt-2">
+              {sentModeLine}
+            </p>
           )}
 
           {/* Send button */}
@@ -956,6 +988,11 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
   const { mutate: updateInvoice } = useMutation<Record<string, unknown>, InvoiceResponse>('PUT', `/api/invoices/${invoiceId}`);
 
   const [sendOpen,  setSendOpen]  = useState(false);
+  // Remembered here, not in the sheet: when the issue succeeds but the send is
+  // refused (e.g. the pay link couldn't be made), a retry, even from a closed
+  // and reopened sheet before the refetch lands, must not issue the now-open
+  // invoice again ("Invalid transition from open to open").
+  const [issuedId, setIssuedId] = useState<string | null>(null);
   const [markOpen,  setMarkOpen]  = useState(false);
   const [paid,      setPaid]      = useState(false);
 
@@ -1369,6 +1406,8 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
           // "Payment journey" it drives) is reflected immediately, without
           // requiring a manual page reload — mirrors MarkPaidSheet's onPaid.
           onSent={() => { void refetch(); }}
+          issued={issuedId === inv.id}
+          onIssued={() => { setIssuedId(inv.id); void refetch(); }}
         />
       )}
       {markOpen && (

@@ -318,6 +318,12 @@ export default defineConfig<DevAuthFixtures>({
               'e1-script-mobile.spec.ts',
               // #1563 — Settings → Phone change-number flow at 320px.
               'phone-settings-mobile.spec.ts',
+              // D-045 — message status bubble, blocked-texts notice, "Not sent" list at 320px.
+              'message-status-mobile.spec.ts',
+              // #1762 (D-044) — Settings → Google Business location picker at 320px.
+              'google-business-picker-mobile.spec.ts',
+              // #1763 (D-044) — home "Get found online" card at 320px.
+              'get-found-online-card-mobile.spec.ts',
             ],
             testIgnore: [],
             dependencies: ['devauth-setup'],

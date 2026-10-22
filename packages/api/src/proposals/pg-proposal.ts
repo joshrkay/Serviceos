@@ -1,7 +1,9 @@
 import { Pool, PoolClient } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
 import { ConflictError } from '../shared/errors';
+import { assertStatusWrite } from './lifecycle';
 import { PgBaseRepository } from '../db/pg-base';
+import { currentTenantContext } from '../middleware/tenant-context';
 import {
   LANE_BOOKING_BOOKED_STATUSES,
   Proposal,
@@ -163,6 +165,20 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
         [tenantId, id]
       );
       return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+    });
+  }
+
+  async findByIdsForUpdate(tenantId: string, ids: string[]): Promise<Proposal[]> {
+    if (currentTenantContext()?.tenantId !== tenantId) {
+      throw new Error('findByIdsForUpdate requires the request transaction: a row lock taken outside it is released immediately');
+    }
+    if (ids.length === 0) return [];
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        'SELECT * FROM proposals WHERE tenant_id = $1 AND id = ANY($2::uuid[]) ORDER BY id FOR UPDATE',
+        [tenantId, ids]
+      );
+      return result.rows.map(mapRow);
     });
   }
 
@@ -423,10 +439,11 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
   ): Promise<Proposal | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
       const lock = await client.query(
-        'SELECT id FROM proposals WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+        'SELECT status FROM proposals WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
         [tenantId, id]
       );
       if (lock.rows.length === 0) return null;
+      assertStatusWrite(lock.rows[0].status as ProposalStatus, status);
 
       const setClauses = ['status = $3', 'updated_at = NOW()'];
       const params: unknown[] = [tenantId, id, status];
@@ -477,12 +494,14 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
         | 'approvedAt'
         | 'executedAt'
         | 'executedBy'
+        | 'executedByRole'
         | 'executionError'
         | 'undoneAt'
         | 'undoneBy'
       >
     >
   ): Promise<Proposal | null> {
+    for (const from of fromStatuses) assertStatusWrite(from, to);
     return this.withTenant(tenantId, async (client) => {
       const setClauses = ['status = $4', 'updated_at = NOW()'];
       const params: unknown[] = [tenantId, id, fromStatuses, to];
@@ -494,6 +513,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
       if (updates?.approvedAt !== undefined)        { setClauses.push(`approved_at = $${p++}`);      params.push(updates.approvedAt); }
       if (updates?.executedAt !== undefined)        { setClauses.push(`executed_at = $${p++}`);      params.push(updates.executedAt); }
       if (updates?.executedBy !== undefined)        { setClauses.push(`executed_by = $${p++}`);      params.push(updates.executedBy); }
+      if (updates?.executedByRole !== undefined)    { setClauses.push(`executed_by_role = $${p++}`); params.push(updates.executedByRole); }
       if (updates?.executionError !== undefined)    { setClauses.push(`execution_error = $${p++}`);  params.push(updates.executionError); }
       if (updates?.undoneAt !== undefined)          { setClauses.push(`undone_at = $${p++}`);        params.push(updates.undoneAt); }
       if (updates?.undoneBy !== undefined)          { setClauses.push(`undone_by = $${p}`);         params.push(updates.undoneBy); }
@@ -532,7 +552,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
   async update(
     tenantId: string,
     id: string,
-    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt'>>
+    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt' | 'status'>>
   ): Promise<Proposal | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
       // Status transitions MUST go through updateStatus() which uses

@@ -48,7 +48,13 @@ import {
   retryAfterMsFromError,
   type RetryPolicy,
 } from './retry';
-import { adoptDeadline, STAGE_BUDGETS } from './deadline';
+import {
+  adoptDeadline,
+  MAX_GATEWAY_DEADLINE_MS,
+  MIN_RETRY_BUDGET_MS,
+  STAGE_BUDGETS,
+  type DeadlineContext,
+} from './deadline';
 import {
   TenantQuotaRegistry,
   estimateTokens,
@@ -88,6 +94,54 @@ function isFailoverEligible(err: unknown): boolean {
     return false; // permanent 4xx — do not failover
   }
   return true;
+}
+
+/**
+ * Default cap on the slice of the shared deadline held back for the next
+ * provider in a failover chain (GATEWAY-03). Tunable per deploy with
+ * AI_FALLBACK_RESERVE_MS (0 disables the reserve).
+ */
+export const DEFAULT_FALLBACK_RESERVE_MS = 2_500;
+
+/**
+ * How much of `remainingMs` to hold back for the next provider when a fallback
+ * exists: at most a quarter of the budget, at most `reserveCapMs`, and nothing
+ * when that would be less than one viable attempt (MIN_RETRY_BUDGET_MS).
+ *
+ * The reserve only matters when the primary HANGS — a fast primary failure
+ * (5xx, refused socket, 429) leaves the fallback everything that is left
+ * anyway. A hang is the rare case, so the primary keeps at least three
+ * quarters of the caller's budget for the common success path (prod classify:
+ * 12s → 9.5s primary, 2.5s fallback). Exported for unit testing.
+ */
+export function fallbackReserveFor(remainingMs: number, reserveCapMs: number): number {
+  const reserve = Math.floor(Math.min(remainingMs / 4, Math.max(0, reserveCapMs)));
+  return reserve >= MIN_RETRY_BUDGET_MS ? reserve : 0;
+}
+
+/**
+ * Settle no later than `signal` aborts, even when `work` ignores the signal.
+ * Real adapters tear the HTTP request down on abort, but the per-tenant quota
+ * lease outside the failover chain is sized to the deadline, so the deadline
+ * must bound the hold for a provider that does not cooperate too. A late
+ * settlement of `work` is observed and dropped (no unhandled rejection).
+ */
+function settleByDeadline<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    if (signal.aborted) onAbort();
+    else signal.addEventListener('abort', onAbort, { once: true });
+    work.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (err: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(err);
+      },
+    );
+  });
 }
 
 // ─── ProviderRetryDeadlineWrapper ────────────────────────────────────────────
@@ -197,6 +251,11 @@ export class ProviderBreakerWrapper implements LLMProvider {
  * 4xx validation errors are re-thrown immediately without trying the next
  * provider — they indicate bad input, not provider health.
  *
+ * The whole chain runs inside ONE deadline (`request.deadlineMs`, adopting
+ * `request.signal`): each provider is handed what is left, the primary leaves
+ * a reserve for the next provider (`fallbackReserveFor`), and the chain stops
+ * advancing once less than a viable attempt remains (GATEWAY-03).
+ *
  * On full exhaustion (all providers failed with failover-eligible errors),
  * throws AppError with code LLM_PROVIDER_UNAVAILABLE (HTTP 503) — EXCEPT when
  * the last error was a provider throttle, which gets its own
@@ -210,12 +269,33 @@ export class ProviderBreakerWrapper implements LLMProvider {
 export class ProviderFailoverWrapper implements LLMProvider {
   readonly name: string;
 
-  constructor(private readonly providers: LLMProvider[]) {
+  constructor(
+    private readonly providers: LLMProvider[],
+    private readonly defaultDeadlineMs: number = STAGE_BUDGETS.defaultTotal,
+    private readonly fallbackReserveMs: number = DEFAULT_FALLBACK_RESERVE_MS,
+  ) {
     if (providers.length === 0) throw new Error('ProviderFailoverWrapper requires at least one provider');
     this.name = providers[0].name;
   }
 
   async complete(request: LLMRequest): Promise<LLMResponse> {
+    // GATEWAY-03: ONE deadline for the whole chain. Each provider gets a slice
+    // of what is left, never a fresh copy of the caller's budget — otherwise a
+    // hanging primary costs the full budget and the fallback another full one.
+    // Clamped to MAX_GATEWAY_DEADLINE_MS: the tenant-quota lease wrapping this
+    // chain is sized to that ceiling (GATEWAY-01).
+    const deadline = adoptDeadline(
+      Math.min(request.deadlineMs ?? this.defaultDeadlineMs, MAX_GATEWAY_DEADLINE_MS),
+      request.signal,
+    );
+    try {
+      return await this.runChain(request, deadline);
+    } finally {
+      deadline.abort();
+    }
+  }
+
+  private async runChain(request: LLMRequest, deadline: DeadlineContext): Promise<LLMResponse> {
     const path: string[] = [];
     let lastErr: unknown;
     // The provider whose error this wrapper ends up surfacing. Every error
@@ -225,11 +305,23 @@ export class ProviderFailoverWrapper implements LLMProvider {
     // primary route (PR #975 finding 6).
     let lastProvider = this.name;
 
-    for (const provider of this.providers) {
+    for (let i = 0; i < this.providers.length; i++) {
+      const provider = this.providers[i];
+      const remainingMs = Math.floor(deadline.remainingMs());
+      const hasNext = i + 1 < this.providers.length;
+      // Leave the next provider a viable attempt if the budget allows one
+      // (a reserve is pointless when nothing comes after).
+      const sliceMs = hasNext
+        ? remainingMs - fallbackReserveFor(remainingMs, this.fallbackReserveMs)
+        : remainingMs;
+
       path.push(`${provider.name}:${request.model}`);
       lastProvider = provider.name;
       try {
-        const response = await provider.complete(request);
+        const response = await settleByDeadline(
+          provider.complete({ ...request, signal: deadline.signal, deadlineMs: sliceMs }),
+          deadline.signal,
+        );
         // Annotate the response with the accumulated providerPath
         return { ...response, providerPath: [...path] };
       } catch (err) {
@@ -240,14 +332,17 @@ export class ProviderFailoverWrapper implements LLMProvider {
           throw stampProviderAttemptTrail(err, { providerPath: path, lastProvider });
         }
 
-        // Record failover metric (from → to) if there is a next provider
-        const nextIndex = this.providers.indexOf(provider) + 1;
-        if (nextIndex < this.providers.length) {
-          gatewayFailoverTotal.inc({
-            from_provider: provider.name,
-            to_provider: this.providers[nextIndex].name,
-          });
+        // Stop advancing once the shared budget can't fit a viable attempt
+        // (or the caller aborted): starting the next provider would only
+        // overrun the caller-visible deadline to arrive at the same failure.
+        if (!hasNext || deadline.isExpired() || deadline.remainingMs() < MIN_RETRY_BUDGET_MS) {
+          break;
         }
+
+        gatewayFailoverTotal.inc({
+          from_provider: provider.name,
+          to_provider: this.providers[i + 1].name,
+        });
         // Continue to next provider
       }
     }
@@ -316,6 +411,42 @@ export class ProviderFailoverWrapper implements LLMProvider {
 // ─── ProviderTenantQuotaWrapper ───────────────────────────────────────────────
 
 /**
+ * Tokens reserved per image part. Real image cost depends on model, size and
+ * detail (gpt-4o: 85 + 170 per 512px tile, ~1,105 for a high-detail photo);
+ * this is an admission estimate only — release() reconciles the provider's
+ * actual usage, and an underestimate is carried as bucket debt.
+ */
+export const IMAGE_PART_TOKEN_ALLOWANCE = 1_105;
+
+/**
+ * Upper-bound token estimate for admission (GATEWAY-05): message `content`,
+ * every text part, a fixed allowance per image part, plus `request.maxTokens`
+ * (the most output the call can bill — the gateway always sets it from the
+ * routing tier). Previously only `content` was counted, so images, text parts
+ * and the whole output were never reserved. Robust to malformed `parts`.
+ * Exported for unit testing.
+ */
+export function estimateRequestTokens(request: LLMRequest): number {
+  let input = 0;
+  for (const m of request.messages) {
+    input += estimateTokens(typeof m.content === 'string' ? m.content : '');
+    if (!Array.isArray(m.parts)) continue;
+    for (const part of m.parts) {
+      if (part == null) continue;
+      if (part.type === 'image') input += IMAGE_PART_TOKEN_ALLOWANCE;
+      else if (part.type === 'text' && typeof part.text === 'string') {
+        input += estimateTokens(part.text);
+      }
+    }
+  }
+  const output =
+    typeof request.maxTokens === 'number' && Number.isFinite(request.maxTokens) && request.maxTokens > 0
+      ? Math.ceil(request.maxTokens)
+      : 0;
+  return input + output;
+}
+
+/**
  * Wraps an LLMProvider with per-tenant concurrency + token-bucket enforcement.
  *
  * Acquires a lease before forwarding to the inner provider and releases it
@@ -343,11 +474,9 @@ export class ProviderTenantQuotaWrapper implements LLMProvider {
       ? `classifier_${tenantTier}`
       : tenantTier;
 
-    // Estimate tokens from message text
-    const estimatedTokens = request.messages.reduce(
-      (sum, m) => sum + estimateTokens(m.content),
-      0,
-    );
+    // GATEWAY-05: reserve what the call can spend — input (text + images)
+    // plus its output allowance — and refund the difference on release.
+    const estimatedTokens = estimateRequestTokens(request);
 
     const lease = await this.registry.acquire({
       tenantId: quotaTenantId,
@@ -394,6 +523,12 @@ export interface ResilienceStackOptions {
 
   /** Default per-request deadline in ms. */
   defaultDeadlineMs?: number;
+
+  /**
+   * Cap (ms) on the slice of the shared deadline held back for the next
+   * provider in the failover chain. See `fallbackReserveFor`.
+   */
+  fallbackReserveMs?: number;
 }
 
 /**
@@ -420,6 +555,7 @@ export function composeResilienceStack(
     retryPolicy = DEFAULT_RETRY,
     fallbackProviders = [],
     defaultDeadlineMs = STAGE_BUDGETS.defaultTotal,
+    fallbackReserveMs = DEFAULT_FALLBACK_RESERVE_MS,
   } = options;
 
   // Wrap each provider (primary + any fallbacks) with retry+deadline+breaker
@@ -438,8 +574,12 @@ export function composeResilienceStack(
 
   const allProviders = [primary, ...fallbackProviders].map(wrapWithRetryAndBreaker);
 
-  // Failover wrapper across all providers
-  const failoverProvider = new ProviderFailoverWrapper(allProviders);
+  // Failover wrapper across all providers — owns the single end-to-end deadline.
+  const failoverProvider = new ProviderFailoverWrapper(
+    allProviders,
+    defaultDeadlineMs,
+    fallbackReserveMs,
+  );
 
   // Outermost: tenant quota enforcement
   return new ProviderTenantQuotaWrapper(failoverProvider, quota);

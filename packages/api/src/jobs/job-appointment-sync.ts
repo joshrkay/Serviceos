@@ -39,6 +39,7 @@ import {
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { WorkingHoursRepository } from '../availability/working-hours';
 import { UnavailableBlockRepository } from '../availability/unavailable-block';
+import { SkillMatcher, assertTechnicianHoldsRequiredSkills } from '../scheduling/skill-matcher';
 import { SettingsRepository } from '../settings/settings';
 import { ConflictError, NotFoundError, ValidationError } from '../shared/errors';
 import { requireActiveTechnician } from '../users/tenant-member';
@@ -90,6 +91,8 @@ export interface JobAppointmentSyncDeps {
    */
   workingHoursRepo?: WorkingHoursRepository;
   unavailableBlockRepo?: UnavailableBlockRepository;
+  /** Dispatch FR-2 — assignment refuses a technician missing a required skill. */
+  skillMatcher?: SkillMatcher;
   /**
    * Resolves the tenant timezone when the caller omits one. Without it a
    * timezone-less schedule stores UTC, and the working-hours guard then
@@ -185,7 +188,7 @@ async function findCancelableAppointment(
  */
 export type PrimaryTechnicianDeps = Pick<
   JobAppointmentSyncDeps,
-  'appointmentRepo' | 'assignmentRepo' | 'userRepo' | 'auditRepo' | 'workingHoursRepo' | 'unavailableBlockRepo'
+  'appointmentRepo' | 'assignmentRepo' | 'userRepo' | 'auditRepo' | 'workingHoursRepo' | 'unavailableBlockRepo' | 'skillMatcher'
 >;
 
 /**
@@ -254,6 +257,7 @@ export async function ensurePrimaryTechnician(
       actorRole,
       workingHoursRepo: deps.workingHoursRepo,
       unavailableBlockRepo: deps.unavailableBlockRepo,
+      skillMatcher: deps.skillMatcher,
     },
   );
 }
@@ -376,6 +380,11 @@ export async function syncJobSchedule(
           { start: scheduledStart, end: scheduledEnd, timezone: existing.timezone },
           deps,
         );
+        // Dispatch FR-2 — likewise the skill rule: the job's required skills
+        // (or the tech's) may have changed since the original assignment.
+        if (deps.skillMatcher) {
+          await assertTechnicianHoldsRequiredSkills(tenantId, currentPrimary.technicianId, jobId, deps.skillMatcher);
+        }
       }
 
       const updated = await deps.appointmentRepo.update(tenantId, existing.id, {

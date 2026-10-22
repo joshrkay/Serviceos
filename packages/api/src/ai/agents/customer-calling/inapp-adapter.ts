@@ -59,6 +59,7 @@ import { isDeadlineExceeded } from '../../gateway/deadline';
 import { escalateToHuman } from '../../skills/escalate-to-human';
 import type { EscalationReason } from '../../skills/escalate-to-human';
 import { summarizeSession } from '../../skills/summarize-session';
+import { runOutsideRequestTransaction } from '../../../middleware/tenant-context';
 import { estimateCostCents } from '../../skills/session-cost-tracker';
 import {
   intentClassifiedEvent,
@@ -164,6 +165,7 @@ import type { DroppedCallScheduler } from '../../../sms/recovery/scheduler';
 import { buildRecoveryContext } from '../../../sms/recovery/scheduler';
 import type { CustomerRepository } from '../../../customers/customer';
 import { normalizePhone } from '../../../customers/dedup';
+import { redactCardNumbers } from '../../privacy/pan-redact';
 import {
   confirmTurnSlotFillEvent,
   isAffirmation,
@@ -1393,7 +1395,10 @@ export class InAppVoiceAdapter {
   }
 
   async handleInput(sessionId: string, text: string): Promise<HandleInputResult> {
-    return this.deps.store.withSessionLock(sessionId, () => this._handleInputLocked(sessionId, text));
+    // PRIV-3 — a recited card number never reaches the transcript, the
+    // classifier, the FSM or a drafted proposal on this surface either.
+    const scrubbed = redactCardNumbers(text);
+    return this.deps.store.withSessionLock(sessionId, () => this._handleInputLocked(sessionId, scrubbed));
   }
 
   private async _handleInputLocked(sessionId: string, text: string): Promise<HandleInputResult> {
@@ -2091,8 +2096,10 @@ export class InAppVoiceAdapter {
       // still produces a finalized row. _endSessionLocked's later call
       // is short-circuited by the session.terminalOutcome guard.
       this.finalizeTerminalOutcome(session, endReason);
-      // Best-effort summary (P8-010 — skill is already in tree).
-      void this.runSummary(session).catch(() => {
+      // Best-effort summary (P8-010 — skill is already in tree). Detached
+      // from the request's tenant context (TI-01): it outlives the response,
+      // and its gateway writes must open their own transactions.
+      void runOutsideRequestTransaction(() => this.runSummary(session)).catch(() => {
         /* never block the response on summary failures */
       });
     }
@@ -2276,8 +2283,10 @@ export class InAppVoiceAdapter {
       const effects = session.machine.dispatch({ type: 'session_ended' });
       await this.executeSideEffects(session, effects);
       session.ended = true;
-      // Run summary in background — the route returns 204 immediately.
-      void this.runSummary(session).catch(() => {
+      // Run summary in background — the route returns 204 immediately, so
+      // detach it from the request's tenant context (TI-01): the request
+      // client is back in the pool by the time the summary writes.
+      void runOutsideRequestTransaction(() => this.runSummary(session)).catch(() => {
         /* swallow — summary is best-effort */
       });
     }

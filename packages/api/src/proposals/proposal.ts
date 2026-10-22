@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { ConflictError } from '../shared/errors';
+import { assertStatusWrite } from './lifecycle';
 import {
   confidenceMetaBlocksAutoApprove,
   resolveAutoApproveThreshold,
@@ -411,10 +412,12 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     case 'add_service_location':
     case 'log_time_entry':
     // UB-A2 — capturing a standing instruction WRITES a directive row, moves
-    // no money and contacts no customer; the instruction only ever shapes
-    // future DRAFTS (which are themselves reviewed). Capture-class, but the
+    // no money and contacts no customer directly. Capture-class, but the
     // voice task handler deliberately omits sourceTrustTier, so the
-    // instruction itself always lands for human review in v1.
+    // instruction itself always lands for human review in v1. It is NOT
+    // harmless config: it shapes every future draft AND the unreviewed
+    // dropped-call recovery SMS, so approving it is config-writing
+    // (PI-2 — actions.ts CONFIG_WRITING_PROPOSAL_TYPES, settings:update).
     case 'create_standing_instruction':
     // WS20 — updating a catalog item's unit price is a config change: it moves
     // no money (only shapes FUTURE drafts, which are themselves reviewed),
@@ -956,6 +959,16 @@ export interface ProposalRepository {
    */
   createMany(proposals: Proposal[]): Promise<Proposal[]>;
   findById(tenantId: string, id: string): Promise<Proposal | null>;
+  /**
+   * The locking read of a proposal SET (onboarding/draft/locked-set.ts): this
+   * tenant's rows among `ids`, ordered by id, each `SELECT ... FOR UPDATE` until
+   * the request transaction ends. A missing or foreign id is simply absent from
+   * the result. The fixed order means two callers locking the same set cannot
+   * deadlock. Only meaningful inside the /api request transaction: the Pg
+   * implementation refuses to run outside one (a lock taken on a throwaway
+   * connection is released at once). In memory it is a plain ordered read.
+   */
+  findByIdsForUpdate(tenantId: string, ids: string[]): Promise<Proposal[]>;
   findByTenant(tenantId: string): Promise<Proposal[]>;
   findByStatus(tenantId: string, status: ProposalStatus): Promise<Proposal[]>;
   /**
@@ -1128,6 +1141,7 @@ export interface ProposalRepository {
         | 'approvedAt'
         | 'executedAt'
         | 'executedBy'
+        | 'executedByRole'
         | 'executionError'
         | 'undoneAt'
         | 'undoneBy'
@@ -1154,7 +1168,7 @@ export interface ProposalRepository {
   update(
     tenantId: string,
     id: string,
-    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt'>>
+    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt' | 'status'>>
   ): Promise<Proposal | null>;
 
   /**
@@ -1435,6 +1449,15 @@ export class InMemoryProposalRepository implements ProposalRepository {
     return { ...proposal };
   }
 
+  /** Plain ordered read: in-memory callers are single-threaded, so there is nothing to lock. */
+  async findByIdsForUpdate(tenantId: string, ids: string[]): Promise<Proposal[]> {
+    return [...new Set(ids)]
+      .sort()
+      .map((id) => this.proposals.get(id))
+      .filter((p): p is Proposal => !!p && p.tenantId === tenantId)
+      .map((p) => ({ ...p }));
+  }
+
   async findByTenant(tenantId: string): Promise<Proposal[]> {
     return Array.from(this.proposals.values())
       .filter((p) => p.tenantId === tenantId)
@@ -1656,6 +1679,7 @@ export class InMemoryProposalRepository implements ProposalRepository {
   ): Promise<Proposal | null> {
     const proposal = this.proposals.get(id);
     if (!proposal || proposal.tenantId !== tenantId) return null;
+    assertStatusWrite(proposal.status, status);
 
     proposal.status = status;
     proposal.updatedAt = new Date();
@@ -1690,6 +1714,7 @@ export class InMemoryProposalRepository implements ProposalRepository {
         | 'approvedAt'
         | 'executedAt'
         | 'executedBy'
+        | 'executedByRole'
         | 'executionError'
         | 'undoneAt'
         | 'undoneBy'
@@ -1699,6 +1724,7 @@ export class InMemoryProposalRepository implements ProposalRepository {
     // Same precondition the pg impl folds into its WHERE clause: the row must
     // exist, belong to this tenant, and still sit in one of `fromStatuses`.
     // Single-threaded here, so the check + write are trivially atomic.
+    for (const from of fromStatuses) assertStatusWrite(from, to);
     const proposal = this.proposals.get(id);
     if (!proposal || proposal.tenantId !== tenantId) return null;
     if (!fromStatuses.includes(proposal.status)) return null;
@@ -1723,12 +1749,15 @@ export class InMemoryProposalRepository implements ProposalRepository {
   async update(
     tenantId: string,
     id: string,
-    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt'>>
+    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt' | 'status'>>
   ): Promise<Proposal | null> {
     const proposal = this.proposals.get(id);
     if (!proposal || proposal.tenantId !== tenantId) return null;
 
-    Object.assign(proposal, updates, { updatedAt: new Date() });
+    // Parity with the pg repo, which has no status column in its field map:
+    // status moves only through updateStatus and its gate.
+    const { status: _ignored, ...fields } = updates as Partial<Proposal>;
+    Object.assign(proposal, fields, { updatedAt: new Date() });
     this.proposals.set(id, proposal);
     return { ...proposal };
   }

@@ -1,5 +1,6 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
+import { paymentModeLockKey } from '../invoices/payment-collection-mode';
 import {
   DEFAULT_ESCALATION_SETTINGS,
   EscalationSettings,
@@ -189,6 +190,8 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // Migration 120. NULL → undefined to match the InMemory repo shape.
     googleReviewUrl: (row.google_review_url as string | null) ?? undefined,
     yelpReviewUrl: (row.yelp_review_url as string | null) ?? undefined,
+    // D-044 — migration 330.
+    googleReviewUrlDerived: (row.google_review_url_derived as string | null) ?? undefined,
     // P11-002 — language stack. default_language / auto_detect_language
     // are NOT NULL with column defaults, so a pre-migration row still
     // reads 'en' / true.
@@ -347,6 +350,19 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
     options?: SettingsUpdateOptions,
   ): Promise<TenantSettings | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
+      // S5a-4 (U8) — a write that names payment_collection_mode takes the
+      // per-tenant payment-mode lock EXCLUSIVELY as its first statement, so
+      // it is ordered against every guarded link attach (which takes it
+      // shared): an attach past its mode check finishes and commits first,
+      // and one that starts after this write reads the new value — even when
+      // this is the tenant's first write and the seed below inserts the row.
+      // Every writer (PUT /api/settings, the onboarding policy handler, any
+      // later one) gets it here.
+      const touchesPaymentMode = updates.paymentCollectionMode !== undefined;
+      if (touchesPaymentMode) {
+        await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [paymentModeLockKey(tenantId)]);
+      }
+
       // #1031 — update() must never be a silent no-op for a tenant whose
       // tenant_settings row doesn't exist yet (every tenant-creation path
       // seeds one, but a correction-lesson cascade or onboarding write can
@@ -457,6 +473,8 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         // Migration 120 — public review links.
         googleReviewUrl: 'google_review_url',
         yelpReviewUrl: 'yelp_review_url',
+        // D-044 — migration 330.
+        googleReviewUrlDerived: 'google_review_url_derived',
         // P11-002 — language stack.
         defaultLanguage: 'default_language',
         autoDetectLanguage: 'auto_detect_language',
@@ -620,22 +638,64 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         }
       }
 
+      // D-044 — a review link written by anyone but the listing flow (which
+      // names both keys) keeps the "app filled this" marker only while the
+      // link still equals it; an owner's own value is never re-claimed.
+      if (updates.googleReviewUrl !== undefined && updates.googleReviewUrlDerived === undefined) {
+        setClauses.push(
+          `google_review_url_derived = CASE WHEN google_review_url_derived IS NOT DISTINCT FROM $${paramIndex}::text THEN google_review_url_derived ELSE NULL END`,
+        );
+        params.push(updates.googleReviewUrl ?? null);
+        paramIndex++;
+      }
+
       if (needsTerminologyMerge) {
         setClauses.push(`terminology_preferences = $${paramIndex}`);
         params.push(terminologyJson ? JSON.stringify(terminologyJson) : null);
         paramIndex++;
       }
 
-      if (setClauses.length === 0) return this.findByTenant(tenantId);
+      // S5a-4 — a mode write always moves updated_at (the cleanup job's
+      // per-transition idempotency key reads it), even from a caller that
+      // does not stamp the patch (the onboarding policy handler).
+      if (touchesPaymentMode && !Object.prototype.hasOwnProperty.call(updates, 'updatedAt')) {
+        setClauses.push('updated_at = NOW()');
+      }
 
-      params.push(tenantId);
-      const result = await client.query(
-        `UPDATE tenant_settings SET ${setClauses.join(', ')}
-         WHERE tenant_id = $${paramIndex}
-         RETURNING *`,
-        params
-      );
-      return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+      const afterWrite = options?.afterWrite;
+      if (!afterWrite) {
+        if (setClauses.length === 0) return this.findByTenant(tenantId);
+      }
+
+      // S5a-4 — the row before the write, read on this transaction's client
+      // (under the payment-mode lock when the patch names the key), only
+      // when a hook will look at it.
+      let before: TenantSettings | null = null;
+      if (afterWrite) {
+        const prior = await client.query(
+          'SELECT * FROM tenant_settings WHERE tenant_id = $1 FOR UPDATE',
+          [tenantId],
+        );
+        before = prior.rows.length > 0 ? mapRow(prior.rows[0]) : null;
+      }
+
+      let after: TenantSettings | null;
+      if (setClauses.length === 0) {
+        after = before;
+      } else {
+        params.push(tenantId);
+        const result = await client.query(
+          `UPDATE tenant_settings SET ${setClauses.join(', ')}
+           WHERE tenant_id = $${paramIndex}
+           RETURNING *`,
+          params
+        );
+        after = result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+      }
+      if (afterWrite && after) {
+        await afterWrite({ client, tenantId, before, after });
+      }
+      return after;
     });
   }
 

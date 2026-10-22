@@ -396,6 +396,126 @@ describe('InMemoryCallTranscriptTurnRepository', () => {
     });
   });
 
+  describe('U1 reply timing — recordTurn stamps and markReplyAudio', () => {
+    const LAST_WORD = new Date('2026-10-20T10:00:00.000Z');
+    const STT_FINAL = new Date('2026-10-20T10:00:00.800Z');
+
+    async function seedCaller(repo: InMemoryCallTranscriptTurnRepository): Promise<void> {
+      await repo.recordTurn({
+        tenantId: TENANT_A,
+        callSid: CALL_SID,
+        sessionId: SESSION_1,
+        turnIndex: 0,
+        speaker: 'caller',
+        text: 'hello',
+        lastWordAt: LAST_WORD,
+        sttFinalAt: STT_FINAL,
+        endpointDelayMs: 800,
+        transport: 'realtime',
+      });
+    }
+
+    it('carries the append-time stamps and keeps them on an interim → final replacement', async () => {
+      const repo = new InMemoryCallTranscriptTurnRepository();
+      await seedCaller(repo);
+      const replaced = await repo.recordTurn({
+        tenantId: TENANT_A,
+        callSid: CALL_SID,
+        sessionId: SESSION_1,
+        turnIndex: 0,
+        speaker: 'caller',
+        text: 'hello there',
+      });
+      expect(replaced.lastWordAt).toEqual(LAST_WORD);
+      expect(replaced.sttFinalAt).toEqual(STT_FINAL);
+      expect(replaced.endpointDelayMs).toBe(800);
+      expect(replaced.transport).toBe('realtime');
+    });
+
+    it('rejects an unknown transport', async () => {
+      const repo = new InMemoryCallTranscriptTurnRepository();
+      await expect(
+        repo.recordTurn({
+          tenantId: TENANT_A,
+          callSid: CALL_SID,
+          sessionId: SESSION_1,
+          turnIndex: 0,
+          speaker: 'caller',
+          text: 'hello',
+          transport: 'sms' as never,
+        }),
+      ).rejects.toThrow(/transport/);
+    });
+
+    it('keeps the first stamp of each column: a filler first_audible_at survives the real frame', async () => {
+      const repo = new InMemoryCallTranscriptTurnRepository();
+      await seedCaller(repo);
+      const key = { tenantId: TENANT_A, callSid: CALL_SID, sessionId: SESSION_1, turnIndex: 0 };
+      const fillerAt = new Date('2026-10-20T10:00:00.900Z');
+      const ackedAt = new Date('2026-10-20T10:00:01.650Z');
+      expect(await repo.markReplyAudio({ ...key, firstAudibleAt: fillerAt })).toBe(1);
+      expect(
+        await repo.markReplyAudio({ ...key, firstAudibleAt: ackedAt, firstAudioAt: ackedAt, replyGapMs: 1650 }),
+      ).toBe(1);
+      expect(await repo.markReplyAudio({ ...key, firstAudioAt: new Date(), replyGapMs: 99_999 })).toBe(1);
+      const [row] = await repo.listByCallSid(TENANT_A, CALL_SID);
+      expect(row.firstAudibleAt).toEqual(fillerAt);
+      expect(row.firstAudioAt).toEqual(ackedAt);
+      expect(row.replyGapMs).toBe(1650);
+    });
+
+    it('returns 0 and never inserts for a missing row; rejects an unknown unacked reason', async () => {
+      const repo = new InMemoryCallTranscriptTurnRepository();
+      expect(
+        await repo.markReplyAudio({
+          tenantId: TENANT_A, callSid: CALL_SID, sessionId: SESSION_1, turnIndex: 3, firstAudioAt: new Date(),
+        }),
+      ).toBe(0);
+      expect(await repo.listByCallSid(TENANT_A, CALL_SID)).toEqual([]);
+      await expect(
+        repo.markReplyAudio({
+          tenantId: TENANT_A, callSid: CALL_SID, sessionId: SESSION_1, turnIndex: 0,
+          replyUnackedReason: 'lost' as never,
+        }),
+      ).rejects.toThrow(/replyUnackedReason/);
+    });
+
+    it('stamps by row id after attachRecording renumbered the index; a stale-index stamp misses', async () => {
+      const repo = new InMemoryCallTranscriptTurnRepository();
+      // Leg 2 starts at index 0 again; attachRecording compacts the call into one sequence.
+      await repo.recordTurn({ tenantId: TENANT_A, callSid: CALL_SID, sessionId: SESSION_1, turnIndex: 0, speaker: 'caller', text: 'one' });
+      const second = await repo.recordTurn({
+        tenantId: TENANT_A, callSid: CALL_SID, sessionId: SESSION_2, turnIndex: 0, speaker: 'caller', text: 'two',
+      });
+      expect(await repo.attachRecording(TENANT_A, CALL_SID, 'rec-1')).toBe(2);
+
+      const stale = { tenantId: TENANT_A, callSid: CALL_SID, sessionId: SESSION_2, turnIndex: 0 };
+      // The stale key now addresses nothing for leg 2 (its row is index 1).
+      expect(await repo.markReplyAudio({ ...stale, firstAudioAt: new Date(1) })).toBe(0);
+      expect(await repo.markReplyAudio({ ...stale, id: second.id, firstAudioAt: new Date(1), replyGapMs: 700 })).toBe(1);
+
+      const rows = await repo.listByRecording(TENANT_A, 'rec-1');
+      expect(rows.map((r) => [r.text, r.turnIndex, r.replyGapMs])).toEqual([
+        ['one', 0, undefined],
+        ['two', 1, 700],
+      ]);
+      // Tenant-scoped: another tenant's id lookup never matches.
+      expect(await repo.markReplyAudio({ ...stale, tenantId: TENANT_B, id: second.id, replyGapMs: 1 })).toBe(0);
+    });
+
+    it('records an unacked reason without inventing first_audio_at', async () => {
+      const repo = new InMemoryCallTranscriptTurnRepository();
+      await seedCaller(repo);
+      await repo.markReplyAudio({
+        tenantId: TENANT_A, callSid: CALL_SID, sessionId: SESSION_1, turnIndex: 0, replyUnackedReason: 'clear_echo',
+      });
+      const [row] = await repo.listByCallSid(TENANT_A, CALL_SID);
+      expect(row.replyUnackedReason).toBe('clear_echo');
+      expect(row.firstAudioAt).toBeUndefined();
+      expect(row.replyGapMs).toBeUndefined();
+    });
+  });
+
   describe('parseTranscriptLine', () => {
     it('parses agent:/caller: prefixes and falls back to caller for unprefixed lines', () => {
       expect(parseTranscriptLine('agent: hi there')).toEqual({ speaker: 'agent', text: 'hi there' });

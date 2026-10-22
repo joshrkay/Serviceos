@@ -21,7 +21,12 @@ import {
   invoiceReferenceCheck,
   serviceLocationReferenceCheck,
   executionAnchorReferenceCheck,
+  jobReferenceCheck,
+  describeDanglingReferences,
+  askForExecutabilityGaps,
+  holdForExecutability,
 } from '../../src/proposals/approval-reference-checks';
+import { InMemoryJobRepository, type Job } from '../../src/jobs/job';
 import { InMemoryLocationRepository, createLocation } from '../../src/locations/location';
 import { buildChainRefToken } from '../../src/proposals/chain';
 import { ValidationError } from '../../src/shared/errors';
@@ -221,3 +226,96 @@ describe('#1480 — an estimate/invoice draft with no customer and no job is nev
   });
 });
 
+
+// OVAS-03 — no check looked at a drafted jobId at all: a fabricated uuid, a
+// foreign tenant's job, or a job of a different customer than the card's
+// approved (or auto-approved) and then failed, or attached the document to
+// the wrong customer, after the tap.
+describe('jobReferenceCheck — a drafted jobId must name this tenant\'s job, of the card\'s customer', () => {
+  const CUSTOMER = '7c9e6679-7425-40de-944b-e07fc1f90ae7';
+  const OTHER_CUSTOMER = '8d0f7780-8536-41ef-a55c-f18ad2a01bf8';
+  const RFC_EXAMPLE = '123e4567-e89b-12d3-a456-426614174000';
+
+  async function jobs(): Promise<InMemoryJobRepository> {
+    const repo = new InMemoryJobRepository();
+    const base: Omit<Job, 'id' | 'tenantId' | 'customerId'> = {
+      locationId: 'loc-1',
+      jobNumber: 'JOB-1',
+      summary: 'AC repair',
+      status: 'scheduled',
+      priority: 'normal',
+      createdBy: actorId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    await repo.create({ ...base, id: JOB_ID, tenantId, customerId: CUSTOMER } as Job);
+    await repo.create({
+      ...base,
+      id: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa',
+      tenantId: 'tenant-elsewhere',
+      customerId: CUSTOMER,
+    } as Job);
+    return repo;
+  }
+
+  function proposalOf(proposalType: CreateProposalInput['proposalType'], payload: Record<string, unknown>) {
+    return createProposal({ tenantId, proposalType, payload, summary: 's', createdBy: actorId });
+  }
+
+  for (const type of ['draft_estimate', 'draft_invoice', 'create_appointment'] as const) {
+    it(`${type}: a jobId naming no job is a jobId gap`, async () => {
+      const check = jobReferenceCheck(await jobs());
+      expect(await check(tenantId, proposalOf(type, { customerId: CUSTOMER, jobId: RFC_EXAMPLE }))).toEqual(['jobId']);
+    });
+
+    it(`${type}: another tenant's job is a jobId gap`, async () => {
+      const check = jobReferenceCheck(await jobs());
+      expect(
+        await check(tenantId, proposalOf(type, { customerId: CUSTOMER, jobId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa' })),
+      ).toEqual(['jobId']);
+    });
+
+    it(`${type}: a different customer's job is a mismatch gap`, async () => {
+      const check = jobReferenceCheck(await jobs());
+      expect(await check(tenantId, proposalOf(type, { customerId: OTHER_CUSTOMER, jobId: JOB_ID }))).toEqual([
+        'jobCustomerMismatch',
+      ]);
+    });
+
+    it(`${type}: the customer's own job (or a job with no customer named) passes`, async () => {
+      const check = jobReferenceCheck(await jobs());
+      expect(await check(tenantId, proposalOf(type, { customerId: CUSTOMER, jobId: JOB_ID }))).toEqual([]);
+      expect(await check(tenantId, proposalOf(type, { jobId: JOB_ID }))).toEqual([]);
+    });
+  }
+
+  it('create_appointment checks linkedJobId (the job a revisit books against) when present', async () => {
+    const check = jobReferenceCheck(await jobs());
+    expect(
+      await check(tenantId, proposalOf('create_appointment', { customerId: CUSTOMER, linkedJobId: RFC_EXAMPLE })),
+    ).toEqual(['linkedJobId']);
+  });
+
+  it('ignores other types, an absent jobId, and an unresolved chain token', async () => {
+    const check = jobReferenceCheck(await jobs());
+    expect(await check(tenantId, proposalOf('update_job', { jobId: RFC_EXAMPLE, status: 'completed' }))).toEqual([]);
+    expect(await check(tenantId, proposalOf('draft_estimate', { customerId: CUSTOMER }))).toEqual([]);
+    expect(
+      await check(tenantId, proposalOf('draft_estimate', { jobId: buildChainRefToken(0, 'jobId') })),
+    ).toEqual([]);
+  });
+
+  it('an auto-approved draft with a dangling job is held, and approval refuses it with a sentence', async () => {
+    const check = jobReferenceCheck(await jobs());
+    const proposal = {
+      ...proposalOf('draft_estimate', { customerId: OTHER_CUSTOMER, jobId: JOB_ID }),
+      status: 'approved' as const,
+    };
+    const held = await holdForExecutability(tenantId, proposal, [check]);
+    expect(held.proposal.status).toBe('ready_for_review');
+    expect(held.gaps).toEqual(['jobCustomerMismatch']);
+    expect(describeDanglingReferences(held.gaps)).toMatch(/different customer/);
+    expect(askForExecutabilityGaps(held.gaps)).toMatch(/different customer/);
+    expect(askForExecutabilityGaps(held.gaps)).not.toMatch(/does not name an existing record/);
+  });
+});

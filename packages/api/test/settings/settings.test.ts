@@ -340,3 +340,69 @@ describe('#874 — upsertIdentityFields serviceAreaRadius tri-state (in-memory p
     expect(cleared.serviceAreaRadius).toBeNull();
   });
 });
+
+describe('S5a-4 — the afterWrite hook on SettingsRepository.update (in-memory parity)', () => {
+  // The Pg leg (the hook runs on the transaction's own client, under the
+  // payment-mode lock, and a throw rolls the row back) is pinned against
+  // real Postgres in test/integration/payment-link-mode-switch.test.ts.
+  async function seeded() {
+    const repo = new InMemorySettingsRepository();
+    await createSettings({ tenantId: 'tenant-hook', businessName: 'Hook Co' }, repo);
+    return repo;
+  }
+
+  it('sees the row before and after a payment-mode write', async () => {
+    const repo = await seeded();
+    const seen: Array<{ before: unknown; after: unknown; client: unknown; tenantId: string }> = [];
+    await repo.update(
+      'tenant-hook',
+      { paymentCollectionMode: 'collect_on_site' },
+      {
+        afterWrite: async ({ client, tenantId, before, after }) => {
+          seen.push({
+            client,
+            tenantId,
+            before: before?.paymentCollectionMode,
+            after: after.paymentCollectionMode,
+          });
+        },
+      },
+    );
+    expect(seen).toEqual([{ client: null, tenantId: 'tenant-hook', before: undefined, after: 'collect_on_site' }]);
+  });
+
+  it('updateSettings threads the hook through, and a plain save still works without one', async () => {
+    const repo = await seeded();
+    const afters: Array<string | undefined> = [];
+    await updateSettings('tenant-hook', { paymentCollectionMode: 'collect_on_site' }, repo, {
+      afterWrite: async ({ after }) => {
+        afters.push(after.paymentCollectionMode);
+      },
+    });
+    expect(afters).toEqual(['collect_on_site']);
+    const plain = await updateSettings('tenant-hook', { paymentCollectionMode: 'pay_link' }, repo);
+    expect(plain?.paymentCollectionMode).toBe('pay_link');
+  });
+
+  it('a throwing hook undoes the write and propagates', async () => {
+    const repo = await seeded();
+    await expect(
+      repo.update(
+        'tenant-hook',
+        { paymentCollectionMode: 'collect_on_site' },
+        { afterWrite: async () => { throw new Error('enqueue failed'); } },
+      ),
+    ).rejects.toThrow('enqueue failed');
+    expect((await repo.findByTenant('tenant-hook'))?.paymentCollectionMode).toBeUndefined();
+  });
+
+  it('a payment-mode write moves updatedAt even when the patch does not stamp it (Pg parity)', async () => {
+    const repo = await seeded();
+    const stamped = (await repo.findByTenant('tenant-hook'))!.updatedAt;
+    await new Promise((r) => { setTimeout(r, 5); });
+    const after = await repo.update('tenant-hook', { paymentCollectionMode: 'collect_on_site' });
+    expect(after!.updatedAt.getTime()).toBeGreaterThan(stamped.getTime());
+    const untouched = await repo.update('tenant-hook', { businessName: 'Hook Co 2' });
+    expect(untouched!.updatedAt.getTime()).toBe(after!.updatedAt.getTime());
+  });
+});

@@ -6,18 +6,25 @@
  * `app.current_tenant_id`. Every query also carries an explicit tenant_id
  * predicate because RLS enforcement is a runtime flag (db/rls-runtime-role.ts).
  *
- * Concurrency: `stageChoice` is a compare-and-swap on `version`, so two tabs
- * cannot silently overwrite each other; the loser gets DraftVersionConflictError
- * and re-reads. Approval takes the row lock first (`getForTenantForUpdate`), so
- * a PUT /choices and an approve, or two approves, serialise on the draft row;
- * `markApproved` is the second guard: a compare-and-swap on the version read
- * under that lock, which never returns a row it did not update. `markRetried`
- * is the same compare-and-swap for a later approval attempt (a retry), so
+ * Concurrency (U11): every writer of onboarding_drafts is a thin caller of
+ * `updateLocked`, which does the same four things in one tenant transaction, in
+ * this order: (1) `SELECT ... FOR UPDATE` the tenant's draft row; (2) refuse
+ * unless the row is in the status the writer requires (`draft` for a field
+ * write, `approved` for the retry bump and later undo/reset/reopen), and check
+ * the writer's own precondition on the locked row; (3) compare `version` with
+ * the caller's `expectedVersion` when it sent one; (4) compute the change from
+ * the locked row, never from an earlier read, write it and bump `version`. It is
+ * the only code here that issues the table's UPDATE statement (a guard test reads
+ * this file), so a PUT /choices and an approve, or two approves, serialise on
+ * the draft row and a writer cannot land between proposal construction and
+ * `markApproved`. Approval reads the row under the same lock
+ * (`getForTenantForUpdate`) and `markApproved` re-checks the version it read as
+ * the second guard; `markRetried` is the same for a later attempt (a retry), so
  * `version` names the attempt a tab rendered, not just the staged choices.
  */
 import type { Pool } from 'pg';
 import { PgBaseRepository } from '../../db/pg-base';
-import { tenantContextStore } from '../../middleware/tenant-context';
+import { currentTenantContext } from '../../middleware/tenant-context';
 import type { AssembledShop } from '../choices/assemble';
 import { ChoiceKeySchema, assertOverrideAllowedFor, type AnyChoiceKey } from '../choices/schema';
 import { OwnerPhoneE164Schema } from './owner-phone';
@@ -45,6 +52,17 @@ export class DraftNotApprovedError extends Error {
   constructor() {
     super('onboarding draft is not approved');
     this.name = 'DraftNotApprovedError';
+  }
+}
+/**
+ * The metro cannot change once any choice is staged: a staged 'a' or 'b' names
+ * an option as the owner saw it priced, and the cents behind it live in
+ * `assembled`, so re-pricing under it would change the number they agreed to.
+ */
+export class DraftMetroLockedError extends Error {
+  constructor() {
+    super('onboarding draft metro is locked: a choice is already staged');
+    this.name = 'DraftMetroLockedError';
   }
 }
 
@@ -83,6 +101,45 @@ export interface CreateDraftRecord {
   assembled: AssembledShop;
 }
 
+/**
+ * The columns a writer may change through `updateLocked`. `version` and
+ * `updatedAt` are never in a patch: the helper always bumps them.
+ */
+export type DraftPatch = Partial<
+  Pick<OnboardingDraft, 'choices' | 'clientTimezone' | 'ownerPhone' | 'metroCode' | 'metroName' | 'assembled' | 'status' | 'proposalIds' | 'approvedAt'>
+>;
+
+export interface UpdateLockedOptions {
+  /** `draft` for every field write; `approved` for the retry bump, undo, reset and reopen. */
+  requireStatus: DraftStatus;
+  /** When sent, the locked row's `version` must equal it (DraftVersionConflictError otherwise). */
+  expectedVersion?: number;
+  /**
+   * A writer-specific check on the locked row, run after the status check and
+   * BEFORE the version compare, so a stale version is never reported as the
+   * reason a write that could never apply was refused (`setMetro`: no choice
+   * staged). Throws its own typed error.
+   */
+  precondition?: (row: OnboardingDraft) => void;
+}
+
+/** Builds the assembled shop for a new metro from the locked draft row (U1's assembleTypicalShop). */
+export type AssembleForMetro = (row: OnboardingDraft) => Promise<AssembledShop>;
+
+/** The precondition of `setMetro`: nothing staged, under any key. */
+function assertMetroUnlocked(row: OnboardingDraft): void {
+  if (Object.keys(row.choices).length > 0) throw new DraftMetroLockedError();
+}
+
+/** The patch `setMetro` writes: the new shop whole, with the code and name it was built for. */
+async function metroPatch(row: OnboardingDraft, metroCode: string, assemble: AssembleForMetro): Promise<DraftPatch> {
+  const assembled = await assemble(row);
+  if (assembled.metroCode !== metroCode) {
+    throw new Error(`setMetro: assembled shop is for ${String(assembled.metroCode)}, not ${metroCode}`);
+  }
+  return { metroCode: assembled.metroCode, metroName: assembled.metroName, assembled };
+}
+
 export interface OnboardingDraftRepository {
   getForTenant(tenantId: string): Promise<OnboardingDraft | null>;
   /**
@@ -95,6 +152,16 @@ export interface OnboardingDraftRepository {
   getForTenantForUpdate(tenantId: string): Promise<OnboardingDraft | null>;
   /** Creates the tenant's draft, or returns the existing one unchanged. */
   create(tenantId: string, input: CreateDraftRecord): Promise<OnboardingDraft>;
+  /**
+   * The one write path (see the file comment): lock, status + precondition,
+   * version, then `compute(lockedRow)` and ONE update that applies the patch and
+   * bumps `version`. `compute` may be async and may throw a typed refusal
+   * before anything is written; an empty patch still bumps the version. Throws
+   * DraftNotFoundError / DraftAlreadyApprovedError (requireStatus `draft` on an
+   * approved row) / DraftNotApprovedError (requireStatus `approved` on a draft)
+   * / the precondition's error / DraftVersionConflictError, in that order.
+   */
+  updateLocked(tenantId: string, opts: UpdateLockedOptions, compute: (row: OnboardingDraft) => Promise<DraftPatch> | DraftPatch): Promise<OnboardingDraft>;
   /**
    * Overrides must carry only writes the choice owns (and prices only on the
    * price choice); a violation throws WritesNotAllowedError before any write.
@@ -112,6 +179,16 @@ export interface OnboardingDraftRepository {
    * order, so an approved draft always answers DraftAlreadyApprovedError.
    */
   setOwnerPhone(tenantId: string, ownerPhone: string, expectedVersion: number): Promise<OnboardingDraft>;
+  /**
+   * Re-prices the draft for another metro. Refused once approved
+   * (DraftAlreadyApprovedError), then once ANY choice is staged
+   * (DraftMetroLockedError, checked before the version because a fresh version
+   * cannot make it succeed), then on a stale version (DraftVersionConflictError).
+   * `assemble` builds the shop for the new metro from the LOCKED row; its result
+   * is stored whole, with its metro code and name, in the one version bump, so
+   * the city and the prices an approval copies always belong to one metro.
+   */
+  setMetro(tenantId: string, metroCode: string, expectedVersion: number, assemble: AssembleForMetro): Promise<OnboardingDraft>;
   /**
    * Marks approved and records the proposal ids, only if the draft is still
    * `draft` at `expectedVersion` (the version read under the lock). Throws
@@ -175,6 +252,33 @@ function mapRow(row: DraftRow): OnboardingDraft {
   };
 }
 
+/** Patch field -> column, in a fixed order so the UPDATE's parameter list is deterministic. */
+const PATCH_COLUMNS: Record<keyof DraftPatch, { name: string; json: boolean }> = {
+  choices: { name: 'choices', json: true },
+  clientTimezone: { name: 'client_timezone', json: false },
+  ownerPhone: { name: 'owner_phone', json: false },
+  metroCode: { name: 'metro_code', json: false },
+  metroName: { name: 'metro_name', json: false },
+  assembled: { name: 'assembled', json: true },
+  status: { name: 'status', json: false },
+  proposalIds: { name: 'proposal_ids', json: true },
+  approvedAt: { name: 'approved_at', json: false },
+};
+const PATCH_KEYS = Object.keys(PATCH_COLUMNS) as (keyof DraftPatch)[];
+
+/**
+ * Steps 2 and 3 of `updateLocked`, shared by both repositories so the order of
+ * refusals is identical: status, then the writer's precondition, then version.
+ */
+function assertWritable(row: OnboardingDraft, opts: UpdateLockedOptions): void {
+  if (opts.requireStatus === 'draft' && row.status === 'approved') throw new DraftAlreadyApprovedError();
+  if (opts.requireStatus === 'approved' && row.status !== 'approved') throw new DraftNotApprovedError();
+  opts.precondition?.(row);
+  if (opts.expectedVersion !== undefined && opts.expectedVersion !== row.version) {
+    throw new DraftVersionConflictError(opts.expectedVersion, row.version);
+  }
+}
+
 export class PgOnboardingDraftRepository extends PgBaseRepository implements OnboardingDraftRepository {
   constructor(pool: Pool) {
     super(pool);
@@ -188,7 +292,7 @@ export class PgOnboardingDraftRepository extends PgBaseRepository implements Onb
   }
 
   async getForTenantForUpdate(tenantId: string): Promise<OnboardingDraft | null> {
-    if (tenantContextStore.getStore()?.tenantId !== tenantId) {
+    if (currentTenantContext()?.tenantId !== tenantId) {
       throw new Error('getForTenantForUpdate requires the request transaction: a row lock taken outside it is released immediately');
     }
     return this.withTenant(tenantId, async (client) => {
@@ -224,133 +328,74 @@ export class PgOnboardingDraftRepository extends PgBaseRepository implements Onb
     });
   }
 
+  async updateLocked(
+    tenantId: string,
+    opts: UpdateLockedOptions,
+    compute: (row: OnboardingDraft) => Promise<DraftPatch> | DraftPatch,
+  ): Promise<OnboardingDraft> {
+    return this.withTenant(tenantId, async (client) => {
+      const locked = await client.query<DraftRow>('SELECT * FROM onboarding_drafts WHERE tenant_id = $1 FOR UPDATE', [tenantId]);
+      if (locked.rows.length === 0) throw new DraftNotFoundError(tenantId);
+      const row = mapRow(locked.rows[0]);
+      assertWritable(row, opts);
+      const patch = await compute(row);
+
+      const sets: string[] = [];
+      const params: unknown[] = [row.id, row.version, tenantId];
+      for (const key of PATCH_KEYS) {
+        const value = patch[key];
+        if (value === undefined) continue;
+        const column = PATCH_COLUMNS[key];
+        params.push(column.json ? JSON.stringify(value) : value);
+        sets.push(`${column.name} = $${params.length}${column.json ? '::jsonb' : ''}`);
+      }
+      const updated = await client.query<DraftRow>(
+        `UPDATE onboarding_drafts
+            SET ${[...sets, 'version = version + 1', 'updated_at = NOW()'].join(', ')}
+          WHERE id = $1 AND version = $2 AND tenant_id = $3
+          RETURNING *`,
+        params,
+      );
+      if (updated.rows.length === 0) {
+        // Cannot happen inside one transaction after FOR UPDATE; fail closed rather than return stale state.
+        throw new DraftVersionConflictError(row.version, row.version + 1);
+      }
+      return mapRow(updated.rows[0]);
+    });
+  }
+
   async stageChoice(tenantId: string, settingKey: AnyChoiceKey, choice: StagedChoice, expectedVersion: number): Promise<OnboardingDraft> {
     const key = ChoiceKeySchema.parse(settingKey);
     const staged = StagedChoiceSchema.parse(choice);
     if ('override' in staged) assertOverrideAllowedFor(key, staged.override);
-    return this.withTenant(tenantId, async (client) => {
-      const current = await client.query<Pick<DraftRow, 'status' | 'version'>>(
-        'SELECT status, version FROM onboarding_drafts WHERE tenant_id = $1 FOR UPDATE',
-        [tenantId],
-      );
-      if (current.rows.length === 0) throw new DraftNotFoundError(tenantId);
-      if (current.rows[0].status === 'approved') throw new DraftAlreadyApprovedError();
-      if (current.rows[0].version !== expectedVersion) {
-        throw new DraftVersionConflictError(expectedVersion, current.rows[0].version);
-      }
-      const updated = await client.query<DraftRow>(
-        `UPDATE onboarding_drafts
-            SET choices = choices || jsonb_build_object($2::text, $3::jsonb),
-                version = version + 1,
-                updated_at = NOW()
-          WHERE tenant_id = $1 AND version = $4
-          RETURNING *`,
-        [tenantId, key, JSON.stringify(staged), expectedVersion],
-      );
-      if (updated.rows.length === 0) {
-        // Lost the race between the SELECT ... FOR UPDATE and the UPDATE (cannot
-        // happen within one transaction, but fail closed rather than return stale state).
-        throw new DraftVersionConflictError(expectedVersion, current.rows[0].version + 1);
-      }
-      return mapRow(updated.rows[0]);
-    });
+    return this.updateLocked(tenantId, { requireStatus: 'draft', expectedVersion }, (row) => ({ choices: { ...row.choices, [key]: staged } }));
   }
 
   async setClientTimezone(tenantId: string, clientTimezone: string): Promise<OnboardingDraft> {
-    return this.withTenant(tenantId, async (client) => {
-      const current = await client.query<Pick<DraftRow, 'status'>>(
-        'SELECT status FROM onboarding_drafts WHERE tenant_id = $1 FOR UPDATE',
-        [tenantId],
-      );
-      if (current.rows.length === 0) throw new DraftNotFoundError(tenantId);
-      if (current.rows[0].status === 'approved') throw new DraftAlreadyApprovedError();
-      const updated = await client.query<DraftRow>(
-        `UPDATE onboarding_drafts
-            SET client_timezone = $2,
-                version = version + 1,
-                updated_at = NOW()
-          WHERE tenant_id = $1
-          RETURNING *`,
-        [tenantId, clientTimezone],
-      );
-      return mapRow(updated.rows[0]);
-    });
+    return this.updateLocked(tenantId, { requireStatus: 'draft' }, () => ({ clientTimezone }));
   }
 
   async setOwnerPhone(tenantId: string, ownerPhone: string, expectedVersion: number): Promise<OnboardingDraft> {
     const phone = OwnerPhoneE164Schema.parse(ownerPhone);
-    return this.withTenant(tenantId, async (client) => {
-      const current = await client.query<Pick<DraftRow, 'status' | 'version'>>(
-        'SELECT status, version FROM onboarding_drafts WHERE tenant_id = $1 FOR UPDATE',
-        [tenantId],
-      );
-      if (current.rows.length === 0) throw new DraftNotFoundError(tenantId);
-      if (current.rows[0].status === 'approved') throw new DraftAlreadyApprovedError();
-      if (current.rows[0].version !== expectedVersion) {
-        throw new DraftVersionConflictError(expectedVersion, current.rows[0].version);
-      }
-      const updated = await client.query<DraftRow>(
-        `UPDATE onboarding_drafts
-            SET owner_phone = $2,
-                version = version + 1,
-                updated_at = NOW()
-          WHERE tenant_id = $1 AND version = $3
-          RETURNING *`,
-        [tenantId, phone, expectedVersion],
-      );
-      if (updated.rows.length === 0) {
-        // Cannot happen inside one transaction after FOR UPDATE; fail closed rather than return stale state.
-        throw new DraftVersionConflictError(expectedVersion, current.rows[0].version + 1);
-      }
-      return mapRow(updated.rows[0]);
-    });
+    return this.updateLocked(tenantId, { requireStatus: 'draft', expectedVersion }, () => ({ ownerPhone: phone }));
+  }
+
+  async setMetro(tenantId: string, metroCode: string, expectedVersion: number, assemble: AssembleForMetro): Promise<OnboardingDraft> {
+    return this.updateLocked(tenantId, { requireStatus: 'draft', expectedVersion, precondition: assertMetroUnlocked }, (row) =>
+      metroPatch(row, metroCode, assemble),
+    );
   }
 
   async markApproved(tenantId: string, proposalIds: string[], expectedVersion: number): Promise<OnboardingDraft> {
-    return this.withTenant(tenantId, async (client) => {
-      const updated = await client.query<DraftRow>(
-        `UPDATE onboarding_drafts
-            SET status = 'approved',
-                proposal_ids = $2::jsonb,
-                version = version + 1,
-                approved_at = NOW(),
-                updated_at = NOW()
-          WHERE tenant_id = $1 AND status = 'draft' AND version = $3
-          RETURNING *`,
-        [tenantId, JSON.stringify(proposalIds), expectedVersion],
-      );
-      if (updated.rows.length > 0) return mapRow(updated.rows[0]);
-      // Zero rows: say why, but never hand back a row this call did not update.
-      const existing = await client.query<Pick<DraftRow, 'status' | 'version'>>(
-        'SELECT status, version FROM onboarding_drafts WHERE tenant_id = $1',
-        [tenantId],
-      );
-      if (existing.rows.length === 0) throw new DraftNotFoundError(tenantId);
-      if (existing.rows[0].status === 'approved') throw new DraftAlreadyApprovedError();
-      throw new DraftVersionConflictError(expectedVersion, existing.rows[0].version);
-    });
+    return this.updateLocked(tenantId, { requireStatus: 'draft', expectedVersion }, () => ({
+      status: 'approved',
+      proposalIds: [...proposalIds],
+      approvedAt: new Date(),
+    }));
   }
 
   async markRetried(tenantId: string, expectedVersion: number): Promise<OnboardingDraft> {
-    return this.withTenant(tenantId, async (client) => {
-      const updated = await client.query<DraftRow>(
-        `UPDATE onboarding_drafts
-            SET version = version + 1,
-                updated_at = NOW()
-          WHERE tenant_id = $1 AND status = 'approved' AND version = $2
-          RETURNING *`,
-        [tenantId, expectedVersion],
-      );
-      if (updated.rows.length > 0) return mapRow(updated.rows[0]);
-      // Zero rows: say why, but never hand back a row this call did not update.
-      const existing = await client.query<Pick<DraftRow, 'status' | 'version'>>(
-        'SELECT status, version FROM onboarding_drafts WHERE tenant_id = $1',
-        [tenantId],
-      );
-      if (existing.rows.length === 0) throw new DraftNotFoundError(tenantId);
-      if (existing.rows[0].status !== 'approved') throw new DraftNotApprovedError();
-      throw new DraftVersionConflictError(expectedVersion, existing.rows[0].version);
-    });
+    return this.updateLocked(tenantId, { requireStatus: 'approved', expectedVersion }, () => ({}));
   }
 }
 
@@ -389,56 +434,56 @@ export class InMemoryOnboardingDraftRepository implements OnboardingDraftReposit
     return draft;
   }
 
+  /** Same four steps, same order of refusals; single-threaded, so the "lock" is the current entry. */
+  async updateLocked(
+    tenantId: string,
+    opts: UpdateLockedOptions,
+    compute: (row: OnboardingDraft) => Promise<DraftPatch> | DraftPatch,
+  ): Promise<OnboardingDraft> {
+    const row = this.byTenant.get(tenantId);
+    if (!row) throw new DraftNotFoundError(tenantId);
+    assertWritable(row, opts);
+    const patch = await compute(row);
+    // An undefined field is "not in the patch", exactly as the Pg UPDATE skips it.
+    const next: OnboardingDraft = { ...row, version: row.version + 1, updatedAt: new Date() };
+    for (const key of PATCH_KEYS) {
+      if (patch[key] !== undefined) Object.assign(next, { [key]: patch[key] });
+    }
+    this.byTenant.set(tenantId, next);
+    return next;
+  }
+
   async stageChoice(tenantId: string, settingKey: AnyChoiceKey, choice: StagedChoice, expectedVersion: number): Promise<OnboardingDraft> {
     const key = ChoiceKeySchema.parse(settingKey);
     const staged = StagedChoiceSchema.parse(choice);
     if ('override' in staged) assertOverrideAllowedFor(key, staged.override);
-    const d = this.byTenant.get(tenantId);
-    if (!d) throw new DraftNotFoundError(tenantId);
-    if (d.status === 'approved') throw new DraftAlreadyApprovedError();
-    if (d.version !== expectedVersion) throw new DraftVersionConflictError(expectedVersion, d.version);
-    const next: OnboardingDraft = { ...d, choices: { ...d.choices, [key]: staged }, version: d.version + 1, updatedAt: new Date() };
-    this.byTenant.set(tenantId, next);
-    return next;
+    return this.updateLocked(tenantId, { requireStatus: 'draft', expectedVersion }, (row) => ({ choices: { ...row.choices, [key]: staged } }));
   }
 
   async setClientTimezone(tenantId: string, clientTimezone: string): Promise<OnboardingDraft> {
-    const d = this.byTenant.get(tenantId);
-    if (!d) throw new DraftNotFoundError(tenantId);
-    if (d.status === 'approved') throw new DraftAlreadyApprovedError();
-    const next: OnboardingDraft = { ...d, clientTimezone, version: d.version + 1, updatedAt: new Date() };
-    this.byTenant.set(tenantId, next);
-    return next;
+    return this.updateLocked(tenantId, { requireStatus: 'draft' }, () => ({ clientTimezone }));
   }
 
   async setOwnerPhone(tenantId: string, ownerPhone: string, expectedVersion: number): Promise<OnboardingDraft> {
     const phone = OwnerPhoneE164Schema.parse(ownerPhone);
-    const d = this.byTenant.get(tenantId);
-    if (!d) throw new DraftNotFoundError(tenantId);
-    if (d.status === 'approved') throw new DraftAlreadyApprovedError();
-    if (d.version !== expectedVersion) throw new DraftVersionConflictError(expectedVersion, d.version);
-    const next: OnboardingDraft = { ...d, ownerPhone: phone, version: d.version + 1, updatedAt: new Date() };
-    this.byTenant.set(tenantId, next);
-    return next;
+    return this.updateLocked(tenantId, { requireStatus: 'draft', expectedVersion }, () => ({ ownerPhone: phone }));
+  }
+
+  async setMetro(tenantId: string, metroCode: string, expectedVersion: number, assemble: AssembleForMetro): Promise<OnboardingDraft> {
+    return this.updateLocked(tenantId, { requireStatus: 'draft', expectedVersion, precondition: assertMetroUnlocked }, (row) =>
+      metroPatch(row, metroCode, assemble),
+    );
   }
 
   async markApproved(tenantId: string, proposalIds: string[], expectedVersion: number): Promise<OnboardingDraft> {
-    const d = this.byTenant.get(tenantId);
-    if (!d) throw new DraftNotFoundError(tenantId);
-    if (d.status === 'approved') throw new DraftAlreadyApprovedError();
-    if (d.version !== expectedVersion) throw new DraftVersionConflictError(expectedVersion, d.version);
-    const next: OnboardingDraft = { ...d, status: 'approved', proposalIds: [...proposalIds], version: d.version + 1, approvedAt: new Date(), updatedAt: new Date() };
-    this.byTenant.set(tenantId, next);
-    return next;
+    return this.updateLocked(tenantId, { requireStatus: 'draft', expectedVersion }, () => ({
+      status: 'approved',
+      proposalIds: [...proposalIds],
+      approvedAt: new Date(),
+    }));
   }
 
   async markRetried(tenantId: string, expectedVersion: number): Promise<OnboardingDraft> {
-    const d = this.byTenant.get(tenantId);
-    if (!d) throw new DraftNotFoundError(tenantId);
-    if (d.status !== 'approved') throw new DraftNotApprovedError();
-    if (d.version !== expectedVersion) throw new DraftVersionConflictError(expectedVersion, d.version);
-    const next: OnboardingDraft = { ...d, version: d.version + 1, updatedAt: new Date() };
-    this.byTenant.set(tenantId, next);
-    return next;
+    return this.updateLocked(tenantId, { requireStatus: 'approved', expectedVersion }, () => ({}));
   }
 }

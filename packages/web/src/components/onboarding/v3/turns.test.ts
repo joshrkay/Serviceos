@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { ONBOARDING_CORE_CHOICE_KEYS, type OnboardingDraft } from '@ai-service-os/shared';
+import { narrateTurn, ONBOARDING_CORE_CHOICE_KEYS, type OnboardingDraft } from '@ai-service-os/shared';
 import { plumbingCleDraft, withChoices } from './__fixtures__';
 import { answeredCount, coreTurns, landingTarget, makeItMineTarget, nextUnanswered } from './turns';
 
@@ -45,6 +45,25 @@ describe('turns', () => {
     expect(nextUnanswered(plumbingCleDraft, AFTER)).toBeNull();
     const draft = withChoices(plumbingCleDraft, { [EMERGENCY]: { option: 'a' }, [AFTER]: { option: 'a' } });
     expect(nextUnanswered(draft, HOURS)).toBeNull();
+  });
+});
+
+describe('what Rivet says on a turn (narrateTurn, on the assembled draft)', () => {
+  it('the price turn: the question, both prices with why and what callers hear, then the usual pick', () => {
+    const price = coreTurns(plumbingCleDraft).find((t) => t.settingKey === PRICE)!;
+    expect(narrateTurn(price)).toEqual([
+      'What do you charge to come out?',
+      `First: ${price.options[0].label}. ${price.options[0].detail} Callers hear: “It's $89 for the visit, and that's credited if you go ahead with the repair.”`,
+      `Second: ${price.options[1].label}. Fewer calls, better ones. Your other prices move up with it. Callers hear: “It's $129 for the visit. That covers the diagnosis, and it's credited toward the repair.”`,
+      'Most shops pick the first. Which one?',
+    ]);
+  });
+
+  it('the greeting is not said twice: its options are already what callers hear', () => {
+    const greeting = coreTurns(plumbingCleDraft).find((t) => t.settingKey === GREETING)!;
+    const [, first] = narrateTurn(greeting);
+    expect(first).toBe(`First: ${greeting.options[0].label} ${greeting.options[0].detail}`);
+    expect(first).not.toContain('Callers hear');
   });
 });
 

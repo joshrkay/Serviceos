@@ -51,6 +51,7 @@ import {
   summarizeChainSetResult,
 } from '../actions';
 import { confidenceMetaBlocksAutoApprove } from '../auto-approve';
+import { voidsCustomerAcceptance } from '../acceptance-void';
 import { chainRefFieldsTouchedByDelta } from '../edit-interpreter';
 import type { SettingsRepository } from '../../settings/settings';
 import type { AppointmentRepository } from '../../appointments/appointment';
@@ -262,7 +263,9 @@ async function handleApproveAll(
   const candidates = pending.filter(
     (p) =>
       actionClassForProposalType(p.proposalType) === 'capture' &&
-      !confidenceMetaBlocksAutoApprove(p.payload),
+      !confidenceMetaBlocksAutoApprove(p.payload) &&
+      // OVAS-01 — never void a customer's signed acceptance in bulk.
+      !voidsCustomerAcceptance(p.payload),
   );
   // Mirror the single-approve path's pending-edit guard: a proposal with an
   // unapplied edit request still shows its STALE pre-edit payload, so a blanket

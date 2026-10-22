@@ -46,7 +46,10 @@ describe('D1-3 — helmet hardening headers', () => {
       expect(csp).toContain('https://js.stripe.com');
       expect(csp).toContain('https://*.clerk.com');
       expect(csp).toContain('https://api.stripe.com');
-      expect(csp).toContain('https://*.ingest.sentry.io');
+      // 2026-10 hardening sweep: sources the web app never loads stay OUT
+      // of the allowlist (and keep this CSP identical to the nginx edge's).
+      expect(csp).not.toContain('sentry.io');
+      expect(csp).not.toContain('twilio');
       expect(csp).toContain("frame-ancestors 'none'");
       expect(csp).toContain("object-src 'none'");
       // PostHog analytics — without these in connect-src (and the assets host

@@ -18,6 +18,11 @@ interface UseTTS {
 /**
  * Hook for browser-native text-to-speech via SpeechSynthesis API.
  * Gracefully no-ops when the API isn't available (SSR, test envs).
+ *
+ * The fallback voice: the Assistant's conversation mode speaks with it
+ * (useConversationVoice), and the v3 onboarding shell falls back to it when a
+ * server clip in the tenant's voice cannot be had or played (useRivetVoice,
+ * S3-3). `isSpeaking` turning true is the utterance's start.
  */
 export function useTTS(options: UseTTSOptions = {}): UseTTS {
   const { rate = 1.05, pitch = 1.0, voiceName, lang } = options;

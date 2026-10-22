@@ -52,6 +52,26 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
     expect(src).toMatch(/defaultRules:\s*platformDefaultSupervisorRules/);
   });
 
+  it('the daily payment-link reconciliation sweep runs under its own leader lock, worker roles only (S5a-6)', () => {
+    expect(src).toMatch(/paymentLinkReconciliation:\s*590034/);
+    const segment = src.slice(src.indexOf('// S5a-6 (U8) — daily payment-link reconciliation sweep.'));
+    const block = segment.slice(0, segment.indexOf('// Billing resilience (Part B)'));
+    expect(block).toContain('if (shouldRunWorkers) {');
+    expect(block).toContain('isPaymentLinkReconciliationHour(new Date())');
+    expect(block).toMatch(/runAsLeader\(SWEEP_LOCK\.paymentLinkReconciliation/);
+    expect(block).toContain('listCollectOnSiteTenantIds(pool)');
+  });
+
+  it('the geocode sweep runs under its own leader lock, worker roles only, and only with a pool and a geocoder (dispatch FR-2)', () => {
+    expect(src).toMatch(/geocodeLocations:\s*590035/);
+    const segment = src.slice(src.indexOf('// Dispatch FR-2 phase 1 — geocode sweep.'));
+    const block = segment.slice(0, segment.indexOf('// P8-009'));
+    expect(block).toContain('if (shouldRunWorkers && pool && geocoder) {');
+    expect(block).toMatch(/runAsLeader\(SWEEP_LOCK\.geocodeLocations/);
+    expect(block).toContain('listPendingLocations(pool, limit)');
+    expect(block).toContain('writeGeocodeOutcome(pool, loc, outcome)');
+  });
+
   it('exactly one digest path remains; SWEEP_LOCK has no duplicate keys (U5)', () => {
     // U5 — the redundant P5-020 hourly digest worker was deleted; only the
     // RV-063 daily digest sweep remains.

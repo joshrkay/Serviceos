@@ -14,6 +14,7 @@ import {
   OpenAiTtsProvider,
   type TtsProvider,
 } from '../../../src/ai/tts/tts-provider';
+import { FixtureTtsProvider } from '../../../src/ai/tts/fixture-tts-provider';
 
 describe('UB-C2 — createTtsProvider', () => {
   it('threads ELEVENLABS_VOICE_ID into the ElevenLabs provider (filler/live voice parity)', () => {
@@ -44,6 +45,58 @@ describe('UB-C2 — createTtsProvider', () => {
     expect(
       createTtsProvider({ AI_PROVIDER_API_KEY: 'openai-key' }),
     ).toBeInstanceOf(OpenAiTtsProvider);
+  });
+});
+
+/**
+ * S3-6 (plan U4) — the real-stack e2e lane speaks with no vendor key: a
+ * bundled silent clip at the vendor boundary, so every route, the clip cache,
+ * the per-clip charge and the audit run for real. Never in production.
+ */
+describe('S3-6 — TTS_PROVIDER=fixture', () => {
+  it.each(['dev', 'test', 'development', undefined])('returns the fixture provider when NODE_ENV is %s', (nodeEnv) => {
+    const provider = createTtsProvider({ TTS_PROVIDER: 'fixture', NODE_ENV: nodeEnv });
+    expect(provider).toBeInstanceOf(FixtureTtsProvider);
+  });
+
+  it('refuses to build in production, loudly, even with every vendor key present', () => {
+    expect(() =>
+      createTtsProvider({
+        TTS_PROVIDER: 'fixture',
+        NODE_ENV: 'production',
+        ELEVENLABS_API_KEY: 'key',
+        AI_PROVIDER_API_KEY: 'openai-key',
+      }),
+    ).toThrow(/TTS_PROVIDER=fixture.*production/);
+  });
+
+  it('speaks a short silent audio/mpeg clip for any line, in whichever preset voice is asked', async () => {
+    const provider = createTtsProvider({ TTS_PROVIDER: 'fixture', NODE_ENV: 'test' })!;
+    const a = await provider.synthesize({ text: 'How should I answer your phone?', voice: 'adam' });
+    const b = await provider.synthesize({ text: 'Walsh Plumbing is already set up.' });
+    expect(a.contentType).toBe('audio/mpeg');
+    expect(a.provider).toBe('fixture-tts');
+    // MPEG audio frame sync (11 set bits), Layer III: a real mp3 a browser will decode and play.
+    expect(a.audio[0]).toBe(0xff);
+    expect(a.audio[1] & 0xe6).toBe(0xe2);
+    expect(a.audio.length).toBeGreaterThan(400);
+    expect(a.audio.length).toBeLessThan(4096);
+    expect(a.durationMs).toBe(200);
+    expect(b.audio.equals(a.audio)).toBe(true);
+    // Each preset is its own cache voice, as with a real catalogue.
+    expect(provider.voiceForPreset?.({ id: 'bella', elevenLabsVoiceId: 'EXAVITQu4vr4xnSDxMaL' })).toBe('fixture:bella');
+    // No raw PCM: Media Streams must keep refusing it.
+    expect(provider.synthesizeStream).toBeUndefined();
+  });
+
+  it('the class itself cannot be constructed in production', () => {
+    const was = process.env.NODE_ENV;
+    process.env.NODE_ENV = 'production';
+    try {
+      expect(() => new FixtureTtsProvider()).toThrow(/production/);
+    } finally {
+      process.env.NODE_ENV = was;
+    }
   });
 });
 
