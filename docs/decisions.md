@@ -1838,3 +1838,207 @@ and the card renders whenever there are enough such attempts, so a window where 
 failed shows 100 % rather than "not enough calls"; `voice_turn_latency_ms` keeps its
 "first audible, filler included" meaning and is not reused for the SLO. The number in (3) is
 replaced, with the run date and instance size, by whoever runs the first staging sweep.
+
+## D-044 — "Get found online": a hosted tenant site, a guided Google profile, call forwarding only, and a home checklist outside onboarding
+
+**Date:** 2026-10-21
+**Status:** Accepted (owner decisions 2026-10-21, grilled in the "Google reviews integration flows" project thread)
+
+**Context.** An owner should be able to go from "no web presence" to "customers find me on
+Google, leave reviews, and their calls reach the AI" without leaving the app. What already
+ships: connecting an existing Google Business Profile (first account and first location only),
+the 15-minute review sweep and AI reply drafts, the post-job rating text that sends 4★+ to a
+review link the owner pastes by hand, the public lead and booking pages, and number
+provisioning (D-037). What does not: any website, any path for an owner with no Google
+profile, a location picker, forwarding instructions in the current onboarding, a check that
+forwarding works, and anything that tracks setup after activation.
+
+**Decision.**
+
+1. **Tenant site.** An owner without a website gets a one-page site we host, on a subdomain of
+   a **separate domain reserved for tenant sites**, never the app's domain, so a flagged
+   tenant site cannot hurt the app's login or mail reputation. The page is built from tenant
+   settings (name, services, service area, hours, phone, the booking and lead forms). Its
+   "about" copy is AI-drafted through the gateway as a **proposal**; nothing on the page goes
+   live until the owner approves it.
+2. **Connected domain, no registrar.** An owner who already owns a domain can point it at their
+   tenant site: we show the one DNS record, verify it, and issue HTTPS. We do not sell, buy or
+   renew domains.
+3. **Google profile is guided, not created.** Google requires the owner to verify a profile
+   themselves, so for an owner with none we deep-link them through creating it, then connect it
+   once verified. A connection picks **one location** from a picker (no more first-location
+   default); multi-location tenants are out of scope.
+4. **Derived from the connection.** Once connected, the Google review link is filled in from the
+   location instead of being pasted. Setting the location's website (tenant site or connected
+   domain) and booking link on Google is an outward-facing write, so it is an **approval card**
+   the owner taps, never automatic.
+5. **Call forwarding only — no porting.** The owner keeps their number and forwards it with
+   carrier codes. Two **forwarding modes**: *missed calls only* (default — their phone rings
+   first) and *all calls*. A **forwarding check** places a call from our line to their business
+   number and passes when it arrives back on our number (for missed-calls-only the owner lets
+   it ring out). Porting is a later add-on.
+6. **Chat is the lead form for now.** The tenant site's chat bubble opens the existing lead /
+   booking form. A real AI chatbot needs a public, unauthenticated path into the AI with abuse
+   and per-tenant cost caps, and is its own decision later.
+7. **A home checklist, not onboarding steps.** Progress lives in a "Get found online" checklist
+   on the home page, derived from tenant facts. It is **not** added to the onboarding steps,
+   because activation and the setup-reminder email gate on that list and a Google postcard can
+   take weeks.
+
+**Alternatives rejected.** Linking out to Wix/Squarespace (the owner leaves the app and the
+booking form is not on the site); buying domains for tenants (registrar account, renewals and
+support for little gain); hosting sites on the app's own domain (shared reputation); creating
+Google profiles on the owner's behalf (Google does not allow third-party verification); porting
+in v1 (weeks of carrier paperwork); an AI web chatbot in v1 (needs its own abuse and cost model).
+
+**Consequences.** Ops must buy the tenant-site domain and point a wildcard record at the
+deploy. Every checklist item is derived, so a tenant who disconnects Google or unpublishes their
+site sees the item reopen rather than a stale tick. Forwarding is the exception: turning it off at
+the carrier sends us nothing, so the forwarding check is a point-in-time proof. The forwarding item
+shows the date of the last passing check, reopens when the owner changes carrier or forwarding mode
+in the app, and offers a re-check; detecting carrier-side changes is not promised.
+
+**Amended 2026-10-22 (owner, reconciling the parallel "Get found online" thread, issue #1750).**
+A second grilling the same day recorded its own D-044 on branch `claude/tender-sagan-r78w4n`.
+Reconciled point by point, this entry stays the source of truth and gains:
+- **Presence path.** One onboarding question — *own website*, *Google only*, or *neither* —
+  decides which checklist items show. *Google only* still gets a quiet tenant site as the
+  listing's website, with no domain step.
+- **Skippable items.** The owner can skip an item into a hidden row and bring it back; a
+  skipped item counts as settled. Detection still wins: a skipped item that becomes true shows
+  done.
+- **Day-one owners are not a forwarding mode.** An owner with no existing business line
+  forwards nothing; their call item is done once their Rivet number is live **and** has
+  answered a real inbound call — provisioning alone does not count.
+- **A forwarding mode change voids the last check.** Changing forwarding mode clears the
+  passing check (and advances the line's `forwarding_generation`), so a check proven under one
+  mode never completes the other.
+- **Deferred, not rejected:** creating Google profiles through Google's API (behind Google's
+  API-access approval) and an AI web chat (needs its own abuse, cost-cap and usage-metering
+  decision — what unit a conversation bills as). Both return as their own decisions.
+
+## D-045 — Outbound messaging decides its own policy; invoices go by text with a pay link; proposal status moves only through the lifecycle
+
+**Date:** 2026-10-21
+**Status:** Accepted (owner decisions 2026-10-21, grilled in the "Backend architecture review" project thread)
+
+**Context.** The architecture review found two rules enforced by caller discipline. Outbound
+texts pass one consent gate (`notifications/gated-message-delivery.ts`), but each of about 40
+senders chooses its own policy inputs: an `owner`/`customer` tag that skips every check when
+wrong, a consent snapshot it looked up itself, and an opt-in quiet-hours flag only 2 senders
+set. Invoices and estimates go by email first whenever an email is on file (#1524), and when
+the pay link cannot be made the invoice quietly goes out view-only. Separately, about 20
+callers write a proposal's status directly, and the repository checks no transition.
+
+**Decision.**
+
+1. **Outbound messaging owns the policy.** A sender names a recipient (a customer by id, the
+   owner or team, or a reply to a number that just contacted us) and a **message purpose**
+   (transactional, reply, automated nudge, marketing). The module looks up consent itself,
+   derives quiet-hours handling from the purpose, holds a nudge and sends it when the
+   customer's daytime window opens, and requires a duplicate key built from the purpose and
+   the record the message is about.
+2. **Every message has a send outcome.** *Sent*, *scheduled* (with the time) or *blocked*
+   (with the reason). A send a person triggered shows the reason on screen; an automated
+   one records it. One record per message replaces the invoice/estimate-only dispatch log
+   and links the customer and, when there is one, the job and the invoice or estimate. That
+   record drives a status bubble on the job and the customer; blocked messages also reach
+   the owner's inbox.
+3. **Invoices and estimates go by text first.** When the customer has a textable number and
+   has not opted out, the send is a text with the link; email is the fallback. An invoice
+   text carries a **pay link** unless the owner chose *collect on the spot*. If the pay link
+   cannot be made, the invoice is not sent without it: an owner-pressed send is refused with
+   the reason, and an automatic one is held, retried once, then put on the owner's to-do
+   list. This supersedes #1524's email-first default and S5a-1's fail-open view-only send.
+4. **Wording.** Each purpose has a default message: the owner's saved template for it if
+   there is one, otherwise the built-in text. Any single send may add an owner note on top.
+   *As built (Settings → Text wording, migration 330):* the owner can word the estimate,
+   invoice, customer-portal link and thank-you texts with `{{fill-ins}}` (owner only). Each
+   text can be worded once per language (English and Spanish; Josh, 2026-10-22: "write
+   both", migration 333). A customer gets the owner's wording in the language they read
+   when there is one, otherwise the built-in text in that language. Wording that
+   can't be read or filled falls back to the built-in text with a logged warning, never a
+   failed send or a raw `{{fill_in}}`; an invoice paid in person keeps the built-in
+   in-person line. Emails keep the built-in wording.
+5. **Email stays as it is for now.** Customer emails outside invoice and estimate sends
+   (campaigns, some replies, review follow-ups) are left alone and tracked as known
+   exceptions until an email-consent decision is made (D-017 says a grant never crosses
+   channels, so an SMS grant is not email consent).
+6. **Migration is gradual.** Senders move one file at a time; a guard test lists today's
+   direct callers of the raw sender and the list may only shrink.
+7. **Proposal status moves only through the lifecycle.** The repository runs the transition
+   table on every status write (the **status-write gate**). Four moves the code already made
+   are allowed there as system-only writes, kept out of the table that approve, reject and
+   undo consult: ready_for_review → draft (supervisor hold), approved → executing (execution
+   claim), executing → approved (chain dependent released), approved → rejected (a caller
+   revoking their own unexecuted booking; the generic reject endpoint still cannot reach an
+   approved proposal).
+8. **Drafting has one entry point and three outcomes.** Every surface drafts through one
+   module that returns a proposal, a clarification, or a refusal with a reason, and runs the
+   made-up-id scrub that only chat ran before. Owners keep editing drafts before approval in
+   the app and the portal; an edit re-runs the same checks.
+
+**Not decided (deferred by the owner).** An auto-send trust ramp (auto-approving customer
+messages after N approvals above a confidence bar) was raised and deliberately set aside.
+Customer messages and money still never auto-approve (D-004, D-033).
+
+**Alternatives rejected.** Leaving policy at the call site with a lint rule (the tag still
+lies when wrong); gating email now (needs the email-consent decision first); a big-bang
+rewrite of all senders.
+
+## D-046 — Connected domains terminate TLS behind a `CertificateProvider`; Railway's custom-domain API is the default, inert until configured
+
+**Date:** 2026-10-22
+**Status:** Accepted as the first implementation (agent-made choice on issue #1770, to be confirmed by the owner once Railway's limits are checked against a real project)
+
+**Context.** D-044 point 2 lets an owner point a domain they already own at their tenant site:
+we show one CNAME, verify it, and get HTTPS working. Something has to hold a certificate for
+each such host. Two options: Railway's custom-domain API (register the domain on the serving
+service; Railway's edge issues the certificate), or a TLS-for-SaaS provider (Cloudflare for
+SaaS custom hostnames, or an on-demand-TLS proxy such as Caddy in front).
+
+**Decision.**
+
+1. **A small `CertificateProvider` interface** (`register`, `status`, `remove`) in
+   `packages/api/src/tenant-site/custom-domain.ts`. Everything else (the verification sweep,
+   the owner endpoints, Host serving) depends only on it.
+2. **The default implementation is Railway's GraphQL custom-domain API**
+   (`railway-certificate-provider.ts`). It is **inert unless configured**: it needs
+   `RAILWAY_API_TOKEN`, `RAILWAY_PROJECT_ID`, `RAILWAY_ENVIRONMENT_ID` (Railway injects the last
+   two) and `TENANT_SITE_RAILWAY_SERVICE_ID` (the public `web` service, never the worker's own
+   id). Without them the Settings card does not offer the feature and the sweep is not started.
+3. **A domain verifies only against the tenant's own address.** The CNAME must name
+   `<slug>.<TENANT_SITE_BASE_DOMAIN>` for that tenant. Only a *verified* domain is unique
+   across tenants and served, so an unverified claim cannot squat a name and one tenant's
+   claim can never pass on a domain pointed at another's address.
+4. **Sweep.** Leader-gated every minute (advisory key 590044); each claim keeps its own backoff
+   (1m doubling to 1h, 60 attempts, about two and a half days) and then rests as `failed`
+   until the owner taps "Check again". The domain is registered with the provider only once DNS
+   points at us, so unverified claims do not consume provider slots.
+5. **We never buy, sell or renew domains.** Unchanged from D-044.
+
+**Caveats (not verifiable offline; check before relying on this at scale).**
+- **Per-service domain limits.** Railway caps custom domains per service by plan (as last
+  known: a small single-digit number on Hobby and tens on Pro, raisable on request). The limit
+  was not checked against the live account, and it is the main reason this is behind an
+  interface: at hundreds of connected domains this default stops being enough. The sweep records
+  a provider failure as "We couldn't start your secure (HTTPS) setup" and retries, so hitting the
+  cap shows up to the owner as a pending error, not silent breakage.
+- **The CNAME chain.** The owner's CNAME points at `<slug>.<base>`, which resolves through our
+  wildcard record to Railway. Whether Railway's own domain check accepts a chain (rather than
+  a CNAME straight at its target) and issues the certificate must be confirmed on first use.
+  If it does not, the provider needs the Railway-assigned target shown instead, which changes
+  the record we display but not the interfaces.
+- The GraphQL shapes (`customDomainCreate`, `customDomain.status.certificateStatus`,
+  `customDomainDelete`) follow Railway's public schema and have not been run against a live
+  project from this code; the provider is unit-tested against a mocked endpoint only.
+- A verified domain is not re-checked for DNS drift. If the owner later removes the CNAME,
+  the site stops being reachable there but stays marked verified until they re-check.
+
+**Migration path.** A Cloudflare-for-SaaS or Caddy on-demand provider is a second class
+implementing `CertificateProvider` plus a different record to display; nothing above the
+interface changes. Choose it when connected domains approach the Railway per-service limit.
+
+**Alternatives rejected.** A TLS-for-SaaS provider first (a second vendor account, and DNS and
+billing to set up before one owner has connected a domain); our own ACME client (certificate
+storage, renewal and rate limits are exactly the work a provider removes).

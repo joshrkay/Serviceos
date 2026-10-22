@@ -94,10 +94,10 @@ and that is a stated ceiling of this pin rather than an oversight.**
 
 | Budget | Count |
 |---|---|
-| Owner-only routes in code | **81** |
+| Owner-only routes in code | **91** |
 | `cadence: daily` | **2** |
 | `cadence: onboarding` | **16** |
-| `cadence: occasional` | **63** |
+| `cadence: occasional` | **73** |
 | `ownerRequiredDailyWebActions` — `daily` ∧ not reachable | **1** |
 | `ownerRequiredOnboardingWebActions` — `onboarding` ∧ not reachable | **16** |
 
@@ -109,10 +109,10 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 
 ```json
 {
-  "ownerOnlyRoutes": 81,
+  "ownerOnlyRoutes": 91,
   "daily": 2,
   "onboarding": 16,
-  "occasional": 63,
+  "occasional": 73,
   "ownerRequiredDailyWebActions": 1,
   "ownerRequiredOnboardingWebActions": 16
 }
@@ -144,8 +144,20 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `POST /api/billing/connect/onboarding` | onboarding | Stripe Connect onboarding. Until it is done the tenant cannot take card payments, which is half of the time-to-cash metric. | false | none | Reviewed: one-time activation; Stripe's hosted onboarding is a browser flow by construction. |
 | `POST /api/voice/go-live` | onboarding | Flips the tenant's voice agent live. Until it is called the AI answers nothing, so it is the last forced step of activation. | false | none | Reviewed: one-time activation. Deliberately a considered on-screen act — the owner is handing their phone line to an AI. |
 | `PUT /api/settings/texting-registration/` | onboarding | US A2P 10DLC registration (#1564): the owner submits the business's legal name, EIN, address and authorized contact once; Rivet (as ISV) registers the Brand and campaign with the carriers. Until it is approved the tenant's texts are unregistered 10DLC traffic. | false | none | Reviewed: one-time activation. The carriers vet exact legal identity data (legal name must match the EIN record), so this is a deliberate form entry, not a spoken or SMS action; the long carrier review that follows needs no owner action (the worker polls it). |
+| `PUT /api/get-found/presence-path` | occasional | Get found online checklist (D-044): the owner's "do you have a website?" answer, which picks the checklist's items. Asked once in onboarding but never gates activation, and changed only when the business's web presence changes. | false | none | |
+| `PUT /api/get-found/forwarding-mode` | occasional | Get found online checklist (D-044): missed calls only (default) or all calls for the owner's forwarded line. Set once while getting found; revisited only on a carrier change, and a change voids the last forwarding check. | false | none | |
+| `PUT /api/get-found/items/:id/skip` | occasional | Get found online checklist (D-044): folds an optional setup item the owner does not want into the card's hidden row. Optional by construction. | false | none | |
+| `DELETE /api/get-found/items/:id/skip` | occasional | Get found online checklist (D-044): brings a skipped setup item back. Optional by construction. | false | none | |
 | `DELETE /api/googlebusiness-integrations/google` | occasional | Disconnects review monitoring — teardown of an optional integration, never part of a working day. | false | none | |
 | `POST /api/googlebusiness-integrations/google/connect` | occasional | Connects the tenant's Google Business profile for review monitoring. Tenant-wide credential, set once; owner-gated so a member cannot repoint it at an account they control. | false | none | |
+| `GET /api/googlebusiness-integrations/google/locations` | occasional | D-044: lists the Google listings on the connected account so the owner can pick one. Only needed when the account has several, or to change it. | false | none | |
+| `PUT /api/googlebusiness-integrations/google/location` | occasional | D-044: chooses which Google listing the tenant is (fills the review link from it). A one-time setup choice, owner-gated like the connection itself. | false | none | |
+| `GET /api/get-found-online/` | occasional | D-044: the home "Get found online" checklist. A read of setup progress that no working day forces; dispatchers and techs never see the card. | false | none | |
+| `GET /api/get-found-online/forwarding` | occasional | D-044 / #1765: reads the carrier and mode the owner forwards their number with. Setup read; no working day forces it. | false | none | |
+| `PUT /api/get-found-online/forwarding` | occasional | D-044 / #1765: saves carrier and forwarding mode (missed calls only, or all). One-time setup choice. | false | none | |
+| `GET /api/get-found-online/forwarding/check` | occasional | D-044 / #1766: reads the latest call-forwarding test result. Setup read; no working day forces it. | false | none | |
+| `POST /api/get-found-online/forwarding/check` | occasional | D-044 / #1766: places a test call from the Rivet number to the business number. Rate-limited per tenant; run when forwarding is set up or changed. | false | none | |
+| `POST /api/get-found-online/dismiss` | occasional | D-044: hides the finished checklist. Optional tidy-up, allowed only once every item is done. | false | none | |
 | `POST /api/integrations/quickbooks/connect` | occasional | Connects the tenant's books to a QuickBooks company. Tenant-wide financial integration set up once; owner-gated so a member cannot sync paid invoices/customers into their own Intuit company. | false | none | |
 | `POST /api/integrations/quickbooks/disconnect` | occasional | QuickBooks teardown — never part of a working day. | false | none | |
 | `POST /api/integrations/quickbooks/sync` | occasional | Manual re-sync to QuickBooks; an optional nudge, not something the day forces. Pushes financial data, so owner-gated like connect. | false | none | |
@@ -157,6 +169,7 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `DELETE /api/estimates/:id` | occasional | Cleanup. The daily path is draft → approve → send, not delete. | false | none | |
 | `DELETE /api/notes/:id` | occasional | Cleanup of a note the day already captured. | false | none | |
 | `DELETE /api/settings/packs/:packId` | occasional | Vertical-pack configuration. | false | none | |
+| `DELETE /api/settings/text-wording/:purpose` | occasional | Resets one customer text (estimate, invoice, portal link, thank-you) back to our wording (D-045). Rare by construction. | false | none | |
 | `DELETE /api/settings/e1-script` | occasional | Reverts the tenant's E1 life-safety script to the hard-flagged placeholder (#1386, O-2) — e.g. a sign-off withdrawn. Rare by construction. | false | none | |
 | `DELETE /api/settings/voice-approval-pin` | occasional | Security configuration for the spoken money/irreversible challenge. | false | none | |
 | `PATCH /api/entity-aliases/:id/deactivate` | occasional | Revokes a learned tenant alias — a correction to what the AI inferred, not a step in a normal day. Owner-only per the router's own header ("Owner-only revoke path for learned tenant aliases"). **Gated inside the handler, not by a middleware guard**, so the executed-guard derivation cannot see it; declared in `IN_HANDLER_OWNER_ROUTES` and cross-checked against the mounted app and the source. | false | none | |
@@ -164,6 +177,9 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `GET /api/settings/packs/` | occasional | Configuration read. | false | none | |
 | `GET /api/voice/quality/` | occasional | Reads the production call-quality score (#1602): 7/30-day graded pass rates against the 85% gate and the last graded calls with the judge's reason. A read-only check on how the AI is doing — nothing in a normal day forces it; the SLO monitor pages the operator when the rate drops. | false | none | |
 | `POST /api/voice/quality/grade` | occasional | On-demand run of the nightly call-quality grading sampler for this tenant (#1602), bounded by the same daily cap. Discretionary — the nightly pass does this unprompted. | false | none | |
+| `GET /api/voice/scoring/` | occasional | Lists the scored calls and their flagged moments (#1736) — a review surface, off until the owner opts in. Nothing in a normal day forces it. | false | none | |
+| `PUT /api/voice/scoring/settings` | occasional | One-time opt-in/out of post-call scoring (#1736). | false | none | |
+| `POST /api/voice/scoring/:sessionId/correct` | occasional | "Correct this call" (#1736): the owner tells the AI what it should have done; it becomes a regression case. Discretionary feedback, not a step in the day. | false | none | |
 | `GET /api/settings/texting-registration/` | occasional | Reads the texting-registration status and any carrier rejection reasons (#1564). Owner-only because it returns the submitted business identity. No normal day forces it. | false | none | |
 | `PATCH /api/job-forms/templates/:id` | occasional | Job-form template configuration. | false | none | |
 | `PATCH /api/settings/language` | occasional | One-time language preference. | false | none | |
@@ -204,9 +220,36 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `PUT /api/settings/brand-voice/` | occasional | Brand-voice configuration. Voice can reach it (`update_brand_voice` is `manual` class — owner-only, never auto-approved). | true | voice_intent:update_brand_voice | |
 | `PUT /api/settings/capabilities/:key` | occasional | Per-tenant capability flags (#1011). Configuration. | false | none | |
 | `PUT /api/settings/dunning` | occasional | The tenant's late-fee and dunning policy (#1143). Configuration set once and revisited rarely; the overdue sweep applies it with no owner action on a normal day. | false | none | |
+| `PUT /api/settings/text-wording/:purpose` | occasional | The owner's own wording for one customer text (D-045, Settings → Text wording). Set once and revisited rarely; with none saved, our wording goes out with no owner action. | false | none | |
 | `PUT /api/settings/e1-script` | occasional | Records the reviewed E1 life-safety script with its two reviewer sign-offs (#1386/#1389, O-2: one licensed trade professional AND one counsel, both required; web form at `/settings/e1-script`). Done once per sign-off; until then calls run the hard-flagged placeholder with no owner action. | false | none | |
 | `PUT /api/settings/packs/:packId/activate` | occasional | Vertical-pack activation. | false | none | |
 | `PUT /api/settings/voice-approval-pin` | occasional | Security configuration for the spoken challenge. | false | none | |
+| `DELETE /api/lsa-integration/` | occasional | Unlinks Google Local Services leads (#1738, Settings → Local Services leads). Set once; leads keep arriving in the inbox with no owner action. | false | none | |
+| `GET /api/lsa-integration/` | occasional | Reads the Local Services link status and recent leads (#1738). Read-only, opened from Settings. | false | none | |
+| `POST /api/lsa-integration/link` | occasional | Links or rotates the per-tenant Local Services webhook secret (#1738). One-time setup. | false | none | |
+| `PUT /api/lsa-integration/` | occasional | Turns Local Services intake and its text-back opt-in on or off (#1738). Configuration. | false | none | |
+| `POST /api/lsa-integration/leads/:leadId/disposition` | occasional | Records the outcome of a Local Services lead (#1738). Optional bookkeeping; never required for a lead to be worked. | false | none | |
+| `GET /api/drip-campaigns/sequences` | occasional | Lists follow-up sequences (#1735). Read-only. | false | none | |
+| `GET /api/drip-campaigns/status` | occasional | Whether follow-up campaigns are switched on for the tenant (#1735). Read-only. | false | none | |
+| `POST /api/drip-campaigns/sequences` | occasional | Creates a follow-up sequence, paused (#1735). Occasional campaign setup. | false | none | |
+| `POST /api/drip-campaigns/sequences/:id/enroll` | occasional | Adds matching customers to a sequence (#1735). Occasional; nothing sends until the sequence is resumed. | false | none | |
+| `POST /api/drip-campaigns/sequences/:id/pause` | occasional | Pauses a follow-up sequence (#1735). Occasional. | false | none | |
+| `POST /api/drip-campaigns/sequences/:id/resume` | occasional | Starts a follow-up sequence (#1735). Occasional; every step stays consent-gated. | false | none | |
+| `GET /api/tenant-site/` | occasional | Reads the hosted website state (#1768, Settings → Website). Read-only. | false | none | |
+| `GET /api/tenant-site/about` | occasional | Reads the site's about text and any pending draft (#1769). Read-only. | false | none | |
+| `GET /api/tenant-site/check` | occasional | Checks whether a site address is free (#1768). Read-only. | false | none | |
+| `GET /api/tenant-site/preview` | occasional | Previews the hosted site (#1768). Read-only. | false | none | |
+| `POST /api/tenant-site/about/draft` | occasional | Asks for an AI-drafted about text (#1769); it arrives as a proposal the owner approves in the normal inbox. | false | none | |
+| `POST /api/tenant-site/publish` | occasional | Publishes the hosted site (#1768). Set up once; it then updates itself from settings. | false | none | |
+| `POST /api/tenant-site/unpublish` | occasional | Takes the hosted site down (#1768). Rare. | false | none | |
+| `PUT /api/tenant-site/address` | occasional | Picks the hosted site's address (#1768). Set once. | false | none | |
+| `GET /api/webchat/` | occasional | Reads the web chat settings and the embed snippet (#1737). Read-only. | false | none | |
+| `POST /api/webchat/rotate-token` | occasional | Rotates the web chat embed token (#1737). Rare security action. | false | none | |
+| `PUT /api/webchat/` | occasional | Web chat on/off, allowed sites and daily caps (#1737). Configuration set once. | false | none | |
+| `POST /api/get-found-online/google-website/draft` | occasional | Drafts the approval card that adds the owner's website and booking link to their Google listing (#1771). Nothing is written until the owner taps approve; it is a public change, so it is never automatic. | false | none | |
+| `DELETE /api/tenant-site/domain` | occasional | Disconnects the owner's own domain from the hosted site (#1770). Rare. | false | none | |
+| `POST /api/tenant-site/domain/check` | occasional | Re-checks the owner's domain DNS record after a failure (#1770). The sweep retries on its own; this is an impatient shortcut. | false | none | |
+| `PUT /api/tenant-site/domain` | occasional | Connects a domain the owner already owns to the hosted site (#1770). One-time; we show the single DNS record and verify it ourselves. | false | none | |
 
 <!-- END machine-readable: owner-daily-actions -->
 

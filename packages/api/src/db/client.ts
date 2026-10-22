@@ -1,5 +1,6 @@
 import { Pool, PoolClient, QueryResultRow } from 'pg';
 import { DatabaseClient, DatabaseConfig, QueryResult } from './connection';
+import { buildPgSsl } from './pool';
 
 /**
  * Concrete Postgres implementation of DatabaseClient using node-postgres (pg).
@@ -20,7 +21,7 @@ export class PgDatabaseClient implements DatabaseClient {
       database: config.database,
       user: config.user,
       password: config.password,
-      ssl: config.ssl ? { rejectUnauthorized: false } : false,
+      ssl: config.ssl ? buildPgSsl() : false,
       max: config.maxConnections ?? 10,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 5000,

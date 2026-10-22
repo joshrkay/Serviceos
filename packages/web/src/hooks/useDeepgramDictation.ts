@@ -52,9 +52,17 @@ interface StreamTokenResponse {
  * How `start()` went: `connecting` (token minted, socket opening), `unsupported` (no
  * browser APIs), `unavailable` (the token route answered 503: transcription is not set
  * up here), `refused` (any other refusal of the token), `denied` (the microphone was
- * refused), `failed` (anything else).
+ * refused), `failed` (anything else), `cancelled` (`stop()`, a newer `start()` or unmount
+ * came first; whatever this start had opened is already released).
  */
-export type DictationStart = 'connecting' | 'unsupported' | 'unavailable' | 'refused' | 'denied' | 'failed';
+export type DictationStart =
+  | 'connecting'
+  | 'unsupported'
+  | 'unavailable'
+  | 'refused'
+  | 'denied'
+  | 'failed'
+  | 'cancelled';
 
 export interface UseDeepgramDictation {
   isRecording: boolean;
@@ -183,6 +191,10 @@ export function useDeepgramDictation(opts: {
   const streamRef = useRef<MediaStream | null>(null);
   const finalsRef = useRef<string[]>([]);
   const interimRef = useRef('');
+  // Bumped by every start, stop and unmount. A start still waiting on its
+  // token or microphone checks it after each wait, so a stale start releases
+  // only what it opened itself and never touches a newer attempt's socket.
+  const generationRef = useRef(0);
 
   const cleanup = useCallback(() => {
     try {
@@ -221,6 +233,7 @@ export function useDeepgramDictation(opts: {
   }, []);
 
   const stop = useCallback(() => {
+    generationRef.current += 1;
     if (!recorderRef.current && !wsRef.current) return;
     // Flush Deepgram, then deliver the accumulated final transcript.
     try {
@@ -239,6 +252,11 @@ export function useDeepgramDictation(opts: {
 
   const start = useCallback(async (): Promise<DictationStart> => {
     if (isRecording) return 'connecting';
+    const generation = ++generationRef.current;
+    const superseded = () => generationRef.current !== generation;
+    // A previous start that is still opening its socket belongs to an attempt
+    // the caller has moved on from.
+    cleanup();
     setError(null);
     finalsRef.current = [];
     interimRef.current = '';
@@ -255,6 +273,7 @@ export function useDeepgramDictation(opts: {
       // it, mirroring /transcribe's `languageHint` query param.
       const tokenQs = languageRef.current ? `?language=${encodeURIComponent(languageRef.current)}` : '';
       const res = await apiFetch(`/api/voice/stream-token${tokenQs}`, { method: 'POST' });
+      if (superseded()) return 'cancelled';
       if (!res.ok) {
         let serverMessage: string | undefined;
         try {
@@ -263,6 +282,8 @@ export function useDeepgramDictation(opts: {
         } catch {
           /* ignore non-JSON error bodies */
         }
+        // Stopped while the error body was read: the error is the old attempt's.
+        if (superseded()) return 'cancelled';
         setError(
           res.status === 503
             ? (serverMessage ?? 'Live transcription is not available right now.')
@@ -271,8 +292,15 @@ export function useDeepgramDictation(opts: {
         return res.status === 503 ? 'unavailable' : 'refused';
       }
       const { token, model } = (await res.json()) as StreamTokenResponse;
+      if (superseded()) return 'cancelled';
 
       const stream = givenStreamRef.current ?? (await navigator.mediaDevices.getUserMedia({ audio: true }));
+      if (superseded()) {
+        // This start opened the microphone after the caller moved on: release
+        // it here, since the refs now belong to the newer attempt.
+        if (stream !== givenStreamRef.current) stream.getTracks().forEach((t) => t.stop());
+        return 'cancelled';
+      }
       streamRef.current = stream;
 
       // Deepgram browser auth: pass the short-lived token via the `bearer`
@@ -353,6 +381,7 @@ export function useDeepgramDictation(opts: {
       ws.onclose = endedOnItsOwn;
       return 'connecting';
     } catch (err) {
+      if (superseded()) return 'cancelled';
       const denied = err instanceof DOMException && err.name === 'NotAllowedError';
       setError(denied ? 'Microphone permission is required for voice dictation.' : 'Could not start dictation. Please try again.');
       cleanup();
@@ -362,7 +391,13 @@ export function useDeepgramDictation(opts: {
   }, [isRecording, cleanup, composed, flushUtterance]);
 
   // Tear down on unmount so a mic/WS never leaks past the component.
-  useEffect(() => () => cleanup(), [cleanup]);
+  useEffect(
+    () => () => {
+      generationRef.current += 1;
+      cleanup();
+    },
+    [cleanup],
+  );
 
   return { isRecording, partial, error, supported: dictationSupported(), start, stop };
 }

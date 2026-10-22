@@ -21,6 +21,7 @@
     "voice-quality:watch": "vitest -c vitest.voice-quality.config.mts",
     "voice-quality:record": "VOICE_QUALITY_CASSETTE_MODE=record vitest run -c vitest.voice-quality.config.mts",
     "voice-quality:refresh": "VOICE_QUALITY_CASSETTE_MODE=refresh vitest run -c vitest.voice-quality.config.mts",
+    "voice-quality:export-corrections": "ts-node scripts/export-call-corrections.ts",
     "voice-quality:check-cassettes": "ts-node scripts/check-voice-quality-cassettes.ts",
     "voice-quality:staleness": "ts-node scripts/report-cassette-staleness.ts",
     "voice-quality:seed-cassettes": "ts-node scripts/seed-voice-quality-cassettes.ts",

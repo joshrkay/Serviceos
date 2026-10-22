@@ -179,6 +179,10 @@ import { PgMaterialItemRepository } from '../materials/pg-material-item';
 import { InMemoryMessageTemplateRepository } from '../messaging/message-template';
 import { PgMessageTemplateRepository } from '../messaging/pg-message-template';
 import {
+  InMemoryCustomerTextWordingRepository,
+  PgCustomerTextWordingRepository,
+} from '../notifications/customer-text-wording';
+import {
   InMemoryHfcrWeeklySendRepository,
   PgHfcrWeeklySendRepository,
 } from '../metrics/hfcr-weekly-send';
@@ -490,6 +494,9 @@ export function buildRepositories(
   const messageTemplateRepo = pool
     ? new PgMessageTemplateRepository(pool)
     : new InMemoryMessageTemplateRepository();
+  const customerTextWordingRepo = pool
+    ? new PgCustomerTextWordingRepository(pool)
+    : new InMemoryCustomerTextWordingRepository();
   const bundleRepo = pool
     ? new PgServiceBundleRepository(pool)
     : new InMemoryServiceBundleRepository();
@@ -743,6 +750,7 @@ export function buildRepositories(
     customerPaymentMethodRepo,
     templateRepo,
     messageTemplateRepo,
+    customerTextWordingRepo,
     bundleRepo,
     qualityMetricsRepo,
     voiceRepo,

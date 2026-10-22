@@ -23,6 +23,8 @@ const apiFetchMock = vi.fn();
 vi.mock('./AiMinutesCard', () => ({ AiMinutesCard: () => null }));
 // #1602 — same for the call-quality card (CallQualityCard.test covers it).
 vi.mock('./CallQualityCard', () => ({ CallQualityCard: () => null }));
+// #1736 — same for the call-review card (CallReviewCard.test covers it).
+vi.mock('./CallReviewCard', () => ({ CallReviewCard: () => null }));
 
 vi.mock('../../utils/api-fetch', () => ({
   apiFetch: (...args: unknown[]) => apiFetchMock(...args),

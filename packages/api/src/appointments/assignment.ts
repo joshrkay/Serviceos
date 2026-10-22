@@ -11,6 +11,7 @@ import { UnavailableBlockRepository } from '../availability/unavailable-block';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { notifyTechnicianAssignmentChange } from './assignment-notifications';
 import { isRuntimeTimezone, localDateKey } from '../shared/timezone';
+import { SkillMatcher, assertTechnicianHoldsRequiredSkills } from '../scheduling/skill-matcher';
 
 /**
  * Optional dependencies for `assignTechnician`.
@@ -42,6 +43,13 @@ export interface AssignTechnicianDeps {
    */
   workingHoursRepo?: WorkingHoursRepository;
   unavailableBlockRepo?: UnavailableBlockRepository;
+  /**
+   * Dispatch FR-2: when supplied alongside `appointmentRepo`, a technician
+   * missing one of the job's required skills is refused (ConflictError,
+   * 409) — the same blocking rule the feasibility gate applies, enforced on
+   * the direct assign / reassign / schedule routes too.
+   */
+  skillMatcher?: SkillMatcher;
 }
 
 /** Weekday (0=Sun..6=Sat) of an instant in an IANA timezone. */
@@ -125,6 +133,14 @@ export interface AppointmentAssignment {
   /** Denormalised from the parent appointment for the double-booking trigger. */
   scheduledStart?: Date;
   scheduledEnd?: Date;
+  /**
+   * The dispatcher booked this tech knowing the visit overlaps another one
+   * (FR-2 phase 3c). Exempts this row from `no_double_booking` (migration
+   * 332); set only when an overlap actually existed at assignment time.
+   */
+  overlapAccepted?: boolean;
+  /** The appointment ids that acceptance covers; the DB guard holds the row to exactly these. */
+  overlapAcceptedWith?: string[];
 }
 
 export interface CreateAssignmentInput {
@@ -134,6 +150,13 @@ export interface CreateAssignmentInput {
   technicianRole: string;
   isPrimary?: boolean;
   assignedBy: string;
+  /**
+   * FR-2 phase 3c — appointment ids of the overlapping visits the user
+   * explicitly chose to book over. The booking is marked overlap_accepted
+   * only when every overlap found at assign time is in this list; a clash
+   * with a visit the user never saw is still refused (409).
+   */
+  acceptOverlapWith?: readonly string[];
 }
 
 export interface AssignmentRepository {
@@ -170,6 +193,19 @@ export async function assertNoDoubleBooking(
   repository: AssignmentRepository,
   appointmentRepo: Pick<AppointmentRepository, 'findById'>,
 ): Promise<void> {
+  const conflicts = await findDoubleBookings(tenantId, technicianId, window, repository, appointmentRepo);
+  if (conflicts.length > 0) {
+    throw new ConflictError(`Technician is already booked at this time: ${conflicts[0].message}`);
+  }
+}
+
+async function findDoubleBookings(
+  tenantId: string,
+  technicianId: string,
+  window: { start: Date; end: Date; excludeAppointmentId?: string },
+  repository: AssignmentRepository,
+  appointmentRepo: Pick<AppointmentRepository, 'findById'>,
+): Promise<ReturnType<typeof detectOverlappingAppointments>> {
   const techAssignments = await repository.findByTechnician(tenantId, technicianId);
   const otherApptIds = Array.from(
     new Set(
@@ -197,16 +233,13 @@ export async function assertNoDoubleBooking(
       });
     }
   }
-  const conflicts = detectOverlappingAppointments(
+  return detectOverlappingAppointments(
     technicianId,
     window.start,
     window.end,
     others,
     window.excludeAppointmentId,
   );
-  if (conflicts.length > 0) {
-    throw new ConflictError(`Technician is already booked at this time: ${conflicts[0].message}`);
-  }
 }
 
 export async function assignTechnician(
@@ -218,6 +251,7 @@ export async function assignTechnician(
   if (errors.length > 0) throw new ValidationError(`Validation failed: ${errors.join(', ')}`);
 
   const isPrimary = input.isPrimary ?? true;
+  let overlapAccepted = false;
 
   // Double-booking backstop. When an appointment repo is supplied, refuse
   // to assign a technician who already has an active appointment whose time
@@ -229,13 +263,21 @@ export async function assignTechnician(
   if (deps.appointmentRepo) {
     const target = await deps.appointmentRepo.findById(input.tenantId, input.appointmentId);
     if (target) {
-      await assertNoDoubleBooking(
-        input.tenantId,
-        input.technicianId,
-        { start: target.scheduledStart, end: target.scheduledEnd, excludeAppointmentId: input.appointmentId },
-        repository,
-        deps.appointmentRepo,
-      );
+      const window = { start: target.scheduledStart, end: target.scheduledEnd, excludeAppointmentId: input.appointmentId };
+      if (input.acceptOverlapWith && input.acceptOverlapWith.length > 0) {
+        // Marked only when the overlap is real AND is exactly what the user
+        // accepted, so a stray flag or a calendar that changed since the
+        // user looked never weakens the DB guard.
+        const conflicts = await findDoubleBookings(input.tenantId, input.technicianId, window, repository, deps.appointmentRepo);
+        const accepted = new Set(input.acceptOverlapWith);
+        const unseen = conflicts.find((c) => !c.conflictingEntityId || !accepted.has(c.conflictingEntityId));
+        if (unseen) {
+          throw new ConflictError(`Technician is already booked at this time: ${unseen.message}`);
+        }
+        overlapAccepted = conflicts.length > 0;
+      } else {
+        await assertNoDoubleBooking(input.tenantId, input.technicianId, window, repository, deps.appointmentRepo);
+      }
 
       // Availability preconditions (contract #12/#13) — see the deps doc.
       await assertTechnicianAvailability(
@@ -244,6 +286,10 @@ export async function assignTechnician(
         { start: target.scheduledStart, end: target.scheduledEnd, timezone: target.timezone },
         deps,
       );
+
+      if (deps.skillMatcher && target.jobId) {
+        await assertTechnicianHoldsRequiredSkills(input.tenantId, input.technicianId, target.jobId, deps.skillMatcher);
+      }
     }
   }
 
@@ -276,6 +322,7 @@ export async function assignTechnician(
     scheduledEnd: deps.appointmentRepo
       ? (await deps.appointmentRepo.findById(input.tenantId, input.appointmentId))?.scheduledEnd
       : undefined,
+    ...(overlapAccepted ? { overlapAccepted: true, overlapAcceptedWith: [...(input.acceptOverlapWith ?? [])] } : {}),
   };
 
   const created = await repository.create(assignment);
@@ -293,6 +340,7 @@ export async function assignTechnician(
           assignmentId: created.id,
           technicianId: input.technicianId,
           isPrimary: created.isPrimary,
+          ...(overlapAccepted ? { overlapAccepted: true, overlapAcceptedWith: [...(input.acceptOverlapWith ?? [])] } : {}),
         },
       }),
     );
@@ -407,9 +455,12 @@ export class InMemoryAssignmentRepository implements AssignmentRepository {
   }
 
   async findByTechnician(tenantId: string, technicianId: string): Promise<AppointmentAssignment[]> {
+    // No trigger keeps the denormalised window in step when an appointment is
+    // rescheduled here (Pg's sync_appointment_to_assignments does), so leave
+    // it off: readers that filter on it then fall back to the appointment.
     return Array.from(this.assignments.values())
       .filter((a) => a.tenantId === tenantId && a.technicianId === technicianId)
-      .map((a) => ({ ...a }));
+      .map(({ scheduledStart: _start, scheduledEnd: _end, ...a }) => a);
   }
 
   async delete(tenantId: string, id: string): Promise<boolean> {

@@ -17,7 +17,7 @@ const h = vi.hoisted(() => ({
   params: {} as { reason?: string; next?: string },
 }));
 
-vi.mock('@clerk/clerk-expo', () => ({
+vi.mock('@clerk/expo/legacy', () => ({
   useSignIn: () => ({
     isLoaded: h.isLoaded,
     signIn: {

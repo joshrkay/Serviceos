@@ -203,6 +203,7 @@ jobs:
             packages/api/src/reputation/**
             packages/api/src/verticals/**
             packages/api/src/workers/transcription.ts
+            packages/api/src/voice/scoring/score-voice-call.ts
             packages/api/src/workers/supervisor-review-worker.ts
             packages/api/src/workers/verify-ai.ts
             packages/api/src/proposals/edit-interpreter.ts

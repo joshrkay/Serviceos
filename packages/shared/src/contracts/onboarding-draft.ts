@@ -84,6 +84,12 @@ export const AssembledOnboardingChoiceSchema = z
     /** What Rivet asks. */
     question: z.string(),
     supportLine: z.string().optional(),
+    /**
+     * Rivet's answers to "what does that mean?" and "give me an example". Optional on the
+     * wire: drafts assembled before they existed are stored without them.
+     */
+    explain: z.string().optional(),
+    example: z.string().optional(),
     options: z.tuple([AssembledOnboardingOptionSchema, AssembledOnboardingOptionSchema]),
     /** The option most shops pick; also the answer used when the owner skips. */
     mostShops: OnboardingOptionKeySchema,

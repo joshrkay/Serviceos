@@ -21,6 +21,7 @@ import { useTTS } from '../../hooks/useTTS';
 import { useConversationVoice } from '../../hooks/useConversationVoice';
 import { useUndoableApproval, type StartUndoInput, type ApproveResponseLike } from '../../hooks/useUndoableApproval';
 import { emitProposalsChanged } from '../../lib/proposal-events';
+import { decodePageContext, pageContextChipLabel, type PageContext } from '../../lib/page-context';
 import { reportError, toSafeErrorShape } from '../../lib/errorReporter';
 import { track } from '../../lib/analytics';
 
@@ -77,6 +78,9 @@ async function sendToConversationAPI(
   // consumes it yet — see the doc comment on that schema field and
   // packages/api/test/routes/assistant-chat-attachments.test.ts.
   attachments?: Array<{ fileId: string }>,
+  // The record the operator was viewing when the turn started (VoiceBar
+  // hand-off), so "this job" resolves to it. See lib/page-context.ts.
+  pageContext?: PageContext | null,
 ): Promise<{ content: string; reasoning?: string; proposal?: AIProposal; autoApplied?: boolean; newConversationId?: string; failed?: boolean }> {
   try {
     // AST-01b: chat → /api/assistant/chat. The server runs intent
@@ -95,6 +99,7 @@ async function sendToConversationAPI(
         ...(conversationId ? { conversationId } : {}),
         ...(inputMode ? { inputMode } : {}),
         ...(attachments?.length ? { attachments } : {}),
+        ...(pageContext ? { pageContext } : {}),
       }),
     });
 
@@ -950,6 +955,13 @@ export function AssistantPage() {
   const inputRef  = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const [searchParams, setSearchParams] = useSearchParams();
+  // Attached by a VoiceBar hand-off from a detail page; rides every turn until
+  // the operator removes the chip.
+  const [pageContext, setPageContext] = useState<PageContext | null>(() =>
+    decodePageContext(searchParams.get('ctx')),
+  );
+  const pageContextRef = useRef(pageContext);
+  pageContextRef.current = pageContext;
 
   // Derive conversationId from URL param or localStorage
   const conversationId = searchParams.get('conversationId') || getLocalFlag('conversationId') || null;
@@ -988,8 +1000,9 @@ export function AssistantPage() {
   useEffect(() => {
     const q = searchParams.get('q');
     if (!q) return;
+    const spoken = searchParams.get('via') === 'voice';
     setSearchParams({}, { replace: true });
-    const timer = setTimeout(() => send(q), 300);
+    const timer = setTimeout(() => send(q, spoken ? { inputMode: 'voice' } : undefined), 300);
     return () => clearTimeout(timer);
   }, []); // eslint-disable-line
 
@@ -1075,6 +1088,7 @@ export function AssistantPage() {
         history,
         opts?.inputMode === 'voice' ? 'voice' : undefined,
         wireAttachments.length ? wireAttachments : undefined,
+        pageContextRef.current,
       );
 
       // Story 3.11 — pin the server's conversation id so the next turn appends
@@ -1294,9 +1308,6 @@ export function AssistantPage() {
             >
               <PhoneCall size={12} /> Live session
             </button>
-            <button className="flex min-h-11 min-w-11 items-center gap-1.5 rounded-lg border border-slate-200 bg-white px-3 text-xs text-slate-500 hover:bg-slate-50 transition-colors">
-              <ChevronDown size={12} /> Context
-            </button>
           </div>
         </div>
       </div>
@@ -1443,6 +1454,24 @@ export function AssistantPage() {
               >
                 {photoUploadError}
               </p>
+            )}
+
+            {pageContext && (
+              <div className="flex items-center gap-2 mb-2">
+                <span
+                  data-testid="assistant-page-context-chip"
+                  className="flex items-center gap-1 rounded-lg bg-blue-50 border border-blue-200 pl-2.5 text-xs text-blue-700"
+                >
+                  {pageContextChipLabel(pageContext)}
+                  <button
+                    onClick={() => setPageContext(null)}
+                    aria-label="Remove page context"
+                    className="flex size-11 items-center justify-center text-blue-400 hover:text-blue-700"
+                  >
+                    <X size={13} />
+                  </button>
+                </span>
+              </div>
             )}
 
             {/* Pending attachment preview */}

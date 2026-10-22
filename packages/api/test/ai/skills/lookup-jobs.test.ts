@@ -156,6 +156,18 @@ describe('P11-001 — lookupJobs skill', () => {
       expect(call[1]).toBe('cust-Q');
     });
 
+    it('reads only the job pointed at, and none that is another customer\'s', async () => {
+      const pointed = await seed({ customerId: 'cust-1', summary: 'Water heater' });
+      await seed({ customerId: 'cust-1', summary: 'Furnace' });
+      const result = await lookupJobs({ tenantId: 'tenant-1', customerId: 'cust-1', jobId: pointed.id }, { jobRepo });
+      if (result.status !== 'found') throw new Error('expected found');
+      expect(result.data.jobs.map((j) => j.summary)).toEqual(['Water heater']);
+      expect(result.summary).toBe(`Job ${pointed.jobNumber} — Water heater is ${pointed.status.replace(/_/g, ' ')}.`);
+
+      const other = await lookupJobs({ tenantId: 'tenant-1', customerId: 'cust-2', jobId: pointed.id }, { jobRepo });
+      expect(other.status).toBe('none');
+    });
+
     it('P18-004 lookup-jobs no ISO timestamps in summary', async () => {
       await seed({ summary: 'thing' });
       const result = await lookupJobs(

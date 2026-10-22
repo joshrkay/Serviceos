@@ -18,6 +18,7 @@
   ],
   "optional": [
     { "name": "ANTHROPIC_API_KEY", "reason": "Local-dev fallback key for the real-LLM path-smoke CLI only (ai/voice-quality/path-smoke/provider.ts:90, reached from scripts/agent-path-smoke.ts and the voice-eval --live runners via packages/voice-eval/live-support.ts). Never read on a boot or request path; unset = the smoke / live eval use the production AI_PROVIDER_API_KEY. Production does not use Anthropic." },
+    { "name": "PAYMENT_LINK_PROVIDER", "reason": "Hermetic e2e only (e2e/onboarding-v3.config.ts). payments/payment-link-provider.ts forces the mock pay-link provider when it is the literal 'mock' and refuses to boot with it in production/staging; unset = the real Stripe provider, the current production behaviour." },
     { "name": "AI_CACHE_ENABLED", "reason": "Opt-in response cache. gateway/factory.ts:209 requires the literal 'true'; unset = caching off, the current production behaviour." },
     { "name": "AI_COMPLETION_PROBE_TIMEOUT_MS", "reason": "Readiness-probe timeout. gateway/readiness.ts:76 derives max(classify-intent deadline, 10s) when unset." },
     { "name": "AI_LIGHTWEIGHT_DEADLINE_MS", "reason": "Tuning constant. config/ai-routing.ts:100 defaults to 1500ms." },
@@ -63,6 +64,7 @@
     { "name": "SHADOW_LLM_API_KEY", "reason": "Only read after SHADOW_LLM_ENABLED==='true'; a missing key also short-circuits back to the primary gateway (factory.ts:428)." },
     { "name": "SHADOW_LLM_BASE_URL", "reason": "Only read on the opt-in shadow path (factory.ts:432)." },
     { "name": "SHADOW_LLM_SAMPLING_RATE", "reason": "Only read on the opt-in shadow path (factory.ts:433)." },
+    { "name": "STT_PROVIDER", "reason": "Dev/test only. The single accepted value 'fixture' makes POST /api/voice/stream-token mint a fake token for the scripted-speech e2e lane (deepgram-token.ts); prodEnvSchema refuses it at boot and the mint refuses it again in production. Unset = real Deepgram, the production behaviour." },
     { "name": "STORAGE_ENABLED", "reason": "Opt-OUT flag: config.ts:287 reads `!== 'false'`, so unset means storage is ENABLED. Setting it is how you turn storage off." },
     { "name": "TELEPHONY_ENABLED", "reason": "Opt-OUT flag: config.ts:285 reads `!== 'false'`, so unset means telephony is ENABLED." },
     { "name": "TCPA_CONSENT_ENFORCEMENT", "reason": "config.ts:57 defaults to 'off' - a DELIBERATE off-by-default documented in the schema comment (the DNC opt-out check still applies). Raising it to 'warn'/'block' is an explicit operator decision, not a missing value." },

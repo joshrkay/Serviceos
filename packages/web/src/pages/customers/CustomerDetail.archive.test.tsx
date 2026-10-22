@@ -13,6 +13,11 @@ vi.mock('../../hooks/useDetailQuery', () => ({ useDetailQuery: vi.fn() }));
 vi.mock('../../utils/api-fetch', () => ({ apiFetch: vi.fn() }));
 vi.mock('../../components/customers/CommunicationTimeline', () => ({ CommunicationTimeline: () => null }));
 vi.mock('../../components/customers/CustomerProfitCard', () => ({ CustomerProfitCard: () => null }));
+// D-045 status bubble fetches its own message record; mock it like the other
+// self-contained cards so its request doesn't consume this suite's mocks.
+vi.mock('../../components/interactions/LatestTextStatus', () => ({
+  LatestTextStatus: () => null,
+}));
 vi.mock('../../components/customers/ContactsPanel', () => ({ ContactsPanel: () => null }));
 vi.mock('../../components/customers/TagsPanel', () => ({ TagsPanel: () => null }));
 vi.mock('../../components/customers/CustomFieldsPanel', () => ({ CustomFieldsPanel: () => null }));

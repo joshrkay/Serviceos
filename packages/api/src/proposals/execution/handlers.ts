@@ -65,6 +65,7 @@ import {
   assignTechnician,
   assertTechnicianAvailability,
 } from '../../appointments/assignment';
+import { SkillMatcher, assertTechnicianHoldsRequiredSkills } from '../../scheduling/skill-matcher';
 import { InvoiceRepository } from '../../invoices/invoice';
 import { DunningEventRepository } from '../../invoices/dunning-config';
 import {
@@ -137,6 +138,10 @@ import type { ClerkInvitationConfig } from '../../users/invite-team-member';
 import { EstimateTemplateRepository } from '../../templates/estimate-template';
 import { SeedPackDefaultsDeps } from '../../packs/seed-pack-defaults';
 import { UpdateBrandVoiceExecutionHandler } from './brand-voice-handler';
+import { UpdateTenantSiteAboutExecutionHandler } from './tenant-site-about-handler';
+import { UpdateGoogleListingWebsiteExecutionHandler } from './google-listing-website-handler';
+import type { GoogleBusinessIntegrationRepository } from '../../reputation/google-business-integration';
+import type { GoogleBusinessOAuthConfig } from '../../reputation/google-business-client';
 import type { BrandVoiceRepository } from '../../tenants/brand/brand-voice';
 import { AddMaterialExecutionHandler } from './add-material-handler';
 import { AddCatalogItemExecutionHandler } from './add-catalog-item-handler';
@@ -404,6 +409,8 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
     private readonly availabilityRepos?: {
       workingHoursRepo?: import('../../availability/working-hours').WorkingHoursRepository;
       unavailableBlockRepo?: import('../../availability/unavailable-block').UnavailableBlockRepository;
+      /** Dispatch FR-2 — the assignment refuses a technician missing a required skill. */
+      skillMatcher?: SkillMatcher;
     },
     /** Tenant-timezone fallback for payloads that omit `timezone`. */
     private readonly settingsRepo?: Pick<SettingsRepository, 'findByTenant'>,
@@ -624,6 +631,13 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
             { start: scheduledStart, end: scheduledEnd, timezone },
             this.availabilityRepos,
           );
+          // Dispatch FR-2 — same early rejection for a missing required skill
+          // (assignTechnician re-checks; this just avoids create-then-compensate).
+          if (this.availabilityRepos.skillMatcher) {
+            await assertTechnicianHoldsRequiredSkills(
+              context.tenantId, payload.technicianId, targetJobId, this.availabilityRepos.skillMatcher,
+            );
+          }
         } catch (err) {
           return {
             success: false,
@@ -685,6 +699,7 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
           auditRepo: this.auditRepo,
           workingHoursRepo: this.availabilityRepos?.workingHoursRepo,
           unavailableBlockRepo: this.availabilityRepos?.unavailableBlockRepo,
+          skillMatcher: this.availabilityRepos?.skillMatcher,
         });
       } catch (err) {
         // Atomicity guard: the pre-flight feasibility check above is subject
@@ -1396,6 +1411,11 @@ export function createExecutionHandlerRegistry(deps?: {
   // updateBrandVoice). Absent → the handler reports isFullyWired() false and
   // refuses to execute (WS3 convention) rather than a synthetic passthrough.
   brandVoiceRepo?: BrandVoiceRepository;
+  // D-044 / #1771 — update_google_listing_website writes the website + booking
+  // link to the connected Google listing. Absent → isFullyWired() is false and
+  // the handler refuses to execute (WS3) rather than reporting a fake success.
+  googleBusinessIntegrationRepo?: GoogleBusinessIntegrationRepository;
+  googleBusinessConfig?: GoogleBusinessOAuthConfig | null;
   /**
    * Task 9 (2026-08-07 tradesperson plan) — add_material writes a
    * material_items row (migration 272, Task 8's substrate) via this repo.
@@ -1665,6 +1685,18 @@ export function createExecutionHandlerRegistry(deps?: {
     // sheet uses (never re-implemented here — see brand-voice-handler.ts).
     // manual action class, so it only ever runs after an explicit owner tap.
     new UpdateBrandVoiceExecutionHandler(deps?.brandVoiceRepo, requiredAuditRepo),
+    // D-044 / #1769 — update_tenant_site_about: sets the hosted site's about
+    // copy to the text the owner approved (manual action class — only ever runs
+    // after an explicit owner tap). Degrades to a failed execution without the
+    // settings repo (WS3), never a synthetic success.
+    new UpdateTenantSiteAboutExecutionHandler(deps?.settingsRepo, requiredAuditRepo),
+    // D-044 / #1771 — update_google_listing_website: pushes the owner-approved
+    // website + booking link to their Google listing (manual action class).
+    new UpdateGoogleListingWebsiteExecutionHandler(
+      deps?.googleBusinessIntegrationRepo,
+      deps?.googleBusinessConfig,
+      requiredAuditRepo,
+    ),
     // Task 9 (2026-08-07 tradesperson plan) — add_material: writes a
     // material_items row (migration 272, Task 8's substrate) via the SAME
     // repo lookup_materials reads from. LogExpense-family posture:

@@ -322,6 +322,17 @@ export function scriptHermeticResponse(request: LLMRequest): string {
     return idx >= 0 ? text.slice(idx + marker.length) : text;
   }
 
+  if (taskType === 'tenant_site_about') {
+    // D-044 / #1769 — free text (responseFormat 'text'), not JSON. Echo the
+    // facts the prompt carried so hermetic dev shows a plausible draft the
+    // owner can edit; production never routes here.
+    const name = text.match(/^Business name: (.+)$/m)?.[1]?.trim() || 'our team';
+    const area = text.match(/^Area served: (.+)$/m)?.[1]?.trim();
+    return `${name} is a local home-services business${
+      area && area !== 'not specified' ? ` serving ${area}` : ''
+    }. Call us or send a request and we'll get back to you.`;
+  }
+
   if (taskType === 'update_job') {
     // #1154 item 2 — UpdateJobTaskHandler.buildUserMessage sends
     // `Transcript: <operator words>` (+ optional `Classifier hints: ...`).

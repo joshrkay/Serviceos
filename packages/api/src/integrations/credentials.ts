@@ -184,7 +184,7 @@ type CreateCredentialResolverDeps = {
    * (dev / no PgBouncer). Credential SELECTs keep using `pool`.
    */
   directPool?: Pool;
-  createListener?: (config: string | PoolConfig) => ListenerClient;
+  createListener?: (config: PoolConfig) => ListenerClient;
   sleep?: (ms: number) => Promise<void>;
 };
 
@@ -198,15 +198,15 @@ export function createCredentialResolver({
   const keyOf = (tenantId: string, provider: string): string => `${tenantId}:${provider}`;
 
   // LISTEN must run on a direct (non-PgBouncer) connection — see directPool.
+  // Either way the pool's `ssl` setting (db/pool.ts buildPgSsl) is carried
+  // over explicitly: a bare connectionString would make the LISTEN client fall
+  // back to pg's default (no TLS / no verification) while every pooled
+  // connection verifies the server certificate.
   const listenerSource = directPool ?? pool;
-  const listenerConfig = listenerSource.options.connectionString ?? {
-    host: listenerSource.options.host,
-    port: listenerSource.options.port,
-    user: listenerSource.options.user,
-    password: listenerSource.options.password,
-    database: listenerSource.options.database,
-    ssl: listenerSource.options.ssl,
-  };
+  const { connectionString, host, port, user, password, database, ssl } = listenerSource.options;
+  const listenerConfig: PoolConfig = connectionString
+    ? { connectionString, ssl }
+    : { host, port, user, password, database, ssl };
 
   const listener = createListener(listenerConfig);
   let closed = false;

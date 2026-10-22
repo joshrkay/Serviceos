@@ -247,5 +247,108 @@ test.describe('settings — mobile viewport', () => {
     }));
     await expectNoHorizontalOverflow(scrollWidth, clientWidth);
   });
-});
 
+  // D-045 — the Text wording sheet fits 320px; every control clears 44px.
+  // The wording is mocked with long, unbroken values so the layout is
+  // measured against the worst a business name or link can do.
+  test('Text wording sheet fits 320px and its controls clear 44px (D-045)', async ({ page }) => {
+    const longLink = `https://app.example.com/pay/${'x'.repeat(60)}`;
+    await page.route('**/api/settings/text-wording', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          language: 'en',
+          languages: ['en', 'es'],
+          maxLength: 480,
+          texts: [
+            {
+              purpose: 'invoice_text',
+              fillIns: ['customer_name', 'business_name', 'number', 'total', 'link'],
+              sampleValues: {
+                customer_name: 'Sam Rivera',
+                business_name: 'Northwest Heating, Cooling & Plumbing Services LLC',
+                number: 'INV-1042',
+                total: '$485.00',
+                link: longLink,
+              },
+              byLanguage: {
+                en: {
+                  ours: `Hi Sam Rivera, your invoice is ready.\nPay here: ${longLink}`,
+                  addedLines: [],
+                  saved: { body: 'Hi {{customer_name}}, pay {{total}} here: {{link}}', updatedAt: '2026-10-22T12:00:00Z' },
+                },
+                es: {
+                  ours: `Hola Sam Rivera, su factura está lista.\nPague aquí: ${longLink}`,
+                  addedLines: [],
+                  saved: null,
+                },
+              },
+            },
+          ],
+        }),
+      });
+    });
+    await openSettingsSettled(page);
+
+    await page.getByRole('button', { name: /text wording/i }).first().click();
+    const dialog = page.getByRole('dialog', { name: /Text wording/i });
+    await expect(dialog.getByTestId('wording-invoice_text-en-preview')).toContainText(longLink);
+    await expect(dialog.getByRole('button', { name: /English \(main\)/ })).toBeVisible();
+    const buttons = dialog.getByRole('button');
+    const count = await buttons.count();
+    expect(count).toBeGreaterThanOrEqual(8);
+    for (let i = 0; i < count; i++) {
+      expect((await buttons.nth(i).boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
+    }
+    const { scrollWidth, clientWidth } = await page.evaluate(() => ({
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+    }));
+    await expectNoHorizontalOverflow(scrollWidth, clientWidth);
+    const sheet = await dialog.locator('> div').first().evaluate((el) => ({ sw: el.scrollWidth, cw: el.clientWidth }));
+    expect(sheet.sw).toBeLessThanOrEqual(sheet.cw + 1);
+  });
+
+  // #1737 — the Web chat sheet (snippet, allowed sites, caps, kill switch) fits
+  // 320px; every control clears 44px. A long snippet is the worst case.
+  test('Web chat sheet fits 320px and its controls clear 44px (#1737)', async ({ page }) => {
+    const token = `11111111-1111-4111-8111-111111111111.${'a'.repeat(24)}`;
+    await page.route('**/api/webchat', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          data: {
+            enabled: true,
+            killed: false,
+            allowedOrigins: ['https://www.northwest-heating-cooling-and-plumbing.example.com'],
+            dailyTurnCap: 200,
+            dailyCostCapCents: 500,
+            snippet: `<script async src="https://api.example.com/api/public/webchat/widget.js" data-token="${token}"></script>`,
+            available: true,
+            usageToday: { turns: 12, costCents: 34 },
+          },
+        }),
+      });
+    });
+    await openSettingsSettled(page);
+
+    await page.getByRole('button', { name: /web chat/i }).first().click();
+    const dialog = page.getByRole('dialog', { name: /Web chat/i });
+    await expect(dialog.getByTestId('webchat-snippet')).toBeVisible();
+    const controls = dialog.locator('button, textarea:not([readonly]), input');
+    const count = await controls.count();
+    expect(count).toBeGreaterThanOrEqual(7);
+    for (let i = 0; i < count; i++) {
+      expect((await controls.nth(i).boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
+    }
+    const { scrollWidth, clientWidth } = await page.evaluate(() => ({
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+    }));
+    await expectNoHorizontalOverflow(scrollWidth, clientWidth);
+    const sheet = await dialog.locator('> div').first().evaluate((el) => ({ sw: el.scrollWidth, cw: el.clientWidth }));
+    expect(sheet.sw).toBeLessThanOrEqual(sheet.cw + 1);
+  });
+});

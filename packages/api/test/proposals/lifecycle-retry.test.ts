@@ -10,6 +10,7 @@ import { canTransition, isInUndoWindow } from '../../src/proposals/lifecycle';
 import { createProposal, InMemoryProposalRepository, type Proposal, type ProposalStatus } from '../../src/proposals/proposal';
 import { approveProposal } from '../../src/proposals/actions';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { forceStatus } from '../helpers/proposal-status';
 
 const TENANT = 'tenant-retry-1';
 
@@ -38,15 +39,13 @@ describe('InMemoryProposalRepository.resetFailedForRetry', () => {
         createdBy: 'user-1',
       }),
     );
-    const updated = await repo.update(tenantId, p.id, {
-      status,
+    return forceStatus(repo, tenantId, p.id, status, {
       approvedAt: new Date(Date.now() - 3_600_000),
       executionError: 'boom',
       claimedBy: 'worker-1',
       claimedAt: new Date(Date.now() - 3_600_000),
       executionRetryCount: 3,
     });
-    return updated!;
   }
 
   beforeEach(() => {

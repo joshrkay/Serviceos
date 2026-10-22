@@ -79,6 +79,16 @@ export interface SmsMessage {
    * Ignored on 'customer' sends: no customer text ever bypasses the switch.
    */
   alertClass?: SmsAlertClass;
+  /**
+   * Called once, immediately before the underlying provider is asked to send,
+   * after every policy check (kill switch, consent, DNC, send window, volume
+   * cap) has passed. `GatedMessageDelivery` honors it and strips it before the
+   * provider sees the message. Outbound messaging passes its send-claim
+   * `markProviderStarting` here, so the claim stays reclaimable through the
+   * gate's own reads and becomes `'sending'` only at the provider boundary.
+   * A throw aborts the send before the provider is called.
+   */
+  onProviderStarting?: () => Promise<void>;
 }
 
 /** See `SmsMessage.quietHours`. */

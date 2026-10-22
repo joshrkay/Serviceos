@@ -52,6 +52,7 @@ import type { StorageProvider } from '../files/file-service';
 import { recordInboundCall } from '../voice/voice-service';
 import type { TwilioCopyRemover } from './twilio-recording-deleter';
 import { createLogger } from '../logging/logger';
+import { assertTwilioMediaUrl } from './twilio-media-url';
 
 const logger = createLogger({
   service: 'telephony.recording-webhook',
@@ -157,12 +158,18 @@ export async function fetchRecordingBytes(
   recordingUrl: string,
   accountSid: string,
   authToken: string,
+  fetchFn: typeof fetch = fetch,
 ): Promise<Buffer> {
+  // Hardening sweep 2026-10 — the URL is caller-supplied (webhook body) and
+  // the request below carries the deployment's Twilio credential. Refuse any
+  // host that is not Twilio's, and never follow a redirect off it.
+  assertTwilioMediaUrl(recordingUrl, 'RecordingUrl');
   const url = recordingUrl.endsWith('.mp3') ? recordingUrl : `${recordingUrl}.mp3`;
   const basic = Buffer.from(`${accountSid}:${authToken}`).toString('base64');
-  const res = await fetch(url, {
+  const res = await fetchFn(url, {
     method: 'GET',
     headers: { Authorization: `Basic ${basic}`, Accept: 'audio/mpeg' },
+    redirect: 'manual',
     signal: AbortSignal.timeout(MEDIA_TRANSFER_TIMEOUT_MS),
   });
   if (!res.ok) {
@@ -170,6 +177,13 @@ export async function fetchRecordingBytes(
     // auth token before this string ever lands in a log line.
     const bodyText = await res.text().catch(() => '');
     throw new Error(`Twilio recording fetch failed ${res.status}: ${bodyText.slice(0, 200)}`);
+  }
+  // Second layer behind the URL shape check: a recording is audio. Anything
+  // else (JSON from an API resource, an HTML error page) is never buffered or
+  // stored as one.
+  const contentType = res.headers.get('content-type');
+  if (contentType && !contentType.toLowerCase().startsWith('audio/')) {
+    throw new Error(`Twilio recording fetch returned non-audio content-type: ${contentType.slice(0, 60)}`);
   }
   const contentLength = Number(res.headers.get('content-length'));
   if (Number.isFinite(contentLength) && contentLength > MAX_RECORDING_BYTES) {

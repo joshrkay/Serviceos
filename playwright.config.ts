@@ -146,6 +146,9 @@ const devAuthApiServerEnv: NodeJS.ProcessEnv = {
   LOG_LEVEL: process.env.LOG_LEVEL ?? 'warn',
   TELEPHONY_ENABLED: 'false',
   EMAIL_ENABLED: 'false',
+  // #1768 (D-044) — serve hosted tenant sites by Host header on this pair;
+  // e2e/tenant-site-mobile.spec.ts maps *.sites.e2e.test to this API.
+  TENANT_SITE_BASE_DOMAIN: 'sites.e2e.test',
   // Force InMemory repos regardless of any DATABASE_URL/E2E_USE_TEST_DB set
   // for the legacy webServer pair — dev-auth specs run against seeded
   // InMemory data (verify-seed.mjs), never a real/ephemeral Postgres.
@@ -318,6 +321,22 @@ export default defineConfig<DevAuthFixtures>({
               'e1-script-mobile.spec.ts',
               // #1563 — Settings → Phone change-number flow at 320px.
               'phone-settings-mobile.spec.ts',
+              // D-045 — message status bubble, blocked-texts notice, "Not sent" list at 320px.
+              'message-status-mobile.spec.ts',
+              // #1762 (D-044) — Settings → Google Business location picker at 320px.
+              'google-business-picker-mobile.spec.ts',
+              // #1763 (D-044) — home "Get found online" card at 320px.
+              'get-found-online-card-mobile.spec.ts',
+              // #1764 (D-044) — Google profile walkthrough (no-location state) at 320px.
+              'google-profile-walkthrough-mobile.spec.ts',
+              // #1738 — Settings → Google Local Services leads sheet at 320px.
+              'lsa-leads-mobile.spec.ts',
+              // #1735 — Settings → Follow-up campaigns sheet at 320px.
+              'drip-campaigns-mobile.spec.ts',
+              // #1768 (D-044) — hosted tenant site + Settings → Website card at 320px.
+              'tenant-site-mobile.spec.ts',
+              // #1736 — Settings → Call review card + "Correct this call" at 320px.
+              'call-review-mobile.spec.ts',
             ],
             testIgnore: [],
             dependencies: ['devauth-setup'],

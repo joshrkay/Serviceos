@@ -5,11 +5,13 @@ import { requireAuth, requireTenant, requirePermission } from '../middleware/aut
 import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import {
   createJobSchema,
+  updateJobSchema,
   scheduleJobSchema,
   reassignJobSchema,
   unscheduleJobSchema,
 } from '../shared/contracts';
-import { toErrorResponse, ValidationError } from '../shared/errors';
+import { ForbiddenError, toErrorResponse, ValidationError } from '../shared/errors';
+import { hasPermission, Role } from '../auth/rbac';
 import { uuidSchema } from '../shared/validation';
 import { syncJobSchedule, JobAppointmentSyncDeps } from '../jobs/job-appointment-sync';
 import { notifyDispatchBoardChanged } from '../dispatch/board-notify';
@@ -18,6 +20,8 @@ import { AppointmentRepository } from '../appointments/appointment';
 import { AssignmentRepository } from '../appointments/assignment';
 import { WorkingHoursRepository } from '../availability/working-hours';
 import { UnavailableBlockRepository } from '../availability/unavailable-block';
+import type { SkillMatcher } from '../scheduling/skill-matcher';
+import { assertJobSkillEditKeepsAssigneesQualified } from '../scheduling/skill-edit-guard';
 import { UserRepository } from '../users/user';
 import {
   convertEstimateToScheduledJob,
@@ -98,6 +102,8 @@ export function createJobRouter(
     /** F2 — assignment refuses windows outside modeled tech hours / during time-off. */
     workingHoursRepo?: WorkingHoursRepository;
     unavailableBlockRepo?: UnavailableBlockRepository;
+    /** Dispatch FR-2 — assignment refuses a technician missing a required skill. */
+    skillMatcher?: SkillMatcher;
     /** Tenant-timezone fallback for schedule calls that omit `timezone`. */
     settingsRepo?: JobAppointmentSyncDeps['settingsRepo'];
   },
@@ -116,6 +122,7 @@ export function createJobRouter(
       userRepo: scheduleSyncDeps.userRepo,
       workingHoursRepo: scheduleSyncDeps.workingHoursRepo,
       unavailableBlockRepo: scheduleSyncDeps.unavailableBlockRepo,
+      skillMatcher: scheduleSyncDeps.skillMatcher,
       settingsRepo: scheduleSyncDeps.settingsRepo,
     };
   };
@@ -617,10 +624,33 @@ export function createJobRouter(
             'assignedTechnicianId is derived from the appointment assignment — use POST /api/jobs/:id/reassign or POST /api/appointments/:id/assignments',
           );
         }
+        // Strict allowlist (hardening sweep 2026-10): the repository writes
+        // every key it recognises, so the body must never reach it raw.
+        const input = updateJobSchema.parse(req.body ?? {});
+        // Dispatch FR-2 phase 2 — required skills gate who may be dispatched,
+        // so they follow `jobs:assign` (owners, dispatchers), not the wider
+        // `jobs:update` a technician also holds.
+        if (input.requiredSkills !== undefined && !hasPermission(req.auth!.role as Role, 'jobs:assign')) {
+          throw new ForbiddenError('Only owners and dispatchers can change a job\'s required skills');
+        }
+        // …and must not strand a visit already dispatched to a tech who
+        // lacks a newly required skill (409 — reassign first).
+        if (input.requiredSkills !== undefined && scheduleSyncDeps?.skillMatcher) {
+          await assertJobSkillEditKeepsAssigneesQualified(
+            {
+              appointmentRepo: scheduleSyncDeps.appointmentRepo,
+              assignmentRepo: scheduleSyncDeps.assignmentRepo,
+              skillMatcher: scheduleSyncDeps.skillMatcher,
+            },
+            req.auth!.tenantId,
+            routeParam(req, 'id'),
+            input.requiredSkills,
+          );
+        }
         const result = await updateJob(
           req.auth!.tenantId,
           routeParam(req, 'id'),
-          req.body,
+          input,
           jobRepo,
           req.auth!.userId,
           auditRepo,

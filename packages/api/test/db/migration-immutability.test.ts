@@ -626,6 +626,25 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['324_seeded_price_baseline', '19a3806bcb2f0be4cc31345f6c06d8a2b2a780da20afc3535c4243d7907ca628'],
   // U1 reply-gap — call_transcript_turns.transport / reply timing columns + 2 NOT VALID CHECKs + partial index.
   ['326_call_transcript_turns_reply_timing', 'bad452623ef0091588b40ccd2f8408de9935ee9ceb5d1fdae8386ef11acfe65b'],
+  // Dispatch FR-2 phase 1 — service_locations geocode status/attempts/geocoded_at + 1 NOT VALID CHECK + partial index.
+  ['327_service_locations_geocode_status', '8de7949551f27df07e557b82ce08edab52d318b0034fe46fce0230330c248c78'],
+  // Dispatch FR-2 phase 2 — users.skills + jobs.required_skills (TEXT[], no CHECK).
+  ['328_skill_tags', '7b58a5e30ea28966566996c314b41b155333fe55ce687e8463eabf92ad7261ea'],
+  // D-045 — message_dispatches outcome columns (scheduled/blocked) + 3 NOT VALID CHECKs + 3 partial indexes.
+  ['329_message_dispatch_outcomes', '928d38a17d9f73b2175b5a0d71557b8fbb15719bec0f0415d007b15731ef3ea4'],
+  // D-045 — customer_text_wording (owner's own wording per customer text), RLS, inline CHECKs only.
+  ['330_customer_text_wording', 'cb3931893bf7d7fdf018c8fb546cd0d0b15fbf8823a4ce1dbfd67e86195df1b7'],
+  // D-044 / #1763 — tenant_settings.get_found_online_dismissed_at, google_review_url_derived; review_poll_state.backoff_reason, auth_generation.
+  ['331_get_found_online', 'eb7e83e23154cb56342b21f1b83c90733349f649215af5206885b77bb3a639ca'],
+  // #1750 (D-044) — Get found online checklist facts on tenant_settings + 2 NOT VALID CHECKs (restored after the #1752 merge dropped it).
+  ['332_tenant_settings_get_found', 'a55ccb06da1509baa49df4ff5d76102e8f9ea2115ae2a3f28516b78e7966755c'],
+  ['332_assignment_overlap_accepted', 'eb06c6a9b4dc679fa9532a486a8941a19abcceb6e95875e0fb9d930b94eef471'],
+  // D-045 "write both" — customer_text_wording keyed by (tenant, purpose, language).
+  ['333_customer_text_wording_per_language', '8e523289f2ee6272d8c9c1acb7902f6ecde0cc82aea93bb9588b58aec866b8f2'],
+  // #1750 (D-044) — tenant_settings.presence_path, forwarding_mode (NOT VALID CHECKs), get_found_skipped_items.
+  ['334_tenant_settings_get_found', 'a55ccb06da1509baa49df4ff5d76102e8f9ea2115ae2a3f28516b78e7966755c'],
+  // Dispatch FR-2 phase 3c round 2 — appointment_assignments.overlap_accepted_with, consent-aware guard, backfill of rows 332 marked.
+  ['335_assignment_overlap_accepted_with', '9ce17e738283dccfdb696047dec16aba693948ccdd5c6309942ed5eb6a65b51a'],
 ];
 
 function hashMigration(value: string): string {

@@ -57,4 +57,12 @@ describe('P6-003 — Unassigned appointment queue', () => {
     expect(screen.getByText('Jane Doe')).toBeInTheDocument();
     expect(screen.getByText('Bob Wilson')).toBeInTheDocument();
   });
+
+  it('FR-2 phase 3 — offers technician suggestions per card only when the board handles picks', () => {
+    const { rerender } = render(<UnassignedQueue appointments={appointments} />);
+    expect(screen.queryByTestId('suggest-techs-appt-1')).toBeNull();
+    rerender(<UnassignedQueue appointments={appointments} onPickSuggestion={vi.fn()} />);
+    expect(screen.getByTestId('suggest-techs-appt-1')).toBeInTheDocument();
+    expect(screen.getByTestId('suggest-techs-appt-2')).toBeInTheDocument();
+  });
 });

@@ -3,15 +3,20 @@
  * view review-monitoring status, and disconnect. Mirrors
  * CalendarSyncSheet; the backend is /api/googlebusiness-integrations.
  *
+ * D-044: after OAuth the owner picks which Google location is theirs
+ * (several locations, or a reconnect that found none) and the location's
+ * review link fills the tenant's "Public review links" setting.
+ *
  * Review monitoring runs downstream: a poll worker ingests new reviews
  * every 15 minutes and drafts responses as proposals for human
  * approval. When credentials break (revoked access), the API surfaces a
  * poll-state backoff here as a visible "attention" state.
  */
-import { useEffect, useState } from 'react';
-import { X, Star, AlertCircle } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { X, Star, AlertCircle, MapPin } from 'lucide-react';
 import { toast } from 'sonner';
 import { apiFetch } from '../../utils/api-fetch';
+import { GoogleProfileWalkthrough } from './GoogleProfileWalkthrough';
 
 interface GoogleBusinessIntegrationView {
   id: string;
@@ -19,21 +24,154 @@ interface GoogleBusinessIntegrationView {
   status: string;
   accountId: string | null;
   locationId: string | null;
+  locationTitle?: string | null;
+  reviewUrl?: string | null;
+  /** connected | needs_pick | no_location (absent on older APIs). */
+  locationState?: 'connected' | 'needs_pick' | 'no_location';
   updatedAt: string;
   lastSuccessfulPollAt: string | null;
   backoffUntil: string | null;
+  /** quota = Google throttling (clears on its own); auth = reconnect needed. */
+  backoffReason?: 'quota' | 'auth' | null;
+}
+
+interface GoogleBusinessLocationView {
+  accountId: string;
+  locationId: string;
+  title: string;
+  address: string | null;
+  reviewUrl: string | null;
+}
+
+/** How often the open sheet re-checks Google while waiting on verification. */
+const RECHECK_INTERVAL_MS = 60_000;
+
+async function errorDetail(res: Response, fallback: string): Promise<string> {
+  try {
+    const body = await res.json();
+    if (typeof body?.message === 'string') return body.message;
+    if (typeof body?.error?.message === 'string') return body.error.message;
+  } catch {
+    /* non-JSON */
+  }
+  return fallback;
 }
 
 interface GoogleBusinessSheetProps {
   onClose: () => void;
+  /** Choosing a location can fill or clear the Google review link on the
+   *  server; the Settings page mirrors it so a later Save can't put the
+   *  stale value back. */
+  onReviewUrlChange?: (url: string | null) => void;
 }
 
-export function GoogleBusinessSheet({ onClose }: GoogleBusinessSheetProps) {
+export function GoogleBusinessSheet({ onClose, onReviewUrlChange }: GoogleBusinessSheetProps) {
   const [integration, setIntegration] =
     useState<GoogleBusinessIntegrationView | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  /** Null until the picker is opened; the locations Google lists. */
+  const [locations, setLocations] = useState<GoogleBusinessLocationView[] | null>(null);
+  const [loadingLocations, setLoadingLocations] = useState(false);
+  // Mirrors loadingLocations for the timed re-check, whose closure is stale.
+  const loadingLocationsRef = useRef(false);
+  loadingLocationsRef.current = loadingLocations;
+
+  /** quiet: the sheet's own re-check while the owner is away verifying on
+   *  Google. It only acts when a location has appeared (handing off to the
+   *  picker); an empty answer or a failure leaves the walkthrough alone. */
+  async function loadLocations({ quiet = false }: { quiet?: boolean } = {}) {
+    if (quiet && loadingLocationsRef.current) return;
+    setLoadingLocations(true);
+    if (!quiet) setError('');
+    try {
+      const res = await apiFetch('/api/googlebusiness-integrations/google/locations');
+      if (!res.ok) {
+        throw new Error(await errorDetail(res, `Could not load locations (${res.status})`));
+      }
+      const json = (await res.json()) as {
+        data?: GoogleBusinessLocationView[];
+        listingRemoved?: boolean;
+        integration?: GoogleBusinessIntegrationView;
+        reviewUrlFilled?: boolean;
+        reviewUrlCleared?: boolean;
+      };
+      if (quiet && !json.data?.length) return;
+      setLocations(json.data ?? []);
+      // The server recorded the new count: the account now needs a pick.
+      setIntegration((prev) =>
+        prev && prev.locationState === 'no_location' && json.data?.length
+          ? { ...prev, locationState: 'needs_pick' }
+          : prev,
+      );
+      if (json.integration && !json.listingRemoved) {
+        // Google updated the saved listing (e.g. a review link after
+        // verification); the server saved it.
+        setIntegration(json.integration);
+        if (json.reviewUrlFilled || json.reviewUrlCleared) {
+          onReviewUrlChange?.(json.integration.reviewUrl ?? null);
+        }
+        if (json.reviewUrlFilled) toast.success('Google now has a review link for your location. It is set.');
+      }
+      if (json.listingRemoved) {
+        // The saved listing is no longer on this Google account; the
+        // server dropped it, so the owner must pick again.
+        if (json.integration) setIntegration(json.integration);
+        if (json.reviewUrlCleared) onReviewUrlChange?.(null);
+        toast.error(
+          json.reviewUrlCleared
+            ? 'Your saved Google location is no longer on this account, so its review link was removed. Pick your location again.'
+            : 'Your saved Google location is no longer on this account. Pick your location again.',
+        );
+      }
+    } catch (err) {
+      if (!quiet) setError(err instanceof Error ? err.message : 'Could not load locations');
+    } finally {
+      setLoadingLocations(false);
+    }
+  }
+
+  async function chooseLocation(location: GoogleBusinessLocationView) {
+    setBusy(true);
+    setError('');
+    try {
+      const res = await apiFetch('/api/googlebusiness-integrations/google/location', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          accountId: location.accountId,
+          locationId: location.locationId,
+        }),
+      });
+      if (!res.ok) {
+        throw new Error(await errorDetail(res, `Could not save location (${res.status})`));
+      }
+      const json = (await res.json()) as {
+        data: GoogleBusinessIntegrationView;
+        reviewUrlFilled?: boolean;
+        reviewUrlCleared?: boolean;
+      };
+      setIntegration(json.data);
+      setLocations(null);
+      if (json.reviewUrlFilled || json.reviewUrlCleared) {
+        onReviewUrlChange?.(json.data.reviewUrl ?? null);
+      }
+      toast.success(
+        json.reviewUrlFilled
+          ? `${location.title} connected. Your Google review link is set.`
+          : json.reviewUrlCleared
+            ? `${location.title} connected. Google has no review link for it yet, so the old one was removed.`
+            : `${location.title} connected.`,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Could not save location';
+      setError(msg);
+      toast.error(msg);
+    } finally {
+      setBusy(false);
+    }
+  }
 
   useEffect(() => {
     let cancelled = false;
@@ -44,7 +182,11 @@ export function GoogleBusinessSheet({ onClose }: GoogleBusinessSheetProps) {
         const json = (await res.json()) as {
           data?: GoogleBusinessIntegrationView | null;
         };
-        if (!cancelled) setIntegration(json?.data ?? null);
+        if (cancelled) return;
+        setIntegration(json?.data ?? null);
+        // Several locations (or discovery failed at connect): the owner
+        // picks one now.
+        if (json?.data?.locationState === 'needs_pick') void loadLocations();
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Could not load');
       } finally {
@@ -55,6 +197,27 @@ export function GoogleBusinessSheet({ onClose }: GoogleBusinessSheetProps) {
       cancelled = true;
     };
   }, []);
+
+  // Waiting on Google: look again when the owner comes back to this tab and
+  // every minute while it is open, so a newly verified profile is picked up
+  // without a reconnect.
+  const waitingOnGoogle = integration?.locationState === 'no_location' && locations === null;
+  useEffect(() => {
+    if (!waitingOnGoogle) return;
+    const recheck = () => {
+      if (document.visibilityState === 'visible') void loadLocations({ quiet: true });
+    };
+    const timer = window.setInterval(recheck, RECHECK_INTERVAL_MS);
+    document.addEventListener('visibilitychange', recheck);
+    window.addEventListener('focus', recheck);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', recheck);
+      window.removeEventListener('focus', recheck);
+    };
+    // loadLocations only touches state setters and a ref.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [waitingOnGoogle]);
 
   async function connect() {
     setBusy(true);
@@ -106,10 +269,15 @@ export function GoogleBusinessSheet({ onClose }: GoogleBusinessSheetProps) {
   }
 
   const isConnected = integration !== null;
+  const locationState = integration?.locationState;
   // Backoff in the future ⇒ polling is paused (usually broken
   // credentials after the operator revoked access on Google's side).
+  // Only a backoff for rejected credentials asks for a reconnect: Google
+  // throttling clears on its own, and an untagged (older) backoff may be
+  // either.
   const needsAttention =
     isConnected &&
+    integration!.backoffReason === 'auth' &&
     integration!.backoffUntil !== null &&
     new Date(integration!.backoffUntil).getTime() > Date.now();
 
@@ -175,9 +343,19 @@ export function GoogleBusinessSheet({ onClose }: GoogleBusinessSheetProps) {
               </p>
               <p className="text-xs text-emerald-800 mt-0.5">
                 {integration!.locationId
-                  ? `Business location: ${integration!.locationId}`
-                  : 'No business location found on this account yet.'}
+                  ? `Business location: ${integration!.locationTitle ?? integration!.locationId}`
+                  : locationState === 'no_location'
+                    ? 'No Business Profile found on this Google account yet.'
+                    : 'Choose which Google location is yours.'}
               </p>
+              {integration!.reviewUrl && (
+                <p
+                  data-testid="googlebusiness-review-link"
+                  className="text-xs text-emerald-800 mt-0.5 break-all"
+                >
+                  Review link: {integration!.reviewUrl}
+                </p>
+              )}
               {integration!.lastSuccessfulPollAt && (
                 <p className="text-xs text-emerald-800 mt-0.5">
                   Last checked:{' '}
@@ -192,6 +370,92 @@ export function GoogleBusinessSheet({ onClose }: GoogleBusinessSheetProps) {
             >
               No Google Business Profile connected.
             </p>
+          )}
+
+          {isConnected && !needsAttention && locations === null && (
+            locationState === 'no_location' ? (
+              <GoogleProfileWalkthrough
+                checking={loadingLocations}
+                onCheckAgain={() => void loadLocations()}
+              />
+            ) : locationState === 'connected' ? (
+              <button
+                type="button"
+                onClick={() => void loadLocations()}
+                disabled={loadingLocations}
+                data-testid="googlebusiness-change-location"
+                className="min-h-11 text-sm text-slate-700 underline disabled:opacity-60"
+              >
+                {loadingLocations ? 'Loading locations…' : 'Change location'}
+              </button>
+            ) : loadingLocations ? (
+              <p className="text-sm text-slate-500">Loading your Google locations…</p>
+            ) : (
+              // needs_pick whose automatic load failed: the error shows
+              // below, and this keeps a way to try again.
+              <button
+                type="button"
+                onClick={() => void loadLocations()}
+                data-testid="googlebusiness-load-locations"
+                className="min-h-11 rounded-xl border border-slate-300 px-4 text-sm text-slate-700"
+              >
+                Load my Google locations
+              </button>
+            )
+          )}
+
+          {locations !== null && (
+            <div data-testid="googlebusiness-location-picker" className="space-y-2">
+              <p className="text-sm text-slate-900">Which location is yours?</p>
+              {locations.length === 0 ? (
+                <div data-testid="googlebusiness-no-locations-found">
+                  <p className="text-sm text-slate-500">
+                    Google lists no locations on this account yet.
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => void loadLocations()}
+                    disabled={loadingLocations}
+                    data-testid="googlebusiness-recheck-locations"
+                    className="mt-2 min-h-11 rounded-xl border border-slate-300 px-4 text-sm text-slate-700 disabled:opacity-60"
+                  >
+                    {loadingLocations ? 'Checking…' : 'Check again'}
+                  </button>
+                </div>
+              ) : (
+                <ul className="space-y-2">
+                  {locations.map((loc) => {
+                    const current =
+                      loc.accountId === integration?.accountId &&
+                      loc.locationId === integration?.locationId;
+                    return (
+                      <li key={`${loc.accountId}/${loc.locationId}`}>
+                        <button
+                          type="button"
+                          onClick={() => void chooseLocation(loc)}
+                          disabled={busy || current}
+                          data-testid="googlebusiness-location-option"
+                          className="flex min-h-11 w-full items-start gap-2 rounded-xl border border-slate-200 px-3 py-2 text-left hover:bg-slate-50 disabled:opacity-60"
+                        >
+                          <MapPin size={16} className="mt-0.5 shrink-0 text-slate-500" />
+                          <span className="min-w-0">
+                            <span className="block text-sm text-slate-900 break-words">
+                              {loc.title}
+                              {current ? ' (current)' : ''}
+                            </span>
+                            {loc.address && (
+                              <span className="block text-xs text-slate-500 break-words">
+                                {loc.address}
+                              </span>
+                            )}
+                          </span>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
           )}
 
           {error && (

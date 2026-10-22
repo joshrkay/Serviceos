@@ -5,7 +5,7 @@ import { createProposalsRouter } from '../../src/routes/proposals';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { InMemoryAppointmentRepository, createAppointment } from '../../src/appointments/appointment';
 import { FeasibilityDependencies } from '../../src/scheduling/feasibility-types';
-import { StubSkillMatcher } from '../../src/scheduling/skill-matcher';
+import { noSkillConstraints } from '../helpers/no-skill-constraints';
 import { HaversineFallbackProvider } from '../../src/scheduling/travel-time/haversine-fallback';
 
 describe('POST /api/proposals — scheduling create with version + feasibility gates', () => {
@@ -34,7 +34,7 @@ describe('POST /api/proposals — scheduling create with version + feasibility g
       workingHoursRepo: { findByTechnician: async () => [] } as any,
       unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
       travelTimeProvider: new HaversineFallbackProvider(),
-      skillMatcher: new StubSkillMatcher(),
+      skillMatcher: noSkillConstraints(),
     };
     const userRepo = { findById: async () => ({ id: 'tech-1', role: 'technician' }) } as any;
 

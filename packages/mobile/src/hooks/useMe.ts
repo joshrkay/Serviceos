@@ -7,7 +7,7 @@
  * identity would render the previous user's tenant/role until a manual
  * refetch. `switchMode` invalidates the cache so the next read hits the server.
  */
-import { useAuth } from '@clerk/clerk-expo';
+import { useAuth } from '@clerk/expo';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useApiClient } from '../lib/useApiClient';
 import {

@@ -40,7 +40,7 @@ config.resolver.resolveRequest = (context, moduleName, platform) => {
   ) {
     return { type: 'sourceFile', filePath: path.join(projectRoot, 'src/lib/queryStringCompat.ts') };
   }
-  if (devAuth.shimPath && moduleName === '@clerk/clerk-expo') {
+  if (devAuth.shimPath && (moduleName === '@clerk/expo' || moduleName === '@clerk/expo/legacy')) {
     return { type: 'sourceFile', filePath: devAuth.shimPath };
   }
   // Stripe Terminal is native-only; web e2e export must not load NativeModules.

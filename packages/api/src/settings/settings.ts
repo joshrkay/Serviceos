@@ -537,6 +537,26 @@ export interface TenantSettings {
   googleReviewUrl?: string | null;
   yelpReviewUrl?: string | null;
   /**
+   * D-044 — the review link the app last filled in from a connected
+   * Google listing. Lives here, not on the integration row, so a later
+   * listing can still replace it after a disconnect. Not owner-editable
+   * (absent from updateSettingsSchema). Migration 330.
+   */
+  googleReviewUrlDerived?: string | null;
+  /**
+   * D-044 / #1768 — the owner's website: their own ("I have one") or the
+   * tenant site we host, which publishing fills in and unpublishing clears.
+   * Migration 334.
+   */
+  websiteUrl?: string | null;
+  /**
+   * D-044 / #1769 — the hosted tenant site's "about" copy: AI-drafted, set only
+   * when the owner approves the `update_tenant_site_about` proposal (absent from
+   * updateSettingsSchema, so no generic write reaches it). Absent = the site
+   * shows no about section. Migration 335.
+   */
+  siteAboutText?: string | null;
+  /**
    * P11-002 — tenant language stack (columns on tenant_settings:
    * default_language, auto_detect_language, tts_voice_en/es,
    * spanish_dispatcher_user_ids). Resolves EN/ES for the voice agent
@@ -768,6 +788,12 @@ export interface UpdateSettingsInput {
   /** Public review links (4★+ feedback page); null clears the field. */
   googleReviewUrl?: string | null;
   yelpReviewUrl?: string | null;
+  /** D-044 — see TenantSettings.googleReviewUrlDerived. */
+  googleReviewUrlDerived?: string | null;
+  /** D-044 / #1768 — see TenantSettings.websiteUrl. */
+  websiteUrl?: string | null;
+  /** D-044 / #1769 — see TenantSettings.siteAboutText. */
+  siteAboutText?: string | null;
   /** P11-002 — tenant language stack. */
   defaultLanguage?: Language;
   autoDetectLanguage?: boolean;
@@ -1553,6 +1579,15 @@ export class InMemorySettingsRepository implements SettingsRepository {
     // "untouched" — never let it clobber a stored value via spread.
     for (const key of Object.keys(safeUpdates) as (keyof typeof safeUpdates)[]) {
       if (safeUpdates[key] === undefined) delete safeUpdates[key];
+    }
+    // D-044 parity with Pg: an owner's review-link edit drops the
+    // "app filled this" marker unless the link still equals it.
+    if (
+      safeUpdates.googleReviewUrl !== undefined &&
+      safeUpdates.googleReviewUrlDerived === undefined &&
+      s.googleReviewUrlDerived !== (safeUpdates.googleReviewUrl ?? null)
+    ) {
+      safeUpdates.googleReviewUrlDerived = null;
     }
     // S5a-4 parity with Pg: a payment-mode write always moves updatedAt.
     if (safeUpdates.paymentCollectionMode !== undefined && safeUpdates.updatedAt === undefined) {

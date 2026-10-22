@@ -40,6 +40,7 @@ import { GatedMessageDelivery } from '../../src/notifications/gated-message-deli
 import { InMemoryDncRepository } from '../../src/compliance/dnc';
 import { SendService } from '../../src/notifications/send-service';
 import { createPortalRouter } from '../../src/routes/portal';
+import { withOutbound } from '../helpers/outbound-messaging';
 
 const TENANT = uuidv4();
 const ACTOR = 'user-portal-rbac';
@@ -90,7 +91,7 @@ async function build(role: Role): Promise<Harness> {
     updatedAt: new Date(),
   });
 
-  const sendService = new SendService({
+  const sendService = new SendService(withOutbound({
     delivery: new GatedMessageDelivery({
       base: delivery,
       dnc: new InMemoryDncRepository(),
@@ -104,7 +105,8 @@ async function build(role: Role): Promise<Harness> {
     settingsRepo,
     dispatchRepo,
     publicBaseUrl: 'https://app.example.com',
-  });
+    ensureInvoicePayLink: async () => undefined,
+  }));
 
   const app = express();
   app.use(express.json());

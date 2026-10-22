@@ -14,7 +14,7 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock('../lib/useApiClient', () => ({ useApiClient: () => h.api }));
-vi.mock('@clerk/clerk-expo', () => ({ useAuth: () => ({ orgId: h.orgId }) }));
+vi.mock('@clerk/expo', () => ({ useAuth: () => ({ orgId: h.orgId }) }));
 vi.mock('../push/nativePushDeps', () => ({
   getPermission: h.getPermission,
   requestPermission: h.requestPermission,

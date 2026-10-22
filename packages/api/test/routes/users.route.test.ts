@@ -149,6 +149,59 @@ describe('PATCH /api/users/:id — Tier 4 Team members (PR 2)', () => {
     expect(res.status).toBe(400);
     expect(res.body.message ?? '').toMatch(/only owner/i);
   });
+  // Dispatch FR-2 phase 2 — technician skill tags.
+  it('owner can set a technician\'s skills; they are stored and returned in canonical form', async () => {
+    const app = buildApp(repo, 'owner');
+    const res = await request(app)
+      .patch(`/api/users/${techId}`)
+      .send({ skills: ['Gas Certified', 'EPA 608', 'gas_certified'] });
+    expect(res.status).toBe(200);
+    expect(res.body.skills).toEqual(['gas_certified', 'epa_608']);
+    expect((await repo.findById(TENANT, techId))?.skills).toEqual(['gas_certified', 'epa_608']);
+  });
+
+  it('an empty list clears the skills', async () => {
+    const app = buildApp(repo, 'owner');
+    await request(app).patch(`/api/users/${techId}`).send({ skills: ['hvac'] });
+    const res = await request(app).patch(`/api/users/${techId}`).send({ skills: [] });
+    expect(res.status).toBe(200);
+    expect(res.body.skills).toEqual([]);
+  });
+
+  it('rejects a skill it cannot normalize with 400', async () => {
+    const app = buildApp(repo, 'owner');
+    const res = await request(app).patch(`/api/users/${techId}`).send({ skills: ['R&D'] });
+    expect(res.status).toBe(400);
+    expect((await repo.findById(TENANT, techId))?.skills).toBeUndefined();
+  });
+
+  it('rejects dispatchers editing skills (users:edit_role)', async () => {
+    const app = buildApp(repo, 'dispatcher');
+    const res = await request(app).patch(`/api/users/${techId}`).send({ skills: ['hvac'] });
+    expect(res.status).toBe(403);
+  });
+
+  it('refuses removing a skill the technician needs for an active visit (409, reassign first)', async () => {
+    const skillEditGuard = {
+      appointmentRepo: {
+        findByJob: async () => [],
+        listWithMeta: async (_t: string, o?: { status?: string }) =>
+          ({ data: o?.status === 'scheduled' ? [{ id: 'appt-1', jobId: 'job-gas', status: 'scheduled' }] : [], total: 0 }) as never,
+      },
+      assignmentRepo: { findByAppointment: async () => [] },
+      skillMatcher: {
+        requiredSkillsForJob: async () => ['gas_certified'],
+        skillsForTechnician: async () => [],
+      },
+    };
+    const app = buildApp(repo, 'owner', { skillEditGuard });
+    const blocked = await request(app).patch(`/api/users/${techId}`).send({ skills: ['hvac'] });
+    expect(blocked.status).toBe(409);
+    expect(blocked.body.message).toMatch(/gas_certified.*Reassign/);
+    expect((await repo.findById(TENANT, techId))?.skills).toBeUndefined();
+    const ok = await request(app).patch(`/api/users/${techId}`).send({ skills: ['Gas Certified', 'hvac'] });
+    expect(ok.status).toBe(200);
+  });
 });
 
 describe('POST/GET /api/users/invitations — Tier 4 Team members (PR 3)', () => {

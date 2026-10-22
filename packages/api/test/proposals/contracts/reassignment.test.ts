@@ -1,5 +1,7 @@
 import { describe, it, expect } from 'vitest';
-import { reassignAppointmentPayloadSchema } from '../../../src/proposals/contracts/reassignment';
+import {
+  reassignAppointmentPayloadSchema, withoutOverlapConsent, editRetargetsReassign,
+} from '../../../src/proposals/contracts/reassignment';
 import { validateProposalPayload } from '../../../src/proposals/contracts';
 
 describe('P6-009 — Appointment reassignment proposal type', () => {
@@ -52,5 +54,50 @@ describe('P6-009 — Appointment reassignment proposal type', () => {
     const result1 = validateProposalPayload('reassign_appointment', validPayload);
     const result2 = validateProposalPayload('reassign_appointment', validPayload);
     expect(result1).toEqual(result2);
+  });
+});
+
+describe('FR-2 phase 3c — acceptOverlap is an explicit opt-in only', () => {
+  const base = {
+    appointmentId: '550e8400-e29b-41d4-a716-446655440000',
+    toTechnicianId: '660e8400-e29b-41d4-a716-446655440001',
+  };
+
+  it('accepts acceptOverlap: true', () => {
+    expect(reassignAppointmentPayloadSchema.safeParse({ ...base, acceptOverlap: true }).success).toBe(true);
+  });
+
+  it('accepts the field being absent', () => {
+    expect(reassignAppointmentPayloadSchema.safeParse(base).success).toBe(true);
+  });
+
+  it('accepts the server-written list of accepted overlapping appointments (uuids only)', () => {
+    expect(reassignAppointmentPayloadSchema.safeParse({
+      ...base, acceptOverlap: true, acceptedOverlapAppointmentIds: ['770e8400-e29b-41d4-a716-446655440002'],
+    }).success).toBe(true);
+    expect(reassignAppointmentPayloadSchema.safeParse({
+      ...base, acceptOverlap: true, acceptedOverlapAppointmentIds: ['not-a-uuid'],
+    }).success).toBe(false);
+  });
+
+  it('rejects any value other than true (false, strings, numbers)', () => {
+    for (const bad of [false, 'true', 1, null]) {
+      expect(reassignAppointmentPayloadSchema.safeParse({ ...base, acceptOverlap: bad }).success).toBe(false);
+    }
+  });
+});
+
+describe('FR-2 phase 3c — overlap consent is server-owned', () => {
+  it('withoutOverlapConsent strips only the consent fields', () => {
+    expect(withoutOverlapConsent({ appointmentId: 'a', acceptOverlap: true, acceptedOverlapAppointmentIds: ['x'], reason: 'r' }))
+      .toEqual({ appointmentId: 'a', reason: 'r' });
+  });
+
+  it('editRetargetsReassign is true only when the appointment or technician actually changes', () => {
+    const payload = { appointmentId: 'a', toTechnicianId: 't1' };
+    expect(editRetargetsReassign(payload, { reason: 'x' })).toBe(false);
+    expect(editRetargetsReassign(payload, { toTechnicianId: 't1' })).toBe(false);
+    expect(editRetargetsReassign(payload, { toTechnicianId: 't2' })).toBe(true);
+    expect(editRetargetsReassign(payload, { appointmentId: 'b' })).toBe(true);
   });
 });
