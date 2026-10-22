@@ -189,8 +189,9 @@ export function useOnboardingTalk(deps: OnboardingTalkDeps): UseOnboardingTalk {
     async (userMessage: string | undefined) => {
       setStatus(userMessage === undefined ? 'starting' : 'sending');
       setError(null);
-      // Any owner answer makes Rivet's pending line stale; played late it would land out of order.
-      if (userMessage !== undefined) speechGen.current += 1;
+      // Any new turn (an owner answer, or a fresh greeting after "Start again") makes Rivet's
+      // pending line stale; played late it would land out of order.
+      speechGen.current += 1;
       lastMessage.current = userMessage;
       const outcome = await request(userMessage);
       if (!mounted.current) return;

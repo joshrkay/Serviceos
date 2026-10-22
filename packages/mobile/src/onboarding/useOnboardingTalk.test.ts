@@ -317,11 +317,13 @@ describe('useOnboardingTalk', () => {
     vi.mocked(deps.sendTurn).mockResolvedValueOnce(reply('Thanks, that is all I can ask.', { completed: true, proposalIds: [] }));
     await act(() => result.current.sendText('no idea'));
     expect(result.current.error).toEqual({ message: NOTHING_CAPTURED_COPY, action: 'restart' });
+    const closingIsCurrent = vi.mocked(deps.speak).mock.calls.at(-1)![1];
     vi.mocked(deps.sendTurn).mockResolvedValueOnce(reply('What do you call the business?', { sessionId: 'new' }));
     await act(() => result.current.recover());
     expect(deps.sendTurn).toHaveBeenLastCalledWith({ clientTimezone: 'America/New_York' });
     expect(result.current.status).toBe('ready');
-    expect(result.current.turns).toHaveLength(1);
+    expect(result.current.turns).toHaveLength(1);    // The closing line from the old conversation must not play over the new greeting.
+    expect(closingIsCurrent()).toBe(false);
   });
 
   it('a status it cannot read is reported as unknown, not as done', async () => {
