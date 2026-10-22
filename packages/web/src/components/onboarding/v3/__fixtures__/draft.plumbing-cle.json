@@ -50,7 +50,7 @@
         "question": "What do you charge to come out?",
         "supportLine": "This is the first number a caller hears. Here's where plumbing shops in Cleveland land.",
         "explain": "The trip fee is what a customer pays for you to come out and look. The hourly rate is what the work costs after that. These are the numbers I quote when callers ask.",
-        "example": "Say a caller asks what a water heater would run them. With the first, I tell them it's $89 for the visit, credited toward the repair, and you give the full price once you've seen the job.",
+        "example": "Say a caller asks what a water heater would run them. With the first, I say it's $89 for the visit, credited toward the repair. With the second, I quote the higher fee on that card: fewer callers book, but the ones who do mean it.",
         "options": [
           {
             "key": "a",
