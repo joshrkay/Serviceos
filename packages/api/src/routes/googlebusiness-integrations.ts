@@ -272,11 +272,11 @@ export function createGoogleBusinessOAuthCallbackRouter(
       const reviewCursorReset = selection
         ? await resetReviewCursorIfMoved(deps, consumed.tenantId, previous, selection)
         : false;
-      // With no listing chosen after a reconnect whose discovery worked (the
-      // saved one is gone), a link the app filled from it is cleared; a
-      // typed one stays.
+      // With no listing chosen after a discovery that worked (the saved one
+      // is gone, or a connect after a disconnect finds zero or several), a
+      // link the app filled earlier is cleared; a typed one stays.
       const reviewUrl: Awaited<ReturnType<typeof fillReviewUrl>> =
-        selection || (locations !== null && previous)
+        selection || locations !== null
           ? await fillReviewUrl(
               deps,
               consumed.tenantId,

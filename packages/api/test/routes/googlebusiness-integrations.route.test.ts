@@ -717,6 +717,20 @@ describe('Google Business integrations routes', () => {
       expect(status.body.data.locationState).toBe('needs_pick');
     });
 
+    it('a connect after a disconnect that finds no single listing clears the old app-filled link', async () => {
+      const settingsRepo = await settingsWith();
+      await connect({ '123': ONE_LOCATION }, { settingsRepo });
+      expect(await integrationRepo.disconnect(TENANT)).toBe(true);
+      const res = await connect({ '789': [] }, { settingsRepo });
+      expect(res.headers.location).toContain('googlebusiness_review_link=cleared');
+      expect((await settingsRepo.findByTenant(TENANT))?.googleReviewUrl ?? null).toBeNull();
+
+      await connect({ '123': ONE_LOCATION }, { settingsRepo });
+      expect(await integrationRepo.disconnect(TENANT)).toBe(true);
+      await connect(TWO_LOCATIONS, { settingsRepo });
+      expect((await settingsRepo.findByTenant(TENANT))?.googleReviewUrl ?? null).toBeNull();
+    });
+
     it('a reconnect where the saved listing is gone keeps a link the owner typed', async () => {
       const settingsRepo = await settingsWith('https://g.page/r/typed-by-owner');
       await connect({ '123': ONE_LOCATION }, { settingsRepo });

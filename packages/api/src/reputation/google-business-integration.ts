@@ -159,16 +159,13 @@ export function resolveGoogleBusinessLocation(credRow: CredentialRow): {
   locationId?: string;
 } {
   const creds = (credRow.credentials ?? {}) as StoredGoogleBusinessCredentials;
-  if (creds.providerData) {
-    const { accountId, locationId } = creds.providerData;
-    return {
-      ...(accountId !== undefined ? { accountId } : {}),
-      ...(locationId !== undefined ? { locationId } : {}),
-    };
-  }
+  // Per field: a legacy hand-seeded row keeps its top-level ids even after
+  // providerData gains other fields (e.g. only locationCount).
+  const accountId = creds.providerData?.accountId ?? creds.accountId;
+  const locationId = creds.providerData?.locationId ?? creds.locationId;
   return {
-    ...(creds.accountId !== undefined ? { accountId: creds.accountId } : {}),
-    ...(creds.locationId !== undefined ? { locationId: creds.locationId } : {}),
+    ...(accountId != null ? { accountId } : {}),
+    ...(locationId != null ? { locationId } : {}),
   };
 }
 

@@ -161,6 +161,21 @@ describe('google-business-integration credential shape', () => {
     });
   });
 
+  it('resolveGoogleBusinessLocation keeps legacy top-level ids when providerData only has a count', () => {
+    const row: CredentialRow = {
+      tenant_id: TENANT,
+      provider: GOOGLE_BUSINESS_PROVIDER,
+      credentials: { accessToken: 'plain-at', accountId: 'A', locationId: 'L', providerData: { locationCount: 1 } },
+      credential_version: 2,
+    };
+    expect(resolveGoogleBusinessLocation(row)).toEqual({ accountId: 'A', locationId: 'L' });
+    const picked: CredentialRow = {
+      ...row,
+      credentials: { ...row.credentials, providerData: { accountId: 'B', locationId: 'M' } },
+    };
+    expect(resolveGoogleBusinessLocation(picked)).toEqual({ accountId: 'B', locationId: 'M' });
+  });
+
   it('resolveGoogleBusinessTokens returns null when no token is recoverable', () => {
     const row: CredentialRow = {
       tenant_id: TENANT,
