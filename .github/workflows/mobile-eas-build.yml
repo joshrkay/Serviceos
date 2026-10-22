@@ -1,0 +1,127 @@
+name: Mobile EAS Build
+
+# Builds the Rivet mobile app on Expo's EAS servers and, for the production
+# profile, submits the result to the private store tracks (TestFlight and the
+# Play "internal" track). Promotion to a public release is always a human
+# click in App Store Connect / Play Console — this workflow never does it.
+#
+# Manual dispatch only: a store build costs EAS minutes and a build number,
+# so nothing here runs on push. Builds run on EAS, not on this runner; the
+# job returns as soon as EAS has queued them (`--no-wait`) and prints the
+# build URLs to the step summary.
+#
+# One-time setup (see docs/mobile/RELEASE-RUNBOOK.md):
+#   - `eas init` committed (`extra.eas.projectId` in app.json)
+#   - EAS project env: EXPO_PUBLIC_API_URL, EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY
+#   - EAS credentials: iOS distribution cert + App Store Connect API key
+#     (`eas credentials`), Android keystore (EAS-managed, Play App Signing)
+#   - Repo secrets: EXPO_TOKEN (Expo robot token with build + submit scope),
+#     PLAY_SERVICE_ACCOUNT_JSON (Play Console service-account key, Android
+#     submit only)
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: Platform(s) to build
+        type: choice
+        required: true
+        default: all
+        options: [all, ios, android]
+      profile:
+        description: EAS build profile (production = store-signed + auto-submit)
+        type: choice
+        required: true
+        default: production
+        options: [production, preview, development]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: mobile-eas-build-${{ inputs.platform }}-${{ inputs.profile }}
+  cancel-in-progress: false
+
+jobs:
+  eas-build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version-file: '.nvmrc'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            packages/mobile/package-lock.json
+
+      - name: Refuse to run without an Expo token
+        if: env.EXPO_TOKEN == ''
+        run: |
+          echo "::error::EXPO_TOKEN secret is not set — create an Expo robot token and add it to the repository secrets."
+          exit 1
+
+      # packages/mobile is an isolated Expo project (not a root workspace):
+      # the root install provides the deps ../shared resolves against, the
+      # mobile install provides Expo/RN + eas-cli (see pr-checks.yml).
+      - name: Install root workspace deps
+        run: npm ci
+      - name: Install mobile deps
+        run: npm ci
+        working-directory: packages/mobile
+
+      # Same gates the PR check runs, so a dispatch never spends EAS minutes
+      # on a tree that would not pass CI.
+      - name: Type check Mobile
+        run: npm run typecheck
+        working-directory: packages/mobile
+      - name: Validate store config
+        run: npm run validate:config
+        working-directory: packages/mobile
+
+      - name: Refuse a production build before `eas init`
+        if: inputs.profile == 'production'
+        working-directory: packages/mobile
+        run: |
+          if [ "$(node -p "require('./app.json').expo.extra.eas.projectId")" = "" ]; then
+            echo "::error::app.json extra.eas.projectId is empty — run 'npx eas-cli init' and commit the result before a production build."
+            exit 1
+          fi
+
+      # Android submit reads the Play service-account key from the gitignored
+      # path eas.json names. Only needed for production + android/all.
+      - name: Materialise Play service-account key
+        if: inputs.profile == 'production' && inputs.platform != 'ios'
+        working-directory: packages/mobile
+        env:
+          PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.PLAY_SERVICE_ACCOUNT_JSON }}
+        run: |
+          if [ -z "$PLAY_SERVICE_ACCOUNT_JSON" ]; then
+            echo "::error::PLAY_SERVICE_ACCOUNT_JSON secret is not set — required to submit to the Play internal track."
+            exit 1
+          fi
+          printf '%s' "$PLAY_SERVICE_ACCOUNT_JSON" > play-service-account.json
+
+      - name: EAS build (and submit for production)
+        working-directory: packages/mobile
+        run: |
+          set -euo pipefail
+          args=(build --platform "${{ inputs.platform }}" --profile "${{ inputs.profile }}" --non-interactive --no-wait)
+          if [ "${{ inputs.profile }}" = "production" ]; then
+            # Uses eas.json submit.production: TestFlight + Play internal track.
+            args+=(--auto-submit)
+          fi
+          npx eas-cli "${args[@]}" | tee eas-build.log
+          {
+            echo "## EAS build queued (${{ inputs.platform }} / ${{ inputs.profile }})"
+            echo
+            grep -Eo 'https://expo\.dev/[^ ]+' eas-build.log | sort -u | sed 's/^/- /' || true
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Remove Play service-account key
+        if: always()
+        working-directory: packages/mobile
+        run: rm -f play-service-account.json

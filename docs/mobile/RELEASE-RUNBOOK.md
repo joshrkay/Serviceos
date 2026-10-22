@@ -66,9 +66,10 @@ Terminal requires this EAS native build (config plugins in `app.json`). **Expo G
 
 - **iOS:** `appleId`, `ascAppId`, `appleTeamId` (`REPLACE_WITH_…`). Requires an
   **Apple Developer Program** membership.
-- **Android:** `serviceAccountKeyPath: REPLACE_WITH_PLAY_SERVICE_ACCOUNT.json`,
-  `track: internal`. Point the path at a Play Console service-account JSON
-  (local or CI secret — do not commit the key).
+- **Android:** `serviceAccountKeyPath: ./play-service-account.json`
+  (gitignored), `track: internal`. Drop the Play Console service-account JSON
+  at that path locally, or set the `PLAY_SERVICE_ACCOUNT_JSON` repo secret for
+  the workflow — never commit the key.
 
 Fill them (or pass via `eas submit` flags / EAS secrets).
 
@@ -113,6 +114,19 @@ Builds run on Expo's servers — trigger from your machine or CI with an
 - [ ] Technician demo: Today jobs; en route / running late; photo + voice while online
 - [ ] Offline: reconnect banner; no claim of queued offline recordings
 - [ ] Permission prompts use Rivet copy (mic, camera, location, Bluetooth, notifications)
+
+### 6b. Build from GitHub Actions (preferred once credentials exist)
+`.github/workflows/mobile-eas-build.yml` (manual dispatch: platform + profile)
+runs the same typecheck + `validate:config` gates as PR CI, then
+`eas build --no-wait` on EAS; the `production` profile adds `--auto-submit`,
+which lands the iOS build on TestFlight and the Android build on the Play
+**internal** track. Promotion to a public release stays a human click in each
+console. Repo secrets: `EXPO_TOKEN` (Expo robot token) and
+`PLAY_SERVICE_ACCOUNT_JSON` (Android submit; the workflow writes it to the
+gitignored `play-service-account.json` that `eas.json` names). iOS submit uses
+the App Store Connect API key stored in EAS credentials (`eas credentials`),
+so nothing Apple-side lives in GitHub. Signing: EAS-managed keystore with
+Play App Signing, EAS-managed iOS distribution certificate.
 
 ### 7. Verify push end-to-end (the fix's payoff)
 On a **physical device** install of the production build: sign in → grant
