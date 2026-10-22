@@ -113,9 +113,14 @@ function spokenNumber(t: string[], i: number): { value: number; next: number } |
   return lead;
 }
 
+/** Lowercase words, punctuation and hesitations ("um", "please") removed: the shared reading of what was said. */
+export function spokenWords(text: string): string[] {
+  return words(text).filter((w) => !FILLERS.has(w));
+}
+
 /** The utterance's words, cleaned: fillers out, pronoun "one" out, trailing "the" out, number words as digits. */
 function clean(text: string): string[] {
-  const raw = words(text).filter((w) => !FILLERS.has(w));
+  const raw = spokenWords(text);
   const noPronoun = raw.filter((w, i) => !((w === 'one' || w === 'ones') && i > 0 && ONE_CARRIERS.has(raw[i - 1])));
   while (noPronoun.length > 0 && noPronoun[noPronoun.length - 1] === 'the') noPronoun.pop();
   const out: string[] = [];
