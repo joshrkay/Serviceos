@@ -15,6 +15,7 @@ function setup(draft = plumbingCleDraft, over: Partial<ReadyScreenProps> = {}) {
   const voice: RivetVoice = {
     unlock: vi.fn(),
     speak: vi.fn(),
+    speakAll: vi.fn(),
     prefetch: vi.fn(),
     stop: vi.fn(),
     speaking: false,

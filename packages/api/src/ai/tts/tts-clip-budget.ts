@@ -6,7 +6,7 @@ import { MemoryStore, type Options, type Store } from 'express-rate-limit';
  *
  * #1603 capped the single-clip route at `VOICE_TTS_PER_MIN` clips per user
  * per minute so no account can turn it into a free-text TTS proxy. The
- * onboarding prefetch asks for a whole turn (up to three clips) in one
+ * onboarding prefetch asks for a whole turn (up to four clips) in one
  * request, and the batch must not be a way around that cap: a turn is
  * charged one unit per clip that is actually synthesized, never one per
  * request, and a turn that does not fit in what is left is refused whole.

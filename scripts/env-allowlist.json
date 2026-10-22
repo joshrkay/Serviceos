@@ -64,6 +64,7 @@
     { "name": "SHADOW_LLM_API_KEY", "reason": "Only read after SHADOW_LLM_ENABLED==='true'; a missing key also short-circuits back to the primary gateway (factory.ts:428)." },
     { "name": "SHADOW_LLM_BASE_URL", "reason": "Only read on the opt-in shadow path (factory.ts:432)." },
     { "name": "SHADOW_LLM_SAMPLING_RATE", "reason": "Only read on the opt-in shadow path (factory.ts:433)." },
+    { "name": "STT_PROVIDER", "reason": "Dev/test only. The single accepted value 'fixture' makes POST /api/voice/stream-token mint a fake token for the scripted-speech e2e lane (deepgram-token.ts); prodEnvSchema refuses it at boot and the mint refuses it again in production. Unset = real Deepgram, the production behaviour." },
     { "name": "STORAGE_ENABLED", "reason": "Opt-OUT flag: config.ts:287 reads `!== 'false'`, so unset means storage is ENABLED. Setting it is how you turn storage off." },
     { "name": "TELEPHONY_ENABLED", "reason": "Opt-OUT flag: config.ts:285 reads `!== 'false'`, so unset means telephony is ENABLED." },
     { "name": "TCPA_CONSENT_ENFORCEMENT", "reason": "config.ts:57 defaults to 'off' - a DELIBERATE off-by-default documented in the schema comment (the DNC opt-out check still applies). Raising it to 'warn'/'block' is an explicit operator decision, not a missing value." },
