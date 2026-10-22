@@ -70,6 +70,21 @@ describe('DripCampaignsSheet (#1735)', () => {
     );
   });
 
+  it('creates a membership-renewal campaign and labels it in the list', async () => {
+    const api = mockApi({
+      list: vi.fn().mockResolvedValue([sequence({ name: 'Renew club', targetKind: 'membership_renewals', targetDays: 30 })]),
+    });
+    render(<DripCampaignsSheet onClose={() => {}} api={api} />);
+    expect(await screen.findByText(/Membership renewals · 1 step/)).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Campaign name'), { target: { value: 'Renew' } });
+    fireEvent.change(screen.getByLabelText('Who to follow up with'), { target: { value: 'membership_renewals' } });
+    fireEvent.change(screen.getByLabelText('Step 1 message'), { target: { value: 'Your club renews soon' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Create campaign' }));
+    await waitFor(() =>
+      expect(api.create).toHaveBeenCalledWith(expect.objectContaining({ name: 'Renew', targetKind: 'membership_renewals' })),
+    );
+  });
+
   it('refuses to create without a name or a message', async () => {
     const api = mockApi();
     render(<DripCampaignsSheet onClose={() => {}} api={api} />);

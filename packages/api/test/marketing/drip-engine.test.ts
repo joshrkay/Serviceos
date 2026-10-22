@@ -72,6 +72,7 @@ async function setup(steps: DripStep[], overrides: Partial<DripEngineDeps> = {})
     findTargets: vi.fn(async () => []),
     findBookingSince: vi.fn(async () => null),
     hasRepliedSince: vi.fn(async () => false),
+    hasRenewedMembership: vi.fn(async () => false),
   };
   const customer = { current: makeCustomer() as Customer | null };
   const now = { current: NOW };
@@ -218,6 +219,36 @@ describe('drip engine — exit conditions and quiet hours', () => {
     expect(h.sendText).not.toHaveBeenCalled();
     expect(enrollmentOf(h)).toMatchObject({ status: 'exited', exitReason: 'booked', bookedAppointmentId: 'appt-1' });
     expect(await auditTypes(h)).toEqual(expect.arrayContaining(['drip.booking_attributed', 'drip.enrollment_exited']));
+  });
+
+  it('exits as renewed once the membership it was enrolled for is renewed (#1735)', async () => {
+    const h = await setup([sms]);
+    const enrollment = enrollmentOf(h);
+    enrollment.sourceEntityType = 'service_agreement';
+    enrollment.sourceEntityId = 'agr-1';
+    h.signals.hasRenewedMembership.mockResolvedValueOnce(true);
+    await createDripEngine(h.deps).runTenant(TENANT);
+    expect(h.sendText).not.toHaveBeenCalled();
+    expect(h.signals.hasRenewedMembership).toHaveBeenCalledWith(TENANT, {
+      agreementId: 'agr-1',
+      customerId: CUSTOMER,
+      // enrolledAt + the sequence's 180-day window
+      renewBy: new Date(enrollment.enrolledAt.getTime() + 180 * 86_400_000),
+      since: enrollment.enrolledAt,
+    });
+    expect(enrollmentOf(h)).toMatchObject({ status: 'exited', exitReason: 'renewed' });
+  });
+
+  it('keeps reminding while the membership is not renewed, and never asks for non-membership enrollments', async () => {
+    const renewal = await setup([sms]);
+    enrollmentOf(renewal).sourceEntityType = 'service_agreement';
+    enrollmentOf(renewal).sourceEntityId = 'agr-1';
+    await createDripEngine(renewal.deps).runTenant(TENANT);
+    expect(renewal.sendText).toHaveBeenCalledTimes(1);
+
+    const lapsed = await setup([sms]);
+    await createDripEngine(lapsed.deps).runTenant(TENANT);
+    expect(lapsed.signals.hasRenewedMembership).not.toHaveBeenCalled();
   });
 
   it('exits as replied', async () => {

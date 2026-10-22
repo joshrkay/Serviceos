@@ -246,7 +246,7 @@ export function createDripEngine(deps: DripEngineDeps): DripEngine {
       return;
     }
 
-    // Exit conditions, in precedence order: booked, replied, opted out.
+    // Exit conditions, in precedence order: booked, renewed, replied, opted out.
     const booking = await deps.signals.findBookingSince(tenantId, customer.id, enrollment.enrolledAt);
     if (booking) {
       await deps.repo.recordBooking(tenantId, enrollment.id, booking);
@@ -255,6 +255,21 @@ export function createDripEngine(deps: DripEngineDeps): DripEngine {
         attribution: 'in_sequence',
       });
       await finish(enrollment, 'booked', now);
+      return;
+    }
+    if (
+      enrollment.sourceEntityType === 'service_agreement' &&
+      enrollment.sourceEntityId &&
+      (await deps.signals.hasRenewedMembership(tenantId, {
+        agreementId: enrollment.sourceEntityId,
+        customerId: customer.id,
+        // At enrollment the membership ended within the target window; running
+        // past the window's end now means it was extended.
+        renewBy: addMinutes(enrollment.enrolledAt, sequence.targetDays * 24 * 60),
+        since: enrollment.enrolledAt,
+      }))
+    ) {
+      await finish(enrollment, 'renewed', now);
       return;
     }
     if (await deps.signals.hasRepliedSince(tenantId, customer.id, enrollment.enrolledAt)) {

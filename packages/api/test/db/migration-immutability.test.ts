@@ -656,6 +656,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['347_customer_text_wording_per_language', '8e523289f2ee6272d8c9c1acb7902f6ecde0cc82aea93bb9588b58aec866b8f2'],
   ['348_tenant_settings_get_found', 'a55ccb06da1509baa49df4ff5d76102e8f9ea2115ae2a3f28516b78e7966755c'],
   ['349_assignment_overlap_accepted_with', '9ce17e738283dccfdb696047dec16aba693948ccdd5c6309942ed5eb6a65b51a'],
+  // #1735 membership renewals drip target — deliberate snapshot update for a new migration.
+  ['350_drip_membership_renewals', 'cb9bac79386cf7359a295bb72faef6e76d0e15ad64fd3716517342917d2cdeba'],
 ];
 
 function hashMigration(value: string): string {

@@ -5,6 +5,7 @@ import type {
   DripExitReason,
   DripSequence,
   DripSequenceStatus,
+  DripSourceEntityType,
   DripTargetKind,
 } from './sequence';
 
@@ -16,7 +17,7 @@ import type {
 /** A customer a sequence's targeting rule picked, with what made them eligible. */
 export interface DripTarget {
   customerId: string;
-  sourceEntityType: 'estimate' | null;
+  sourceEntityType: DripSourceEntityType | null;
   sourceEntityId: string | null;
 }
 
@@ -88,6 +89,15 @@ export interface DripSignals {
   findBookingSince(tenantId: string, customerId: string, since: Date): Promise<DripBooking | null>;
   /** True when the customer texted us after `since`. */
   hasRepliedSince(tenantId: string, customerId: string, since: Date): Promise<boolean>;
+  /**
+   * Membership renewals: true once the customer no longer needs reminding —
+   * the agreement is active and auto-renewing, open-ended, or runs past
+   * `renewBy`, or another active agreement created after `since` does.
+   */
+  hasRenewedMembership(
+    tenantId: string,
+    input: { agreementId: string; customerId: string; renewBy: Date; since: Date },
+  ): Promise<boolean>;
 }
 
 export class InMemoryDripRepository implements DripRepository {
