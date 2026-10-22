@@ -216,6 +216,50 @@ describe('useRivetVoice — playback', () => {
     expect(result.current.speaking).toBe(false);
   });
 
+  it('speakAll narrates a turn in order from one batch, with a breath between lines', async () => {
+    const { result } = mount();
+    await act(async () => {
+      void result.current.speakAll(GREETING, { turn: 'greeting', with: GREETING });
+    });
+    await settle();
+    expect(batches().map((r) => r.body?.items)).toEqual([GREETING]);
+    expect(played).toEqual([srcFor(GREETING[0])]);
+    for (let i = 1; i < GREETING.length; i += 1) {
+      await finish();
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      });
+      await settle();
+      expect(played.at(-1)).toBe(srcFor(GREETING[i]));
+    }
+    expect(ttsRequests()).toHaveLength(1);
+  });
+
+  it('anything that interrupts a narration (stop, the owner talking, another line) ends the rest of it', async () => {
+    const { result } = mount();
+    await act(async () => {
+      void result.current.speakAll(GREETING, { turn: 'greeting', with: GREETING });
+    });
+    await settle();
+    expect(played).toEqual([srcFor(GREETING[0])]);
+    act(() => result.current.stop());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    });
+    expect(played).toEqual([srcFor(GREETING[0])]);
+
+    await act(async () => {
+      void result.current.speakAll(GREETING, { turn: 'greeting', with: GREETING });
+    });
+    await settle();
+    await speak(() => result.current, LINE_B, 'greeting', GREETING);
+    await finish();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    });
+    expect(played.slice(-2)).toEqual([srcFor(GREETING[0]), srcFor(LINE_B)]);
+  });
+
   it('an option tapped on that turn plays from the batch already received, with no new request', async () => {
     const { result } = mount();
     await speak(() => result.current, QUESTION, 'greeting', GREETING);

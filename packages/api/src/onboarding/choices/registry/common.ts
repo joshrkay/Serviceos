@@ -157,7 +157,7 @@ export function emergencyEntry(v: TradeVoice): ChoiceEntry {
       {
         key: 'b',
         label: "Your cell, then text you if you don't pick up",
-        detail: 'If you miss it, the caller hears that you have been paged and I text you their number and the problem.',
+        detail: "If you miss it, the caller hears you've been paged, and I text you their number and the problem.",
         rivetLine: "I'm trying {ownerFirstName} now. If I can't reach them, I'll page them and they'll call you right back.",
         writes: { emergencyTarget: 'owner_cell_then_text' },
       },

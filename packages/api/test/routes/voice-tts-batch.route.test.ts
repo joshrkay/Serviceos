@@ -164,11 +164,11 @@ describe('POST /api/voice/tts — charged per synthesized clip, never per reques
 });
 
 describe('POST /api/voice/tts/batch — bounded to one turn (the provider-spend guard)', () => {
-  it('an item over 240 characters is a 400: nothing charged, nothing synthesized', async () => {
+  it('an item over 320 characters is a 400: nothing charged, nothing synthesized', async () => {
     const tts = fakeTts();
     const app = buildApp({ tts, clipsPerMin: 1 });
 
-    const res = await batch(app, [TURN[0], 'x'.repeat(241)]);
+    const res = await batch(app, [TURN[0], 'x'.repeat(321)]);
 
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('VALIDATION_ERROR');
@@ -178,23 +178,27 @@ describe('POST /api/voice/tts/batch — bounded to one turn (the provider-spend 
     expect((await single(app, TURN[0])).status).toBe(200);
   });
 
-  it('four items is a 400', async () => {
+  it('five items is a 400: nothing charged, nothing synthesized', async () => {
     const tts = fakeTts();
-    const res = await batch(buildApp({ tts }), [...TURN, 'One more line.']);
+    const app = buildApp({ tts, clipsPerMin: 1 });
+    const res = await batch(app, [...TURN, 'One more line.', 'And another.']);
 
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('VALIDATION_ERROR');
     expect(tts.synthesize).not.toHaveBeenCalled();
+    expect((await single(app, TURN[0])).status).toBe(200);
   });
 
-  it('three items under 240 each but over 600 in total is a 400', async () => {
+  it('four items under 320 each but 901 characters in total is a 400: nothing charged', async () => {
     const tts = fakeTts();
-    const res = await batch(buildApp({ tts }), ['a'.repeat(200), 'b'.repeat(200), 'c'.repeat(201)]);
+    const app = buildApp({ tts, clipsPerMin: 1 });
+    const res = await batch(app, ['a'.repeat(300), 'b'.repeat(300), 'c'.repeat(300), 'd']);
 
     expect(res.status).toBe(400);
     expect(res.body.error).toBe('VALIDATION_ERROR');
     expect(Object.keys(res.body.details.fields)).toContain('items');
     expect(tts.synthesize).not.toHaveBeenCalled();
+    expect((await single(app, TURN[0])).status).toBe(200);
   });
 
   it('an empty or whitespace-only item, or no items at all, is a 400', async () => {
@@ -208,14 +212,14 @@ describe('POST /api/voice/tts/batch — bounded to one turn (the provider-spend 
     expect(tts.synthesize).not.toHaveBeenCalled();
   });
 
-  it('a three-item turn exactly at the caps is a 200, in order, in the tenant voice', async () => {
+  it('a four-clip narrated turn exactly at the caps is a 200, in order, in the tenant voice', async () => {
     const tts = fakeTts();
-    const items = ['q'.repeat(240), 'a'.repeat(240), 'b'.repeat(120)];
+    const items = ['q'.repeat(320), 'a'.repeat(320), 'b'.repeat(240), 'c'.repeat(20)];
 
     const res = await batch(buildApp({ tts }), items);
 
     expect(res.status).toBe(200);
-    expect(res.body.clips).toHaveLength(3);
+    expect(res.body.clips).toHaveLength(4);
     expect(res.body.clips.map((c: { text: string }) => c.text)).toEqual(items);
     for (const [i, clip] of (res.body.clips as Array<Record<string, unknown>>).entries()) {
       expect(clip).toMatchObject({
@@ -225,7 +229,7 @@ describe('POST /api/voice/tts/batch — bounded to one turn (the provider-spend 
         audio: Buffer.from(`mp3:${ADAM}:${items[i]}`).toString('base64'),
       });
     }
-    expect(tts.synthesize).toHaveBeenCalledTimes(3);
+    expect(tts.synthesize).toHaveBeenCalledTimes(4);
     expect(tts.synthesize).toHaveBeenCalledWith(expect.objectContaining({ text: items[0], voice: ADAM, tenantId: TENANT }));
   });
 

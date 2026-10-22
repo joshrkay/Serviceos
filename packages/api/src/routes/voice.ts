@@ -462,8 +462,8 @@ export function createVoiceRouter(
    * lines) while the current one plays; three single requests every few
    * seconds would meet the per-user cap for a fast owner, so a turn is one
    * request. The batch is not a way around the cap: it is bounded to one
-   * turn (ai/tts/tts-batch.ts — at most three items, 240 characters each,
-   * 600 in all, a 400 otherwise before anything is charged or looked up),
+   * turn (ai/tts/tts-batch.ts — at most four items, 320 characters each,
+   * 900 in all, a 400 otherwise before anything is charged or looked up),
    * cache hits are resolved first and cost nothing, the misses are charged
    * in one go from the same per-user budget as POST /tts (a turn that does
    * not fit is a 429 and nothing is synthesized), and each synthesized clip
