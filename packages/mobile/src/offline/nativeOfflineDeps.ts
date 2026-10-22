@@ -1,5 +1,5 @@
 import * as Crypto from 'expo-crypto';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import type { QueueFs } from './queue';
 
 // Native implementations of the injectable offline-queue deps. Kept out of

@@ -46,15 +46,25 @@ afterEach(() => {
 });
 
 describe('metro.config.js — dev-auth alias wiring (PRD 3.3)', () => {
-  it('resolves @clerk/clerk-expo to the dev shim only when EXPO_PUBLIC_AUTH_MODE=dev', () => {
-    const dev = loadMetroConfig({ EXPO_PUBLIC_AUTH_MODE: 'dev', NODE_ENV: 'development', EAS_BUILD_PROFILE: undefined });
-    expect(dev.resolver.resolveRequest(ctx, '@clerk/clerk-expo', 'android')).toEqual({
-      type: 'sourceFile',
-      filePath: SHIM,
-    });
+  // The app imports the provider/useAuth from the root entry and the
+  // resource-style useSignIn from /legacy (Clerk Core 3); both must hit the shim.
+  it.each(['@clerk/expo', '@clerk/expo/legacy'])(
+    'resolves %s to the dev shim only when EXPO_PUBLIC_AUTH_MODE=dev',
+    (specifier) => {
+      const dev = loadMetroConfig({ EXPO_PUBLIC_AUTH_MODE: 'dev', NODE_ENV: 'development', EAS_BUILD_PROFILE: undefined });
+      expect(dev.resolver.resolveRequest(ctx, specifier, 'android')).toEqual({
+        type: 'sourceFile',
+        filePath: SHIM,
+      });
 
-    const real = loadMetroConfig({ EXPO_PUBLIC_AUTH_MODE: undefined, NODE_ENV: 'development' });
-    expect(real.resolver.resolveRequest(ctx, '@clerk/clerk-expo', 'android')).toEqual({ type: 'fallthrough' });
+      const real = loadMetroConfig({ EXPO_PUBLIC_AUTH_MODE: undefined, NODE_ENV: 'development' });
+      expect(real.resolver.resolveRequest(ctx, specifier, 'android')).toEqual({ type: 'fallthrough' });
+    },
+  );
+
+  it('leaves other @clerk/expo subpaths (token-cache) on the real package in dev-auth mode', () => {
+    const dev = loadMetroConfig({ EXPO_PUBLIC_AUTH_MODE: 'dev', NODE_ENV: 'development', EAS_BUILD_PROFILE: undefined });
+    expect(dev.resolver.resolveRequest(ctx, '@clerk/expo/token-cache', 'android')).toEqual({ type: 'fallthrough' });
   });
 
   it('refuses to load at all for a production EAS build that asks for dev auth', () => {
