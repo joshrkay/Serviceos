@@ -254,6 +254,13 @@ const POINTS_AT_PAGE_RECORD_RE: Readonly<Record<PageEntityType, RegExp>> = {
   appointment: /\b(?:this|that|the same)\s+(?:appointment|visit|booking)\b/i,
 };
 
+/**
+ * A bare pointer at the record on screen: "is it paid?", "was that sent?",
+ * "what's on this?". Never "this week" or "invoices that are open".
+ */
+const BARE_POINTER_RE =
+  /\bit\b|\b(?:is|was|has|did|does)\s+(?:this|that)\b(?!\s+(?:week|month|year|morning|afternoon|evening|weekend|quarter|time|day|job|customer|client|guy|lady)\b)|\b(?:this|that)(?:\s+one)?\s*[?.!]*$/i;
+
 /** The note target a document or customer page stands for. A job or appointment page keeps the job default. */
 const NOTE_TARGET_BY_PAGE: Partial<Record<PageEntityType, 'customer' | 'invoice' | 'estimate'>> = {
   customer: 'customer',
@@ -276,7 +283,8 @@ export interface PageNoteTargetInput {
  * and a document page also fills its job, so without this the note lands on
  * the job while the reply says the open invoice was used. Only when the page
  * filled the record itself, the classifier named no kind, and the words do not
- * point past the page ("this job", or "her" on a document). Pure.
+ * point at the job ("this job"). Words that point at the customer instead
+ * ("for her", "for Ana Garcia") target the customer. Pure.
  */
 export function pageNoteTargetKind(input: PageNoteTargetInput): string | undefined {
   const { intent, entities, text, page, filledKeys } = input;
@@ -285,7 +293,12 @@ export function pageNoteTargetKind(input: PageNoteTargetInput): string | undefin
   if (typeof named === 'string' && named.trim().length > 0) return undefined;
   const kind = NOTE_TARGET_BY_PAGE[page.context.entityType];
   if (!kind || !filledKeys.includes(`${kind}Id`)) return undefined;
-  if (POINTS_AT_JOB_RE.test(text) || (kind !== 'customer' && POINTS_AT_CUSTOMER_RE.test(text))) return undefined;
+  if (POINTS_AT_JOB_RE.test(text)) return undefined;
+  // "Add a note for Ana Garcia" or "for her" on her invoice is about the
+  // customer, not the invoice.
+  if (kind !== 'customer' && (isExplicitReference(entities?.customerName) || POINTS_AT_CUSTOMER_RE.test(text))) {
+    return 'customer';
+  }
   return kind;
 }
 
@@ -330,9 +343,25 @@ export function pageLookupIds(input: PageLookupInput): PageLookupIds {
     if (typeof value === 'string' && value.trim().length > 0) return isDeicticReference(value);
     return re.test(text);
   };
+  // Only a question about that kind of record reads it by number: "what
+  // invoices are on this job?" lists the job's invoices, not the job's status.
+  // "What does this invoice owe?" is a balance question about that invoice.
+  const readsPageDocument =
+    DOCUMENT_LOOKUP_BY_TYPE[page.context.entityType] === intent ||
+    (page.context.entityType === 'invoice' && intent === 'lookup_balance');
+  const readsPageVisit = page.context.entityType === 'appointment' && intent === 'lookup_appointments';
   // Pointing at the record on screen ("this invoice") points at its customer
-  // and job too, since a document page expands to both.
-  const pointsAtPage = POINTS_AT_PAGE_RECORD_RE[page.context.entityType].test(text);
+  // and job too, since a document page expands to both. A question about the
+  // page's own kind of record may point with a bare "it" ("is it paid?"),
+  // unless it names the job or the customer instead.
+  const pointsAtPage =
+    POINTS_AT_PAGE_RECORD_RE[page.context.entityType].test(text) ||
+    ((readsPageDocument || readsPageVisit) &&
+      BARE_POINTER_RE.test(text) &&
+      !POINTS_AT_JOB_RE.test(text) &&
+      !POINTS_AT_CUSTOMER_RE.test(text) &&
+      !isExplicitReference(entities?.customerName) &&
+      !isExplicitReference(entities?.jobReference));
 
   // A record the operator named outright ("Maria Alvarez", "the Khan
   // install") is theirs to resolve, even in a question that also says "this".
@@ -355,18 +384,12 @@ export function pageLookupIds(input: PageLookupInput): PageLookupIds {
   ) {
     out.customerId = page.ids.customerId;
   }
-  // Only a question about that kind of record reads it by number: "what
-  // invoices are on this job?" lists the job's invoices, not the job's status.
-  // "What does this invoice owe?" is a balance question about that invoice.
-  const readsPageDocument =
-    DOCUMENT_LOOKUP_BY_TYPE[page.context.entityType] === intent ||
-    (page.context.entityType === 'invoice' && intent === 'lookup_balance');
   if (page.documentNumber && pointsAtPage && readsPageDocument) {
     out.documentNumber = page.documentNumber;
   }
   // A visit has no number, so its own id stands in: "when is this
   // appointment?" is about that visit, not the customer's next one.
-  if (page.ids.appointmentId && pointsAtPage && intent === 'lookup_appointments') {
+  if (page.ids.appointmentId && pointsAtPage && readsPageVisit) {
     out.appointmentId = page.ids.appointmentId;
   }
   return out;

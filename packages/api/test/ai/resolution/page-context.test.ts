@@ -270,6 +270,21 @@ describe('pageLookupIds on a document page', () => {
     ).toEqual({ jobId: JOB });
   });
 
+  it('a bare "it" on a document page reads that document, but never "this week" or "invoices that are open"', () => {
+    const invoicePage = { ids: { invoiceId: OTHER, jobId: JOB, customerId: CUSTOMER }, documentNumber: 'INV-0042', context: { entityType: 'invoice' as const } };
+    const ask = (text: string, entities: Record<string, unknown> = {}) =>
+      pageLookupIds({ intent: 'lookup_invoices', entities, text, page: invoicePage });
+    for (const text of ['is it paid?', 'was that sent?', "what's the status of this?", 'is this one paid?']) {
+      expect(ask(text), text).toEqual({ customerId: CUSTOMER, jobId: JOB, documentNumber: 'INV-0042' });
+    }
+    for (const text of ['what invoices are due this week?', 'show invoices that are open', 'what invoices are open?']) {
+      expect(ask(text), text).toEqual({});
+    }
+    // Words that name the job or a customer point there instead.
+    expect(ask('is it on this job?')).toEqual({ customerId: CUSTOMER, jobId: JOB });
+    expect(ask('is it paid?', { customerName: 'Maria Alvarez' })).toEqual({});
+  });
+
   it('"what does this invoice owe?" reads that invoice by its number', () => {
     const invoicePage = { ids: { invoiceId: OTHER, jobId: JOB, customerId: CUSTOMER }, documentNumber: 'INV-0042', context: { entityType: 'invoice' as const } };
     expect(
@@ -323,9 +338,15 @@ describe('pageNoteTargetKind', () => {
   it('leaves the job default alone where the page or the words say so', () => {
     expect(target({ page: { context: { entityType: 'job' } }, filledKeys: ['jobId', 'customerId'] })).toBeUndefined();
     expect(target({ text: 'add a note to this job: gate code' })).toBeUndefined();
-    expect(target({ text: 'add a note for her: call after 5' })).toBeUndefined();
     expect(target({ entities: { noteTargetKind: 'customer' } })).toBeUndefined();
     expect(target({ filledKeys: ['jobId'] })).toBeUndefined();
     expect(target({ intent: 'update_job' })).toBeUndefined();
+  });
+
+  it('targets the customer when the words point at the customer on a document page', () => {
+    expect(target({ text: 'add a note for her: call after 5' })).toBe('customer');
+    expect(
+      target({ text: 'add a note for Ana Garcia: prefers calls', entities: { noteBody: 'prefers calls', customerName: 'Ana Garcia' } }),
+    ).toBe('customer');
   });
 });
