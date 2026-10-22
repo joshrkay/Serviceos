@@ -41,6 +41,10 @@
  *    drafting handler's LLM call), so each path's writes commit together in
  *    ONE run of `deps.transactionRunner`, opened only after the re-draft
  *    returns. The failure-soft alias capture runs after that commit.
+ *  - A concurrent approve/reject wins (A-R3): each transaction re-checks the
+ *    status under the row lock before it writes (`lockOpenForPick`, or the
+ *    re-draft's own status write), so a pick never patches a row that left
+ *    review after the pick read it.
  *
  * P8/U-multi (multi-ambiguity chain): a single utterance can carry MORE than
  * one ambiguous reference ("invoice Bob for the Rodriguez job" where both
@@ -61,8 +65,8 @@
  */
 import { Role, hasPermission } from '../auth/rbac';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
-import { ForbiddenError, NotFoundError, ValidationError } from '../shared/errors';
-import { Proposal, ProposalRepository, missingFieldsFor } from './proposal';
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../shared/errors';
+import { Proposal, ProposalRepository, missingFieldsFor, type ProposalStatus } from './proposal';
 import { assertValidProposalPayload, validateProposalPayload } from './contracts';
 import type { IntentType } from '../ai/orchestration/intent-classifier';
 import type { TaskContext } from '../ai/tasks/task-handlers';
@@ -118,6 +122,46 @@ export interface ResolveEntityDeps {
 
 function transactionRunnerOf(deps: ResolveEntityDeps): TenantTransactionRunner {
   return deps.transactionRunner ?? new InMemoryTransactionRunner();
+}
+
+/** Only a proposal still under review takes a pick — never one already
+ *  approved/executed/rejected (terminal states can't be re-drafted). */
+function isOpenForPick(status: ProposalStatus): boolean {
+  return status === 'draft' || status === 'ready_for_review';
+}
+
+/**
+ * A-R3 — the first statement of the annotate-only and next-ambiguity
+ * transactions: lock the row and re-check that it is still open for a pick.
+ *
+ * Those two paths patch the payload without writing a status (a
+ * ready_for_review row gets no status write at all), and the pick read the
+ * row before the transaction opened. An approve or reject that committed in
+ * that gap was therefore overwritten after the fact: an approved row's payload
+ * changed under the approval, a rejected row came back with a resolved id or
+ * a fresh picker. Holding the row lock to commit makes the concurrent
+ * decision win: the pick throws and its patch rolls back.
+ *
+ * The re-draft path needs no lock: its status write (updateStatus →
+ * assertStatusWrite under SELECT ... FOR UPDATE) already refuses a row that
+ * left review, and rolls its patch back.
+ */
+async function lockOpenForPick(
+  deps: ResolveEntityDeps,
+  tenantId: string,
+  proposalId: string,
+): Promise<void> {
+  const locked = (await deps.proposalRepo.findByIdsForUpdate(tenantId, [proposalId])).find(
+    (p) => p.id === proposalId,
+  );
+  if (!locked) {
+    throw new NotFoundError('Proposal', proposalId);
+  }
+  if (!isOpenForPick(locked.status)) {
+    throw new ConflictError('This was already handled, so that choice was not saved.', {
+      status: locked.status,
+    });
+  }
 }
 
 /** The structured original-intent context the producer stamps for re-draft. */
@@ -322,9 +366,10 @@ export async function resolveProposalEntity(
   if (!proposal) {
     throw new NotFoundError('Proposal', proposalId);
   }
-  // Only a proposal still under review can be patched — never one already
-  // approved/executed/rejected (terminal states can't be re-drafted).
-  if (proposal.status !== 'draft' && proposal.status !== 'ready_for_review') {
+  // Only a proposal still under review can be patched. Re-checked under the
+  // row lock inside each path's transaction (lockOpenForPick / the re-draft's
+  // status write), since a concurrent approve/reject can land after this read.
+  if (!isOpenForPick(proposal.status)) {
     throw new ValidationError(
       `Cannot resolve an entity on a proposal in '${proposal.status}' status`,
     );
@@ -514,6 +559,7 @@ export async function resolveProposalEntity(
   const movedToReview = proposal.status === 'draft' && !stillGated;
 
   await transactionRunnerOf(deps).run(tenantId, async () => {
+    await lockOpenForPick(deps, tenantId, proposalId);
     await deps.proposalRepo.update(tenantId, proposalId, {
       payload: nextPayload,
       sourceContext: nextSourceContext,
@@ -899,6 +945,7 @@ async function advanceToNextAmbiguity(args: {
   nextSourceContext.resolvedEntity = resolvedEntities[resolvedEntities.length - 1];
 
   await transactionRunnerOf(deps).run(tenantId, async () => {
+    await lockOpenForPick(deps, tenantId, proposalId);
     await deps.proposalRepo.update(tenantId, proposalId, {
       payload: nextPayload,
       summary,

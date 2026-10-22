@@ -14,7 +14,7 @@ import {
 import type { TaskHandler, TaskContext } from '../../src/ai/tasks/task-handlers';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import { createExecutionHandlerRegistry } from '../../src/proposals/execution/handlers';
-import { ForbiddenError, NotFoundError, ValidationError } from '../../src/shared/errors';
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../../src/shared/errors';
 import type { TenantTransactionRunner } from '../../src/db/tenant-transaction';
 import type { EntityAliasCandidateCapture } from '../../src/learning/entity-aliases/candidate-service';
 
@@ -1195,6 +1195,7 @@ describe('A1 — resolveProposalEntity commits each path in one short transactio
     };
     // Every write records whether it ran inside the runner's transaction.
     for (const [name, target] of [
+      ['findByIdsForUpdate', repo],
       ['update', repo],
       ['updateStatus', repo],
       ['create', auditRepo],
@@ -1335,6 +1336,7 @@ describe('A1 — resolveProposalEntity commits each path in one short transactio
     expect(result.status).toBe('ready_for_review');
     expect(events).toEqual([
       `BEGIN ${TENANT_UUID}`,
+      'findByIdsForUpdate (in tx)',
       'update (in tx)',
       'updateStatus (in tx)',
       'create (in tx)',
@@ -1370,6 +1372,7 @@ describe('A1 — resolveProposalEntity commits each path in one short transactio
     expect(handler.handle).not.toHaveBeenCalled();
     expect(events).toEqual([
       `BEGIN ${TENANT_UUID}`,
+      'findByIdsForUpdate (in tx)',
       'update (in tx)',
       'create (in tx)',
       'COMMIT',
@@ -1398,5 +1401,79 @@ describe('A1 — resolveProposalEntity commits each path in one short transactio
 
     expect(events.at(-1)).toBe('ROLLBACK');
     expect(aliasCapture.capture).not.toHaveBeenCalled();
+  });
+  // A-R3 — the annotate-only and next-ambiguity paths write no status (or, for
+  // a ready_for_review row, none at all), so nothing re-checked the status the
+  // pick read before its transaction. Each now locks the row and re-checks it
+  // first thing inside the transaction: an approve/reject that landed in the
+  // gap wins, and the pick rolls back without writing.
+  describe('A-R3 — a pick loses to an approve/reject that lands before its transaction', () => {
+    /** The pick's read returns its snapshot; then `status` lands, as a
+     *  concurrent request would (through the unspied repo method, so the
+     *  pick's own event log stays its own). */
+    function landsAfterTheRead(status: 'approved' | 'rejected' | 'ready_for_review') {
+      const realFindById = repo.findById.bind(repo);
+      vi.spyOn(repo, 'findById').mockImplementationOnce(async (tenantId, id) => {
+        const snapshot = await realFindById(tenantId, id);
+        await InMemoryProposalRepository.prototype.updateStatus.call(repo, tenantId, id, status, {});
+        return snapshot;
+      });
+    }
+
+    it.each(['approved', 'rejected'] as const)(
+      'annotate-only on a ready_for_review row: %s wins, nothing is patched or audited',
+      async (status) => {
+        await repo.create({ ...clarification(), status: 'ready_for_review' });
+        const before = await repo.findById(TENANT_UUID, PROPOSAL);
+        landsAfterTheRead(status);
+        const aliasCapture = capture();
+
+        const err = await resolve({ entityAliasCandidateCapture: aliasCapture }).catch((e: unknown) => e);
+
+        expect(err).toBeInstanceOf(ConflictError);
+        expect((err as Error).message).not.toMatch(/proposal|\bAI\b|agent/i);
+        expect(events).toEqual([`BEGIN ${TENANT_UUID}`, 'findByIdsForUpdate (in tx)', 'ROLLBACK']);
+        const after = await repo.findById(TENANT_UUID, PROPOSAL);
+        expect(after!.status).toBe(status);
+        expect(after!.payload).toEqual(before!.payload);
+        expect(after!.sourceContext).toEqual(before!.sourceContext);
+        expect(await auditRepo.findByEntity(TENANT_UUID, 'proposal', PROPOSAL)).toEqual([]);
+        expect(aliasCapture.capture).not.toHaveBeenCalled();
+      },
+    );
+
+    it('next ambiguity on a draft row: a reject wins and the row is not advanced', async () => {
+      await repo.create(
+        clarification({
+          pendingEntityAmbiguities: [
+            {
+              entityKind: 'job',
+              reference: 'Rodriguez job',
+              candidates: [{ id: JOB_A, kind: 'job', label: 'Rodriguez — kitchen', score: 0.8 }],
+            },
+          ],
+        }),
+      );
+      const before = await repo.findById(TENANT_UUID, PROPOSAL);
+      landsAfterTheRead('rejected');
+
+      await expect(resolve()).rejects.toBeInstanceOf(ConflictError);
+
+      expect(events).toEqual([`BEGIN ${TENANT_UUID}`, 'findByIdsForUpdate (in tx)', 'ROLLBACK']);
+      const after = await repo.findById(TENANT_UUID, PROPOSAL);
+      expect(after!.status).toBe('rejected');
+      expect(after!.payload).toEqual(before!.payload);
+      expect(after!.sourceContext).toEqual(before!.sourceContext);
+    });
+
+    it('a row that moved from draft to ready_for_review in the gap is still patched (both are open for a pick)', async () => {
+      await repo.create(clarification());
+      landsAfterTheRead('ready_for_review');
+
+      const result = await resolve();
+
+      expect(result.status).toBe('ready_for_review');
+      expect((result.payload as Record<string, unknown>).customerId).toBe(CUST_B);
+    });
   });
 });

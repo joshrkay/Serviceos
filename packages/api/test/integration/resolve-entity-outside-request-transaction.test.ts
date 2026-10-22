@@ -18,6 +18,11 @@
  * an app pool of max=1 - so "another tenant's request completes while the LLM
  * call is in flight" is a hard proof (with the request transaction held there
  * is no second connection to hand out), not a likelihood.
+ *
+ * A-R3 - the annotate-only and next-ambiguity paths write no status, so
+ * nothing re-checked the status they read before their transaction. A gate on
+ * the pick's first proposal read lets a real reject commit in that gap; the
+ * pick must then lose (409) and leave the rejected row exactly as it was.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import express from 'express';
@@ -141,6 +146,21 @@ function clarificationFor(tenantId: string, createdBy: string): Proposal {
   });
 }
 
+const JOB_A = '33333333-3333-4333-8333-333333333333';
+const JOB_B = '44444444-4444-4444-8444-444444444444';
+
+/** No originalIntent: resolution annotates the pick in place (no re-draft). */
+function annotateOnlyClarificationFor(
+  tenantId: string,
+  createdBy: string,
+  sourceContext: Record<string, unknown> = {},
+): Proposal {
+  const base = clarificationFor(tenantId, createdBy);
+  const annotateOnly: Record<string, unknown> = { ...base.sourceContext, ...sourceContext };
+  delete annotateOnly.originalIntent;
+  return { ...base, sourceContext: annotateOnly };
+}
+
 describe('A1 — resolve-entity holds no connection across its LLM call and commits its writes as one unit', () => {
   let harnessPool: Pool;
   let realAppPool: Pool;
@@ -151,6 +171,14 @@ describe('A1 — resolve-entity holds no connection across its LLM call and comm
   let seedRepo: PgProposalRepository;
   const log: LoggedStatement[] = [];
   const injection: { failWhen: RegExp | null } = { failWhen: null };
+
+  // A-R3 — holds the pick right after its first read of the armed proposal,
+  // so a concurrent request can commit before the pick's own transaction.
+  const readGate: { armedFor: string | null; reached: Deferred; release: Deferred } = {
+    armedFor: null,
+    reached: deferred(),
+    release: deferred(),
+  };
 
   // Per-test gateway control.
   let llmEntered: Deferred;
@@ -169,6 +197,16 @@ describe('A1 — resolve-entity holds no connection across its LLM call and comm
     realAppPool = appPool(dbUrl);
     const pool = loggingPool(realAppPool, log, injection);
     const proposalRepo = new PgProposalRepository(pool);
+    const realFindById = proposalRepo.findById.bind(proposalRepo);
+    proposalRepo.findById = async (tenantId: string, id: string) => {
+      const found = await realFindById(tenantId, id);
+      if (readGate.armedFor === id) {
+        readGate.armedFor = null;
+        readGate.reached.resolve();
+        await readGate.release.promise;
+      }
+      return found;
+    };
     const auditRepo = new PgAuditRepository(pool);
 
     // The drafting LLM: records what it can see, then blocks until released.
@@ -262,7 +300,8 @@ describe('A1 — resolve-entity holds no connection across its LLM call and comm
       proposal_type: string;
       status: string;
       payload: Record<string, unknown>;
-    }>('SELECT proposal_type, status, payload FROM proposals WHERE id = $1', [id]);
+      source_context: Record<string, unknown>;
+    }>('SELECT proposal_type, status, payload, source_context FROM proposals WHERE id = $1', [id]);
     return rows[0];
   }
 
@@ -387,5 +426,120 @@ describe('A1 — resolve-entity holds no connection across its LLM call and comm
     expect(done.proposal_type).toBe('draft_invoice');
     expect(done.status).toBe('ready_for_review');
     expect(await resolvedAudits(clarification.id)).toBe(1);
+  });
+
+  /**
+   * Runs the pick with a real reject committed between the pick's read and its
+   * transaction, and returns the pick's response and the SQL it sent after
+   * the gate opened.
+   */
+  async function pickRacingAReject(proposalId: string) {
+    log.length = 0;
+    readGate.reached = deferred();
+    readGate.release = deferred();
+    readGate.armedFor = proposalId;
+    const pick = post(`/api/proposals/${proposalId}/resolve-entity`, tenantA, { candidateId: CUST_B });
+    await readGate.reached.promise;
+
+    // The owner dismisses it from another screen, and that commits first.
+    const rejected = await post(`/api/proposals/${proposalId}/reject`, tenantA, { reason: 'not needed' });
+    expect(rejected.status).toBe(200);
+    expect((await proposalRow(proposalId)).status).toBe('rejected');
+
+    const releasedAt = log.length;
+    readGate.release.resolve();
+    const response = await pick;
+    return { response, after: log.slice(releasedAt).map((s) => s.sql) };
+  }
+
+  const LOCK_ROW = /^SELECT \* FROM proposals WHERE tenant_id = \$1 AND id = ANY\(\$2::uuid\[\]\) ORDER BY id FOR UPDATE$/;
+
+  it('annotate-only: a reject that commits after the pick read its ready_for_review row wins; the pick is refused and patches nothing', async () => {
+    const seeded = await seedRepo.create(annotateOnlyClarificationFor(tenantA.tenantId, tenantA.userId));
+    await seedRepo.updateStatus(tenantA.tenantId, seeded.id, 'ready_for_review');
+    const before = await proposalRow(seeded.id);
+
+    const { response, after } = await pickRacingAReject(seeded.id);
+
+    expect(response.status).toBe(409);
+    // The rejected row is exactly as the reject left it: no resolved id, the
+    // picker still there, no resolution audit.
+    const row = await proposalRow(seeded.id);
+    expect(row.status).toBe('rejected');
+    expect(row.payload).toEqual(before.payload);
+    expect(row.source_context).toEqual(before.source_context);
+    expect(row.payload.customerId).toBeUndefined();
+    expect(await resolvedAudits(seeded.id)).toBe(0);
+
+    // The pick took the row lock first thing in its own transaction, saw the
+    // reject, and rolled back without writing.
+    const begin = after.indexOf('BEGIN');
+    const lock = after.findIndex((s) => LOCK_ROW.test(s));
+    expect(begin).toBeGreaterThanOrEqual(0);
+    expect(lock).toBeGreaterThan(begin);
+    expect(after.slice(begin, lock)).toContain('SET LOCAL ROLE rls_app_runtime');
+    expect(after[lock + 1]).toBe('ROLLBACK');
+    expect(after.some((s) => s.startsWith('UPDATE proposals'))).toBe(false);
+    expect(after.some((s) => s.startsWith('INSERT INTO audit_events'))).toBe(false);
+  });
+
+  it('next ambiguity: a reject that commits after the pick read its draft row wins; the row is not advanced to the next picker', async () => {
+    const seeded = await seedRepo.create(
+      annotateOnlyClarificationFor(tenantA.tenantId, tenantA.userId, {
+        pendingEntityAmbiguities: [
+          {
+            entityKind: 'job',
+            reference: 'Rodriguez job',
+            candidates: [
+              { id: JOB_A, kind: 'job', label: 'Rodriguez - kitchen', score: 0.8 },
+              { id: JOB_B, kind: 'job', label: 'Rodriguez - bath', score: 0.79 },
+            ],
+          },
+        ],
+      }),
+    );
+    const before = await proposalRow(seeded.id);
+
+    const { response, after } = await pickRacingAReject(seeded.id);
+
+    expect(response.status).toBe(409);
+    const row = await proposalRow(seeded.id);
+    expect(row.status).toBe('rejected');
+    expect(row.payload).toEqual(before.payload);
+    expect(row.payload.entityReference).toBe('Bob');
+    expect(row.source_context).toEqual(before.source_context);
+    expect(await resolvedAudits(seeded.id)).toBe(0);
+    const lock = after.findIndex((s) => LOCK_ROW.test(s));
+    expect(lock).toBeGreaterThan(after.indexOf('BEGIN'));
+    expect(after[lock + 1]).toBe('ROLLBACK');
+    expect(after.some((s) => s.startsWith('UPDATE proposals'))).toBe(false);
+  });
+
+  it('annotate-only, no race: the row lock comes first, then the patch and the audit, in one transaction', async () => {
+    const seeded = await seedRepo.create(annotateOnlyClarificationFor(tenantA.tenantId, tenantA.userId));
+    await seedRepo.updateStatus(tenantA.tenantId, seeded.id, 'ready_for_review');
+    log.length = 0;
+
+    const response = await post(`/api/proposals/${seeded.id}/resolve-entity`, tenantA, { candidateId: CUST_B });
+
+    expect(response.status).toBe(200);
+    const row = await proposalRow(seeded.id);
+    expect(row.status).toBe('ready_for_review');
+    expect(row.payload.customerId).toBe(CUST_B);
+    expect(row.payload.entityCandidates).toBeUndefined();
+    expect(await resolvedAudits(seeded.id)).toBe(1);
+
+    const sqls = log.map((s) => s.sql);
+    const lock = sqls.findIndex((s) => LOCK_ROW.test(s));
+    const begin = sqls.lastIndexOf('BEGIN', lock);
+    const commit = sqls.indexOf('COMMIT', lock);
+    const tx = sqls.slice(begin, commit + 1);
+    const lockAt = tx.findIndex((s) => LOCK_ROW.test(s));
+    const patchAt = tx.findIndex((s) => s.startsWith('UPDATE proposals SET updated_at = NOW(), payload'));
+    const auditAt = tx.findIndex((s) => s.startsWith('INSERT INTO audit_events'));
+    expect(lockAt).toBeGreaterThan(0);
+    expect(patchAt).toBeGreaterThan(lockAt);
+    expect(auditAt).toBeGreaterThan(patchAt);
+    expect(tx.filter((s) => s === 'BEGIN' || s === 'COMMIT' || s === 'ROLLBACK')).toEqual(['BEGIN', 'COMMIT']);
   });
 });
