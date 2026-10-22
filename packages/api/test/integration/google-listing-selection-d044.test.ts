@@ -9,7 +9,7 @@
  * a real Postgres under RLS. No Google calls.
  *
  * Also pins review_poll_state.cursor reset on a listing change, and
- * review_poll_state.backoff_reason (migration 330) so the home checklist
+ * review_poll_state.backoff_reason (migration 331) so the home checklist
  * asks for a reconnect only when Google rejected the credentials.
  *
  * #1763 — also pins tenant_settings.get_found_online_dismissed_at (migration
@@ -253,6 +253,35 @@ describe('D-044 Google listing selection (real Postgres)', () => {
     await repo.recordQuotaError(tenantId, 30);
     expect(await repo.recordReconnect(tenantId)).toBe(false);
     expect((await repo.getPollState(tenantId))?.backoffReason).toBe('quota');
+  });
+
+  it('#1771 recordListingWebsite is kept for that listing only, and a pick of another location hides it', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    const repo = new PgGoogleBusinessIntegrationRepository(pool);
+    await repo.upsert({
+      tenantId,
+      accessToken: 'AT-1',
+      refreshToken: 'RT-1',
+      accessTokenExpiresAt: new Date('2026-10-22T05:00:00Z'),
+      locationCount: 2,
+      selection: { accountId: '456', locationId: '555', placeId: null, reviewUrl: null, locationTitle: 'North' },
+    });
+    expect((await repo.get(tenantId))?.listingWebsiteUri).toBeNull();
+
+    await repo.recordListingWebsite(tenantId, '555', 'https://acme.example.com');
+    expect(await repo.get(tenantId)).toMatchObject({
+      locationId: '555',
+      locationTitle: 'North',
+      listingWebsiteUri: 'https://acme.example.com',
+    });
+    // Tokens survive the merge.
+    expect((await repo.getTokens(tenantId))?.accessToken).toBe('AT-1');
+
+    // Re-selecting the same listing keeps it; a different listing does not inherit it.
+    await repo.selectLocation(tenantId, { accountId: '456', locationId: '555', placeId: 'P', reviewUrl: null, locationTitle: 'North' });
+    expect((await repo.get(tenantId))?.listingWebsiteUri).toBe('https://acme.example.com');
+    await repo.selectLocation(tenantId, { accountId: '456', locationId: '777', placeId: null, reviewUrl: null, locationTitle: 'South' });
+    expect((await repo.get(tenantId))?.listingWebsiteUri).toBeNull();
   });
 
   it('an auth failure from before a reconnect is dropped', async () => {

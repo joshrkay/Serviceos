@@ -72,5 +72,54 @@ test.describe('Home → Get found online card — mobile layout', () => {
       await expect(page).toHaveURL(/\/settings/);
       await expect(page.locator('#google-review-url')).toBeVisible({ timeout: 20_000 });
     });
+
+    test('#1771 the Google approval card fits 320px with glove-size buttons', async ({ page }) => {
+      await page.route(
+        (url) => url.pathname.replace(/\/$/, '') === '/api/get-found-online',
+        (route) =>
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              data: {
+                items: [{ id: 'google_website', status: 'current', reason: 'not_published' }],
+                allDone: false,
+                visible: true,
+              },
+            }),
+          }),
+      );
+      await page.route('**/api/get-found-online/google-website/draft', (route) =>
+        route.fulfill({
+          status: 201,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            data: {
+              proposalId: 'p-1',
+              websiteUri: 'https://a-very-long-business-name-plumbing-and-heating.sites.example.com/some/path',
+              bookingUri: 'https://app.example.com/book?t=00000000-0000-0000-0000-000000000000',
+            },
+          }),
+        }),
+      );
+      await page.goto('/');
+      await dismissWhatsNewModal(page);
+      const item = page.getByTestId('get-found-online-item-google_website');
+      await expect(item).toBeVisible({ timeout: 20_000 });
+      await item.getByRole('button').click();
+
+      const approval = page.getByTestId('google-website-approval');
+      await expect(approval).toBeVisible();
+      for (const id of ['google-website-approve', 'google-website-discard']) {
+        const button = page.getByTestId(id);
+        await button.scrollIntoViewIfNeeded();
+        const box = await button.boundingBox();
+        expect(box).not.toBeNull();
+        expect(Math.round(box!.height)).toBeGreaterThanOrEqual(44);
+        expect(box!.x).toBeGreaterThanOrEqual(0);
+        expect(box!.x + box!.width).toBeLessThanOrEqual(320);
+      }
+      expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
+    });
   });
 });

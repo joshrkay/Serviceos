@@ -139,6 +139,8 @@ export interface AppointmentAssignment {
    * 332); set only when an overlap actually existed at assignment time.
    */
   overlapAccepted?: boolean;
+  /** The appointment ids that acceptance covers; the DB guard holds the row to exactly these. */
+  overlapAcceptedWith?: string[];
 }
 
 export interface CreateAssignmentInput {
@@ -320,7 +322,7 @@ export async function assignTechnician(
     scheduledEnd: deps.appointmentRepo
       ? (await deps.appointmentRepo.findById(input.tenantId, input.appointmentId))?.scheduledEnd
       : undefined,
-    ...(overlapAccepted ? { overlapAccepted: true } : {}),
+    ...(overlapAccepted ? { overlapAccepted: true, overlapAcceptedWith: [...(input.acceptOverlapWith ?? [])] } : {}),
   };
 
   const created = await repository.create(assignment);
@@ -338,7 +340,7 @@ export async function assignTechnician(
           assignmentId: created.id,
           technicianId: input.technicianId,
           isPrimary: created.isPrimary,
-          ...(overlapAccepted ? { overlapAccepted: true } : {}),
+          ...(overlapAccepted ? { overlapAccepted: true, overlapAcceptedWith: [...(input.acceptOverlapWith ?? [])] } : {}),
         },
       }),
     );

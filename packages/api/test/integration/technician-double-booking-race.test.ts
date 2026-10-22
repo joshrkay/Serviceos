@@ -8,6 +8,7 @@ import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { assignTechnician } from '../../src/appointments/assignment';
 import { ConflictError } from '../../src/shared/errors';
+import { isDoubleBookingViolation } from '../../src/appointments/double-booking-db-error';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 
 /**
@@ -427,16 +428,22 @@ describe('Postgres integration — technician double-booking race (TEST-02)', ()
       const apptB = await makeAppointment(start, end);
       const assignmentBId = crypto.randomUUID();
 
-      // Still SCHEDULED — the EXCLUDE constraint must reject this raw
-      // INSERT (control: proves the constraint is actually load-bearing
-      // here, not vacuously permissive).
-      await expect(
-        pool.query(
+      // Still SCHEDULED — the DB must reject this raw INSERT (control:
+      // proves the guard is actually load-bearing here, not vacuously
+      // permissive). Since 332 the BEFORE trigger trg_overlap_accepted_guard
+      // fires ahead of the EXCLUDE constraint and raises the same 23P01
+      // without a constraint name, so match it the way the repos do.
+      const refused = await pool
+        .query(
           `INSERT INTO appointment_assignments (id, tenant_id, appointment_id, technician_id, is_primary, assigned_by, assigned_at)
            VALUES ($1, $2, $3, $4, true, $5, now())`,
           [assignmentBId, tenant.tenantId, apptB, technicianId, tenant.userId],
-        ),
-      ).rejects.toMatchObject({ code: '23P01', constraint: 'no_double_booking' });
+        )
+        .then(
+          () => null,
+          (err: unknown) => err,
+        );
+      expect(isDoubleBookingViolation(refused)).toBe(true);
 
       // Now cancel apptA — the sync trigger propagates the status onto
       // assignmentA's denormalized appointment_status, which takes it out
