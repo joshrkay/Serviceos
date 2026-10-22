@@ -519,10 +519,26 @@ export interface RecordInboundCallResult {
 }
 
 /**
+ * LCR-04 — the advisory-lock key for one recording's ingest, hashed with
+ * `pg_advisory_xact_lock(hashtext($1))` like `job_number:<tenantId>` and
+ * `payment_mode:<tenantId>`; the `voice_recording_ingest:` prefix keeps it
+ * apart from those features' keys. The parts are `:`-delimited so two
+ * different (call_sid, recording_url) splits don't concatenate to one key.
+ * A key collision (a `:` inside a CallSid, or a 32-bit hashtext clash) only
+ * makes two unrelated ingests wait on each other; the dedupe SELECT still
+ * matches the exact triple, so it can never merge two recordings.
+ */
+function recordingIngestLockKey(input: RecordInboundCallInput): string {
+  return `voice_recording_ingest:${input.tenantId}:${input.callSid}:${input.recordingUrl}`;
+}
+
+/**
  * Persist a `voice_recordings` row for a finalized Twilio inbound call
  * recording. Idempotent on `(tenant_id, call_sid, recording_url)` via
- * SELECT-then-INSERT inside a transaction — a second webhook delivery for
- * the same RecordingSid is a no-op that returns the existing row's id.
+ * SELECT-then-INSERT inside a transaction serialized per recording by an
+ * advisory lock (LCR-04) — a second webhook delivery for the same
+ * RecordingSid, sequential or concurrent, is a no-op that returns the
+ * existing row's id.
  *
  * Why recording_url is part of the identity (U9 review fix): one call can
  * legitimately produce TWO recordings — the live leg's `<Start><Record>`
@@ -553,13 +569,22 @@ export async function recordInboundCall(
 ): Promise<RecordInboundCallResult> {
   const client = await pool.connect();
   try {
-    // Wrap the SELECT-then-INSERT in a transaction so concurrent
-    // Twilio retries can't both pass the existence check and produce
-    // duplicate (files, voice_recordings) rows. The DB-level uniqueness
-    // is partial / advisory today; the transaction is what enforces
-    // atomicity here.
+    // LCR-04 — nothing is unique on (tenant_id, call_sid, recording_url),
+    // and the SELECT … FOR UPDATE below locks no row while none exists yet,
+    // so two concurrent deliveries of one recording (a Twilio callback
+    // retry, or a callback racing a replay) both passed the check and both
+    // inserted. A transaction-scoped advisory lock on that triple, taken
+    // before the check, is what serializes them: the second delivery waits
+    // for the first to COMMIT (or ROLLBACK), then its SELECT — a fresh
+    // READ COMMITTED snapshot — finds the first's row and returns
+    // inserted=false. Released at COMMIT/ROLLBACK; no unlock to leak.
+    // Different recordings of one call (U9), and other tenants, hash to
+    // different keys and do not wait on each other.
     await client.query('BEGIN');
     await applyTenantContext(client, input.tenantId, { transactional: true });
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [
+      recordingIngestLockKey(input),
+    ]);
     const existing = await client.query<{ id: string }>(
       `SELECT id FROM voice_recordings
        WHERE tenant_id = $1 AND call_sid = $2 AND source = 'inbound_call'
