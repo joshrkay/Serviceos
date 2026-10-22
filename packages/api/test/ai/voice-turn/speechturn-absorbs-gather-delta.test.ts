@@ -46,7 +46,11 @@ import {
   LANGUAGE_UNSUPPORTED_LINE,
   LOW_STT_CONFIDENCE_REPROMPT_COPY,
   SPEECH_TURN_FAILURE_ESCALATION_COPY,
+  HANDOFF_UNAVAILABLE_COPY,
+  SILENCE_CLOSING_COPY,
 } from '../../../src/ai/agents/customer-calling/tts-copy';
+import { InMemoryOnCallRepository } from '../../../src/oncall/rotation';
+import { DefaultTwilioCallControl } from '../../../src/telephony/twilio-call-control';
 import { CREATE_CUSTOMER_CONFIRMATION_TTS } from '../../../src/ai/tasks/create-customer-task';
 import type { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
 import type { PhoneLookupDeps } from '../../../src/ai/voice-turn/phone-lookup-surface';
@@ -397,7 +401,7 @@ describe('PR-B silence/low-STT ladder — Gather semantics, own streak counter (
     ).toBe(false);
   });
 
-  it('gather-declared surface: two consecutive silent turns escalate gracefully and end the session', async () => {
+  it('gather-declared surface: two consecutive silent turns close with a call-us-back line and page nobody (LCR-02)', async () => {
     const gateway = gatewayAlways(classifyJson('unknown'));
     const h = makeTurnHarness({ gateway, surface: 'gather' });
 
@@ -405,12 +409,13 @@ describe('PR-B silence/low-STT ladder — Gather semantics, own streak counter (
     const fx2 = await h.turn('   ');
 
     expect((gateway.complete as ReturnType<typeof vi.fn>)).not.toHaveBeenCalled();
-    expect(ttsTexts(fx2)).toContain(
-      renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en'),
-    );
-    expect(endSessionReasons(fx2)).toContain('low_stt_confidence_max_retries');
+    expect(ttsTexts(fx2)).toEqual([renderTtsText(SILENCE_CLOSING_COPY, {}, 'en')]);
+    expect(ttsTexts(fx2)).not.toContain(renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en'));
+    expect(fx2.some((f) => f.type === 'notify_oncall')).toBe(false);
+    expect(endSessionReasons(fx2)).toEqual(['silence_max_retries']);
+    expect(h.session.machine.currentState).not.toBe('escalating');
     expect(h.session.ended).toBe(true);
-    expect(h.session.terminalOutcome).toBeDefined();
+    expect(h.session.terminalReason).toBe('silence_max_retries');
   });
 
   it('gather-declared surface: a spoken turn between silences resets the streak — third turn reprompts, not escalates', async () => {
@@ -438,14 +443,42 @@ describe('PR-B silence/low-STT ladder — Gather semantics, own streak counter (
     // The transport-side entry for a NON-empty low-acoustic-confidence turn
     // (Twilio's Gather `Confidence` arrives with the webhook, outside the
     // SpeechTurnHandler contract) — same ladder, same streak.
-    const fx2 = h.processor.maybeHandleLowSttConfidence(h.session, 0.3);
+    const fx2 = await h.processor.maybeHandleLowSttConfidence(h.session, 0.3);
 
+    // LCR-02 — the capping strike is low confidence: the FSM escalates. No
+    // on-call is wired here, so nothing is parked and the caller hears that
+    // nobody could be reached — never "connect you" ahead of the end.
     expect(fx2).not.toBeNull();
-    expect(ttsTexts(fx2!)).toContain(
-      renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en'),
-    );
-    expect(endSessionReasons(fx2!)).toContain('low_stt_confidence_max_retries');
+    expect(h.session.machine.currentState).toBe('escalating');
+    expect(ttsTexts(fx2!)).toEqual([renderTtsText(HANDOFF_UNAVAILABLE_COPY, {}, 'en')]);
+    expect(endSessionReasons(fx2!)).toEqual(['low_stt_confidence_max_retries']);
     expect(h.session.ended).toBe(true);
+  });
+
+  it('gather-declared surface: a low-confidence cap with someone on call parks the <Dial> and keeps the session for /dial-result (LCR-02)', async () => {
+    const pendingTransferTwiml = new Map<string, string>();
+    const h = makeTurnHarness({
+      gateway: gatewayAlways(classifyJson('unknown')),
+      surface: 'gather',
+      deps: {
+        pendingTransferTwiml,
+        onCallRepo: new InMemoryOnCallRepository(
+          new Map([[TENANT, [{ id: 'r1', userId: 'u1', orderIndex: 0 }]]]),
+        ),
+        callControl: new DefaultTwilioCallControl(),
+        dispatcherPhoneResolver: async () => '+15125550101',
+      },
+    });
+
+    await h.processor.maybeHandleLowSttConfidence(h.session, 0.3);
+    const fx2 = await h.processor.maybeHandleLowSttConfidence(h.session, 0.2);
+
+    expect(pendingTransferTwiml.get(h.session.id)).toContain('<Dial');
+    // The transport hands the <Dial> back in place of this line.
+    expect(ttsTexts(fx2!)).toContain(renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, 'en'));
+    expect(endSessionReasons(fx2!)).toEqual([]);
+    expect(h.session.ended).toBe(false);
+    expect(h.session.terminalOutcome).toBeUndefined();
   });
 
   it('gather-declared surface: high (or absent) confidence returns null and clears the streak', async () => {
@@ -455,7 +488,7 @@ describe('PR-B silence/low-STT ladder — Gather semantics, own streak counter (
     });
 
     await h.turn('');
-    expect(h.processor.maybeHandleLowSttConfidence(h.session, 0.95)).toBeNull();
+    expect(await h.processor.maybeHandleLowSttConfidence(h.session, 0.95)).toBeNull();
     // The streak was cleared: the next silence is a fresh 1st strike.
     const fx = await h.turn('');
     expect(ttsTexts(fx)).toContain(renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, 'en'));
@@ -476,6 +509,6 @@ describe('PR-B silence/low-STT ladder — Gather semantics, own streak counter (
     expect(endSessionReasons(fx)).not.toContain('low_stt_confidence_max_retries');
     expect(h.session.ended).toBe(false);
     // …and the transport-side confidence entry stays closed on this surface.
-    expect(h.processor.maybeHandleLowSttConfidence(h.session, 0.1)).toBeNull();
+    expect(await h.processor.maybeHandleLowSttConfidence(h.session, 0.1)).toBeNull();
   });
 });

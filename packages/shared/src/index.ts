@@ -28,3 +28,8 @@ export * from './contracts/negotiation-event.js';
 export * from './contracts/notification.js';
 export * from './contracts/voice-answer.js';
 export * from './contracts/list-sort.js';
+export * from './contracts/signup-attribution.js';
+export * from './contracts/onboarding-draft.js';
+export * from './contracts/onboarding-narration.js';
+export * from './contracts/demo-call.js';
+export * from './contracts/skill-tags.js';

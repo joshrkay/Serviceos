@@ -47,6 +47,11 @@ import {
   ExecutionContext,
 } from '../../src/proposals/execution/handlers';
 import { provesExecution } from '../../src/capabilities/proven-bar';
+import {
+  holdForExecutability,
+  jobReferenceCheck,
+} from '../../src/proposals/approval-reference-checks';
+import { createProposal } from '../../src/proposals/proposal';
 
 function mockGateway(jsonContent: string): LLMGateway {
   return {
@@ -157,7 +162,9 @@ describe(provesExecution('draft_estimate') + 'Postgres integration — voice dra
     // persisted 15000 proves the catalog price won, not the LLM's.
     const gateway = mockGateway(
       JSON.stringify({
-        jobId,
+        // OVAS-03 — a model-emitted jobId is ignored (an invented one rode
+        // through before); the RFC example uuid here proves it.
+        jobId: '123e4567-e89b-12d3-a456-426614174000',
         lineItems: [
           { description: 'Site Visit', quantity: 2, unitPrice: 14950, category: 'labor' },
         ],
@@ -174,12 +181,15 @@ describe(provesExecution('draft_estimate') + 'Postgres integration — voice dra
       // Resolved caller identity — the REAL customerId, never LLM-authored
       // (estimate-task.ts authorCustomerId never trusts parsed.customerId).
       customerId,
+      // The resolver-verified job (voice-action-router existingEntities).
+      existingEntities: { jobId },
     });
 
     expect(result.taskType).toBe('draft_estimate');
     expect(result.proposal.proposalType).toBe('draft_estimate');
     const draftedPayload = result.proposal.payload as Record<string, unknown>;
     expect(draftedPayload.customerId).toBe(customerId);
+    expect(draftedPayload.jobId).toBe(jobId);
     const draftedLines = draftedPayload.lineItems as Array<Record<string, unknown>>;
     expect(draftedLines).toHaveLength(1);
     // Catalog grounding overrode the LLM's 14950 with the catalog's 15000.
@@ -341,5 +351,149 @@ describe(provesExecution('draft_estimate') + 'Postgres integration — voice dra
       [tenant.tenantId, execResult.resultEntityId],
     );
     expect(eventRows.map((r) => r.event_type)).toEqual(['estimate.change_order_created']);
+  });
+});
+
+// OVAS-03 — estimates.job_id REFERENCES jobs(id) with no tenant-composite key,
+// so Postgres itself accepts another tenant's job uuid, and a fabricated uuid
+// only fails deep inside the write. The executor and the approval-time
+// jobReferenceCheck must refuse both before any row exists.
+describe('OVAS-03 — a dangling or foreign jobId produces no estimates row (Postgres)', () => {
+  let pool: Pool;
+  let tenant: { tenantId: string; userId: string };
+  let other: { tenantId: string; userId: string };
+  let customerId: string;
+  let foreignJobId: string;
+  let registryDeps: Parameters<typeof createExecutionHandlerRegistry>[0];
+  let jobRepo: PgJobRepository;
+
+  async function seedCustomerJob(t: { tenantId: string; userId: string }): Promise<{ customerId: string; jobId: string }> {
+    const customerRepo = new PgCustomerRepository(pool);
+    const locationRepo = new PgLocationRepository(pool);
+    const cId = crypto.randomUUID();
+    await customerRepo.create({
+      id: cId,
+      tenantId: t.tenantId,
+      firstName: 'Ovas',
+      lastName: 'Three',
+      displayName: 'Ovas Three',
+      preferredChannel: 'phone',
+      smsConsent: false,
+      isArchived: false,
+      createdBy: t.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const locId = crypto.randomUUID();
+    await locationRepo.create({
+      id: locId,
+      tenantId: t.tenantId,
+      customerId: cId,
+      street1: '3 Dangling Way',
+      city: 'Austin',
+      state: 'TX',
+      postalCode: '78701',
+      country: 'USA',
+      isPrimary: true,
+      isArchived: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const jId = crypto.randomUUID();
+    await jobRepo.create({
+      id: jId,
+      tenantId: t.tenantId,
+      customerId: cId,
+      locationId: locId,
+      jobNumber: `JOB-OVAS3-${jId.slice(0, 6)}`,
+      summary: 'Condenser',
+      status: 'scheduled',
+      priority: 'normal',
+      createdBy: t.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    return { customerId: cId, jobId: jId };
+  }
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    jobRepo = new PgJobRepository(pool);
+    tenant = await createTestTenant(pool);
+    other = await createTestTenant(pool);
+    customerId = (await seedCustomerJob(tenant)).customerId;
+    foreignJobId = (await seedCustomerJob(other)).jobId;
+    registryDeps = {
+      estimateRepo: new PgEstimateRepository(pool),
+      settingsRepo: new PgSettingsRepository(pool),
+      jobRepo,
+      locationRepo: new PgLocationRepository(pool),
+      auditRepo: new PgAuditRepository(pool),
+      customerRepo: new PgCustomerRepository(pool),
+    };
+  });
+
+  function approvedDraft(jobIdValue: string): Proposal {
+    return {
+      ...createProposal({
+        tenantId: tenant.tenantId,
+        proposalType: 'draft_estimate',
+        payload: {
+          customerId,
+          jobId: jobIdValue,
+          lineItems: [{ description: 'Site Visit', quantity: 1, unitPrice: 15000 }],
+        },
+        summary: 'Quote the condenser',
+        createdBy: tenant.userId,
+      }),
+      status: 'approved',
+      approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100),
+    };
+  }
+
+  async function estimateCount(): Promise<number> {
+    const { rows } = await pool.query(`SELECT count(*)::int AS n FROM estimates WHERE tenant_id = $1`, [
+      tenant.tenantId,
+    ]);
+    return rows[0].n;
+  }
+
+  async function execute(proposal: Proposal) {
+    const proposalRepo = new InMemoryProposalRepository();
+    await proposalRepo.create(proposal);
+    const executor = new ProposalExecutor(
+      createExecutionHandlerRegistry(registryDeps),
+      proposalRepo,
+      new IdempotencyGuard(new InMemoryProposalExecutionRepository(), proposalRepo),
+      registryDeps!.auditRepo!,
+    );
+    const context: ExecutionContext = { tenantId: tenant.tenantId, executedBy: tenant.userId };
+    return (await executor.execute(proposal, context)).result;
+  }
+
+  it('a fabricated jobId (the RFC example uuid) fails and writes no estimate', async () => {
+    const before = await estimateCount();
+    const result = await execute(approvedDraft('123e4567-e89b-12d3-a456-426614174000'));
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/does not exist in this tenant/i);
+    expect(await estimateCount()).toBe(before);
+  });
+
+  it("another tenant's real job uuid fails and writes no estimate (the FK alone would accept it)", async () => {
+    const before = await estimateCount();
+    const result = await execute(approvedDraft(foreignJobId));
+    expect(result.success).toBe(false);
+    expect(await estimateCount()).toBe(before);
+    const { rows } = await pool.query(`SELECT 1 FROM estimates WHERE job_id = $1`, [foreignJobId]);
+    expect(rows).toHaveLength(0);
+  });
+
+  it('the approval-time jobReferenceCheck holds the same drafts before they can auto-approve', async () => {
+    const check = jobReferenceCheck(jobRepo);
+    for (const jobIdValue of ['123e4567-e89b-12d3-a456-426614174000', foreignJobId]) {
+      const held = await holdForExecutability(tenant.tenantId, approvedDraft(jobIdValue), [check]);
+      expect(held.gaps).toEqual(['jobId']);
+      expect(held.proposal.status).toBe('ready_for_review');
+    }
   });
 });

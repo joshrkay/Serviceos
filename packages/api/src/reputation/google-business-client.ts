@@ -14,9 +14,11 @@
  * policy). Schema violations throw `GoogleBusinessApiError` — distinct
  * so the worker doesn't mistake them for throttling.
  *
- * `fetchFn` is injectable so tests can stub HTTP without nock.
+ * `fetchFn` is injectable so tests can stub HTTP without nock; the default
+ * is the global fetch bounded at 10 s.
  */
 import { z } from 'zod';
+import { timedFetch } from '../shared/timed-fetch';
 
 export interface GoogleBusinessOAuthConfig {
   clientId: string;
@@ -25,6 +27,12 @@ export interface GoogleBusinessOAuthConfig {
 }
 
 export type GoogleFetch = typeof fetch;
+
+/** Default when no fetch is injected: bounded at 10 s, so an unanswered
+ *  Google call can't pin the request (see shared/timed-fetch). Call sites
+ *  that thread a fetch through use this as THEIR default too — passing the
+ *  bare global `fetch` would bypass the bound. */
+export const boundedGoogleFetch: GoogleFetch = timedFetch();
 
 /** OAuth scope required for read access to GBP locations + reviews. */
 export const GOOGLE_BUSINESS_SCOPE = 'https://www.googleapis.com/auth/business.manage';
@@ -132,7 +140,7 @@ export interface ExchangedBusinessTokens {
 export async function exchangeAuthorizationCode(
   config: GoogleBusinessOAuthConfig,
   code: string,
-  fetchFn: GoogleFetch = fetch,
+  fetchFn: GoogleFetch = boundedGoogleFetch,
 ): Promise<ExchangedBusinessTokens> {
   const res = await fetchFn(GOOGLE_TOKEN_URL, {
     method: 'POST',
@@ -186,7 +194,7 @@ export interface RefreshedBusinessTokens {
 export async function refreshAccessToken(
   config: GoogleBusinessOAuthConfig,
   refreshToken: string,
-  fetchFn: GoogleFetch = fetch,
+  fetchFn: GoogleFetch = boundedGoogleFetch,
 ): Promise<RefreshedBusinessTokens> {
   const res = await fetchFn(GOOGLE_TOKEN_URL, {
     method: 'POST',
@@ -319,7 +327,7 @@ export async function listReviews(
   accountId: string,
   locationId: string,
   pageToken: string | null = null,
-  fetchFn: GoogleFetch = fetch,
+  fetchFn: GoogleFetch = boundedGoogleFetch,
 ): Promise<ListReviewsPage> {
   const url = new URL(
     `${GOOGLE_BUSINESS_REVIEWS_HOST}/v4/accounts/${accountId}/locations/${locationId}/reviews`,
@@ -407,7 +415,7 @@ export async function replyToReview(
   locationId: string,
   reviewId: string,
   comment: string,
-  fetchFn: GoogleFetch = fetch,
+  fetchFn: GoogleFetch = boundedGoogleFetch,
 ): Promise<ReplyToReviewResult> {
   const url = `${GOOGLE_BUSINESS_REVIEWS_HOST}/v4/accounts/${accountId}/locations/${locationId}/reviews/${reviewId}/reply`;
   const res = await fetchFn(url, {
@@ -453,29 +461,84 @@ export async function replyToReview(
 // ─── Connect-flow discovery (accounts + locations) ─────────────────────────
 //
 // The OAuth callback only receives tokens; the poll worker additionally
-// needs the tenant's GBP `accountId` + `locationId`. These two minimal
-// v4 listings let the connect flow auto-discover them (SMB tenants
-// overwhelmingly have exactly one of each). Same error taxonomy as the
-// review calls: 429 → quota, 401 → auth, schema drift → api error.
+// needs the tenant's GBP `accountId` + `locationId`, and the review-request
+// flow needs the location's review link (D-044). The v4 account/location
+// listings are retired, so discovery uses the Business Profile APIs that
+// replaced them: Account Management (accounts) and Business Information
+// (locations, with `metadata.placeId` / `metadata.newReviewUri`). Both must
+// be enabled on the Google Cloud project. Same error taxonomy as the review
+// calls: 429 → quota, 401 → auth, schema drift → api error.
 
-const namedResourceSchema = z.object({ name: z.string().min(1) }).passthrough();
+export const GOOGLE_ACCOUNT_MANAGEMENT_HOST =
+  'https://mybusinessaccountmanagement.googleapis.com';
+export const GOOGLE_BUSINESS_INFORMATION_HOST =
+  'https://mybusinessbusinessinformation.googleapis.com';
+
+/** Google's documented review-form deep link, used when a location carries
+ *  a place ID but no `newReviewUri`. */
+export function writeReviewUrlForPlace(placeId: string): string {
+  return `https://search.google.com/local/writereview?placeid=${encodeURIComponent(placeId)}`;
+}
+
+/** One Google Business Profile location the token can see. */
+export interface GoogleBusinessLocation {
+  accountId: string;
+  locationId: string;
+  title: string;
+  /** One-line storefront address, or null for service-area businesses. */
+  address: string | null;
+  placeId: string | null;
+  /** Where a customer leaves a review; null until Google has a place ID. */
+  reviewUrl: string | null;
+}
 
 const listAccountsResponseSchema = z
-  .object({ accounts: z.array(namedResourceSchema).optional() })
+  .object({
+    accounts: z.array(z.object({ name: z.string().min(1) }).passthrough()).optional(),
+    nextPageToken: z.string().optional(),
+  })
+  .passthrough();
+
+const locationSchema = z
+  .object({
+    name: z.string().min(1),
+    title: z.string().optional(),
+    storefrontAddress: z
+      .object({
+        addressLines: z.array(z.string()).optional(),
+        locality: z.string().optional(),
+        administrativeArea: z.string().optional(),
+      })
+      .passthrough()
+      .optional(),
+    metadata: z
+      .object({
+        placeId: z.string().optional(),
+        newReviewUri: z.string().optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
   .passthrough();
 
 const listLocationsResponseSchema = z
-  .object({ locations: z.array(namedResourceSchema).optional() })
+  .object({
+    locations: z.array(locationSchema).optional(),
+    nextPageToken: z.string().optional(),
+  })
   .passthrough();
 
-async function getNamedResources(
+/** Pages fetched per listing. An SMB has one or two of each; the cap only
+ *  stops a runaway pagination loop. */
+const MAX_DISCOVERY_PAGES = 5;
+
+async function getJson<T>(
   url: string,
   accessToken: string,
   op: string,
-  schema: typeof listAccountsResponseSchema | typeof listLocationsResponseSchema,
-  key: 'accounts' | 'locations',
+  schema: z.ZodType<T>,
   fetchFn: GoogleFetch,
-): Promise<string[]> {
+): Promise<T> {
   const res = await fetchFn(url, {
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -506,37 +569,106 @@ async function getNamedResources(
       { cause: parsed.error },
     );
   }
-  const rows = (parsed.data as Record<string, { name: string }[] | undefined>)[key];
-  return (rows ?? []).map((r) => r.name);
+  return parsed.data;
 }
 
-/** List account resource names (`accounts/{id}`) visible to the token. */
+const trailingId = (resourceName: string): string | undefined => {
+  const idx = resourceName.lastIndexOf('/');
+  const tail = idx === -1 ? resourceName : resourceName.slice(idx + 1);
+  return tail.length > 0 ? tail : undefined;
+};
+
+/** Account ids (the `{id}` of `accounts/{id}`) visible to the token. */
 export async function listAccounts(
   accessToken: string,
-  fetchFn: GoogleFetch = fetch,
+  fetchFn: GoogleFetch = boundedGoogleFetch,
 ): Promise<string[]> {
-  return getNamedResources(
-    `${GOOGLE_BUSINESS_REVIEWS_HOST}/v4/accounts`,
-    accessToken,
-    'listAccounts',
-    listAccountsResponseSchema,
-    'accounts',
-    fetchFn,
-  );
+  const ids: string[] = [];
+  let pageToken: string | undefined;
+  for (let page = 0; page < MAX_DISCOVERY_PAGES; page++) {
+    const url = new URL(`${GOOGLE_ACCOUNT_MANAGEMENT_HOST}/v1/accounts`);
+    if (pageToken) url.searchParams.set('pageToken', pageToken);
+    const data = await getJson(
+      url.toString(),
+      accessToken,
+      'listAccounts',
+      listAccountsResponseSchema,
+      fetchFn,
+    );
+    for (const a of data.accounts ?? []) {
+      const id = trailingId(a.name);
+      if (id) ids.push(id);
+    }
+    pageToken = data.nextPageToken;
+    if (!pageToken) break;
+  }
+  return ids;
 }
 
-/** List location resource names (`accounts/{a}/locations/{l}`) under an account. */
+function oneLineAddress(
+  addr: z.infer<typeof locationSchema>['storefrontAddress'],
+): string | null {
+  if (!addr) return null;
+  const parts = [
+    ...(addr.addressLines ?? []),
+    addr.locality,
+    addr.administrativeArea,
+  ].filter((p): p is string => typeof p === 'string' && p.trim().length > 0);
+  return parts.length > 0 ? parts.join(', ') : null;
+}
+
+/** Locations under one account, with the fields the connect flow needs. */
 export async function listLocations(
   accessToken: string,
   accountId: string,
-  fetchFn: GoogleFetch = fetch,
-): Promise<string[]> {
-  return getNamedResources(
-    `${GOOGLE_BUSINESS_REVIEWS_HOST}/v4/accounts/${accountId}/locations`,
-    accessToken,
-    'listLocations',
-    listLocationsResponseSchema,
-    'locations',
-    fetchFn,
-  );
+  fetchFn: GoogleFetch = boundedGoogleFetch,
+): Promise<GoogleBusinessLocation[]> {
+  const out: GoogleBusinessLocation[] = [];
+  let pageToken: string | undefined;
+  for (let page = 0; page < MAX_DISCOVERY_PAGES; page++) {
+    const url = new URL(
+      `${GOOGLE_BUSINESS_INFORMATION_HOST}/v1/accounts/${encodeURIComponent(accountId)}/locations`,
+    );
+    url.searchParams.set('readMask', 'name,title,storefrontAddress,metadata');
+    url.searchParams.set('pageSize', '100');
+    if (pageToken) url.searchParams.set('pageToken', pageToken);
+    const data = await getJson(
+      url.toString(),
+      accessToken,
+      'listLocations',
+      listLocationsResponseSchema,
+      fetchFn,
+    );
+    for (const loc of data.locations ?? []) {
+      const locationId = trailingId(loc.name);
+      if (!locationId) continue;
+      const placeId = loc.metadata?.placeId ?? null;
+      out.push({
+        accountId,
+        locationId,
+        title: loc.title?.trim() || 'Untitled location',
+        address: oneLineAddress(loc.storefrontAddress),
+        placeId,
+        reviewUrl:
+          loc.metadata?.newReviewUri ??
+          (placeId ? writeReviewUrlForPlace(placeId) : null),
+      });
+    }
+    pageToken = data.nextPageToken;
+    if (!pageToken) break;
+  }
+  return out;
+}
+
+/** Every location across every account the token can see. */
+export async function discoverLocations(
+  accessToken: string,
+  fetchFn: GoogleFetch = boundedGoogleFetch,
+): Promise<GoogleBusinessLocation[]> {
+  const accounts = await listAccounts(accessToken, fetchFn);
+  const all: GoogleBusinessLocation[] = [];
+  for (const accountId of accounts) {
+    all.push(...(await listLocations(accessToken, accountId, fetchFn)));
+  }
+  return all;
 }

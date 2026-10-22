@@ -2,6 +2,17 @@ import { describe, it, expect, afterEach, vi } from 'vitest';
 
 const ENV_KEY = 'AI_MODEL_PRICING_JSON';
 
+/**
+ * The production primary (AI Profile A) priced the way ops price it: through
+ * AI_MODEL_PRICING_JSON. OpenAI models are deliberately NOT in the default
+ * table (GATEWAY-04, #1699), so every OpenAI price in these tests arrives by
+ * the same config path production uses. Integer cents per 1M tokens.
+ */
+const PROFILE_A_PRICING_JSON = JSON.stringify({
+  'gpt-4o-mini': { inputCentsPerMillionTokens: 15, outputCentsPerMillionTokens: 60 },
+  'gpt-4o': { inputCentsPerMillionTokens: 250, outputCentsPerMillionTokens: 1000 },
+});
+
 async function freshModule() {
   // AI_MODEL_PRICING_JSON is read once at module load (matches the rest of
   // the gateway's env-derived config, e.g. ai-routing.ts's model env vars),
@@ -67,6 +78,25 @@ describe('model-pricing — integer micro-cent cost accounting', () => {
       expect(resolveModelPricing('CLAUDE-SONNET-4-6')).not.toBeNull();
     });
 
+    it('prices the live production primary (AI Profile A: gpt-4o-mini / gpt-4o) from AI_MODEL_PRICING_JSON, dated ids included', async () => {
+      // OBS-4 review round 1 — production runs OpenAI primary. While these
+      // resolved to null every live run stored cost_micro_cents NULL, the
+      // window SUM read 0 and the ai_spend_window rule could never fire.
+      // OpenAI stays unpriced by default (GATEWAY-04), so ops price it with
+      // AI_MODEL_PRICING_JSON — this proves that path prices it correctly.
+      process.env[ENV_KEY] = PROFILE_A_PRICING_JSON;
+      const { resolveModelPricing } = await freshModule();
+      const mini = { inputCentsPerMillionTokens: 15, outputCentsPerMillionTokens: 60 };
+      const full = { inputCentsPerMillionTokens: 250, outputCentsPerMillionTokens: 1000 };
+      expect(resolveModelPricing('gpt-4o-mini')).toEqual(mini);
+      expect(resolveModelPricing('gpt-4o')).toEqual(full);
+      expect(resolveModelPricing('openai/gpt-4o-mini')).toEqual(mini);
+      expect(resolveModelPricing('gpt-4o-2024-08-06')).toEqual(full);
+      // The dated mini id must resolve to the MINI family, not to the
+      // shorter 'gpt-4o' prefix that also matches it.
+      expect(resolveModelPricing('gpt-4o-mini-2024-07-18')).toEqual(mini);
+    });
+
     it('returns null for an unpriced model — never a guessed price', async () => {
       const { resolveModelPricing } = await freshModule();
       // Deliberately excluded from the default table (see model-pricing.ts
@@ -120,8 +150,18 @@ describe('model-pricing — integer micro-cent cost accounting', () => {
 
     it('returns null for an unpriced model regardless of token usage', async () => {
       const { computeCostMicroCents } = await freshModule();
-      const cost = computeCostMicroCents('gpt-4o-mini', { input: 1000, output: 1000, total: 2000 });
+      const cost = computeCostMicroCents('totally-unknown-model', { input: 1000, output: 1000, total: 2000 });
       expect(cost).toBeNull();
+    });
+
+    it('prices the dated id OpenAI actually returns for the live default model (AI_MODEL_PRICING_JSON)', async () => {
+      process.env[ENV_KEY] = PROFILE_A_PRICING_JSON;
+      const { computeCostMicroCents } = await freshModule();
+      // gpt-4o-mini: 15 cents/M input, 60 cents/M output.
+      // 9,000 * 15 + 100 * 60 = 135,000 + 6,000 = 141,000 micro-cents.
+      expect(
+        computeCostMicroCents('gpt-4o-mini-2024-07-18', { input: 9000, output: 100, total: 9100 }),
+      ).toBe(141_000);
     });
 
     it('returns null when tokenUsage is absent', async () => {
@@ -199,14 +239,14 @@ describe('model-pricing — integer micro-cent cost accounting', () => {
       });
     });
 
-    it('adds a brand-new model not in the default table (e.g. gpt-4o-mini)', async () => {
+    it('adds a brand-new model not in the default table (e.g. mistral-large)', async () => {
       process.env[ENV_KEY] = JSON.stringify({
-        'gpt-4o-mini': { inputCentsPerMillionTokens: 15, outputCentsPerMillionTokens: 60 },
+        'mistral-large': { inputCentsPerMillionTokens: 200, outputCentsPerMillionTokens: 600 },
       });
       const { resolveModelPricing } = await freshModule();
-      expect(resolveModelPricing('gpt-4o-mini')).toEqual({
-        inputCentsPerMillionTokens: 15,
-        outputCentsPerMillionTokens: 60,
+      expect(resolveModelPricing('mistral-large')).toEqual({
+        inputCentsPerMillionTokens: 200,
+        outputCentsPerMillionTokens: 600,
       });
     });
 
@@ -247,35 +287,108 @@ describe('model-pricing — integer micro-cent cost accounting', () => {
       // config, but resolveModelPricing() only ever sees/looks up the bare
       // last-segment id at call time.
       process.env[ENV_KEY] = JSON.stringify({
-        'openai/gpt-4o-mini': { inputCentsPerMillionTokens: 15, outputCentsPerMillionTokens: 60 },
+        'openai/gpt-4o-mini': { inputCentsPerMillionTokens: 99, outputCentsPerMillionTokens: 77 },
       });
       const { resolveModelPricing } = await freshModule();
       expect(resolveModelPricing('gpt-4o-mini')).toEqual({
-        inputCentsPerMillionTokens: 15,
-        outputCentsPerMillionTokens: 60,
+        inputCentsPerMillionTokens: 99,
+        outputCentsPerMillionTokens: 77,
       });
     });
 
     it('a bare override key ("gpt-4o-mini") matches a namespaced runtime id', async () => {
       process.env[ENV_KEY] = JSON.stringify({
-        'gpt-4o-mini': { inputCentsPerMillionTokens: 15, outputCentsPerMillionTokens: 60 },
+        'gpt-4o-mini': { inputCentsPerMillionTokens: 99, outputCentsPerMillionTokens: 77 },
       });
       const { resolveModelPricing } = await freshModule();
       expect(resolveModelPricing('openai/gpt-4o-mini')).toEqual({
-        inputCentsPerMillionTokens: 15,
-        outputCentsPerMillionTokens: 60,
+        inputCentsPerMillionTokens: 99,
+        outputCentsPerMillionTokens: 77,
       });
     });
 
     it('normalizes override keys case-insensitively too, mirroring the lookup path', async () => {
       process.env[ENV_KEY] = JSON.stringify({
-        'OpenAI/GPT-4o-Mini': { inputCentsPerMillionTokens: 15, outputCentsPerMillionTokens: 60 },
+        'OpenAI/GPT-4o-Mini': { inputCentsPerMillionTokens: 99, outputCentsPerMillionTokens: 77 },
       });
       const { resolveModelPricing } = await freshModule();
       expect(resolveModelPricing('gpt-4o-mini')).toEqual({
-        inputCentsPerMillionTokens: 15,
-        outputCentsPerMillionTokens: 60,
+        inputCentsPerMillionTokens: 99,
+        outputCentsPerMillionTokens: 77,
       });
     });
+  });
+});
+
+describe('GATEWAY-04 — dated snapshot ids resolve to the LONGEST matching family', () => {
+  const MINI = { inputCentsPerMillionTokens: 15, outputCentsPerMillionTokens: 60 };
+  const FOUR_O = { inputCentsPerMillionTokens: 250, outputCentsPerMillionTokens: 1000 };
+
+  afterEach(() => {
+    delete process.env[ENV_KEY];
+    vi.resetModules();
+  });
+
+  it.each([
+    ['gpt-4o listed first', { 'gpt-4o': FOUR_O, 'gpt-4o-mini': MINI }],
+    ['gpt-4o-mini listed first', { 'gpt-4o-mini': MINI, 'gpt-4o': FOUR_O }],
+  ])('%s: OpenAI-echoed dated ids price at their own family', async (_label, table) => {
+    process.env[ENV_KEY] = JSON.stringify(table);
+    const { resolveModelPricing, computeCostMicroCents } = await freshModule();
+    // OpenAI echoes the dated snapshot in completion.model — that is what the
+    // gateway prices. First-prefix-wins billed mini at 4o rates (16.7x).
+    expect(resolveModelPricing('gpt-4o-mini-2024-07-18')).toEqual(MINI);
+    expect(resolveModelPricing('gpt-4o-2024-08-06')).toEqual(FOUR_O);
+    expect(resolveModelPricing('openai/gpt-4o-mini-2024-07-18')).toEqual(MINI);
+    expect(computeCostMicroCents('gpt-4o-mini-2024-07-18', { input: 1_000, output: 100 })).toBe(
+      1_000 * 15 + 100 * 60,
+    );
+  });
+
+  it('the gateway records mini rates on the response AND the ai_runs row', async () => {
+    process.env[ENV_KEY] = JSON.stringify({ 'gpt-4o': FOUR_O, 'gpt-4o-mini': MINI });
+    vi.resetModules();
+    const { LLMGateway } = await import('../../../src/ai/gateway/gateway');
+    const { InMemoryAiRunRepository } = await import('../../../src/ai/ai-run');
+    const aiRunRepo = new InMemoryAiRunRepository();
+    const provider = {
+      name: 'api.openai.com',
+      isAvailable: async () => true,
+      complete: async () => ({
+        content: 'ok',
+        model: 'gpt-4o-mini-2024-07-18',
+        provider: 'api.openai.com',
+        tokenUsage: { input: 1_000, output: 100, total: 1_100 },
+        latencyMs: 1,
+      }),
+    };
+    const gateway = new LLMGateway(
+      { defaultProvider: provider.name },
+      new Map([[provider.name, provider]]),
+      undefined,
+      aiRunRepo,
+    );
+    const res = await gateway.complete({
+      taskType: 'summarize_conversation',
+      tenantId: 'tenant-price',
+      model: 'gpt-4o-mini',
+      messages: [{ role: 'user', content: 'hi' }],
+    });
+    const expected = 1_000 * 15 + 100 * 60;
+    expect(res.costMicroCents).toBe(expected);
+    const [run] = await aiRunRepo.findByTaskType('tenant-price', 'summarize_conversation');
+    expect(run.costMicroCents).toBe(expected);
+    expect(run.model).toBe('gpt-4o-mini-2024-07-18');
+  });
+
+  it('findUnpricedModels names configured models that would record a null cost', async () => {
+    const { findUnpricedModels } = await freshModule();
+    expect(findUnpricedModels(['gpt-4o-mini', 'claude-haiku-4-5-20251001', 'gpt-4o'])).toEqual([
+      'gpt-4o-mini',
+      'gpt-4o',
+    ]);
+    process.env[ENV_KEY] = JSON.stringify({ 'gpt-4o-mini': MINI, 'gpt-4o': FOUR_O });
+    const reloaded = await freshModule();
+    expect(reloaded.findUnpricedModels(['gpt-4o-mini', 'gpt-4o'])).toEqual([]);
   });
 });

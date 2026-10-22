@@ -4,7 +4,7 @@ import { Proposal } from '../../../src/proposals/proposal';
 import type { TransactionalCommsService } from '../../../src/notifications/transactional-comms-service';
 import { InMemoryAppointmentRepository, createAppointment } from '../../../src/appointments/appointment';
 import { FeasibilityDependencies } from '../../../src/scheduling/feasibility-types';
-import { StubSkillMatcher } from '../../../src/scheduling/skill-matcher';
+import { noSkillConstraints } from '../../helpers/no-skill-constraints';
 import { HaversineFallbackProvider } from '../../../src/scheduling/travel-time/haversine-fallback';
 import { InMemoryAssignmentRepository } from '../../../src/appointments/assignment';
 import { getDispatchBoardEventBus } from '../../../src/dispatch/board-event-bus';
@@ -272,7 +272,7 @@ describe('P6-013 — Execution for reschedule proposals', () => {
       workingHoursRepo: { findByTechnician: async () => [] } as any,
       unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
       travelTimeProvider: new HaversineFallbackProvider(),
-      skillMatcher: new StubSkillMatcher(),
+      skillMatcher: noSkillConstraints(),
     };
     handler = new RescheduleAppointmentExecutionHandler(
       appointmentRepo, assignmentRepo, undefined, undefined, feasibilityDeps,
@@ -320,7 +320,7 @@ describe('P6-013 — Execution for reschedule proposals', () => {
       workingHoursRepo,
       unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
       travelTimeProvider: new HaversineFallbackProvider(),
-      skillMatcher: new StubSkillMatcher(),
+      skillMatcher: noSkillConstraints(),
     };
     handler = new RescheduleAppointmentExecutionHandler(
       appointmentRepo, assignmentRepo, undefined, undefined, feasibilityDeps,
@@ -363,7 +363,7 @@ describe('P6-013 — Execution for reschedule proposals', () => {
       workingHoursRepo: { findByTechnician: async () => [] } as any,
       unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
       travelTimeProvider: new HaversineFallbackProvider(),
-      skillMatcher: new StubSkillMatcher(),
+      skillMatcher: noSkillConstraints(),
     };
   }
 

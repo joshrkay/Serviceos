@@ -373,6 +373,12 @@ describe('#1600 (3) — a caller who refers to a cancelled appointment', () => {
       );
     expect(bookingRows).toHaveLength(1);
     expect((bookingRows[0]!.metadata as { confidence?: number }).confidence).toBe(0.95);
+    // D-015 — that confidence scored the move request, not a booking, so it
+    // reaches the drafted booking with no 'model' source: the autonomous lane
+    // never trusts it (red-team pass 3).
+    const draft = close.find((f) => f.type === 'create_proposal');
+    expect(draft).toBeDefined();
+    expect(draft!.payload.confidenceSource).toBeUndefined();
   });
 
   it('a yes that carries a different request ("Yes, but can we do Thursday at 10 instead?") is a new request, not the held booking', async () => {

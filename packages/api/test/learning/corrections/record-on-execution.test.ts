@@ -63,6 +63,11 @@ function buildDeps(opts: {
    * payload, as it is after a real owner edit.
    */
   originalItems?: LineItem[];
+  /**
+   * PI-3 — the approver's role, stamped on the proposal at approval
+   * (approveProposal). Defaults to an owner approval; `null` = unstamped.
+   */
+  executedByRole?: string | null;
 }): {
   deps: RecordOnExecutionDeps;
   ports: FakeConfigPorts;
@@ -79,6 +84,10 @@ function buildDeps(opts: {
             status: 'executed',
             payload: { lineItems: opts.draftedItems },
             ...(opts.originalItems ? { originalPayload: { lineItems: opts.originalItems } } : {}),
+            createdBy: 'drafter-u7',
+            ...(opts.executedByRole === null
+              ? {}
+              : { executedBy: OWNER, executedByRole: opts.executedByRole ?? 'owner' }),
           } as unknown as Proposal)
         : null,
   } as unknown as ProposalRepository;
@@ -137,6 +146,45 @@ describe('U7 — recordCorrectionLessonsOnExecution', () => {
   let auditRepo: InMemoryAuditRepository;
   beforeEach(() => {
     auditRepo = new InMemoryAuditRepository();
+  });
+
+  // PI-3 — a lesson cascades into the tenant price book / labor rate /
+  // brand voice, which only settings:update may change (catalog routes,
+  // lesson undo). The approver is the one exercising that authority, so a
+  // dispatcher's approval (or an unstamped one) must cascade nothing.
+  describe('PI-3 — the cascade needs an approver who holds settings:update', () => {
+    const laborEdit = {
+      draftedItems: [li({ id: 'l1', unitPriceCents: 11500 })],
+      executedItems: [li({ id: 'l1', unitPriceCents: 13500 })],
+      laborRateCents: 11500,
+    };
+
+    for (const role of ['dispatcher', 'technician', null] as const) {
+      it(`approver role ${String(role)} → no lesson recorded, no port touched`, async () => {
+        const { deps, ports, lessonRepo } = buildDeps({ ...laborEdit, executedByRole: role });
+        const lessons = await recordCorrectionLessonsOnExecution(
+          { tenantId: TENANT, proposalId: PROPOSAL },
+          deps,
+        );
+        expect(lessons).toEqual([]);
+        expect(ports.laborRateCents).toBe(11500);
+        expect(await lessonRepo.findAppliedForDay(TENANT, '2026-06-15')).toEqual([]);
+        const audits = (deps.auditRepo as InMemoryAuditRepository).getAll();
+        expect(audits.filter((e) => e.eventType === 'correction_lesson.applied')).toEqual([]);
+      });
+    }
+
+    it('an owner approval cascades and the audit names the approver and their real role', async () => {
+      const { deps, ports } = buildDeps({ ...laborEdit, executedByRole: 'owner' });
+      await recordCorrectionLessonsOnExecution({ tenantId: TENANT, proposalId: PROPOSAL }, deps);
+      expect(ports.laborRateCents).toBe(13500);
+      const applied = (deps.auditRepo as InMemoryAuditRepository)
+        .getAll()
+        .filter((e) => e.eventType === 'correction_lesson.applied');
+      expect(applied).toHaveLength(1);
+      expect(applied[0].actorId).toBe(OWNER);
+      expect(applied[0].actorRole).toBe('owner');
+    });
   });
 
   it('records a labor_rate_changed lesson and cascades the rate forward', async () => {

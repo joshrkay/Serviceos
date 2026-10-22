@@ -37,7 +37,7 @@ import { StripePaymentLinkProvider } from '../../src/payments/stripe-payment-lin
 
 describe('U9 Connect-routing audit — Stripe-Account present iff charges_enabled', () => {
   describe('createPaymentIntent (public /pay + saved-card share this wrapper)', () => {
-    const input = { amount: 12500, currency: 'usd', invoiceId: 'inv-1', tenantId: 'tenant-1' };
+    const input = { amount: 12500, currency: 'usd', invoiceId: 'inv-1', tenantId: 'tenant-1', repricingNonce: 1 };
 
     function okFetch(): MockedFunction<StripeFetch> {
       const spy = vi.fn() as MockedFunction<StripeFetch>;
@@ -55,7 +55,7 @@ describe('U9 Connect-routing audit — Stripe-Account present iff charges_enable
       await createPaymentIntent({ apiKey: 'sk_test' }, input, spy);
       const [, init] = spy.mock.calls[0];
       expect(init.headers['Stripe-Account']).toBeUndefined();
-      expect(init.headers['Idempotency-Key']).toBe('pi_inv-1_12500_platform');
+      expect(init.headers['Idempotency-Key']).toBe('pi_inv-1_12500_platform_r1');
     });
 
     it('Connect direct charge (charges_enabled tenant) sets Stripe-Account + scopes idempotency', async () => {
@@ -63,7 +63,7 @@ describe('U9 Connect-routing audit — Stripe-Account present iff charges_enable
       await createPaymentIntent({ apiKey: 'sk_test' }, { ...input, stripeAccountId: 'acct_tenant_1' }, spy);
       const [, init] = spy.mock.calls[0];
       expect(init.headers['Stripe-Account']).toBe('acct_tenant_1');
-      expect(init.headers['Idempotency-Key']).toBe('pi_inv-1_12500_acct_tenant_1');
+      expect(init.headers['Idempotency-Key']).toBe('pi_inv-1_12500_acct_tenant_1_r1');
     });
   });
 

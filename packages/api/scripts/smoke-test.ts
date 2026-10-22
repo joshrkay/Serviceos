@@ -17,27 +17,26 @@ interface Probe {
   name: string;
   path: string;
   expectStatus: number | number[];
-  // If set, the body must contain this string. Cheap defense-in-depth
-  // against a 200 from the load balancer when the app itself is down.
-  expectBodyContains?: string;
+  // Match top-level JSON fields; nested healthy checks cannot mask degradation.
+  expectJson?: Record<string, string | boolean>;
 }
 
 const PROBES: Probe[] = [
   // /health always returns 200 with {"status":"ok"|"degraded"|"down"}.
-  // Require "status":"ok" so a DB-degraded deploy fails: the DB health
+  // Require top-level status=ok so a DB-degraded deploy fails: the DB health
   // check returns 'degraded' on connection failure (app.ts), and /ready
   // only flips to 503 for 'down', so a substring match on "status"
   // would silently green-light an outage.
-  { name: 'liveness', path: '/health', expectStatus: 200, expectBodyContains: '"status":"ok"' },
+  { name: 'liveness', path: '/health', expectStatus: 200, expectJson: { status: 'ok' } },
   // /ready returns 503 when a critical dependency is down — that is
   // exactly the signal a smoke check must fail on, not paper over.
   { name: 'readiness', path: '/ready', expectStatus: 200 },
   // /api/telephony/health always returns 200 even when capabilities are
   // degraded; the structured payload sets `ok: false` with `warnings`
   // in that case (see TelephonyHealthReport in routes/telephony.ts).
-  // Require `"ok":true` in the body so a degraded subsystem fails the
+  // Require top-level ok=true so a degraded subsystem fails the
   // probe instead of silently passing.
-  { name: 'telephony-health', path: '/api/telephony/health', expectStatus: 200, expectBodyContains: '"ok":true' },
+  { name: 'telephony-health', path: '/api/telephony/health', expectStatus: 200, expectJson: { ok: true } },
 ];
 
 const ALLOWED_FLAGS = new Set(['env', 'base']);
@@ -105,7 +104,14 @@ async function main(): Promise<void> {
       const body = await res.text();
       const expected = Array.isArray(probe.expectStatus) ? probe.expectStatus : [probe.expectStatus];
       const statusOk = expected.includes(res.status);
-      const bodyOk = !probe.expectBodyContains || body.includes(probe.expectBodyContains);
+      let bodyOk = true;
+      if (probe.expectJson) {
+        const payload: unknown = JSON.parse(body);
+        bodyOk = payload !== null && typeof payload === 'object' && !Array.isArray(payload)
+          && Object.entries(probe.expectJson).every(
+            ([key, value]) => (payload as Record<string, unknown>)[key] === value,
+          );
+      }
       const ms = Date.now() - t0;
       if (statusOk && bodyOk) {
         console.log(`  ok  ${probe.name.padEnd(20)} ${res.status} ${ms}ms ${probe.path}`);
@@ -114,7 +120,7 @@ async function main(): Promise<void> {
         console.error(
           `  FAIL ${probe.name.padEnd(20)} ${res.status} ${ms}ms ${probe.path}` +
             (statusOk ? '' : ` — status ${res.status} not in [${expected.join(',')}]`) +
-            (bodyOk ? '' : ` — body missing "${probe.expectBodyContains}"`),
+            (bodyOk ? '' : ` — expected top-level fields ${JSON.stringify(probe.expectJson)}`),
         );
         console.error(`       body: ${body.slice(0, 200)}`);
       }

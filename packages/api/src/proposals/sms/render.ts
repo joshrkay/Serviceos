@@ -23,12 +23,17 @@
  *     line is appended (within budget); approveUrl included as normal.
  *   LOW / VERY_LOW → body becomes "needs review in app" form; the Reply Y
  *     prompt and approveUrl are OMITTED — no approve affordance.
+ *
+ * OVAS-01 — a payload carrying the RV-042 acceptance-void marker always gets
+ * the "Check: approving voids the customer's prior acceptance" line, at any
+ * confidence level (proposals/acceptance-void.ts).
  */
 import type { ProposalType } from '../proposal';
 import { actionClassForProposalType } from '../proposal';
 import { formatUsdCentsFixed } from '@ai-service-os/shared';
 import { CONFIDENCE_LEVELS, type ConfidenceLevel } from '../../ai/guardrails/confidence';
 import { AUTO_APPROVE_BLOCKING_CONFIDENCE_LEVELS } from '../auto-approve';
+import { ACCEPTANCE_VOID_MARKER, voidsCustomerAcceptance } from '../acceptance-void';
 
 export const PROPOSAL_SMS_MAX_CHARS = 320;
 
@@ -311,11 +316,16 @@ export function renderProposalSms(
   const factsPart = facts.length > 0 ? ` (${facts.join(', ')})` : '';
   const linkPart = options.approveUrl ? ` Or tap (30 min): ${options.approveUrl}` : '';
 
-  // MEDIUM: append Check: line when a marker exists (within budget)
-  let checkLine = '';
-  if (overallConfidence === 'medium' && firstMarkerReason) {
-    checkLine = `\nCheck: ${firstMarkerReason}`;
-  }
+  // MEDIUM: append Check: line when a marker exists (within budget).
+  // OVAS-01 — the acceptance-void warning prints at EVERY level: approving
+  // that card deletes the customer's signed acceptance, and a 'high' render
+  // used to hand the owner a bare "Reply Y" with no hint of it.
+  const checkReason = voidsCustomerAcceptance(input.payload)
+    ? ACCEPTANCE_VOID_MARKER.reason
+    : overallConfidence === 'medium'
+      ? firstMarkerReason
+      : undefined;
+  const checkLine = checkReason ? `\nCheck: ${checkReason}` : '';
 
   // The summary absorbs all truncation; instructions are sacred. The link
   // is appended outside the budget (see module note).
@@ -451,17 +461,28 @@ export function renderChainSms(
   // separate-approval marker applies to every non-capture member — but
   // only on the approvable form (on the review form NOTHING is Y-able,
   // so "separately" would be meaningless).
-  const items = members.map((m) => {
+  //
+  // OVAS-01 — a non-head member that voids a customer's acceptance is starred
+  // too: approveChainSet skips it ('voids_acceptance'), so it really does
+  // follow separately. Whenever any member carries that marker the warning is
+  // printed as a trailing Check: line (the head itself rides the Y).
+  const items = members.map((m, i) => {
     const cents = extractAmountCents(m.payload);
     const money = cents !== null ? formatCents(cents) : null;
     const moneyFact = money !== null && !m.summary.includes(money) ? ` (${money})` : '';
-    const flagged = !reviewForm && actionClassForProposalType(m.proposalType) !== 'capture';
+    const flagged =
+      !reviewForm &&
+      (actionClassForProposalType(m.proposalType) !== 'capture' ||
+        (i > 0 && voidsCustomerAcceptance(m.payload)));
     return { summary: m.summary.trim(), moneyFact, flagged };
   });
 
   const prefix = `${members.length} linked actions: `;
   const legend = items.some((i) => i.flagged) ? ` ${CHAIN_SEPARATE_APPROVAL_LEGEND}` : '';
   const instructions = reviewForm ? REVIEW_IN_APP_INSTRUCTIONS : CHAIN_REPLY_INSTRUCTIONS;
+  const checkLine = members.some((m) => voidsCustomerAcceptance(m.payload))
+    ? `\nCheck: ${ACCEPTANCE_VOID_MARKER.reason}`
+    : '';
 
   // Same truncation contract as renderProposalSms: the instructions (and
   // legend) are sacred, the member summaries absorb all truncation. The
@@ -476,7 +497,8 @@ export function renderChainSms(
     (items.length - 1) + // single-space separators between items
     legend.length +
     1 + // space before instructions
-    instructions.length;
+    instructions.length +
+    checkLine.length;
   // The CHAIN_MIN_MEMBER_CHARS floor (12) is an intentional exception to the
   // 320-char contract: with many long-named members the per-member budget can
   // fall below 12, at which point the total may exceed 320. Readability wins
@@ -497,5 +519,5 @@ export function renderChainSms(
   const linkPart =
     !reviewForm && options.approveUrl ? ` Or tap (30 min): ${options.approveUrl}` : '';
 
-  return `${prefix}${list}${legend} ${instructions}${linkPart}`;
+  return `${prefix}${list}${legend} ${instructions}${checkLine}${linkPart}`;
 }

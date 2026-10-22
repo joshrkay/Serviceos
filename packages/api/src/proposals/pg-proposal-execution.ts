@@ -60,7 +60,10 @@ export class PgProposalExecutionRepository
     return this.withTenantTransaction(input.tenantId, async (client) => {
       // When idempotency_key is set, do an upsert that returns the
       // existing row on collision (preserves the original execution
-      // instead of overwriting). When it's null, always insert a fresh
+      // instead of overwriting) — except a prior FAILED attempt, which the
+      // new outcome replaces: a retried proposal (execution_failed -> draft
+      // -> approved) re-runs under the same key, and a stale 'failed' row
+      // must not outlive its success. When it's null, always insert a fresh
       // row — undo + redo both produce new history.
       if (input.idempotencyKey !== undefined && input.idempotencyKey !== null) {
         const result = await client.query<ProposalExecutionRow>(
@@ -73,9 +76,20 @@ export class PgProposalExecutionRepository
              status, error_message, idempotency_key
            ) VALUES ($1, $2, $3::jsonb, $4, COALESCE($5, NOW()), $6, $7, $8)
            ON CONFLICT (tenant_id, proposal_id, idempotency_key) WHERE idempotency_key IS NOT NULL DO UPDATE SET
-             -- DO UPDATE re-returns the existing row without mutating its
-             -- substantive fields. SET to a no-op so RETURNING fires.
-             idempotency_key = EXCLUDED.idempotency_key
+             -- DO UPDATE re-returns the existing row so RETURNING fires. A
+             -- succeeded or undone row keeps its substantive fields (the
+             -- first execution wins); a failed one takes the new attempt's.
+             idempotency_key = EXCLUDED.idempotency_key,
+             status = CASE WHEN proposal_executions.status = 'failed'
+                           THEN EXCLUDED.status ELSE proposal_executions.status END,
+             error_message = CASE WHEN proposal_executions.status = 'failed'
+                                  THEN EXCLUDED.error_message ELSE proposal_executions.error_message END,
+             executed_payload = CASE WHEN proposal_executions.status = 'failed'
+                                     THEN EXCLUDED.executed_payload ELSE proposal_executions.executed_payload END,
+             executed_by = CASE WHEN proposal_executions.status = 'failed'
+                                THEN EXCLUDED.executed_by ELSE proposal_executions.executed_by END,
+             executed_at = CASE WHEN proposal_executions.status = 'failed'
+                                THEN EXCLUDED.executed_at ELSE proposal_executions.executed_at END
            RETURNING *`,
           [
             input.tenantId,

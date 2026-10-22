@@ -1,4 +1,5 @@
 import type { SeatUsageReader } from '../../users/seat-limit';
+import type { Queue } from '../../queues/queue';
 import { v4 as uuidv4 } from 'uuid';
 import type { Pool } from 'pg';
 import {
@@ -64,6 +65,7 @@ import {
   assignTechnician,
   assertTechnicianAvailability,
 } from '../../appointments/assignment';
+import { SkillMatcher, assertTechnicianHoldsRequiredSkills } from '../../scheduling/skill-matcher';
 import { InvoiceRepository } from '../../invoices/invoice';
 import { DunningEventRepository } from '../../invoices/dunning-config';
 import {
@@ -128,6 +130,7 @@ import {
   OnboardingEstimateTemplateExecutionHandler,
   OnboardingTeamMemberExecutionHandler,
   OnboardingScheduleExecutionHandler,
+  OnboardingVoicePolicyExecutionHandler,
 } from './onboarding-handlers';
 import { PackActivationRepository } from '../../settings/pack-activation';
 import type { PendingInvitationRepository } from '../../users/pending-invitation';
@@ -402,6 +405,8 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
     private readonly availabilityRepos?: {
       workingHoursRepo?: import('../../availability/working-hours').WorkingHoursRepository;
       unavailableBlockRepo?: import('../../availability/unavailable-block').UnavailableBlockRepository;
+      /** Dispatch FR-2 — the assignment refuses a technician missing a required skill. */
+      skillMatcher?: SkillMatcher;
     },
     /** Tenant-timezone fallback for payloads that omit `timezone`. */
     private readonly settingsRepo?: Pick<SettingsRepository, 'findByTenant'>,
@@ -622,6 +627,13 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
             { start: scheduledStart, end: scheduledEnd, timezone },
             this.availabilityRepos,
           );
+          // Dispatch FR-2 — same early rejection for a missing required skill
+          // (assignTechnician re-checks; this just avoids create-then-compensate).
+          if (this.availabilityRepos.skillMatcher) {
+            await assertTechnicianHoldsRequiredSkills(
+              context.tenantId, payload.technicianId, targetJobId, this.availabilityRepos.skillMatcher,
+            );
+          }
         } catch (err) {
           return {
             success: false,
@@ -683,6 +695,7 @@ export class CreateAppointmentExecutionHandler implements ExecutionHandler {
           auditRepo: this.auditRepo,
           workingHoursRepo: this.availabilityRepos?.workingHoursRepo,
           unavailableBlockRepo: this.availabilityRepos?.unavailableBlockRepo,
+          skillMatcher: this.availabilityRepos?.skillMatcher,
         });
       } catch (err) {
         // Atomicity guard: the pre-flight feasibility check above is subject
@@ -1005,6 +1018,33 @@ export class DraftEstimateExecutionHandler implements ExecutionHandler {
       }
     }
 
+    // OVAS-03 — the same EXISTENCE rule for a drafted jobId, plus OWNERSHIP:
+    // a present jobId is written straight onto the estimate as its container
+    // and decides who receives it on send (estimates carry no customer). So
+    // it must name a job IN THIS TENANT (estimates.job_id has no tenant-
+    // composite FK, so Postgres would accept a foreign tenant's job), and that
+    // job must be the drafted customer's. Skipped when the repo isn't wired,
+    // matching this handler's existing degradation (the registry wires it).
+    if (jobId && this.jobRepo) {
+      const job = await this.jobRepo.findById(context.tenantId, jobId);
+      if (!job) {
+        return {
+          success: false,
+          error:
+            `Estimate draft references job '${jobId}', which does not exist in this tenant — ` +
+            `link a real job before approving`,
+        };
+      }
+      if (customerId && job.customerId !== customerId) {
+        return {
+          success: false,
+          error:
+            `Estimate draft names job '${jobId}', which belongs to a different customer than ` +
+            `the draft's — pick that customer's job (or the right customer) before approving`,
+        };
+      }
+    }
+
     try {
       // Estimates require a job container (estimate.ts validateEstimateInput).
       // A drafted payload without one gets a job opened for the customer.
@@ -1310,6 +1350,13 @@ export function createExecutionHandlerRegistry(deps?: {
   // RV-141 — emergency_dispatch owner page. Optional; absent → the handler
   // degrades per its own per-dep guards (job-only / passthrough).
   emergencySmsSender?: EmergencySmsSender;
+  /**
+   * S5a-5 (U8) — the app queue: an approved onboarding_voice_policy that
+   * switches payment_collection_mode to "Collect on the spot" enqueues the
+   * pay-link cleanup in its own settings transaction. Absent → no enqueue
+   * (the daily reconciliation sweep is the backstop).
+   */
+  queue?: Queue;
   // RV-086 — send_estimate_nudge. sendService drives the actual re-send;
   // dispatchRepo backs the 48h cooldown check. Absent → degraded behavior
   // documented on the handler.
@@ -1620,6 +1667,10 @@ export function createExecutionHandlerRegistry(deps?: {
       deps?.seatUsage,
     ),
     new OnboardingScheduleExecutionHandler(deps?.settingsRepo, requiredAuditRepo),
+    // "Pick, don't build" onboarding — one proposal for the choices the five
+    // onboarding_* proposals above do not cover (greeting, book-or-hold,
+    // after-hours mode, emergency target, payment mode, booking hours).
+    new OnboardingVoicePolicyExecutionHandler(deps?.settingsRepo, requiredAuditRepo, deps?.queue),
     // B1.18 — update_brand_voice: writes through the SAME versioned
     // read→cool-down-check→merge→bump path the Brand-Voice Configurator
     // sheet uses (never re-implemented here — see brand-voice-handler.ts).
@@ -1656,7 +1707,9 @@ export function createExecutionHandlerRegistry(deps?: {
     ));
     // Collections cadence — apply_late_fee: appends a non-taxable late-fee
     // line to an overdue invoice and refreshes the money-state rollup.
-    // Money-class: only runs after explicit owner approval.
+    // Money-class: only runs after explicit owner approval. No stale-link
+    // cleanup: a fee raises the balance, so an old-price link/PI can only
+    // underpay (review H2 — see the handler's doc comment).
     handlers.push(new ApplyLateFeeExecutionHandler(
       deps.invoiceRepo,
       deps.auditRepo,
@@ -1665,11 +1718,13 @@ export function createExecutionHandlerRegistry(deps?: {
     // Tradesperson wave 1, Task 4 — apply_credit: appends a non-taxable,
     // NEGATIVE, floor-guarded line to an issued invoice and refreshes the
     // money-state rollup. Money-class: only runs after explicit owner
-    // approval.
+    // approval. P0-9 — a credit LOWERS the balance, so paymentLinkCleanup
+    // kills the stale link and the PaymentIntents priced above it.
     handlers.push(new ApplyCreditExecutionHandler(
       deps.invoiceRepo,
       deps.auditRepo,
       moneyStateDeps,
+      deps.paymentLinkCleanup,
     ));
   }
   if (deps?.estimateRepo) {

@@ -92,14 +92,51 @@ export class PgQueue extends PgBaseRepository implements Queue {
       // receive/receiveBatch skip the row until the delay elapses. Delay 0 is
       // the pre-existing immediate path.
       const delaySeconds = Math.max(0, options?.delaySeconds ?? 0);
-      await client.query(
-        `INSERT INTO _queue_messages (id, type, payload, attempts, max_attempts, idempotency_key, visible_at, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, NOW() + ($7 || ' seconds')::interval, NOW())
-         ON CONFLICT (idempotency_key) DO NOTHING`,
-        [id, type, JSON.stringify(payload), 0, this.config.maxRetries, key, String(delaySeconds)]
-      );
+      await this.insertMessage(client, id, type, payload, key, delaySeconds);
       return id;
     });
+  }
+
+  /**
+   * S5a-3 (U8) — enqueue inside the caller's open transaction on the
+   * caller's client (see `Queue.sendOn`). The table bootstrap is DDL and must
+   * never run in the caller's transaction (a ROLLBACK there would take the
+   * table with it), so it runs first on the queue's own connection — and once
+   * the bootstrap promise exists no connection is taken at all, so a caller
+   * holding the pool's last connection cannot wait on itself.
+   */
+  async sendOn<T>(
+    client: import('pg').PoolClient,
+    type: string,
+    payload: T,
+    idempotencyKey: string,
+    options?: SendOptions,
+  ): Promise<string> {
+    if (this.initPromise) {
+      await this.initPromise;
+    } else {
+      await this.withClient((own) => this.ensureTable(own));
+    }
+    const id = randomUUID();
+    await this.insertMessage(client, id, type, payload, idempotencyKey, Math.max(0, options?.delaySeconds ?? 0));
+    return id;
+  }
+
+  /** The one enqueue statement `send` and `sendOn` share. */
+  private async insertMessage<T>(
+    client: import('pg').PoolClient,
+    id: string,
+    type: string,
+    payload: T,
+    key: string,
+    delaySeconds: number,
+  ): Promise<void> {
+    await client.query(
+      `INSERT INTO _queue_messages (id, type, payload, attempts, max_attempts, idempotency_key, visible_at, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW() + ($7 || ' seconds')::interval, NOW())
+       ON CONFLICT (idempotency_key) DO NOTHING`,
+      [id, type, JSON.stringify(payload), 0, this.config.maxRetries, key, String(delaySeconds)]
+    );
   }
 
   async receive<T>(): Promise<QueueMessage<T> | null> {
@@ -329,9 +366,12 @@ export class PgQueue extends PgBaseRepository implements Queue {
   }
 
   /**
-   * WS15 — pending messages older than `olderThanSeconds` (see Queue
-   * interface). Filters on created_at, not visible_at: a message mid-backoff
-   * is still "sitting in the queue" from the SLO's point of view.
+   * WS15 — messages due (visible) and unclaimed for longer than
+   * `olderThanSeconds` (see Queue interface). Filters on visible_at, not
+   * created_at: a delayed message is not stuck before it falls due (counting
+   * by creation paged an operator every night for each overnight delay), and
+   * a claimed message's visible_at is pushed into the future until its
+   * visibility lapses.
    */
   async stalePendingCount(olderThanSeconds: number): Promise<number> {
     return this.withClient(async (client) => {
@@ -339,7 +379,7 @@ export class PgQueue extends PgBaseRepository implements Queue {
       const res = await client.query<{ stale: string }>(
         `SELECT COUNT(*) AS stale
            FROM _queue_messages
-          WHERE created_at < NOW() - ($1 || ' seconds')::interval`,
+          WHERE visible_at < NOW() - ($1 || ' seconds')::interval`,
         [String(Math.max(0, olderThanSeconds))],
       );
       return Number(res.rows[0].stale);

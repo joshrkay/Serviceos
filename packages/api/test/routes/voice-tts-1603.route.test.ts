@@ -89,7 +89,9 @@ describe('POST /api/voice/tts — speak a memo answer back (#1603)', () => {
 
     expect(res.status).toBe(200);
     // base64 of the provider's bytes ('mp3-bytes-1603'), plus its MIME type.
-    expect(res.body).toEqual({ audio: 'bXAzLWJ5dGVzLTE2MDM=', contentType: 'audio/mpeg' });
+    // S3-1 added `clipHash` and `cached` beside them; the device reads
+    // `audio` only, so the contract is a superset.
+    expect(res.body).toMatchObject({ audio: 'bXAzLWJ5dGVzLTE2MDM=', contentType: 'audio/mpeg' });
     expect(tts.synthesize).toHaveBeenCalledWith(
       expect.objectContaining({ text: 'You have nothing on the schedule today.', tenantId: TENANT }),
     );
@@ -133,10 +135,13 @@ describe('POST /api/voice/tts — speak a memo answer back (#1603)', () => {
     try {
       const tts = fakeTts();
       const app = buildApp({ auth: { role: 'technician' }, tts });
-      const body = { text: 'You have nothing on the schedule today.' };
-      expect((await request(app).post('/api/voice/tts').send(body)).status).toBe(200);
-      expect((await request(app).post('/api/voice/tts').send(body)).status).toBe(200);
-      const third = await request(app).post('/api/voice/tts').send(body);
+      // S3-1 — three DISTINCT texts: a repeated line would be a clip-cache
+      // hit, which costs nothing and would mask the cap.
+      const first = { text: 'You have nothing on the schedule today.' };
+      const second = { text: 'Your next job is at ten.' };
+      expect((await request(app).post('/api/voice/tts').send(first)).status).toBe(200);
+      expect((await request(app).post('/api/voice/tts').send(second)).status).toBe(200);
+      const third = await request(app).post('/api/voice/tts').send({ text: 'Sarah Chen owes four hundred dollars.' });
       expect(third.status).toBe(429);
       expect(third.body.error).toBe('RATE_LIMITED');
       expect(tts.synthesize).toHaveBeenCalledTimes(2);

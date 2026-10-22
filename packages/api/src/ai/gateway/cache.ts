@@ -1,10 +1,12 @@
 import { createHash } from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import type { LLMRequest, LLMResponse, LLMGateway } from './gateway';
-import { redactMessagesForSnapshot, messagesContainImage } from './gateway';
+import { redactMessagesForSnapshot, messagesContainImage, promptRefFields } from './gateway';
 import type { AiRunRepository } from '../ai-run';
 import { createAiRun } from '../ai-run';
+import { redactCardNumbersInUserMessages } from '../privacy/pan-redact';
 import type { LLMTraceExporter } from './trace-exporter';
+import { runOutsideRequestTransaction } from '../../middleware/tenant-context';
 import {
   gatewayCacheHitsTotal,
   gatewayCacheMissesTotal,
@@ -135,7 +137,10 @@ export class CachingGatewayWrapper {
 
         // Write AiRun row for cache hit so audit is never blind (best-effort).
         // Fire-and-forget: the function has internal try/catch so a void call is safe.
-        void this.writeAiRunForCacheHit(request, cached.response);
+        // Detached from the request's tenant context (TI-01): the caller can
+        // answer before the updateStatus half is issued, and by then the
+        // request client may be back in the pool.
+        void runOutsideRequestTransaction(() => this.writeAiRunForCacheHit(request, cached.response));
         // U10 — the hit never reaches gateway.complete (and so never its
         // trace hook), so the wrapper exports it itself. Same gap, same fix.
         this.exportTraceForCacheHit(request, cached.response);
@@ -179,18 +184,22 @@ export class CachingGatewayWrapper {
       const tenantId = request.tenantId ?? this.tenantId;
       const correlationId =
         (request.metadata?.correlationId as string | undefined) ?? uuidv4();
-      const promptVersionId = request.metadata?.promptVersionId as string | undefined;
+      // OBS-1: a non-UUID prompt ref is filed as input_snapshot.promptRef.
+      const promptRef = promptRefFields(request.metadata?.promptVersionId);
       const now = new Date();
 
       const pendingRun = createAiRun({
         tenantId,
         taskType: request.taskType,
         model: cachedResponse.model,
-        promptVersionId,
+        promptVersionId: promptRef.promptVersionId,
         inputSnapshot: {
-          messages: redactMessagesForSnapshot(request.messages),
+          // PRIV-3 — a hit never reaches LLMGateway.complete, so this path
+          // scrubs card numbers itself before the snapshot is written.
+          messages: redactMessagesForSnapshot(redactCardNumbersInUserMessages(request.messages)),
           temperature: request.temperature,
           maxTokens: request.maxTokens,
+          ...promptRef.snapshot,
         },
         createdBy: 'gateway-cache',
         correlationId,

@@ -150,6 +150,8 @@ export async function patchOwnerThrough(
       deps.callControl.dialDispatcher(callSid, ownerPhone, {
         actionUrl: input.dialActionUrl,
         timeoutSeconds: PATCH_DIAL_TIMEOUT_SECONDS,
+        // A vulnerable + urgent caller is emergency-class: press-1 screen.
+        screen: true,
       }),
       PATCH_ANNOUNCE_LINE_OWNER,
     );
@@ -173,6 +175,8 @@ export async function patchOwnerThrough(
             deps.callControl.dialDispatcher(callSid, phone, {
               actionUrl: input.dialActionUrl,
               timeoutSeconds: PATCH_DIAL_TIMEOUT_SECONDS,
+        // A vulnerable + urgent caller is emergency-class: press-1 screen.
+        screen: true,
             }),
             PATCH_ANNOUNCE_LINE_ONCALL,
           );
@@ -190,6 +194,8 @@ export async function patchOwnerThrough(
           deps.callControl.dialDispatcher(callSid, fallbackPhone, {
             actionUrl: input.dialActionUrl,
             timeoutSeconds: PATCH_DIAL_TIMEOUT_SECONDS,
+        // A vulnerable + urgent caller is emergency-class: press-1 screen.
+        screen: true,
           }),
           PATCH_ANNOUNCE_LINE_ONCALL,
         );

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { TaskHandler, TaskContext, TaskResult } from './task-handlers';
+import { TaskHandler, TaskContext, TaskResult, draftingRunLink, draftingRunMetadata } from './task-handlers';
 import { taskMessageForPrompt } from './task-input';
 import { createProposal, CreateProposalInput, Proposal } from '../../proposals/proposal';
 import { LLMGateway } from '../gateway/gateway';
@@ -593,6 +593,8 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
       tenantId: context.tenantId,
       messages: [...systemMessages, { role: 'user', content: this.buildUserMessage(context) }],
       responseFormat: 'json',
+      // OBS-2 — ai_runs.correlation_id → this conversation.
+      ...draftingRunMetadata(context),
     });
 
     const parsed = tryParseJson(llmResponse.content);
@@ -759,6 +761,8 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
       tenantId: context.tenantId,
       proposalType: this.taskType,
       payload,
+      // OBS-2 — the drafting run that authored this payload.
+      ...draftingRunLink(llmResponse),
       summary,
       confidenceScore: confidence.score,
       confidenceFactors: confidence.factors,
@@ -902,6 +906,12 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
         laneEvaluation = evaluateAutonomousBookingLane({
           platformDisabled: context.autonomousBooking.platformDisabled,
           settings: context.autonomousBooking.settings,
+          ownerPhone: context.autonomousBooking.ownerPhone,
+          undoChannelAvailable: context.autonomousBooking.undoChannelAvailable,
+          // The P0-035 check above ran before the hold and returned a
+          // clarification on any conflict, so reaching here with it wired
+          // means the slot was checked and is free.
+          slotConflictFree: Boolean(checker && customerId),
           proposalType: 'create_booking',
           inboundReceptionistSource: context.autonomousBooking.inboundReceptionistSource,
           confidenceScore: confidence.score,
@@ -945,6 +955,8 @@ export class CreateAppointmentAITaskHandler implements TaskHandler {
         tenantId: context.tenantId,
         proposalType: 'create_booking',
         payload: bookingPayload,
+        // OBS-2 — the drafting run that authored this payload.
+        ...draftingRunLink(llmResponse),
         summary,
         confidenceScore: confidence.score,
         confidenceFactors: confidence.factors,

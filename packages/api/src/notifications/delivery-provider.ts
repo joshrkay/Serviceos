@@ -55,7 +55,47 @@ export interface SmsMessage {
    * makes the gate fail closed (missing_consent_context). Ignored for 'owner'.
    */
   consent?: SmsConsentContext;
+  /**
+   * Send-window policy for a CUSTOMER send (ignored for 'owner').
+   *
+   *   - absent  → sent now. Transactional and conversational texts — estimate
+   *     / invoice sends, appointment confirmations and reminders, replies to a
+   *     customer who just texted or called, one-time links — must not wait.
+   *   - 'defer' → NON-transactional (thank-you, review request, automated
+   *     reminder). Outside the recipient-local window the gate throws
+   *     `SmsDeferredError` instead of sending; the caller keeps the work
+   *     retryable and sends on a later in-window attempt.
+   */
+  quietHours?: SmsQuietHoursPolicy;
+  /**
+   * Marks an OWNER-class send that must reach a human even while the
+   * customer-facing outbound kill switch (`TELEPHONY_ENABLED=false`) is off —
+   * inbound voice AI stays live then, so its emergency pages must too.
+   *
+   *   - 'life_safety' — E1 life-safety alerts, the E2 emergency page ladder,
+   *     the vulnerable-caller patch-miss page.
+   *   - 'operator'    — platform operator alerts (ALERT_SMS_TO).
+   *
+   * Ignored on 'customer' sends: no customer text ever bypasses the switch.
+   */
+  alertClass?: SmsAlertClass;
+  /**
+   * Called once, immediately before the underlying provider is asked to send,
+   * after every policy check (kill switch, consent, DNC, send window, volume
+   * cap) has passed. `GatedMessageDelivery` honors it and strips it before the
+   * provider sees the message. Outbound messaging passes its send-claim
+   * `markProviderStarting` here, so the claim stays reclaimable through the
+   * gate's own reads and becomes `'sending'` only at the provider boundary.
+   * A throw aborts the send before the provider is called.
+   */
+  onProviderStarting?: () => Promise<void>;
 }
+
+/** See `SmsMessage.quietHours`. */
+export type SmsQuietHoursPolicy = 'defer';
+
+/** See `SmsMessage.alertClass`. */
+export type SmsAlertClass = 'life_safety' | 'operator';
 
 export interface EmailMessage {
   to: string;

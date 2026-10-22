@@ -699,13 +699,17 @@ async function sendDigestSms(
  * invariant and the SMS Y-reply class refusal. Unknown class fails closed.
  *
  * Proposals with unresolved `missingFields` (e.g. an ambiguous catalog line on
- * a draft estimate) are likewise excluded: `approveProposal` rejects them, so a
+ * a draft estimate), and edits that void a customer's signed acceptance
+ * (OVAS-01), are likewise excluded: `approveProposal` rejects them, so a
  * one-tap / "APPROVE ALL" link would always fail. They stay in the digest deep
  * link for in-app review only.
  */
 function isBatchApprovable(approval: DailyDigestPayload['pendingApprovals']['top'][number]): boolean {
   if (isBlockingConfidence(approval.overallConfidence)) return false;
   if (approval.hasMissingFields) return false;
+  // OVAS-01 — approving voids a customer's signed acceptance: never a bare
+  // tap or a blanket ALL; the owner reviews it (and its warning) in the app.
+  if (approval.voidsAcceptance) return false;
   return actionClassForProposalType(approval.proposalType as ProposalType) === 'capture';
 }
 

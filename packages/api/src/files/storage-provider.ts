@@ -1,5 +1,7 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
 import { ObjectMetadata, StorageProvider } from './file-service';
+import { resolveStorageConfig, type StorageConfigEnv } from '../shared/storage-config';
+import { createDownloadUrlPolicy, type DownloadUrlPolicy } from './download-url-policy';
 
 export interface S3StorageConfig {
   bucket: string;
@@ -25,15 +27,8 @@ export interface DevStorageConfig {
   secret?: string;
 }
 
-export interface StorageProviderEnv {
-  STORAGE_BUCKET?: string;
-  STORAGE_ENDPOINT?: string;
-  STORAGE_REGION?: string;
-  STORAGE_ACCESS_KEY_ID?: string;
-  STORAGE_SECRET_ACCESS_KEY?: string;
+export interface StorageProviderEnv extends StorageConfigEnv {
   STORAGE_PUBLIC_URL?: string;
-  /** Explicit opt-out aligned with validateFeatureRequiredConfig. */
-  STORAGE_ENABLED?: string;
   API_PORT?: string;
   PORT?: string;
   NODE_ENV?: string;
@@ -110,6 +105,13 @@ export interface SignS3RequestInput {
   // When provided, binds the Content-Type into the signature so a client
   // cannot PUT a different MIME type than what the server validated.
   contentType?: string;
+  // When provided (PUT only), binds the exact Content-Length into the
+  // signature. S3/R2 recompute the canonical request from the headers the
+  // client actually sends, so a PUT whose body length differs from the
+  // declared size fails with SignatureDoesNotMatch — this is what makes
+  // the upload-intent size cap (MAX_FILE_SIZE / MAX_JOB_PHOTO_SIZE) real
+  // rather than advisory.
+  contentLength?: number;
 }
 
 // Pure SigV4 presign. Exported for test vector verification.
@@ -126,6 +128,7 @@ export function signS3Request(input: SignS3RequestInput): string {
     now,
     pathStyle,
     contentType,
+    contentLength,
   } = input;
   const { amzDate: ts, dateStamp } = amzDate(now);
   const scope = `${dateStamp}/${region}/s3/aws4_request`;
@@ -144,7 +147,16 @@ export function signS3Request(input: SignS3RequestInput): string {
     : `${basePath}/${encodedKey}`;
 
   const signContentType = !!contentType && method === 'PUT';
-  const signedHeaders = signContentType ? 'content-type;host' : 'host';
+  const signContentLength = contentLength !== undefined && method === 'PUT';
+  if (signContentLength && !(Number.isSafeInteger(contentLength) && contentLength! >= 0)) {
+    throw new Error(`Invalid contentLength for presigned PUT: ${contentLength}`);
+  }
+  // SigV4 requires canonical headers sorted by lowercase name.
+  const headerEntries: Array<[string, string]> = [];
+  if (signContentLength) headerEntries.push(['content-length', String(contentLength)]);
+  if (signContentType) headerEntries.push(['content-type', contentType!]);
+  headerEntries.push(['host', host]);
+  const signedHeaders = headerEntries.map(([name]) => name).join(';');
 
   const params: Record<string, string> = {
     'X-Amz-Algorithm': 'AWS4-HMAC-SHA256',
@@ -158,9 +170,7 @@ export function signS3Request(input: SignS3RequestInput): string {
     .map((k) => `${encodeRfc3986(k)}=${encodeRfc3986(params[k])}`)
     .join('&');
 
-  const canonicalHeaders = signContentType
-    ? `content-type:${contentType}\nhost:${host}\n`
-    : `host:${host}\n`;
+  const canonicalHeaders = headerEntries.map(([name, value]) => `${name}:${value}\n`).join('');
   const canonicalRequest = [
     method,
     canonicalPath,
@@ -201,8 +211,23 @@ export class S3StorageProvider implements StorageProvider {
     this.config = { ...config, pathStyle: config.pathStyle ?? true };
   }
 
-  async generateUploadUrl(bucket: string, key: string, contentType: string): Promise<string> {
-    return this.presign('PUT', bucket, key, DEFAULT_UPLOAD_EXPIRES_SECONDS, contentType);
+  // sizeBytes is the size the upload-intent route validated against its
+  // cap; it is signed as Content-Length so the storage backend rejects any
+  // PUT of a different length. Required — no caller may mint an unbounded
+  // upload URL.
+  async generateUploadUrl(
+    bucket: string,
+    key: string,
+    contentType: string,
+    sizeBytes: number
+  ): Promise<string> {
+    // Non-negative (not positive): server-side callers (telephony) may
+    // legitimately store an empty object; a 0 binding still caps the PUT.
+    // Client-facing routes reject 0 earlier via validateUpload.
+    if (!Number.isSafeInteger(sizeBytes) || sizeBytes < 0) {
+      throw new Error(`generateUploadUrl requires a non-negative integer sizeBytes (got ${sizeBytes})`);
+    }
+    return this.presign('PUT', bucket, key, DEFAULT_UPLOAD_EXPIRES_SECONDS, contentType, sizeBytes);
   }
 
   async generateDownloadUrl(bucket: string, key: string): Promise<string> {
@@ -241,7 +266,7 @@ export class S3StorageProvider implements StorageProvider {
     // Content-Type is bound into the signature (same guarantee as client
     // presigned uploads): the stored object's MIME type matches what the
     // pipeline produced.
-    const url = this.presign('PUT', bucket, key, 60, contentType);
+    const url = this.presign('PUT', bucket, key, 60, contentType, body.length);
     const res = await fetch(url, {
       method: 'PUT',
       headers: { 'content-type': contentType },
@@ -266,7 +291,8 @@ export class S3StorageProvider implements StorageProvider {
     bucket: string,
     key: string,
     expiresSeconds: number,
-    contentType?: string
+    contentType?: string,
+    contentLength?: number
   ): string {
     const { endpoint, region, accessKeyId, secretAccessKey, pathStyle } = this.config;
     return signS3Request({
@@ -281,6 +307,7 @@ export class S3StorageProvider implements StorageProvider {
       now: new Date(),
       pathStyle: pathStyle ?? true,
       contentType,
+      contentLength,
     });
   }
 }
@@ -289,8 +316,14 @@ export class S3StorageProvider implements StorageProvider {
 // URL points at the API's own /storage-dev receiver which accepts PUTs
 // and discards the payload — enough for the voice pipeline to exercise
 // the happy path in local development, where the dev transcription
-// provider does not fetch audio bytes anyway. In prod the factory
-// refuses to return this provider.
+// provider does not fetch audio bytes anyway.
+//
+// In prod/staging the factory returns this provider ONLY under the explicit
+// opt-out STORAGE_ENABLED=false (every other unconfigured prod env throws).
+// That posture is real, and then putObject() below is a no-op: uploads,
+// recordings and inbound MMS photos are NOT persisted. createStorageProvider
+// logs a boot WARN saying so, and app.ts keeps the /storage-dev receiver
+// dark there, so the download URLs this provider mints 404.
 export class DevStorageProvider implements StorageProvider {
   private readonly secret: string;
 
@@ -302,7 +335,16 @@ export class DevStorageProvider implements StorageProvider {
     this.secret = config.secret ?? randomBytes(32).toString('hex');
   }
 
-  async generateUploadUrl(_bucket: string, key: string, _contentType: string): Promise<string> {
+  // sizeBytes is accepted for interface parity but not enforced: the dev
+  // receiver discards uploaded bytes. In prod/staging this provider is only
+  // active under the STORAGE_ENABLED=false opt-out (see the class comment),
+  // where app.ts keeps the /storage-dev receiver dark.
+  async generateUploadUrl(
+    _bucket: string,
+    key: string,
+    _contentType: string,
+    _sizeBytes: number
+  ): Promise<string> {
     const token = signDevStorageToken(this.secret, 'PUT', key);
     return `${this.config.publicUrlBase.replace(/\/$/, '')}/${encodeKeyPath(key)}?token=${token}`;
   }
@@ -333,7 +375,7 @@ export class DevStorageProvider implements StorageProvider {
 
 // Production environments canonicalize NODE_ENV to 'prod'/'staging' but
 // the raw value 'production' is a common accident; treat both as prod
-// so a missing STORAGE_* credential fails fast instead of silently
+// so a missing storage credential fails fast instead of silently
 // returning a dev provider.
 function isProductionLikeEnv(nodeEnv: string | undefined): boolean {
   return nodeEnv === 'prod' || nodeEnv === 'production' || nodeEnv === 'staging';
@@ -350,7 +392,16 @@ function defaultDevPublicUrl(env: StorageProviderEnv): string {
   return `http://localhost:${port}/storage-dev`;
 }
 
-export function createStorageProvider(env: StorageProviderEnv = process.env): {
+export interface StorageProviderDeps {
+  // Optional so the factory stays usable where the structured logger isn't
+  // wired (unit tests); defaults to console.
+  logger?: { warn: (message: string, meta?: Record<string, unknown>) => void };
+}
+
+export function createStorageProvider(
+  env: StorageProviderEnv = process.env,
+  deps: StorageProviderDeps = {}
+): {
   provider: StorageProvider;
   bucket: string;
   mode: 's3' | 'dev';
@@ -360,50 +411,77 @@ export function createStorageProvider(env: StorageProviderEnv = process.env): {
    * and the secret to verify its tokens with (#1273).
    */
   devStorageSecret?: string;
+  /**
+   * H2 — the allowlist of URLs `provider.generateDownloadUrl` mints, for
+   * the workers that GET a stored file by URL (transcription). Built from
+   * the same config as the provider; across processes (web mints, worker
+   * fetches) keep the STORAGE_* env identical, or a URL minted from an
+   * origin the worker does not know is refused.
+   */
+  downloadUrlPolicy: DownloadUrlPolicy;
 } {
-  const {
-    STORAGE_BUCKET,
-    STORAGE_ENDPOINT,
-    STORAGE_REGION,
-    STORAGE_ACCESS_KEY_ID,
-    STORAGE_SECRET_ACCESS_KEY,
-    STORAGE_PUBLIC_URL,
-    STORAGE_ENABLED,
-    NODE_ENV,
-  } = env;
+  const { STORAGE_PUBLIC_URL, STORAGE_ENABLED, NODE_ENV } = env;
 
-  const hasS3 =
-    STORAGE_BUCKET &&
-    STORAGE_ENDPOINT &&
-    STORAGE_REGION &&
-    STORAGE_ACCESS_KEY_ID &&
-    STORAGE_SECRET_ACCESS_KEY;
-
-  if (hasS3) {
+  const resolved = resolveStorageConfig(env);
+  if (resolved.ok) {
+    const { bucket, endpoint, region, accessKeyId, secretAccessKey } = resolved.config;
     return {
       provider: new S3StorageProvider({
-        bucket: STORAGE_BUCKET!,
-        endpoint: STORAGE_ENDPOINT!,
-        region: STORAGE_REGION!,
-        accessKeyId: STORAGE_ACCESS_KEY_ID!,
-        secretAccessKey: STORAGE_SECRET_ACCESS_KEY!,
+        bucket,
+        endpoint,
+        region,
+        accessKeyId,
+        secretAccessKey,
         publicUrlBase: STORAGE_PUBLIC_URL,
       }),
-      bucket: STORAGE_BUCKET!,
+      bucket,
       mode: 's3',
+      // generateDownloadUrl serves STORAGE_PUBLIC_URL when set, else a
+      // path-style presign on the endpoint host (pathStyle defaults to true
+      // and is not configurable from env). Both are allowed: the process
+      // that mints the URL (web) and the worker that fetches it may not
+      // carry the same STORAGE_PUBLIC_URL (H2 review M1).
+      downloadUrlPolicy: createDownloadUrlPolicy({
+        allowedOrigins: [endpoint, STORAGE_PUBLIC_URL ?? ''],
+        productionLike: isProductionLikeEnv(NODE_ENV),
+      }),
     };
   }
 
-  // Match validateFeatureRequiredConfig: STORAGE_ENABLED=false opts out of
-  // object storage in prod/staging (recordings/uploads stay unavailable).
+  // Same resolver as validateFeatureRequiredConfig: STORAGE_ENABLED=false is
+  // the one way to run prod/staging without object storage.
   const storageOptedOut = STORAGE_ENABLED === 'false';
   if (isProductionLikeEnv(NODE_ENV) && !storageOptedOut) {
     throw new Error(
-      'Storage configuration missing: set STORAGE_BUCKET, STORAGE_ENDPOINT, STORAGE_REGION, STORAGE_ACCESS_KEY_ID, STORAGE_SECRET_ACCESS_KEY'
+      `Storage configuration missing: set ${resolved.missing.join(', ')} ` +
+        '(or STORAGE_ENABLED=false to run without persisted uploads and recordings)'
     );
   }
 
-  const bucket = STORAGE_BUCKET || 'serviceos-dev';
+  // Reaching the dev provider in a production-like env means the operator
+  // opted out (STORAGE_ENABLED=false) — the throw above covers everything
+  // else. It is a legitimate posture but not a quiet one: putObject() on
+  // this provider is a no-op, so inbound MMS photos, recordings and uploads
+  // are "saved" to nowhere. Say so once, at boot.
+  if (isProductionLikeEnv(NODE_ENV)) {
+    const logger = deps.logger ?? {
+      warn: (msg: string, meta?: Record<string, unknown>) => {
+        // eslint-disable-next-line no-console
+        console.warn(msg, meta ?? '');
+      },
+    };
+    logger.warn(
+      'OBJECT STORAGE DISABLED (STORAGE_ENABLED=false) in a production-like environment: ' +
+        'customer uploads, call recordings and inbound MMS photos are NOT persisted — ' +
+        'the dev provider discards every write and its download URLs 404. ' +
+        'To enable storage set STORAGE_BUCKET, STORAGE_ENDPOINT, STORAGE_REGION, ' +
+        'STORAGE_ACCESS_KEY_ID and STORAGE_SECRET_ACCESS_KEY (or the R2_ACCOUNT_ID / ' +
+        'R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY alias) and remove STORAGE_ENABLED=false.',
+      { nodeEnv: NODE_ENV, storageMode: 'dev', persisted: false }
+    );
+  }
+
+  const bucket = env.STORAGE_BUCKET || 'serviceos-dev';
   const publicUrlBase = STORAGE_PUBLIC_URL || defaultDevPublicUrl(env);
   // Fresh per-boot secret — never persisted, never logged, only ever held
   // by this DevStorageProvider instance and the /storage-dev router app.ts
@@ -414,5 +492,11 @@ export function createStorageProvider(env: StorageProviderEnv = process.env): {
     bucket,
     mode: 'dev',
     devStorageSecret,
+    // In a prod-like env (STORAGE_ENABLED=false) the /storage-dev receiver
+    // is never mounted, so there is no legitimate dev URL to fetch at all.
+    downloadUrlPolicy: createDownloadUrlPolicy({
+      allowedOrigins: isProductionLikeEnv(NODE_ENV) ? [] : [publicUrlBase],
+      productionLike: isProductionLikeEnv(NODE_ENV),
+    }),
   };
 }

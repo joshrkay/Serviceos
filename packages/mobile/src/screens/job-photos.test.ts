@@ -163,7 +163,7 @@ vi.mock('expo-router', () => ({
   useRouter: () => ({ push: vi.fn(), back: vi.fn(), replace: vi.fn() }),
 }));
 vi.mock('../lib/useApiClient', () => ({ useApiClient: () => h.api }));
-vi.mock('expo-file-system', () => ({
+vi.mock('expo-file-system/legacy', () => ({
   getInfoAsync: (...args: unknown[]) => h.getInfoAsync(...args),
   uploadAsync: vi.fn(),
   FileSystemUploadType: { BINARY_CONTENT: 'BINARY_CONTENT' },

@@ -40,6 +40,12 @@ export interface User {
    */
   mobileNumber?: string;
   /**
+   * Dispatch FR-2 phase 2 (migration 328) — canonical skill tags
+   * (@ai-service-os/shared skill-tags) the feasibility skill gate checks against a job's
+   * `requiredSkills`. Optional in TS for fixtures; the Pg layer always maps it.
+   */
+  skills?: string[];
+  /**
    * 16D soft-delete stamp (migration 093). Non-null means the account is
    * deleted: auth rejects it (authorization-loader) and repository reads
    * exclude it. Rows are retained — never purged — for audit and billing.
@@ -68,6 +74,8 @@ export interface UpdateUserInput {
   firstName?: string;
   lastName?: string;
   canFieldServe?: boolean;
+  /** Canonical tags only — the route normalizes through `skillTagsSchema`. */
+  skills?: string[];
 }
 
 export interface UserRepository {
@@ -139,8 +147,18 @@ export interface UserRepository {
    */
   deactivateMember(tenantId: string, id: string): Promise<User | null>;
   /** Test/dev helper. Production user creation goes through the Clerk webhook. */
-  create?(user: Omit<User, 'createdAt' | 'updatedAt'>): Promise<User>;
+  create?(user: CreateUserInput): Promise<User>;
 }
+
+/**
+ * A new users row. `canFieldServe` omitted = the insert default: owners are
+ * field-capable, every other role opts in (Postgres: migration 309's users
+ * INSERT trigger, which every creation path — including the raw-SQL Clerk
+ * webhook inserts — goes through). An explicit value is always kept.
+ */
+export type CreateUserInput = Omit<User, 'createdAt' | 'updatedAt' | 'canFieldServe'> & {
+  canFieldServe?: boolean;
+};
 
 export function validateUpdateUserInput(input: UpdateUserInput): string[] {
   const errors: string[] = [];
@@ -395,15 +413,21 @@ export class InMemoryUserRepository implements UserRepository {
       firstName: updates.firstName ?? u.firstName,
       lastName: updates.lastName ?? u.lastName,
       canFieldServe: updates.canFieldServe ?? u.canFieldServe,
+      skills: updates.skills ?? u.skills,
       updatedAt: new Date(),
     };
     this.users.set(id, next);
     return { ...next };
   }
 
-  async create(user: Omit<User, 'createdAt' | 'updatedAt'>): Promise<User> {
+  async create(user: CreateUserInput): Promise<User> {
     const now = new Date();
-    const created: User = { ...user, createdAt: now, updatedAt: now };
+    const created: User = {
+      ...user,
+      canFieldServe: user.canFieldServe ?? user.role === 'owner',
+      createdAt: now,
+      updatedAt: now,
+    };
     this.users.set(created.id, created);
     return { ...created };
   }

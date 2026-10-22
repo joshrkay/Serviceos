@@ -18,7 +18,7 @@ jobs:
       - run: npm ci
       - name: Install browser
         run: |
-          sudo rm -f /etc/apt/sources.list.d/deadsnakes-* /etc/apt/sources.list.d/ondrej-* || true
+          sudo rm -f /etc/apt/sources.list.d/deadsnakes-* /etc/apt/sources.list.d/ondrej-* /etc/apt/sources.list.d/microsoft-prod* || true
           npx playwright install --with-deps chromium
       - name: Load Development Clerk test keys through existing Railway access
         run: node scripts/release/load-development-clerk.mjs

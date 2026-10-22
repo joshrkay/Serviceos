@@ -63,6 +63,11 @@ describe('P0-010 — File upload and attachment storage', () => {
     expect(errors.some((e) => e.includes('exceeds maximum'))).toBe(true);
   });
 
+  it('validation — rejects a fractional size (signed verbatim as Content-Length)', () => {
+    const errors = validateUpload({ ...validRequest, sizeBytes: 1024.5 });
+    expect(errors).toContain('File size must be a whole number of bytes');
+  });
+
   it('validation — rejects missing tenantId', () => {
     const errors = validateUpload({ ...validRequest, tenantId: '' });
     expect(errors).toContain('Tenant ID is required');

@@ -139,6 +139,16 @@ describe('P7-026 InMemoryReviewPollStateRepository', () => {
     );
   });
 
+  it('records why it backed off, and a success clears the reason', async () => {
+    const repo = new InMemoryReviewPollStateRepository(() => NOW);
+    await repo.recordQuotaError('t1');
+    expect((await repo.getPollState('t1'))?.backoffReason).toBe('quota');
+    await repo.recordAuthFailure('t1', 3600, (await repo.getPollState('t1'))?.authGeneration ?? 0);
+    expect((await repo.getPollState('t1'))?.backoffReason).toBe('auth');
+    await repo.recordSuccess('t1', '2026-10-01T00:00:00.000Z');
+    expect((await repo.getPollState('t1'))?.backoffReason).toBeNull();
+  });
+
   it('recordQuotaError preserves existing cursor (we retry from same watermark)', async () => {
     const repo = new InMemoryReviewPollStateRepository(() => NOW);
     await repo.recordSuccess('t1', '2026-05-17T11:00:00.000Z');
@@ -193,5 +203,17 @@ describe('P7-026 InMemoryReviewPollStateRepository', () => {
     expect(stateB?.backoffUntil?.getTime()).toBe(
       NOW.getTime() + REVIEW_BACKOFF_BASE_MS,
     );
+  });
+});
+
+describe('InMemoryReviewPollStateRepository — reconnects', () => {
+  it('drops an auth failure recorded against an older generation', async () => {
+    const repo = new InMemoryReviewPollStateRepository(() => new Date('2026-10-01T00:00:00Z'));
+    expect(await repo.recordReconnect('t1')).toBe(false);
+    expect(await repo.recordAuthFailure('t1', 3600, 0)).toBe(false);
+    expect((await repo.getPollState('t1'))?.backoffUntil).toBeNull();
+    expect(await repo.recordAuthFailure('t1', 3600, 1)).toBe(true);
+    expect(await repo.recordReconnect('t1')).toBe(true);
+    expect(await repo.getPollState('t1')).toMatchObject({ backoffUntil: null, authGeneration: 2 });
   });
 });

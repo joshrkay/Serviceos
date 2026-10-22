@@ -113,7 +113,7 @@ export function createCalendarOAuthCallbackRouter(
         throw new ValidationError('Google calendar integration is not configured');
       }
 
-      const consumed = await deps.stateRepo.consume(state);
+      const consumed = await deps.stateRepo.consume(state, 'google');
       if (!consumed) {
         throw new ValidationError('Invalid or expired OAuth state');
       }

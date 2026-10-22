@@ -50,18 +50,14 @@ import { logInboundCallOnCustomerTimeline } from './inbound-call-log';
 import { notifyOwner } from '../notifications/owner-notifications-instance';
 import { assembleB2bAccountContext } from '../ai/agents/customer-calling/b2b-account-context';
 import { detectConfirmTurnQuestion } from '../ai/voice-turn/confirm-turn-question';
-import { intentClassifiedEvent, languageSwitchedEvent } from '../ai/voice-quality/events';
-import {
-  detectLanguageSwitchIntent,
-  isLanguageSupported,
-} from '../ai/orchestration/language-detector';
+import { intentClassifiedEvent } from '../ai/voice-quality/events';
 import { TAU_INT } from '../ai/agents/customer-calling/transitions';
 import type {
   CallingAgentContext,
   CallingAgentEvent,
   SideEffect,
 } from '../ai/agents/customer-calling/types';
-import type { VoiceSession, VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
+import type { CallerTurnTiming, VoiceSession, VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
 import type { VulnerabilityTriageHook } from '../ai/agents/customer-calling/vulnerability-triage-hook';
 import { extractPriorTurns } from '../ai/agents/customer-calling/transcript-turns';
 import type { VoiceSessionRepository } from '../voice/voice-session';
@@ -77,6 +73,14 @@ import {
 } from '../ai/skills/escalate-to-human';
 import { createLogger } from '../logging/logger';
 import { xmlEscape } from './shared/xml-escape';
+import {
+  GATHER_VOICE_EN,
+  GATHER_VOICE_ES,
+  injectSafetySayLines,
+} from './shared/safety-say-lines';
+import { isBlockedCallerId } from '../ai/voice-turn/shared/blocked-caller-id';
+import { resolveOwnerSession } from '../ai/voice-turn/shared/owner-session';
+import { switchSessionLanguage } from '../ai/voice-turn/shared/language-switch';
 import {
   queueCallbackProposal as queueCallbackProposalShared,
 } from './shared/queue-callback-proposal';
@@ -109,24 +113,28 @@ import { classifyCallerSafety } from '../ai/agents/customer-calling/emergency-ti
 import { askCallerUtteranceCarriesRequest } from '../ai/voice-turn/ask-caller-request';
 import { detectPromptInjection } from '../ai/agents/customer-calling/untrusted-content';
 import {
-  renderTtsText,
   ttsCopy,
   TTS_COPY,
-  LOW_STT_CONFIDENCE_REPROMPT_COPY,
-  SPEECH_TURN_FAILURE_ESCALATION_COPY,
-  MAX_CALL_DURATION_WRAP_UP_COPY,
-  LANGUAGE_SWITCH_ACK,
-  LANGUAGE_UNSUPPORTED_LINE,
-  LANGUAGE_SWITCH_CAP_LINE,
   type SessionLanguage,
 } from '../ai/agents/customer-calling/tts-copy';
 import {
-  MIN_STT_CONFIDENCE,
-  MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS,
-  MAX_LANGUAGE_SWITCHES_PER_CALL,
-  DEFAULT_MAX_CALL_DURATION_MS,
-} from './media-streams/mediastream-adapter';
-import { recordVoiceError } from '../analytics/posthog';
+  MAX_CALL_DURATION_TERMINAL_REASON,
+  resolveMaxCallDurationMs,
+  hasReachedMaxCallDuration,
+  callAgeMs,
+  maxCallDurationEffects,
+} from '../ai/voice-turn/shared/max-call-duration';
+import {
+  createLowSttStreak,
+  clearLowSttStreak,
+  isLowSttConfidence,
+  parkedHandoffKind,
+  runLowSttConfidenceLadder,
+  recordLowSttLadderError,
+  type LadderVoicemailKind,
+  type LowSttStrikeCause,
+} from '../ai/voice-turn/shared/low-stt-ladder';
+import { buildVoicemailTwiml } from './voicemail-fallback';
 import {
   detectRecordingObjection,
   RECORDING_OBJECTION_ACK,
@@ -145,13 +153,13 @@ import type { DroppedCallScheduler } from '../sms/recovery/scheduler';
 import { buildRecoveryContext } from '../sms/recovery/scheduler';
 import type { SettingsRepository } from '../settings/settings';
 import type { UserRepository } from '../users/user';
-import { isApproverPhone } from '../proposals/approver-identity';
 import { isOwnerLineAttested } from './stir-attestation';
 import type { EntityResolver } from '../ai/resolution/entity-resolver';
 import type { LocationRepository } from '../locations/location';
 import type { ProposalSmsEventRepository } from '../proposals/sms/sms-event';
 import type { OneTapFallbackDeps } from '../ai/tasks/proposal-approval-task';
 import { TenantGlossaryProvider } from '../voice/tenant-glossary-provider';
+import { redactCardNumbers } from '../ai/privacy/pan-redact';
 
 const logger = createLogger({
   service: 'telephony.twilio-adapter',
@@ -168,7 +176,8 @@ export interface TwilioAdapterDeps {
    * `VOICE_MAX_CALL_DURATION_MS`. Gather has no timer of its own (every turn
    * is a fresh webhook), so `_handleGatherLocked` compares the session age
    * against this on each turn and hangs up with the wrap-up line once it is
-   * exceeded. Default {@link DEFAULT_MAX_CALL_DURATION_MS}.
+   * exceeded. Default `DEFAULT_MAX_CALL_DURATION_MS`
+   * (`ai/voice-turn/shared/max-call-duration.ts`).
    */
   maxCallDurationMs?: number;
   /**
@@ -486,6 +495,13 @@ export interface TwilioAdapterDeps {
    * drift from VoiceTurnProcessorDeps.
    */
   autonomousClose?: VoiceTurnProcessorDeps['autonomousClose'];
+  /**
+   * D-015 — owner one-tap UNDO for a lane-approved live-call booking.
+   * Processor-only pass-through, typed by reference like autonomousClose.
+   */
+  laneUndo?: VoiceTurnProcessorDeps['laneUndo'];
+  /** D-015 — the P0-035 slot-conflict check before a live-call hold. */
+  slotConflictChecker?: VoiceTurnProcessorDeps['slotConflictChecker'];
 }
 
 /**
@@ -547,28 +563,6 @@ export function buildTelephonyGreeting(
 // ─── XML helpers ─────────────────────────────────────────────────────────────
 
 /**
- * P18-001: detect a Twilio `From` value that represents a withheld /
- * blocked / private caller-id. Twilio surfaces these as common literal
- * strings; an empty string signals "we never recorded one". Returns
- * true ONLY for explicitly blocked indicators — a plain missing string
- * returns false so the caller can prompt for a callback rather than
- * assuming the caller chose to withhold.
- */
-export function isBlockedCallerId(from: string | undefined): boolean {
-  if (!from) return false;
-  const v = from.trim().toLowerCase();
-  if (v.length === 0) return false;
-  return (
-    v === 'restricted' ||
-    v === 'private' ||
-    v === 'blocked' ||
-    v === 'unknown' ||
-    v === 'anonymous' ||
-    v === 'unavailable'
-  );
-}
-
-/**
  * Fire exactly one `incoming_call` owner push for an inbound call (best-effort).
  *
  * Known caller → deep-links to their customer record with their name; an
@@ -607,6 +601,7 @@ export async function notifyOwnerOfIncomingCall(opts: {
 // `xmlEscape` (whisper-route.ts, twilio-call-control.ts, routes/telephony.ts,
 // and their tests) keep working unchanged.
 export { xmlEscape } from './shared/xml-escape';
+export { injectSafetySayLines } from './shared/safety-say-lines';
 
 // ─── Side-effect → TwiML mapping ─────────────────────────────────────────────
 
@@ -654,8 +649,6 @@ interface BuildTwimlOpts {
  */
 const E1_AUDIT_DEADLINE_MS = 1500;
 
-const GATHER_VOICE_EN = 'Polly.Joanna';
-const GATHER_VOICE_ES = 'Polly.Mia-Neural';
 const GATHER_LOCALE_EN = 'en-US';
 const GATHER_LOCALE_ES = 'es-US';
 /** A2 — mirrors VerticalTerminologyProvider/TenantGlossaryProvider's caps; protects Gather URL/TwiML size. */
@@ -771,46 +764,25 @@ export function buildTwiML(
   return `<?xml version="1.0" encoding="UTF-8"?><Response>${parts.join('')}</Response>`;
 }
 
-/**
- * RV-142 — prepend safety-marked TTS lines (payload.priority === 'safety',
- * e.g. the emergency 911 line) as `<Say>` verbs at the top of an existing
- * `<Response>` document (typically the pending `<Dial>` transfer TwiML), so
- * the safety script is spoken BEFORE the bridge. Non-safety lines are left
- * out, preserving the long-standing behavior where transfer TwiML replaces
- * ordinary turn copy. Returns the document unchanged when no safety lines
- * are present.
- */
-export function injectSafetySayLines(
-  twiml: string,
-  sideEffects: ReadonlyArray<SideEffect>,
-  opts: { language?: 'en' | 'es'; voiceOverride?: string } = {},
-): string {
-  const lang: SessionLanguage = opts.language === 'es' ? 'es' : 'en';
-  const sayParts = sideEffects
-    .filter(
-      (fx) =>
-        fx.type === 'tts_play' &&
-        fx.payload.priority === 'safety' &&
-        typeof fx.payload.text === 'string' &&
-        fx.payload.text.length > 0,
-    )
-    .map((fx) => {
-      const voice =
-        opts.voiceOverride ?? (lang === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN);
-      // Localize the safety script by session language — same selector the
-      // Polly voice switch above uses. renderTtsText resolves the FSM's
-      // fixed English sentences back to their TTS_COPY entry (exact match;
-      // the 911 + transfer lines are catalogued), and passes unknown text
-      // through unchanged, so an 'en' session is a no-op.
-      const text = renderTtsText(String(fx.payload.text), fx.payload, lang);
-      return `<Say voice="${xmlEscape(voice)}">${xmlEscape(text)}</Say>`;
-    })
-    .join('');
-  if (!sayParts) return twiml;
-  return twiml.replace('<Response>', `<Response>${sayParts}`);
-}
-
 // ─── Adapter ─────────────────────────────────────────────────────────────────
+
+/** One `<Gather>` callback, as the /gather route hands it to the adapter. */
+export interface GatherTurn {
+  sessionId: string;
+  callSid: string;
+  speechResult: string;
+  confidence: number | undefined;
+  tenantId: string;
+  /**
+   * LCR-05 — the caller and dialled numbers from the callback. Only read when
+   * `sessionId` is unknown to this process (a deploy cut-over): they are what
+   * a fresh session is started from. Absent → the turn hangs up as before.
+   */
+  from?: string;
+  to?: string;
+  /** Twilio `StirVerstat`, carried into a restarted session (#1223). */
+  stirVerstat?: string;
+}
 
 export class TwilioGatherAdapter {
   /**
@@ -883,6 +855,11 @@ export class TwilioGatherAdapter {
     return this.pendingConsentCommit.size;
   }
 
+  /** Test-only view of the parked hand-off TwiML count (L1 leak regression). */
+  get _pendingTransferTwimlSize(): number {
+    return this.pendingTransferTwiml.size;
+  }
+
   /**
    * A3 — consecutive-low-Gather-`Confidence`-turn streak, keyed by
    * sessionId. Each `/gather` POST is a stateless HTTP request, so this
@@ -899,8 +876,9 @@ export class TwilioGatherAdapter {
    * Limitation: this streak is process-local — a mid-call replica
    * restart/redeploy silently resets it to 0. Acceptable for a short,
    * bounded reprompt budget (2 turns) rather than a durable guarantee.
+   * Keyed by the live session object (#1601 step 2), so it dies with it.
    */
-  private readonly lowConfidenceGatherStreak = new Map<string, number>();
+  private readonly lowConfidenceGatherStreak = createLowSttStreak();
 
   /**
    * A2 — lazily-constructed fallback source for `<Gather hints="...">`
@@ -991,37 +969,6 @@ export class TwilioGatherAdapter {
       .catch(() => {
         /* swallow — audit is best-effort here */
       });
-  }
-
-  /**
-   * RV-070 — owner-line recognition. True when the inbound caller-ID
-   * matches `tenant_settings.owner_phone` or the backup supervisor's
-   * mobile (normalized E.164 comparison — the SAME identity logic as the
-   * SMS reply transport, via `proposals/approver-identity.ts`). Best
-   * effort and fail-closed: a settings/user lookup failure returns false
-   * so a degraded dependency can never mint an owner session.
-   */
-  private async resolveOwnerSession(
-    tenantId: string,
-    from: string | undefined,
-  ): Promise<boolean> {
-    if (!this.deps.settingsRepo || !from) return false;
-    try {
-      return await isApproverPhone(
-        {
-          settingsRepo: this.deps.settingsRepo,
-          ...(this.deps.userRepo ? { userRepo: this.deps.userRepo } : {}),
-        },
-        tenantId,
-        from,
-      );
-    } catch (err) {
-      logger.warn('resolveOwnerSession failed — treating caller as non-owner', {
-        tenantId,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return false;
-    }
   }
 
   /**
@@ -1229,7 +1176,8 @@ export class TwilioGatherAdapter {
     // authority on full STIR/SHAKEN A-attestation. B/C/failed/absent →
     // untrusted caller (no ownerSession, no phone actor, S1 profile).
     const attested = isOwnerLineAttested(opts.stirVerstat);
-    const approverCallerId = await this.resolveOwnerSession(opts.tenantId, opts.from);
+    // #1601 step 2 — the shared RV-070 resolver (`ai/voice-turn/shared/owner-session.ts`).
+    const approverCallerId = await resolveOwnerSession(this.deps, opts.tenantId, opts.from);
     const ownerSession = approverCallerId && attested;
     // Owner extended lookups (day/digest/pending) stay owner+flag gated.
     const extendedIntents = extendedIntentsFlag && ownerSession;
@@ -2097,7 +2045,13 @@ export class TwilioGatherAdapter {
     callSid: string;
     speechResult: string;
     tenantId: string;
+    /** U1 — this final's timing, stamped onto the caller line appended below. */
+    callerTiming?: CallerTurnTiming;
   }): Promise<SideEffect[]> {
+    // PRIV-3 — a recited card number is scrubbed where the caller's words
+    // enter the turn, so the FSM events, task handlers and the proposals they
+    // persist never see the digits (not only the stored transcript turn).
+    opts = { ...opts, speechResult: redactCardNumbers(opts.speechResult) };
     const session = this.deps.store.get(opts.sessionId);
     if (!session) {
       logger.warn('processCallerUtterance: unknown session', { sessionId: opts.sessionId });
@@ -2121,6 +2075,7 @@ export class TwilioGatherAdapter {
         // at each consumer, so every derived summary inherits it.
         text: callerTranscriptText(session, opts.speechResult),
         ts: Date.now(),
+        ...(opts.callerTiming ? { timing: opts.callerTiming } : {}),
       });
     }
 
@@ -2330,28 +2285,45 @@ export class TwilioGatherAdapter {
    * Handle a `<Gather>` callback — the caller spoke, Twilio sent us the
    * transcript. Classify intent → drive FSM → emit next TwiML.
    */
-  async handleGather(opts: {
-    sessionId: string;
-    callSid: string;
-    speechResult: string;
-    confidence: number | undefined;
-    tenantId: string;
-  }): Promise<string> {
+  async handleGather(opts: GatherTurn): Promise<string> {
+    // PRIV-3 — Twilio's speech result has no upstream card redaction, so a
+    // recited card number is scrubbed here, before classification, the FSM
+    // and every task handler (see processCallerUtterance).
+    const scrubbed = { ...opts, speechResult: redactCardNumbers(opts.speechResult) };
     // Per-session lock: Twilio retries (or duplicate webhook deliveries)
     // for the same sessionId could otherwise interleave FSM dispatch +
     // transcript writes. Same primitive as the in-app adapter.
-    return this.deps.store.withSessionLock(opts.sessionId, () => this._handleGatherLocked(opts));
+    return this.deps.store.withSessionLock(opts.sessionId, () => this._handleGatherLocked(scrubbed));
   }
 
-  private async _handleGatherLocked(opts: {
-    sessionId: string;
-    callSid: string;
-    speechResult: string;
-    confidence: number | undefined;
-    tenantId: string;
-  }): Promise<string> {
+  private async _handleGatherLocked(opts: GatherTurn): Promise<string> {
     const session = this.deps.store.get(opts.sessionId);
     if (!session) {
+      // LCR-05 — sessions live in the memory of the process that answered the
+      // call, so after a deploy (Railway moves traffic to the new process as
+      // soon as it is healthy) a live call's next turn arrives here with a
+      // session id this process never held. Start the call over as a fresh,
+      // disclosed session on the dialled number's tenant (the route resolved
+      // it by DID, exactly as /voice does) rather than hanging up on a caller
+      // mid-conversation. The greeting and recording notice replay and the
+      // conversation so far is lost, so it is logged as a restart. A Twilio
+      // retry of this same turn reuses the restarted session (handleInbound's
+      // CallSid replay check).
+      if (opts.from && opts.to) {
+        logger.warn('handleGather: unknown session, starting the call over (deploy_induced_restart)', {
+          event: 'deploy_induced_restart',
+          sessionId: opts.sessionId,
+          callSid: opts.callSid,
+          tenantId: opts.tenantId,
+        });
+        return this.handleInbound({
+          callSid: opts.callSid,
+          from: opts.from,
+          to: opts.to,
+          tenantId: opts.tenantId,
+          ...(opts.stirVerstat ? { stirVerstat: opts.stirVerstat } : {}),
+        });
+      }
       logger.warn('handleGather: unknown session', { sessionId: opts.sessionId });
       return buildTwiML(
         [
@@ -2369,11 +2341,14 @@ export class TwilioGatherAdapter {
     //    call as caller speech and classify/summarize it as a spoken
     //    no-intent call instead of a silent one.
     if (opts.speechResult.trim().length > 0) {
+      // U1 — Gather has no stream clock: only the webhook receipt is known, so
+      // the row records transport + stt_final_at and never a reply gap.
       this.deps.store.appendTranscript(opts.sessionId, {
         speaker: 'caller',
         // #850 — see the sibling append above.
         text: callerTranscriptText(session, opts.speechResult),
         ts: Date.now(),
+        timing: { transport: 'gather', sttFinalAt: new Date() },
       });
     }
 
@@ -2448,7 +2423,7 @@ export class TwilioGatherAdapter {
     // reprompted forever. Same caller experience as a low-confidence turn:
     // reprompt below the cap, graceful escalation + hangup at it.
     if (opts.speechResult.trim().length === 0) {
-      return this.runLowSttConfidenceGatherLadder(session, opts.sessionId);
+      return this.runLowSttConfidenceGatherLadder(session, opts.sessionId, opts.tenantId, 'silence');
     }
 
     // A3 — low acoustic STT confidence gate. Twilio's Gather `Confidence` on
@@ -2669,6 +2644,9 @@ export class TwilioGatherAdapter {
             // Thread the classify call's REAL ai_runs id so a proposal born
             // from this intent links to its run row (proposals.ai_run_id FK).
             ...(classification.aiRunId ? { aiRunId: classification.aiRunId } : {}),
+            ...(classification.confidenceSource
+              ? { confidenceSource: classification.confidenceSource }
+              : {}),
           };
         } else {
           // Low / unknown intent → intent_classified so FSM uses
@@ -3037,14 +3015,9 @@ export class TwilioGatherAdapter {
    * Mirrors the media-streams adapter's `recoverFromLowSttConfidence`
    * shape: reprompt on an isolated low-confidence turn using
    * {@link LOW_STT_CONFIDENCE_REPROMPT_COPY}; after
-   * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS} back-to-back, speak the
-   * SAME escalation line VOX-35c uses
-   * ({@link SPEECH_TURN_FAILURE_ESCALATION_COPY}) and end the call
-   * gracefully via a synthetic `end_session` side effect + explicit
-   * `finalizeTerminatedSession` call (this path never touches the FSM, so
-   * `finalizeTwiml`'s own `currentState === 'terminated'` finalize check
-   * would never fire — the manual call here is required, same pattern
-   * `/dial-result`'s successful-transfer branch already uses).
+   * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS} back-to-back, end the
+   * ladder by the capping strike's cause (LCR-02, see
+   * {@link runLowSttConfidenceGatherLadder}).
    */
   /**
    * U5 — end a Gather call whose age (`Date.now() - session.createdAt`, the
@@ -3056,28 +3029,24 @@ export class TwilioGatherAdapter {
     session: VoiceSession,
     sessionId: string,
   ): Promise<string | null> {
-    const limitMs = this.deps.maxCallDurationMs ?? DEFAULT_MAX_CALL_DURATION_MS;
-    const elapsedMs = Date.now() - session.createdAt.getTime();
-    if (elapsedMs < limitMs) return null;
+    // #1601 step 2 — limit, lead, copy and terminal reason are the shared
+    // cap's (`ai/voice-turn/shared/max-call-duration.ts`); Gather owns the
+    // per-turn age check, the TwiML and the terminal finalize.
+    const limitMs = resolveMaxCallDurationMs(this.deps.maxCallDurationMs);
+    const now = Date.now();
+    if (!hasReachedMaxCallDuration(session, limitMs, now)) return null;
 
     logger.info('handleGather: max call duration reached — ending call', {
       sessionId,
       callSid: session.callSid,
-      elapsedMs,
+      elapsedMs: callAgeMs(session, now),
       limitMs,
     });
-    const lang: SessionLanguage = session.language === 'es' ? 'es' : 'en';
-    const effects: SideEffect[] = [
-      {
-        type: 'tts_play',
-        payload: { text: renderTtsText(MAX_CALL_DURATION_WRAP_UP_COPY, {}, lang) },
-      },
-      { type: 'end_session', payload: { reason: 'max_call_duration' } },
-    ];
+    const effects = maxCallDurationEffects(session);
     const twiml = await this.finalizeTwiml(session, effects, sessionId);
     if (!session.ended) {
       session.ended = true;
-      this.finalizeTerminatedSession(session, effects, 'max_call_duration');
+      this.finalizeTerminatedSession(session, effects, MAX_CALL_DURATION_TERMINAL_REASON);
       // PR #975 F5 — every terminal Gather branch kicks off the summary so
       // call_summaries captures the capped call too (parity with the FSM
       // `terminated` branches in handleInbound / _handleGatherLocked).
@@ -3090,17 +3059,16 @@ export class TwilioGatherAdapter {
 
   private async maybeHandleLowSttConfidenceGather(
     session: VoiceSession,
-    opts: { sessionId: string; confidence: number | undefined },
+    opts: { sessionId: string; confidence: number | undefined; tenantId: string },
   ): Promise<string | null> {
-    const { confidence } = opts;
-    if (typeof confidence !== 'number' || !Number.isFinite(confidence) || confidence >= MIN_STT_CONFIDENCE) {
+    if (!isLowSttConfidence(opts.confidence)) {
       // High confidence (or no signal at all) clears the streak so a later
       // isolated blip on this session gets its own reprompt budget.
-      this.lowConfidenceGatherStreak.delete(opts.sessionId);
+      clearLowSttStreak(this.lowConfidenceGatherStreak, session);
       return null;
     }
 
-    return this.runLowSttConfidenceGatherLadder(session, opts.sessionId);
+    return this.runLowSttConfidenceGatherLadder(session, opts.sessionId, opts.tenantId, 'low_confidence');
   }
 
   /**
@@ -3110,58 +3078,92 @@ export class TwilioGatherAdapter {
    * (silence, delivered by `actionOnEmptyResult`). One streak for both, so
    * a caller alternating silence and mumbling still terminates at
    * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS} — matching the
-   * media-streams ladder semantics.
+   * media-streams ladder semantics. LCR-02: the cap is split on the capping
+   * strike's `cause` — silence → voicemail (never a page); low confidence →
+   * the FSM's system_failure → the parked `<Dial>` / no-one-available
+   * message, or a voicemail when nothing was parked. The ladder never
+   * returns a "connect you" line ahead of a hang-up. These paths finalize
+   * explicitly: the FSM never reaches `terminated` here, so `finalizeTwiml`'s
+   * own finalize check would not fire.
    */
   private async runLowSttConfidenceGatherLadder(
     session: VoiceSession,
     sessionId: string,
+    tenantId: string,
+    cause: LowSttStrikeCause,
   ): Promise<string> {
-    const lang: SessionLanguage = session.language === 'es' ? 'es' : 'en';
-    const streak = (this.lowConfidenceGatherStreak.get(sessionId) ?? 0) + 1;
-
-    if (streak >= MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS) {
-      this.lowConfidenceGatherStreak.delete(sessionId);
-      const effects: SideEffect[] = [
-        {
-          type: 'tts_play',
-          payload: { text: renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, lang) },
-        },
-        { type: 'end_session', payload: { reason: 'low_stt_confidence_max_retries' } },
-      ];
-      const twiml = await this.finalizeTwiml(session, effects, sessionId);
-      if (!session.ended) {
-        session.ended = true;
-        this.finalizeTerminatedSession(session, effects, 'low_stt_confidence_max_retries');
-        // PR #975 F5 — same omission as the max-duration end: without this a
-        // ladder hand-off left no call_summaries row.
-        void this.processor.runSummary(session).catch(() => {
-          /* swallow — summary is best-effort */
-        });
+    // #1601 step 2 — the rules (floor, cap, copy, terminal reason) are the
+    // shared ladder's; this method owns the Gather streak map, the TwiML and
+    // the terminal finalize. `sessionId` IS `session.id` (store.get).
+    const { effects, step } = runLowSttConfidenceLadder(session, this.lowConfidenceGatherStreak, cause);
+    let twiml: string;
+    if (step.kind === 'reprompt') {
+      twiml = await this.finalizeTwiml(session, effects, sessionId);
+    } else if (step.kind === 'silence_close') {
+      // LCR-02 — a silent line: nobody may be there, so nobody is paged.
+      // Offer the voicemail; the recording reaches the owner as any other.
+      twiml = this.endLadderWithVoicemail(session, 'silence', step.reason);
+    } else {
+      // LCR-02 — the caller is speaking but cannot be heard: the FSM's
+      // system_failure. Its notify_oncall parks a <Dial> (finalizeTwiml hands
+      // it back in place of the "connect you" <Say>), or the no-one-available
+      // message, or nothing — then the caller is offered a voicemail rather
+      // than told they are being connected.
+      await this.processor.executeSideEffects(session, effects, tenantId);
+      const parked = parkedHandoffKind(this.pendingTransferTwiml.get(sessionId));
+      if (parked === 'none') {
+        twiml = this.endLadderWithVoicemail(session, 'no_handoff', step.reason);
+      } else {
+        twiml = await this.finalizeTwiml(session, effects, sessionId);
+        // A <Dial> is finalized by /dial-result; the message ends the call.
+        if (parked === 'message') this.endLadderSession(session, step.reason);
       }
-      recordVoiceError({
-        errorKind: 'low_stt_confidence_repeated',
-        channel: 'gather',
-        callSid: session.callSid ?? undefined,
-        tenantId: session.tenantId,
-      });
-      return twiml;
     }
-
-    this.lowConfidenceGatherStreak.set(sessionId, streak);
-    const effects: SideEffect[] = [
-      {
-        type: 'tts_play',
-        payload: { text: renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, lang) },
-      },
-    ];
-    const twiml = await this.finalizeTwiml(session, effects, sessionId);
-    recordVoiceError({
-      errorKind: 'low_stt_confidence',
-      channel: 'gather',
-      callSid: session.callSid ?? undefined,
-      tenantId: session.tenantId,
-    });
+    recordLowSttLadderError(step, 'gather', { callSid: session.callSid, tenantId: session.tenantId });
     return twiml;
+  }
+
+  /**
+   * LCR-02 — the voicemail a ladder cap offers mid-call: the ladder's own
+   * line (in the call's language and voice), then `<Record>`, whose
+   * /voicemail-status callback finds the session by CallSid and carries the
+   * caller ID (the same signed threading every voicemail uses). Also the
+   * media-streams adapter's `ladderVoicemailTwiml` (delivered over REST).
+   */
+  buildLadderVoicemailTwiml(session: VoiceSession, kind: LadderVoicemailKind): string {
+    const language = session.language === 'es' ? 'es' : 'en';
+    const base = (this.deps.publicBaseUrl ?? '').replace(/\/+$/, '');
+    const callerPhone = this.callerIdBySession.get(session.id) || undefined;
+    return buildVoicemailTwiml({
+      shopName: this.deps.businessName,
+      recordingStatusCallback: `${base}/api/telephony/voicemail-status`,
+      prompt: ttsCopy(kind === 'silence' ? 'silence_voicemail' : 'handoff_unavailable_voicemail', language),
+      voice: session.ttsVoice ?? (language === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN),
+      ...(callerPhone ? { callerPhone } : {}),
+      ...(session.stirVerstat ? { stirVerstat: session.stirVerstat } : {}),
+    });
+  }
+
+  private endLadderWithVoicemail(session: VoiceSession, kind: LadderVoicemailKind, reason: string): string {
+    const twiml = this.buildLadderVoicemailTwiml(session, kind);
+    this.deps.store.appendTranscript(session.id, {
+      speaker: 'agent',
+      text: ttsCopy(kind === 'silence' ? 'silence_voicemail' : 'handoff_unavailable_voicemail', session.language === 'es' ? 'es' : 'en'),
+      ts: Date.now(),
+    });
+    this.endLadderSession(session, reason);
+    return twiml;
+  }
+
+  /** Stamp the ladder's terminal reason once (first stamp wins) and kick off the summary. */
+  private endLadderSession(session: VoiceSession, reason: string): void {
+    session.ended = true;
+    if (session.terminalOutcome) return;
+    this.finalizeTerminatedSession(session, [{ type: 'end_session', payload: { reason } }], reason);
+    // PR #975 F5 — without this a ladder hand-off left no call_summaries row.
+    void this.processor.runSummary(session).catch(() => {
+      /* swallow — summary is best-effort */
+    });
   }
 
   /**
@@ -3290,53 +3292,16 @@ export class TwilioGatherAdapter {
    */
   private async handleLanguageSwitchGather(
     session: VoiceSession,
-    opts: { sessionId: string; tenantId: string; speechResult: string },
+    opts: { tenantId: string; speechResult: string },
   ): Promise<SideEffect[]> {
-    const current: SessionLanguage = session.language === 'es' ? 'es' : 'en';
-    // The utterance's requested language when the heuristic can extract it,
-    // else the other half of the en/es pair (the classifier already said
-    // this turn IS a switch request) — same fallback as media-streams.
-    const target = detectLanguageSwitchIntent(opts.speechResult) ?? (current === 'es' ? 'en' : 'es');
-
-    if (target === current) {
-      // Already speaking the requested language — just acknowledge; no
-      // counter spend, no event.
-      return [{ type: 'tts_play', payload: { text: LANGUAGE_SWITCH_ACK[current] } }];
-    }
-    // detectLanguageSwitchIntent is an ungated heuristic — the tenant
-    // opt-in gate is applied here (same as the media-streams pre-scan).
-    if (!isLanguageSupported(target, session.supportedLanguages ?? null)) {
-      return [{ type: 'tts_play', payload: { text: LANGUAGE_UNSUPPORTED_LINE[current] } }];
-    }
-    const switchCount = session.languageSwitchCount ?? 0;
-    if (switchCount >= MAX_LANGUAGE_SWITCHES_PER_CALL) {
-      logger.info('gather: language switch refused — flap guard', {
-        sessionId: opts.sessionId,
-        target,
-        switchCount,
-      });
-      return [{ type: 'tts_play', payload: { text: LANGUAGE_SWITCH_CAP_LINE[current] } }];
-    }
-
-    session.language = target;
-    session.languageSwitchCount = switchCount + 1;
-    // Re-resolve the per-language TTS voice (settings.ttsVoiceEn/Es); a
-    // resolver failure clears the override so the language-derived default
-    // Polly voice applies rather than the stale other-language voice.
-    const resolved = await this.resolveTenantLanguage(opts.tenantId, target);
-    session.ttsVoice = resolved.ttsVoice;
-    session.events.emit(
-      'voice-event',
-      languageSwitchedEvent({
-        from: current,
-        to: target,
-        trigger: 'classified_intent',
-        switchCount: session.languageSwitchCount,
-      }),
-    );
-    // Acknowledge in the language being switched TO — the caller just told
-    // us that's the one they understand. Same copy as media-streams.
-    return [{ type: 'tts_play', payload: { text: LANGUAGE_SWITCH_ACK[target] } }];
+    // #1601 step 2 — the shared handler (`ai/voice-turn/shared/language-switch.ts`):
+    // same policy, same voice re-resolve (settings.ttsVoiceEn/Es), same ack.
+    return switchSessionLanguage(session, {
+      tenantId: opts.tenantId,
+      speechResult: opts.speechResult,
+      settingsRepo: this.deps.settingsRepo,
+      surface: 'gather',
+    });
   }
 
   private async resolveExtendedIntents(tenantId: string): Promise<boolean> {
@@ -3541,26 +3506,42 @@ export class TwilioGatherAdapter {
   }
 
   /**
-   * Pop the pending transfer TwiML for a session, if any. Used by
-   * the route layer to short-circuit the normal Gather response when
-   * the escalation flow produced a `<Dial>`.
+   * Pop the pending hand-off TwiML for a session, if any. Consumers: the
+   * Gather webhook responses (finalizeTwiml / handleInbound) return it in
+   * place of the next `<Gather>`; on the realtime transport the media-stream
+   * adapter takes it and delivers it to the live call over REST; and
+   * /voice/gather-fallback returns one a degraded stream call left undelivered.
    */
   takePendingTransferTwiml(sessionId: string): string | undefined {
     const twiml = this.pendingTransferTwiml.get(sessionId);
     if (twiml) this.pendingTransferTwiml.delete(sessionId);
+    this.sweepPendingTransferTwiml();
     return twiml;
   }
 
   /**
-   * Store a pending <Dial> TwiML string for the given session. Called by
-   * `TwilioMediaStreamAdapter` via a deps callback so both the gather
-   * adapter (which reads via `takePendingTransferTwiml`) and the media-stream
-   * adapter (which writes during `handleEscalateWithContext`) share the same
-   * in-memory Map. Without this, the Dial TwiML would be written to
-   * `state.pendingTransferTwiml` on the media-stream adapter where nothing
-   * ever reads it — the call would hang on hold forever.
+   * L1 — drop hand-off TwiML parked for sessions the store no longer holds
+   * (the call ended / was reaped before anything took it: a second escalation
+   * parked behind the once-per-leg latch, a hand-off parked after the leg
+   * closed). Runs on every park and take — both transports take after every
+   * turn — so the Map stays bounded by live sessions. `peek`, not `get`: a
+   * sweep must not refresh the activity clock of the sessions it inspects.
+   */
+  private sweepPendingTransferTwiml(): void {
+    for (const sessionId of this.pendingTransferTwiml.keys()) {
+      if (!this.deps.store.peek(sessionId)) this.pendingTransferTwiml.delete(sessionId);
+    }
+  }
+
+  /**
+   * Park a hand-off TwiML for the given session in the Map every escalation
+   * producer shares. Callers outside the processor: the vulnerable-caller
+   * owner patch (app.ts), and the media-stream adapter
+   * (`handleEscalateWithContext`, and re-parking an undelivered hand-off
+   * before a degrade to Gather).
    */
   setPendingTransferTwiml(sessionId: string, twiml: string): void {
+    this.sweepPendingTransferTwiml();
     this.pendingTransferTwiml.set(sessionId, twiml);
   }
 

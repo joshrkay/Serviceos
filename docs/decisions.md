@@ -224,6 +224,38 @@ proposals whose `sourceContext.autonomousLaneEvaluation.eligible = true` —
 mirroring the WS6 supervisorChecks reflection so autonomous activity is never
 silent even when nothing goes wrong.
 
+**Amendment (2026-10-16):** Autonomous (system) approval now requires, after the
+structural gates (`proposal_type_not_eligible`, `not_inbound_receptionist`, so memo
+traffic keeps its structural reason):
+- the owner's cell, `tenant_settings.owner_phone` only, never a backup supervisor's
+  mobile (`owner_cell_missing`), because the owner UNDO SMS is part of why the lane is
+  safe (voice-parity plan, design review 2026-10-15);
+- an UNDO channel that can deliver (`undo_channel_unavailable`): a sender and the
+  one-tap secret, and in production a configured SMS provider and an https,
+  non-localhost API origin (`proposals/lane-undo-sms.ts` `buildLaneUndoChannel`),
+  checked per booking against the outbound SMS kill switch (`TELEPHONY_ENABLED=false`
+  silences owner texts, so it also stops autonomous approval);
+- a slot-conflict check that ran before the hold (`conflict_check_unavailable`; a slot
+  the check finds busy is refused before the lane runs, as a draft on the call or a
+  clarification on a memo); and localized caller copy (`language_unsupported`).
+
+The live call can now auto-approve: it passes the classifier confidence only when the
+primary model produced it (`IntentClassification.confidenceSource` 'model'; a phrase
+rule's pinned 0.95, a post-gateway override, a failover model's score and a rebook
+offer's borrowed confidence never count), takes the lane's customer only from an
+A-attested caller-ID match not created on the call, treats a prompt-injection-flagged
+session as `session_flagged`, speaks the pending line whenever the stored booking is
+not approved, and sends the owner a fire-and-forget, audited UNDO naming the customer
+on record and the held time. The one-tap UNDO link acts only on POST: a GET or HEAD
+(SMS link previews, scanners) renders a confirm page naming the customer on file and
+the time, and only for a booking that can still be undone. The digest's "Auto-booked:
+N, M undone" counts bookings the machine approved at creation (`approvedAt` equal to
+`createdAt`; a held booking a human approved later is not auto-booked) and counts an
+owner UNDO after execution from the `sourceContext.ownerUndo` stamp the route writes. The D-019 on-call close composes the
+D-015 gates without the autonomy-only ones (`evaluateBookingLaneForOwnerApproval`):
+every close is owner-approved. A tenant that opted in with no owner cell now gets its
+bookings queued for review instead of auto-approved.
+
 ### D-016: Railway supersedes AWS (D-001) — CDK prototype removed
 **Date:** 2026-07-11
 **Decision:** D-001's single-cloud AWS/CDK deployment was never carried into production.
@@ -1723,3 +1755,215 @@ categorisation, the Layer 1 graders and #1614's pin all hold.
 code; their cassettes were re-recorded with the offline mock. The simulator still carries no gate
 of its own (the #1587 structural test). In-app voice (S2, the authenticated operator) is
 deliberately outside (1)–(3).
+
+## D-043 — Realtime is the default voice transport; the reply gap is measured from the caller's last word; the replica trigger is the concurrency at which single-process p95 TTFA crosses 800 ms
+
+**Date:** 2026-10-20
+**Status:** Accepted (plan U1, `docs/plans/2026-10-16-001-feat-voice-parity-bland-avoca-plan.md`,
+requirements R1 and R2)
+**Resolves:** the plan's open question 6 (the realtime default-on / capacity entry) and the
+capacity half of open question 5. Paths are relative to `packages/api/src/`.
+
+**Context.** Two transports answer a call: Twilio Media Streams ("realtime": Deepgram STT →
+the production turn → ElevenLabs TTS over one WebSocket, `telephony/media-streams/`) and the
+legacy `<Gather>` loop. `shared/config.ts` `resolveMediaStreamsEnabled` already has three
+states — `true` (forced on), `false` (kill switch), unset/`auto` (on iff `TTS_PROVIDER=elevenlabs`
++ `ELEVENLABS_API_KEY` + `DEEPGRAM_API_KEY` are all set) — but the production env and
+`.env.production.example` ship `TWILIO_MEDIA_STREAMS_ENABLED=false`, so every production call
+runs on Gather and the realtime stack is measured only by the Layer 2 harness. The one latency
+SLO in production, `voice_turn_latency_p95` (`workers/slo-monitor.ts`, 3,500 ms warning,
+`docs/runbooks/slo-alerts.md` §4), is anchored at the STT-final transcript and stops at the
+first enqueued chunk, so it neither starts when the caller stopped talking nor stops when the
+caller actually heard something. A live call's state lives only in the memory of the process
+that answered it, so `docs/runbooks/voice-capacity.md` forbids replicas on a process that
+answers calls (LCR-05 refuses to boot with `NUM_REPLICAS > 1` on `web`/`voice`); nothing
+records how many concurrent realtime calls one process sustains before replies audibly lag.
+
+**Decision (1) — Realtime is the default transport.** The production value of
+`TWILIO_MEDIA_STREAMS_ENABLED` moves from `false` to `auto` (and
+`.env.production.example` with it): realtime is on whenever the full ElevenLabs + Deepgram
+stack is configured, off on any partial stack, with `resolveMediaStreamsEnabled`'s semantics
+unchanged. `false` stays the kill switch. The ramp is per tenant first: the first accounts are
+moved through the `voice_realtime` tenant flag (`tenant_feature_flags`, default on when the
+master switch is on, `routes/telephony.ts` `shouldUseRealtimeStream`) while
+`telephony/realtime-health-circuit.ts` is watched — it already degrades new calls to Gather on
+repeated session-establishment failures — and only then does the env default move. Gather
+remains the degrade path for every failure (`docs/runbooks/voice-realtime-rollout.md`).
+
+**Decision (2) — The SLO is the reply gap from the caller's last word, and it is two numbers.**
+`reply_gap_ms` = first **real** acked reply audio − the caller's last word. "Last word" is
+Deepgram's own word timing (the `Results` message's `start` + `duration`, or
+`words[].end` where present) converted to wall clock through an anchor taken at the **first
+sample forwarded to that Deepgram session** — not the stream's `start` frame, because the
+adapter drops frames until the disclosure has played, and per Deepgram session, because
+`switchLanguage` and the same-language recovery path open a new session whose offsets restart
+at zero. "First real acked audio" is the acknowledged mark that brackets the first non-filler
+chunk — when Twilio played it, not when it was enqueued. A reply whose mark is never acked
+(`reply_unacked_reason` ∈ `clear_echo` / `ack_timeout` / `stream_closed`) keeps `reply_gap_ms`
+null and is **counted, never dropped**, so the SLO is the p95 of acked gaps **and** the
+unacked-reply rate: **p95 ≤ 1,500 ms and unacked ≤ 1 %**, both held for **seven days**, before
+the old `voice_turn_latency_p95` rule is retired. Until then the new `voice_reply_gap_p95` rule
+(now in `workers/slo-monitor.ts`, with its companion `voice_reply_unacked_rate`) runs beside the old
+one; a rate above 1 % fails the gate however good the p95 looks, since the
+p95 only describes replies that played. Gather turns record no gap and are reported as the
+share of calls that ran degraded, so a degraded tenant never shows an artificially good
+percentile.
+
+**Decision (3) — The replica trigger is measured, not assumed.** The trigger is the
+concurrency at which one API process's p95 time-to-first-audio crosses **800 ms** (the Layer 2
+TTFA gate), produced by `npm run loadtest:voice-realtime`
+(`loadtest/voice-realtime-concurrency.ts`): N emulated Twilio Media Streams
+(`ai/voice-quality/audio/twilio-stream-emulator.ts`, the same client and the same TTFA stop
+point as Layer 2 — first inbound `media` frame after the caller's audio is fully delivered)
+against ONE process, swept upward until the censored p95 (timed-out, errored and dropped turns count at the reply timeout, so fast survivors cannot mask them) breaches on two consecutive levels; the report's
+`replicaTrigger` is the highest level that passed below that confirmed breach pair (an isolated
+breach that recovers is not the trigger; if max is reached with no pair, it is the highest
+passing level overall). **Replica trigger: TBD — to be
+filled from the first staging run of `loadtest/voice-realtime-concurrency.ts`; until then the
+trigger is 10 concurrent realtime calls per replica — a placeholder, not a measurement:
+`docs/runbooks/voice-capacity.md` states no per-instance figure for realtime calls (its
+per-instance ceiling row is still TBD).** The run needs a harness boot of
+`attachMediaStreamServer` with `authTestMode: true` and real Deepgram/ElevenLabs providers
+(see `loadtest/README.md` "Voice realtime concurrency"); that boot script does not exist yet
+and is the first follow-up.
+
+**Consequences.** Below the trigger the in-memory session store stays acceptable; the measured
+number decides whether a shared session store becomes a unit of the next plan (open question
+5). Because a call-answering process cannot be replicated today, reaching the trigger means a
+larger instance or that shared store, not an extra replica — the runbook's scaling guidance
+stands until call state is shared. The Call Quality card and `GET /api/voice/quality` report
+the new gap, the first-sound delay (filler counted) and the unacked rate filtered to realtime
+turns; the unacked rate's denominator is every realtime turn whose first real frame was enqueued,
+and the card renders whenever there are enough such attempts, so a window where every reply
+failed shows 100 % rather than "not enough calls"; `voice_turn_latency_ms` keeps its
+"first audible, filler included" meaning and is not reused for the SLO. The number in (3) is
+replaced, with the run date and instance size, by whoever runs the first staging sweep.
+
+## D-044 — "Get found online": a hosted tenant site, a guided Google profile, call forwarding only, and a home checklist outside onboarding
+
+**Date:** 2026-10-21
+**Status:** Accepted (owner decisions 2026-10-21, grilled in the "Google reviews integration flows" project thread)
+
+**Context.** An owner should be able to go from "no web presence" to "customers find me on
+Google, leave reviews, and their calls reach the AI" without leaving the app. What already
+ships: connecting an existing Google Business Profile (first account and first location only),
+the 15-minute review sweep and AI reply drafts, the post-job rating text that sends 4★+ to a
+review link the owner pastes by hand, the public lead and booking pages, and number
+provisioning (D-037). What does not: any website, any path for an owner with no Google
+profile, a location picker, forwarding instructions in the current onboarding, a check that
+forwarding works, and anything that tracks setup after activation.
+
+**Decision.**
+
+1. **Tenant site.** An owner without a website gets a one-page site we host, on a subdomain of
+   a **separate domain reserved for tenant sites**, never the app's domain, so a flagged
+   tenant site cannot hurt the app's login or mail reputation. The page is built from tenant
+   settings (name, services, service area, hours, phone, the booking and lead forms). Its
+   "about" copy is AI-drafted through the gateway as a **proposal**; nothing on the page goes
+   live until the owner approves it.
+2. **Connected domain, no registrar.** An owner who already owns a domain can point it at their
+   tenant site: we show the one DNS record, verify it, and issue HTTPS. We do not sell, buy or
+   renew domains.
+3. **Google profile is guided, not created.** Google requires the owner to verify a profile
+   themselves, so for an owner with none we deep-link them through creating it, then connect it
+   once verified. A connection picks **one location** from a picker (no more first-location
+   default); multi-location tenants are out of scope.
+4. **Derived from the connection.** Once connected, the Google review link is filled in from the
+   location instead of being pasted. Setting the location's website (tenant site or connected
+   domain) and booking link on Google is an outward-facing write, so it is an **approval card**
+   the owner taps, never automatic.
+5. **Call forwarding only — no porting.** The owner keeps their number and forwards it with
+   carrier codes. Two **forwarding modes**: *missed calls only* (default — their phone rings
+   first) and *all calls*. A **forwarding check** places a call from our line to their business
+   number and passes when it arrives back on our number (for missed-calls-only the owner lets
+   it ring out). Porting is a later add-on.
+6. **Chat is the lead form for now.** The tenant site's chat bubble opens the existing lead /
+   booking form. A real AI chatbot needs a public, unauthenticated path into the AI with abuse
+   and per-tenant cost caps, and is its own decision later.
+7. **A home checklist, not onboarding steps.** Progress lives in a "Get found online" checklist
+   on the home page, derived from tenant facts. It is **not** added to the onboarding steps,
+   because activation and the setup-reminder email gate on that list and a Google postcard can
+   take weeks.
+
+**Alternatives rejected.** Linking out to Wix/Squarespace (the owner leaves the app and the
+booking form is not on the site); buying domains for tenants (registrar account, renewals and
+support for little gain); hosting sites on the app's own domain (shared reputation); creating
+Google profiles on the owner's behalf (Google does not allow third-party verification); porting
+in v1 (weeks of carrier paperwork); an AI web chatbot in v1 (needs its own abuse and cost model).
+
+**Consequences.** Ops must buy the tenant-site domain and point a wildcard record at the
+deploy. Every checklist item is derived, so a tenant who disconnects Google or unpublishes their
+site sees the item reopen rather than a stale tick. Forwarding is the exception: turning it off at
+the carrier sends us nothing, so the forwarding check is a point-in-time proof. The forwarding item
+shows the date of the last passing check, reopens when the owner changes carrier or forwarding mode
+in the app, and offers a re-check; detecting carrier-side changes is not promised.
+
+## D-045 — Outbound messaging decides its own policy; invoices go by text with a pay link; proposal status moves only through the lifecycle
+
+**Date:** 2026-10-21
+**Status:** Accepted (owner decisions 2026-10-21, grilled in the "Backend architecture review" project thread)
+
+**Context.** The architecture review found two rules enforced by caller discipline. Outbound
+texts pass one consent gate (`notifications/gated-message-delivery.ts`), but each of about 40
+senders chooses its own policy inputs: an `owner`/`customer` tag that skips every check when
+wrong, a consent snapshot it looked up itself, and an opt-in quiet-hours flag only 2 senders
+set. Invoices and estimates go by email first whenever an email is on file (#1524), and when
+the pay link cannot be made the invoice quietly goes out view-only. Separately, about 20
+callers write a proposal's status directly, and the repository checks no transition.
+
+**Decision.**
+
+1. **Outbound messaging owns the policy.** A sender names a recipient (a customer by id, the
+   owner or team, or a reply to a number that just contacted us) and a **message purpose**
+   (transactional, reply, automated nudge, marketing). The module looks up consent itself,
+   derives quiet-hours handling from the purpose, holds a nudge and sends it when the
+   customer's daytime window opens, and requires a duplicate key built from the purpose and
+   the record the message is about.
+2. **Every message has a send outcome.** *Sent*, *scheduled* (with the time) or *blocked*
+   (with the reason). A send a person triggered shows the reason on screen; an automated
+   one records it. One record per message replaces the invoice/estimate-only dispatch log
+   and links the customer and, when there is one, the job and the invoice or estimate. That
+   record drives a status bubble on the job and the customer; blocked messages also reach
+   the owner's inbox.
+3. **Invoices and estimates go by text first.** When the customer has a textable number and
+   has not opted out, the send is a text with the link; email is the fallback. An invoice
+   text carries a **pay link** unless the owner chose *collect on the spot*. If the pay link
+   cannot be made, the invoice is not sent without it: an owner-pressed send is refused with
+   the reason, and an automatic one is held, retried once, then put on the owner's to-do
+   list. This supersedes #1524's email-first default and S5a-1's fail-open view-only send.
+4. **Wording.** Each purpose has a default message: the owner's saved template for it if
+   there is one, otherwise the built-in text. Any single send may add an owner note on top.
+   *As built (Settings → Text wording, migration 330):* the owner can word the estimate,
+   invoice, customer-portal link and thank-you texts with `{{fill-ins}}` (owner only). Each
+   wording is saved with the business's language at the time and goes only to customers who
+   read that language, so switching the business's language never sends it to the new one;
+   everyone else keeps the built-in translated text (pending the owner's call on wording for
+   other languages). Wording that
+   can't be read or filled falls back to the built-in text with a logged warning, never a
+   failed send or a raw `{{fill_in}}`; an invoice paid in person keeps the built-in
+   in-person line. Emails keep the built-in wording.
+5. **Email stays as it is for now.** Customer emails outside invoice and estimate sends
+   (campaigns, some replies, review follow-ups) are left alone and tracked as known
+   exceptions until an email-consent decision is made (D-017 says a grant never crosses
+   channels, so an SMS grant is not email consent).
+6. **Migration is gradual.** Senders move one file at a time; a guard test lists today's
+   direct callers of the raw sender and the list may only shrink.
+7. **Proposal status moves only through the lifecycle.** The repository runs the transition
+   table on every status write (the **status-write gate**). Four moves the code already made
+   are allowed there as system-only writes, kept out of the table that approve, reject and
+   undo consult: ready_for_review → draft (supervisor hold), approved → executing (execution
+   claim), executing → approved (chain dependent released), approved → rejected (a caller
+   revoking their own unexecuted booking; the generic reject endpoint still cannot reach an
+   approved proposal).
+8. **Drafting has one entry point and three outcomes.** Every surface drafts through one
+   module that returns a proposal, a clarification, or a refusal with a reason, and runs the
+   made-up-id scrub that only chat ran before. Owners keep editing drafts before approval in
+   the app and the portal; an edit re-runs the same checks.
+
+**Not decided (deferred by the owner).** An auto-send trust ramp (auto-approving customer
+messages after N approvals above a confidence bar) was raised and deliberately set aside.
+Customer messages and money still never auto-approve (D-004, D-033).
+
+**Alternatives rejected.** Leaving policy at the call site with a lint rule (the tag still
+lies when wrong); gating email now (needs the email-consent decision first); a big-bang
+rewrite of all senders.

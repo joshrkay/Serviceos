@@ -21,6 +21,16 @@ export interface CatalogItem {
    * URL only at the edge — never store a URL here.
    */
   imageFileId?: string | null;
+  /**
+   * U6 seeded-price baseline (migration 324) — internal provenance, never
+   * owner-facing (not in the catalog route's API model). `seedKey` is
+   * '<packId>:visit' | '<packId>:labor' on the pack's two headline items,
+   * written once by the seeder; `seededUnitPriceCents` is the price the
+   * seeder (or a setup re-run) last wrote. Any other price write sets it to
+   * null in the same update: a null baseline means the owner's price.
+   */
+  seedKey?: string | null;
+  seededUnitPriceCents?: number | null;
   archivedAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -220,6 +230,9 @@ export class InMemoryCatalogItemRepository implements CatalogItemRepository {
       ...updates,
       category: nextCategory,
       productServiceType: inferProductServiceType(nextCategory),
+      // Mirrors PgCatalogItemRepository.update: a price write of any kind,
+      // even at the amount already held, ends repricing.
+      ...(updates.unitPriceCents !== undefined && { seededUnitPriceCents: null }),
       updatedAt: new Date().toISOString(),
     };
 

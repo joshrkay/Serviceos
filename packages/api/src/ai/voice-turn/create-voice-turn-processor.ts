@@ -53,9 +53,10 @@ import {
   PgTenantTransactionRunner,
   type TenantTransactionRunner,
 } from '../../db/tenant-transaction';
-import { tenantContextStore } from '../../middleware/tenant-context';
+import { currentTenantContext } from '../../middleware/tenant-context';
 import type { ApprovalReferenceCheck } from '../../proposals/approval-reference-checks';
 import { appendAgentTts, callerTranscriptText } from './transcript-append';
+import { redactCardNumbers } from '../privacy/pan-redact';
 import {
   classifyIntent,
   isLookupIntent,
@@ -100,32 +101,19 @@ import {
   emergencyImmediateDial,
   EMERGENCY_INTENTS,
 } from '../skills/escalate-to-human';
-import { estimateCostCents } from '../skills/session-cost-tracker';
 import {
   intentClassifiedEvent,
-  costIncurredEvent,
-  sessionTerminatedEvent,
   escalationStartedEvent,
-  languageSwitchedEvent,
 } from '../voice-quality/events';
 import { VOICE_EVENT_CHANNEL } from '../voice-quality/event-bus';
 import { answerPhoneEnRoute, type PhoneEnRouteDeps } from './phone-en-route-surface';
 import { answerPhoneLookup, type PhoneLookupDeps } from './phone-lookup-surface';
 import { COVERAGE_TABLE, type CoverageSurface, type IntentFamilyId } from './coverage-table';
 import {
-  detectLanguageSwitchIntent,
-  isLanguageSupported,
-  MAX_LANGUAGE_SWITCHES_PER_CALL,
-} from '../orchestration/language-detector';
-import {
   renderTtsText,
+  sessionLanguage,
   ttsCopy,
   TTS_COPY,
-  LANGUAGE_SWITCH_ACK,
-  LANGUAGE_UNSUPPORTED_LINE,
-  LANGUAGE_SWITCH_CAP_LINE,
-  LOW_STT_CONFIDENCE_REPROMPT_COPY,
-  SPEECH_TURN_FAILURE_ESCALATION_COPY,
   CALLER_INCOMPLETE_REQUEST_COPY,
   CALLER_REQUEST_QUEUED_COPY,
   CROSS_CUSTOMER_REFUSAL_COPY,
@@ -139,7 +127,6 @@ import {
   CREATE_CUSTOMER_CONFIRMATION_TTS,
 } from '../tasks/create-customer-task';
 import { isCustomerDuplicateLoader } from '../../customers/dedup';
-import { recordVoiceError } from '../../analytics/posthog';
 import {
   buildAccountContextPromptSection,
   proposalAccountContext,
@@ -187,6 +174,10 @@ import {
   type AutonomousCloseEvaluation,
   type AutonomousCloseIneligibleReason,
 } from '../../proposals/autonomous-close-lane';
+import { sendLaneUndoSms, type LaneUndoChannel } from '../../proposals/lane-undo-sms';
+import { autonomousLaneEvaluationFor } from '../../proposals/autonomous-lane';
+import { isOwnerLineAttested } from '../../telephony/stir-attestation';
+import type { SlotConflictChecker } from '../tasks/slot-conflict-checker';
 import {
   queueCloseFallbackChain,
   AUTONOMOUS_CLOSE_ACTOR,
@@ -326,19 +317,33 @@ import type {
 } from '../../voice/voice-service';
 import type { SettingsRepository } from '../../settings/settings';
 import { resolveEscalationSettings } from '../../settings/settings';
-import { isRuntimeTimezone } from '../../shared/timezone';
+import { isBlockedCallerId } from './shared/blocked-caller-id';
+import { createSessionTimezoneResolver } from './shared/session-timezone';
+import { switchSessionLanguage } from './shared/language-switch';
+import { createSessionCostRecorder } from './shared/session-cost';
+import {
+  answerConfirmTurnQuestion as answerConfirmTurnQuestionShared,
+  type ConfirmTurnLookupPorts,
+} from './shared/confirm-turn-answer';
 import type { CallMeBackRepository } from '../../voice/call-me-back/call-me-back';
 import type { DeviceTokenRepository } from '../../push/device-token-service';
 import type { PushDeliveryProvider } from '../../notifications/push-delivery-provider';
+import type { SmsAlertClass } from '../../notifications/delivery-provider';
 import {
-  MIN_STT_CONFIDENCE,
-  MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS,
   type SpeechTurnHandler,
 } from '../../telephony/media-streams/mediastream-adapter';
+import {
+  createLowSttStreak,
+  clearLowSttStreak,
+  isLowSttConfidence,
+  runLowSttConfidenceLadder as sharedLowSttLadder,
+  recordLowSttLadderError,
+  parkedHandoffKind,
+  noHandoffCloseEffects,
+  type LowSttStrikeCause,
+} from './shared/low-stt-ladder';
 import { createLogger } from '../../logging/logger';
 import {
-  answerCallbackNumberQuestion,
-  answerPendingDetailQuestion,
   detectConfirmTurnQuestion,
   type ConfirmTurnQuestionKind,
 } from './confirm-turn-question';
@@ -629,29 +634,6 @@ function familyServedByDeclaredCell(
 }
 
 /**
- * P18-001: detect a Twilio `From` value that represents a withheld /
- * blocked / private caller-id. Mirrors `twilio-adapter.ts#isBlockedCallerId`
- * — re-implemented locally (the `xmlEscape` precedent above) so this module
- * never imports back from `telephony/twilio-adapter`, which would create a
- * circular import. Returns true ONLY for explicitly blocked indicators — a
- * plain missing string returns false so the caller can prompt for a
- * callback rather than assuming the caller chose to withhold.
- */
-function isBlockedCallerId(from: string | undefined): boolean {
-  if (!from) return false;
-  const v = from.trim().toLowerCase();
-  if (v.length === 0) return false;
-  return (
-    v === 'restricted' ||
-    v === 'private' ||
-    v === 'blocked' ||
-    v === 'unknown' ||
-    v === 'anonymous' ||
-    v === 'unavailable'
-  );
-}
-
-/**
  * #886/#887 — which classifier taxonomy profile this session's turns
  * advertise. Derived from SESSION IDENTITY ONLY (channel allowlist, RV-070/
  * 071 owner flag, D-026 phone actor) — never from transcript content, so a
@@ -889,6 +871,19 @@ export interface VoiceTurnProcessorDeps {
     oneTapSecret?: string;
     buildApproveUrl?: (token: string) => string;
   };
+  /**
+   * D-015 — the owner one-tap UNDO SMS for a lane-approved live-call booking
+   * (sender, one-tap secret, undo link). Absent ⇒ the live lane refuses
+   * autonomy (`undo_channel_unavailable`): a booking is never auto-approved
+   * without the owner's UNDO.
+   */
+  laneUndo?: LaneUndoChannel;
+  /**
+   * D-015 — the P0-035 slot-conflict check run before a live-call hold. A
+   * busy slot gets no hold; without the check the live lane never
+   * auto-approves (`conflict_check_unavailable`).
+   */
+  slotConflictChecker?: SlotConflictChecker;
   verticalPromptResolver?: (tenantId: string) => Promise<string | undefined>;
   callerPlanResolver?: (
     tenantId: string,
@@ -939,8 +934,14 @@ export interface VoiceTurnProcessorDeps {
   now?: () => Date;
   /** F3 — whisper TwiML cache for dispatcher ear-only context. */
   whisperCache?: WhisperCache;
-  /** F4 — outbound SMS to dispatcher on escalation. */
-  deliveryProvider?: { sendSms(args: { to: string; body: string }): Promise<unknown> };
+  /**
+   * F4 — outbound SMS to dispatcher on escalation; also the E1 owner alert,
+   * which it tags `alertClass: 'life_safety'` so the outbound kill switch
+   * cannot silence it (notifications/delivery-provider.ts).
+   */
+  deliveryProvider?: {
+    sendSms(args: { to: string; body: string; alertClass?: SmsAlertClass }): Promise<unknown>;
+  };
   /**
    * ANS-001 — durable URGENT follow-up tasks (the same repo the call-me-back
    * worker sweeps and the emergency page ladder falls back to). Wired so an E1
@@ -1327,7 +1328,7 @@ export interface VoiceTurnProcessor {
   maybeHandleLowSttConfidence(
     session: VoiceSession,
     confidence: number | undefined,
-  ): SideEffect[] | null;
+  ): Promise<SideEffect[] | null>;
 }
 
 export function createVoiceTurnProcessor(
@@ -1354,44 +1355,14 @@ export function createVoiceTurnProcessor(
    * retry cap — counter unification is a separate, explicit decision
    * (#965).
    */
-  const lowConfidenceStreak = new Map<string, number>();
+  const lowConfidenceStreak = createLowSttStreak();
 
   /**
    * U4 (Part E punch #1) — tenant timezone for spoken-datetime resolution,
-   * resolved ONCE per session (E1-script precedent: settings read per
-   * session, not per utterance). Keyed by the live session OBJECT so
-   * entries are garbage-collected with the session — no eviction hook
-   * needed. `undefined` (no settings repo, no configured zone, or a
-   * settings-read failure) is cached too: the session then refuses to
-   * resolve spoken times rather than guessing a zone (B5.5 precedent),
-   * and the next session retries the read.
+   * resolved ONCE per session (#1601 step 2: the shared resolver; see
+   * `shared/session-timezone.ts` for the memo + refusal semantics).
    */
-  const sessionTimezones = new WeakMap<VoiceSession, Promise<string | undefined>>();
-
-  function resolveSessionTimezone(
-    session: VoiceSession,
-    tenantId: string,
-  ): Promise<string | undefined> {
-    const cached = sessionTimezones.get(session);
-    if (cached) return cached;
-    const pending = (async () => {
-      if (!deps.settingsRepo) return undefined;
-      try {
-        const settings = await deps.settingsRepo.findByTenant(tenantId);
-        const tz = settings?.timezone;
-        return typeof tz === 'string' && isRuntimeTimezone(tz.trim()) ? tz.trim() : undefined;
-      } catch (err) {
-        logger.warn('tenant timezone lookup failed; spoken times stay unresolved', {
-          tenantId,
-          sessionId: session.id,
-          error: err instanceof Error ? err.message : String(err),
-        });
-        return undefined;
-      }
-    })();
-    sessionTimezones.set(session, pending);
-    return pending;
-  }
+  const resolveSessionTimezone = createSessionTimezoneResolver(deps);
 
   // ─── Helpers (formerly private methods on TwilioGatherAdapter) ──────
 
@@ -1470,51 +1441,13 @@ export function createVoiceTurnProcessor(
   }
 
   /**
-   * #1204 — sessions `recordCost` has already told a caller to end for an
-   * exceeded cap. Keyed by the live session object (GC'd with it, like
-   * `sessionTimezones`). Both phone transports share this processor, so the
-   * one-end-per-session guarantee holds across them.
+   * #1204 — one cost recorder per processor (#1601 step 2: the shared
+   * `shared/session-cost.ts`): usage on the session tracker, cost_incurred,
+   * and the cap decision on the tracker's LEVEL, ended ONCE per session.
+   * Both phone transports share this processor, so the one-end-per-session
+   * guarantee holds across them.
    */
-  const capEndedSessions = new WeakSet<VoiceSession>();
-
-  /** Record one turn's usage on the session tracker and emit cost_incurred. */
-  function recordTurnUsage(
-    session: VoiceSession,
-    usage: { input: number; output: number } | undefined,
-  ): void {
-    if (!usage) return;
-    const cents = estimateCostCents(usage.input, usage.output);
-    session.costTracker.recordUsage({
-      inputTokens: usage.input,
-      outputTokens: usage.output,
-      costCents: cents,
-    });
-    session.events.emit(
-      'voice-event',
-      costIncurredEvent(cents, session.costTracker.totals.costCents),
-    );
-  }
-
-  function recordCost(
-    session: VoiceSession,
-    usage: { input: number; output: number } | undefined,
-  ): boolean {
-    recordTurnUsage(session, usage);
-    // #1204 — decide on the tracker's LEVEL, not on this turn's events. The
-    // tracker emits `cost_cap_exceeded` once per dimension, and the
-    // sentiment classifier / vulnerability grader record their own usage on
-    // the same tracker between turns and discard the events
-    // (`recordCompletionUsage`). A classifier that crossed the cap therefore
-    // consumed the event, and no later turn ever ended the call. `isExceeded`
-    // is set by the same recordUsage that emits the event, so a turn whose
-    // own usage crosses the cap still ends the call on that turn.
-    if (!session.costTracker.isExceeded || capEndedSessions.has(session)) {
-      return false;
-    }
-    capEndedSessions.add(session);
-    session.events.emit('voice-event', sessionTerminatedEvent('cap_exceeded'));
-    return true;
-  }
+  const { recordTurnUsage, recordCost } = createSessionCostRecorder();
 
   /**
    * #1476 — the side effects for a question asked at the `intent_confirm`
@@ -1534,38 +1467,20 @@ export function createVoiceTurnProcessor(
   ): Promise<SideEffect[]> {
     const ctx = session.machine.currentContext;
     const entities = (ctx.extractedEntities ?? {}) as Record<string, unknown>;
-    let answer: string;
-    if (kind === 'callback_number') {
-      const untrustedCaller = isUntrustedS1Session(session);
-      let onFile: string | undefined;
-      // Trusted line only: an S1 caller never gets a record read to them.
-      if (!untrustedCaller && deps.customerRepo) {
-        const customerId =
-          (typeof entities.customerId === 'string' ? entities.customerId : undefined) ??
-          session.customerId;
-        const customer = customerId
-          ? await deps.customerRepo.findById(session.tenantId, customerId).catch(() => null)
-          : null;
-        onFile = customer?.primaryPhone ?? customer?.secondaryPhone;
-      }
-      answer = answerCallbackNumberQuestion({
-        untrustedCaller,
-        givenThisCall: typeof entities.phone === 'string' ? entities.phone : undefined,
-        callerId: deps.callerPhoneResolver?.(session) ?? session.callerPhone,
-        onFile,
-      });
-    } else {
-      let looked: string | undefined;
-      const detail = answerPendingDetailQuestion(kind, entities);
-      if (detail === undefined) {
-        const lookup = await answerConfirmTurnQuestionByLookup(session, speechResult, tenantId);
-        // The lookup classify crossed the session cap: escalation supersedes
-        // the answer, exactly as on a capture-state classifier turn.
-        if (lookup.capExceeded) return session.machine.dispatch({ type: 'cost_cap_exceeded' });
-        looked = lookup.text;
-      }
-      answer = detail ?? looked ?? TTS_COPY.no_detail_yet.en;
-    }
+    // #1601 step 2 — the shared answer (`shared/confirm-turn-answer.ts`);
+    // the phone's ports: S1 trust, caller-ID, and the lookup path below.
+    const untrustedCaller = isUntrustedS1Session(session);
+    const answered = await answerConfirmTurnQuestionShared(session, kind, speechResult, {
+      untrustedCaller,
+      callerId: deps.callerPhoneResolver?.(session) ?? session.callerPhone,
+      // The shared rule reads the record only on a trusted line.
+      customerRepo: deps.customerRepo,
+      lookup: confirmTurnLookupPorts(session, tenantId),
+    });
+    // The lookup classify crossed the session cap: escalation supersedes
+    // the answer, exactly as on a capture-state classifier turn.
+    if (answered.capExceeded) return session.machine.dispatch({ type: 'cost_cap_exceeded' });
+    const answer = answered.answer;
     const effects: SideEffect[] = [
       {
         type: 'audit_log',
@@ -1596,46 +1511,32 @@ export function createVoiceTurnProcessor(
 
   /**
    * #1476 — a confirm-step question the pending request cannot answer goes
-   * through the EXISTING lookup path: the unchanged classifier names the
-   * lookup, `answerPhoneLookup` answers it with its S1/D-026 rules intact,
-   * gated on the surface's declared (lookup, surface) cell. Anything else —
-   * a mutation intent, low confidence, a classifier failure — is undefined:
-   * a question never becomes an instruction here.
+   * through the EXISTING lookup path (#1601 step 2: the shared
+   * `answerConfirmTurnQuestionByLookup`, with the phone's ports): the
+   * unchanged classifier names the lookup, `answerPhoneLookup` answers it
+   * with its S1/D-026 rules intact, gated on the surface's declared
+   * (lookup, surface) cell. Null when this surface serves no lookups.
    */
-  async function answerConfirmTurnQuestionByLookup(
-    session: VoiceSession,
-    speechResult: string,
-    tenantId: string,
-  ): Promise<{ text?: string; capExceeded: boolean }> {
-    if (!servesFamilyHere('lookup')) return { capExceeded: false };
-    let classification: Awaited<ReturnType<typeof classifyIntent>>;
-    try {
-      classification = await classifyIntent(
-        speechResult,
-        await buildPhoneClassifyContext(session, tenantId),
-        deps.gateway,
-      );
-    } catch (err) {
-      logger.warn('speechTurn: confirm-question classify failed', {
-        error: err instanceof Error ? err.message : String(err),
-        sessionId: session.id,
-      });
-      return { capExceeded: false };
-    }
-    if (recordCost(session, classification.tokenUsage)) return { capExceeded: true };
-    if (
-      classification.confidence < TAU_INT ||
-      !isLookupIntent(classification.intentType as IntentType)
-    ) {
-      return { capExceeded: false };
-    }
-    const text = await answerPhoneLookup(deps.lookups, {
-      session,
-      tenantId,
-      intent: classification.intentType as IntentType,
-      entities: (classification.extractedEntities ?? {}) as Record<string, unknown>,
-    });
-    return { text, capExceeded: false };
+  function confirmTurnLookupPorts(session: VoiceSession, tenantId: string): ConfirmTurnLookupPorts | null {
+    if (!servesFamilyHere('lookup')) return null;
+    return {
+      classify: async (text) =>
+        classifyIntent(text, await buildPhoneClassifyContext(session, tenantId), deps.gateway),
+      onClassifyError: (err) => {
+        logger.warn('speechTurn: confirm-question classify failed', {
+          error: err instanceof Error ? err.message : String(err),
+          sessionId: session.id,
+        });
+      },
+      recordCost,
+      answer: (classification) =>
+        answerPhoneLookup(deps.lookups, {
+          session,
+          tenantId,
+          intent: classification.intentType as IntentType,
+          entities: (classification.extractedEntities ?? {}) as Record<string, unknown>,
+        }),
+    };
   }
 
   /**
@@ -1767,10 +1668,6 @@ export function createVoiceTurnProcessor(
       sessionLanguage(session),
     );
     return sideEffects;
-  }
-
-  function sessionLanguage(session: VoiceSession): SessionLanguage {
-    return session.language === 'es' ? 'es' : 'en';
   }
 
   function expandIntentConfirmTemplate(
@@ -2870,6 +2767,16 @@ export function createVoiceTurnProcessor(
       let autonomousLaneForCreate:
         | { eligible: true; threshold: number }
         | undefined;
+      // The model confidence the lane judged; stored as the lane-approved
+      // booking's score (no other live proposal carries one).
+      let laneConfidenceForCreate: number | undefined;
+      // The owner cell the lane checked: the UNDO SMS goes to exactly it.
+      let laneOwnerPhone: string | undefined;
+      // The held time as the caller heard it, for the owner's UNDO text.
+      let laneUndoWhen: string | undefined;
+      // The honest pending line, spoken instead of "you're booked" when the
+      // stored booking did not end up approved (supervisor cap, held gap).
+      let bookingPendingUtterance: string | undefined;
       let laneSourceStamp: Record<string, unknown> | undefined;
       // #1045 — the held slot's back-to-back drivability result.
       let holdFeasibilityStamp: HoldFeasibility | undefined;
@@ -2915,6 +2822,9 @@ export function createVoiceTurnProcessor(
                 appointmentRepo: deps.appointmentRepo,
                 ...(deps.jobRepo ? { jobRepo: deps.jobRepo } : {}),
                 ...(deps.feasibilityDeps ? { feasibility: deps.feasibilityDeps } : {}),
+                ...(deps.slotConflictChecker
+                  ? { slotConflictChecker: deps.slotConflictChecker }
+                  : {}),
               },
               {
                 tenantId,
@@ -2944,6 +2854,25 @@ export function createVoiceTurnProcessor(
                   ? { _meta: { overallConfidence: getConfidenceLevel(payloadConfidence) } }
                   : {}),
               };
+              // D-015 — autonomy needs an identity nobody can fake on this
+              // call: the caller-ID match on an A-attested call, not created
+              // on this call and not rejected by the identity check. A
+              // customer resolved from spoken words books only as a draft.
+              const laneCustomerId =
+                session.customerId &&
+                customerId === session.customerId &&
+                isOwnerLineAttested(session.stirVerstat) &&
+                !session.callerCreatedThisCall &&
+                session.callerIdentity !== 'rejected'
+                  ? session.customerId
+                  : undefined;
+              // Only a model's confidence counts: a deterministic phrase match
+              // pins a constant that would always clear the threshold.
+              const laneConfidence =
+                fx.payload.confidenceSource === 'model' &&
+                typeof fx.payload.confidence === 'number'
+                  ? fx.payload.confidence
+                  : undefined;
               const laneEval = buildLaneInputFromSettings({
                 platformDisabled: process.env.AUTONOMOUS_BOOKING_DISABLED === 'true',
                 settings: {
@@ -2952,29 +2881,37 @@ export function createVoiceTurnProcessor(
                     ? { threshold: settings.autonomousBookingThreshold }
                     : {}),
                 },
-                confidenceScore: payloadConfidence,
-                customerId,
+                ownerPhone: settings?.ownerPhone,
+                undoChannelAvailable: deps.laneUndo?.canDeliver() === true,
+                slotConflictFree: hold.conflictChecked,
+                callerLanguageSupported: sessionLanguage(session) === 'en',
+                confidenceScore: laneConfidence,
+                customerId: laneCustomerId,
                 holdExpiryAt: hold.holdExpiryAt,
                 now: new Date(),
                 slotWithinBusinessHours,
                 pendingReferenceCount: 0,
                 negotiationFlagged:
                   session.machine.currentContext.negotiationFlagged === true,
+                injectionFlagged: session.machine.currentContext.injectionFlagged === true,
                 payload: bookingPayload,
               });
               laneSourceStamp = laneStampIfPresent(laneEval) as
                 | Record<string, unknown>
                 | undefined;
               bookingUtterance = bookingSpeechForLane(laneEval, timeReadback);
+              bookingPendingUtterance = bookingSpeechForLane(undefined, timeReadback);
               payloadProposalType = 'create_booking';
               payload = bookingPayload;
               holdFeasibilityStamp = hold.feasibility;
               if (laneEval.eligible) {
                 autonomousLaneForCreate = laneEval;
-              } else if (!laneEval.eligible) {
-                // Hold stays for owner confirmation window (24h); ineligible
-                // lane means draft create_booking, not auto-approve.
+                laneConfidenceForCreate = laneConfidence;
+                laneOwnerPhone = settings?.ownerPhone ?? undefined;
+                laneUndoWhen = timeReadback;
               }
+              // Otherwise the hold stays for the owner's confirmation window
+              // (24h): a draft create_booking, never an auto-approval.
             } else {
               bookingUtterance = await draftOnlySpeech();
             }
@@ -3048,9 +2985,11 @@ export function createVoiceTurnProcessor(
         // uncatalogued-capped score `groundVoiceQuote` produced; a degraded
         // clarification carries neither it nor the quote's missingFields,
         // because there is no quote on that payload to qualify.
-        ...(!degradedFromContract && payloadConfidence !== undefined
-          ? { confidenceScore: payloadConfidence }
-          : {}),
+        ...(autonomousLaneForCreate && laneConfidenceForCreate !== undefined
+          ? { confidenceScore: laneConfidenceForCreate }
+          : !degradedFromContract && payloadConfidence !== undefined
+            ? { confidenceScore: payloadConfidence }
+            : {}),
         // Ambiguous catalog lines AND unmet contract keys both land here:
         // `approveProposal` refuses a proposal with unfilled missingFields, so
         // this is the gate that keeps a contract-incomplete voice draft out of
@@ -3106,6 +3045,84 @@ export function createVoiceTurnProcessor(
       const held = await holdForExecutability(tenantId, proposal, deps.approvalReferenceChecks);
       const stored = await deps.proposalRepo.create(held.proposal);
       session.proposalIds.push(stored.id);
+      if (autonomousLaneForCreate && stored.status !== 'approved' && bookingPendingUtterance) {
+        // The lane said yes but the booking was stored for review (the
+        // supervisor's cap, an executability hold): never "you're booked".
+        bookingUtterance = bookingPendingUtterance;
+      }
+      // D-015 — every live lane verdict is audited, as the router does. A
+      // slot the conflict check found busy never reaches the lane: its hold
+      // is refused and the booking is drafted without a verdict.
+      const laneVerdict = autonomousLaneEvaluationFor(stored);
+      if (laneVerdict && deps.auditRepo) {
+        await deps.auditRepo
+          .create(
+            createAuditEvent({
+              tenantId,
+              actorId: deps.systemActorId ?? 'calling-agent',
+              actorRole: 'system',
+              eventType: 'autonomous_booking_lane_evaluated',
+              entityType: 'proposal',
+              entityId: stored.id,
+              metadata: {
+                proposalType: stored.proposalType,
+                channel: 'telephony',
+                eligible: laneVerdict.eligible,
+                ...(laneVerdict.eligible
+                  ? { threshold: laneVerdict.threshold }
+                  : { reason: laneVerdict.reason }),
+              },
+            }),
+          )
+          .catch(() => undefined);
+      }
+      // D-015 — a lane-approved booking texts the owner the one-tap UNDO at
+      // the cell the lane checked, naming the customer on record and the held
+      // time (never caller-spoken text). Fire-and-forget so the caller's
+      // confirmation never waits on the SMS provider; the outcome is audited.
+      if (
+        stored.status === 'approved' &&
+        autonomousLaneForCreate &&
+        deps.laneUndo &&
+        laneOwnerPhone &&
+        laneUndoWhen
+      ) {
+        const laneUndo = deps.laneUndo;
+        const ownerPhone = laneOwnerPhone;
+        const when = laneUndoWhen;
+        const customerId = session.customerId;
+        const auditUndoSms = (status: 'sent' | 'failed', error?: string) =>
+          deps.auditRepo
+            ?.create(
+              createAuditEvent({
+                tenantId,
+                actorId: deps.systemActorId ?? 'calling-agent',
+                actorRole: 'system',
+                eventType: 'autonomous_booking_undo_sms',
+                entityType: 'proposal',
+                entityId: stored.id,
+                metadata: { status, ...(error ? { error } : {}) },
+              }),
+            )
+            .catch(() => undefined);
+        void (async () => {
+          const customer =
+            customerId && deps.customerRepo
+              ? await deps.customerRepo.findById(tenantId, customerId).catch(() => null)
+              : null;
+          await sendLaneUndoSms(laneUndo, {
+            proposalId: stored.id,
+            tenantId,
+            summary: customer?.displayName ? `${customer.displayName} — ${when}` : when,
+            ownerPhone,
+          });
+          await auditUndoSms('sent');
+        })().catch(async (err) => {
+          const error = err instanceof Error ? err.message : String(err);
+          logger.warn('live-call lane undo SMS failed', { proposalId: stored.id, error });
+          await auditUndoSms('failed', error);
+        });
+      }
       // #1600 (2) — a request that was read back, confirmed and drafted is a
       // completed request, not a repeat: its count starts over, so a caller
       // booking five visits (or correcting a mis-heard readback) on one call
@@ -3299,6 +3316,7 @@ export function createVoiceTurnProcessor(
         ...(transferNumber ? { transferNumber } : {}),
         ...(session.callSid ? { callSid: session.callSid } : {}),
         dialActionUrl: dialResultUrl(session.id),
+        ...(skillReason === 'emergency_dispatch' ? { screenHandoff: true } : {}),
         channelPreferences,
         dispatcherLanguage,
         buildSummary: buildEscalationSummary,
@@ -3324,7 +3342,10 @@ export function createVoiceTurnProcessor(
           channelPreferences.whisper &&
           deps.whisperCache
         ) {
-          deps.whisperCache.set(escalationId, summary.whisper, tenantId);
+          deps.whisperCache.set(escalationId, summary.whisper, tenantId, {
+            sessionId: session.id,
+            language: dispatcherLanguage,
+          });
         }
 
         if (
@@ -3557,7 +3578,7 @@ export function createVoiceTurnProcessor(
     : new InMemoryTransactionRunner();
   const revocationTx: Pick<TenantTransactionRunner, 'run'> = {
     run: (tenantId, fn) =>
-      tenantContextStore.getStore()?.tenantId === tenantId
+      currentTenantContext()?.tenantId === tenantId
         ? new InMemoryTransactionRunner().run(tenantId, fn)
         : ownRevocationTx.run(tenantId, fn),
   };
@@ -3793,7 +3814,7 @@ export function createVoiceTurnProcessor(
         return;
       }
       const sends = await Promise.allSettled(
-        recipients.map((to) => provider.sendSms({ to, body })),
+        recipients.map((to) => provider.sendSms({ to, body, alertClass: 'life_safety' })),
       );
       const failures = sends.filter((s) => s.status === 'rejected');
       for (const f of failures) {
@@ -3804,11 +3825,10 @@ export function createVoiceTurnProcessor(
           sessionId: session.id,
         });
       }
-      // The durable fallback fires only when NO text went out at all — one
-      // delivered alert is a notified tenant.
-      if (failures.length === sends.length) {
-        await createE1FollowUpTask(session, tenantId, 'life_safety_e1', body);
-      }
+      // Filed whatever the SMS did: a Twilio-ACCEPTED text can still be
+      // dropped by carriers (A2P incomplete) without any signal, so an
+      // accepted send is not a notified tenant.
+      await createE1FollowUpTask(session, tenantId, 'life_safety_e1', body);
     })();
     await Promise.allSettled([push, sms]);
   }
@@ -4939,8 +4959,8 @@ export function createVoiceTurnProcessor(
     const jobs = jobRepo.findByCustomer
       ? await jobRepo.findByCustomer(tenantId, customerId, { includeArchived: true })
       : (await jobRepo.findByTenant(tenantId)).filter((j) => j.customerId === customerId);
-    const lists = await Promise.all(jobs.map((j) => appointmentRepo.findByJob(tenantId, j.id)));
-    return lists.flat();
+    // One batched read, not one query per job (callers only filter/count).
+    return appointmentRepo.findByJobs(tenantId, jobs.map((j) => j.id));
   }
 
   /** The tenant-local calendar day of an instant, as YYYY-MM-DD. */
@@ -5119,6 +5139,9 @@ export function createVoiceTurnProcessor(
         entities: { ...pending.entities },
         confidence: pending.confidence,
         utterance: pending.heldUtterance,
+        // No confidenceSource: this confidence scored a move/cancel/confirm
+        // request, not a booking, so the D-015 lane never trusts it — a
+        // rebook is always a draft for the owner.
       };
       effects.push(...session.machine.dispatch(booking));
       if (session.machine.currentState === 'entity_resolution') {
@@ -5551,59 +5574,49 @@ export function createVoiceTurnProcessor(
   // ─── Speech turn (formerly processCallerUtterance) ──────────────────
 
   /**
-   * #962 (PR-B) — the bounded reprompt→escalate ladder ported VERBATIM from
-   * `twilio-adapter.ts#runLowSttConfidenceGatherLadder` (Gather keeps its
-   * copy until the cutover PR removes it — expected strangler duplication).
+   * #962 (PR-B) — the bounded reprompt→escalate ladder. #1601 step 2 moved
+   * the rules to `shared/low-stt-ladder.ts`; Gather's
+   * `runLowSttConfidenceGatherLadder` runs the same function over its own
+   * streak map (one implementation, two streak stores until the cutover).
    * Shared by the two turn-failure modes: an empty utterance (silence,
    * inside `speechTurn`) and low acoustic confidence (via
    * `maybeHandleLowSttConfidence`). One streak for both, so a caller
    * alternating silence and mumbling still terminates at
-   * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS}. At the cap this path
-   * never touches the FSM, so the terminated-session finalize is called
-   * explicitly here (the same pattern Gather's ladder uses). The
+   * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS}. LCR-02: the cap is split
+   * on the capping strike's cause — silence closes with a call-us-back line
+   * and pages nobody; low confidence dispatches the FSM's system_failure.
+   * The FSM never reaches `terminated` here, so the terminal finalize is
+   * called explicitly (the same pattern Gather's ladder uses). The
    * `recordVoiceError` channel stays 'gather' — the only surface whose cell
    * declares this branch today.
    */
-  function runLowSttConfidenceLadder(session: VoiceSession): SideEffect[] {
-    const lang: SessionLanguage = session.language === 'es' ? 'es' : 'en';
-    const streak = (lowConfidenceStreak.get(session.id) ?? 0) + 1;
-
-    if (streak >= MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS) {
-      lowConfidenceStreak.delete(session.id);
-      const effects: SideEffect[] = [
-        {
-          type: 'tts_play',
-          payload: { text: renderTtsText(SPEECH_TURN_FAILURE_ESCALATION_COPY, {}, lang) },
-        },
-        { type: 'end_session', payload: { reason: 'low_stt_confidence_max_retries' } },
-      ];
-      if (!session.ended) {
-        session.ended = true;
-        finalizeTerminatedSession(session, effects, 'low_stt_confidence_max_retries');
-      }
-      recordVoiceError({
-        errorKind: 'low_stt_confidence_repeated',
-        channel: 'gather',
-        callSid: session.callSid ?? undefined,
-        tenantId: session.tenantId,
-      });
-      return effects;
+  async function runLowSttConfidenceLadder(
+    session: VoiceSession,
+    cause: LowSttStrikeCause,
+    tenantId: string,
+  ): Promise<SideEffect[]> {
+    // #1601 step 2 — the rules are the shared ladder's; this owns the
+    // processor's streak map and the terminal finalize.
+    const { effects, step } = sharedLowSttLadder(session, lowConfidenceStreak, cause);
+    let out = effects;
+    let terminalReason: string | undefined = step.kind === 'silence_close' ? step.reason : undefined;
+    if (step.kind === 'system_failure') {
+      // LCR-02 — page through the FSM's own escalation. A parked <Dial> is
+      // handed back by the transport in place of the "connect you" line; a
+      // parked no-one-available message ends the call; with nothing parked
+      // the caller hears that nobody could be reached (this host builds no
+      // voicemail TwiML), never a transfer promise.
+      await executeSideEffects(session, effects, tenantId);
+      const parked = parkedHandoffKind(pendingTransferTwiml.get(session.id));
+      if (parked === 'none') out = noHandoffCloseEffects(session, step.reason);
+      if (parked !== 'dial') terminalReason = step.reason;
     }
-
-    lowConfidenceStreak.set(session.id, streak);
-    const effects: SideEffect[] = [
-      {
-        type: 'tts_play',
-        payload: { text: renderTtsText(LOW_STT_CONFIDENCE_REPROMPT_COPY, {}, lang) },
-      },
-    ];
-    recordVoiceError({
-      errorKind: 'low_stt_confidence',
-      channel: 'gather',
-      callSid: session.callSid ?? undefined,
-      tenantId: session.tenantId,
-    });
-    return effects;
+    if (terminalReason !== undefined) {
+      session.ended = true;
+      finalizeTerminatedSession(session, [{ type: 'end_session', payload: { reason: terminalReason } }], terminalReason);
+    }
+    recordLowSttLadderError(step, 'gather', { callSid: session.callSid, tenantId: session.tenantId });
+    return out;
   }
 
   /**
@@ -5613,29 +5626,25 @@ export function createVoiceTurnProcessor(
    * surface whose ladder lives elsewhere (media-streams' adapter-side A3)
    * is never double-gated.
    */
-  function maybeHandleLowSttConfidence(
+  async function maybeHandleLowSttConfidence(
     session: VoiceSession,
     confidence: number | undefined,
-  ): SideEffect[] | null {
+  ): Promise<SideEffect[] | null> {
     if (!servesFamilyHere('silence_low_stt_ladder')) return null;
-    if (
-      typeof confidence !== 'number' ||
-      !Number.isFinite(confidence) ||
-      confidence >= MIN_STT_CONFIDENCE
-    ) {
+    if (!isLowSttConfidence(confidence)) {
       // High confidence (or no signal at all) clears the streak so a later
       // isolated blip on this session gets its own reprompt budget.
-      lowConfidenceStreak.delete(session.id);
+      clearLowSttStreak(lowConfidenceStreak, session);
       return null;
     }
 
-    return runLowSttConfidenceLadder(session);
+    return runLowSttConfidenceLadder(session, 'low_confidence', session.tenantId);
   }
 
   /**
-   * #962 (PR-B) — #846 mid-call language switch, ported from
-   * `twilio-adapter.ts#handleLanguageSwitchGather` (Gather keeps its copy
-   * until cutover). An ADAPTER-SHAPE act, out-of-FSM: the pure FSM cannot
+   * #962 (PR-B) — #846 mid-call language switch. #1601 step 2: this and
+   * Gather's `handleLanguageSwitchGather` are the same shared function
+   * (`shared/language-switch.ts`). An ADAPTER-SHAPE act, out-of-FSM: the pure FSM cannot
    * mutate `session.language`; the transport's next listen turn follows the
    * flipped session fields. Policy identical to both telephony transports:
    * the tenant `supported_languages` opt-in gates the target, the SAME
@@ -5650,59 +5659,14 @@ export function createVoiceTurnProcessor(
     tenantId: string,
     speechResult: string,
   ): Promise<SideEffect[]> {
-    const current: SessionLanguage = session.language === 'es' ? 'es' : 'en';
-    // The utterance's requested language when the heuristic can extract it,
-    // else the other half of the en/es pair (the classifier already said
-    // this turn IS a switch request) — same fallback as both adapters.
-    const target = detectLanguageSwitchIntent(speechResult) ?? (current === 'es' ? 'en' : 'es');
-
-    if (target === current) {
-      // Already speaking the requested language — just acknowledge; no
-      // counter spend, no event.
-      return [{ type: 'tts_play', payload: { text: LANGUAGE_SWITCH_ACK[current] } }];
-    }
-    // detectLanguageSwitchIntent is an ungated heuristic — the tenant
-    // opt-in gate is applied here (same as the media-streams pre-scan).
-    if (!isLanguageSupported(target, session.supportedLanguages ?? null)) {
-      return [{ type: 'tts_play', payload: { text: LANGUAGE_UNSUPPORTED_LINE[current] } }];
-    }
-    const switchCount = session.languageSwitchCount ?? 0;
-    if (switchCount >= MAX_LANGUAGE_SWITCHES_PER_CALL) {
-      logger.info('speechTurn: language switch refused — flap guard', {
-        sessionId: session.id,
-        target,
-        switchCount,
-      });
-      return [{ type: 'tts_play', payload: { text: LANGUAGE_SWITCH_CAP_LINE[current] } }];
-    }
-
-    session.language = target;
-    session.languageSwitchCount = switchCount + 1;
-    // Re-resolve the per-language TTS voice (settings.ttsVoiceEn/Es); a
-    // resolver failure clears the override so the language-derived default
-    // Polly voice applies rather than the stale other-language voice.
-    let ttsVoice: string | undefined;
-    if (deps.settingsRepo) {
-      try {
-        const settings = await deps.settingsRepo.findByTenant(tenantId);
-        ttsVoice = (target === 'es' ? settings?.ttsVoiceEs : settings?.ttsVoiceEn) ?? undefined;
-      } catch {
-        ttsVoice = undefined;
-      }
-    }
-    session.ttsVoice = ttsVoice;
-    session.events.emit(
-      'voice-event',
-      languageSwitchedEvent({
-        from: current,
-        to: target,
-        trigger: 'classified_intent',
-        switchCount: session.languageSwitchCount,
-      }),
-    );
-    // Acknowledge in the language being switched TO — the caller just told
-    // us that's the one they understand. Same copy as both adapters.
-    return [{ type: 'tts_play', payload: { text: LANGUAGE_SWITCH_ACK[target] } }];
+    // #1601 step 2 — the shared handler (`shared/language-switch.ts`): same
+    // policy, same voice re-resolve (settings.ttsVoiceEn/Es), same ack.
+    return switchSessionLanguage(session, {
+      tenantId,
+      speechResult,
+      settingsRepo: deps.settingsRepo,
+      surface: 'speechTurn',
+    });
   }
 
   /**
@@ -5861,6 +5825,13 @@ export function createVoiceTurnProcessor(
     tenantId,
     transcriptAppended = false,
   }): Promise<SideEffect[]> => {
+    // PRIV-3 — a recited card number is scrubbed where the caller's words
+    // enter the turn: the FSM events built from `speechResult` (their
+    // `utterance` feeds the complaint callback transcript, lastUtterance and
+    // the proposal payload fallbacks), held utterances and every task handler
+    // see `[card number]`, never the digits. A voice-approval challenge is a
+    // short code, never a 13–19 digit run, so its comparison is unaffected.
+    speechResult = redactCardNumbers(speechResult);
     // Note: `processCallerUtterance` historically took `sessionId` and
     // looked up the session via the store. The mediastream adapter
     // already resolves the session before invoking us, so we accept it
@@ -5947,7 +5918,7 @@ export function createVoiceTurnProcessor(
       // keeps today's `confidence_low` dispatch (media-streams' own ladder
       // is adapter-side).
       if (servesFamilyHere('silence_low_stt_ladder')) {
-        const ladderFx = runLowSttConfidenceLadder(session);
+        const ladderFx = await runLowSttConfidenceLadder(session, 'silence', tenantId);
         appendAgentTts(deps.store, session.id, ladderFx);
         return ladderFx;
       }
@@ -5970,7 +5941,7 @@ export function createVoiceTurnProcessor(
     // reach this line — same as the Gather loop, where the approval branch
     // returns before the confidence gate.
     if (servesFamilyHere('silence_low_stt_ladder')) {
-      lowConfidenceStreak.delete(session.id);
+      clearLowSttStreak(lowConfidenceStreak, session);
     }
 
     // #1540 §2 (owner decision 2026-10-01) — the state this turn is handled
@@ -6190,6 +6161,9 @@ export function createVoiceTurnProcessor(
             // Thread the classify call's REAL ai_runs id so a proposal born
             // from this intent links to its run row (proposals.ai_run_id FK).
             ...(classification.aiRunId ? { aiRunId: classification.aiRunId } : {}),
+            ...(classification.confidenceSource
+              ? { confidenceSource: classification.confidenceSource }
+              : {}),
           };
         } else {
           // Low / unknown intent → intent_classified so FSM uses

@@ -12,7 +12,7 @@
  * What is proven here, and what is NOT:
  *
  *  - PROVEN at real Postgres: the link columns are persisted by the guarded
- *    `setPaymentLinkIfPayable` UPDATE and CLEARED by the `clearPaymentLinkIfMatches`
+ *    `attachPaymentLink` UPDATE and CLEARED by the `clearPaymentLinkIfMatches`
  *    CAS; the status flip commits; the `invoice.payment_link_deactivated` and
  *    `invoice.payment_intent_canceled` audit rows exist and are tenant-scoped;
  *    a neighbour tenant's live link and audit trail are untouched by this
@@ -36,6 +36,7 @@ import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgJobRepository } from '../../src/jobs/pg-job';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
+import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { transitionInvoiceStatus } from '../../src/invoices/invoice';
 import { createInvoicePaymentLink } from '../../src/invoices/invoice-payment-link';
 import { MockPaymentLinkProvider } from '../../src/payments/payment-link-provider';
@@ -76,6 +77,9 @@ describe('Postgres integration — voiding an invoice kills its payment link + i
   let pool: Pool;
   let invoiceRepo: PgInvoiceRepository;
   let auditRepo: PgAuditRepository;
+  // S5a-1 — the mint reads `payment_collection_mode`; these tenants have no
+  // settings row, which is the unset-key default (`pay_link`).
+  let settingsRepo: PgSettingsRepository;
   let tenant: { tenantId: string; userId: string };
   let otherTenant: { tenantId: string; userId: string };
   let jobId: string;
@@ -190,6 +194,7 @@ describe('Postgres integration — voiding an invoice kills its payment link + i
     pool = await getSharedTestDb();
     invoiceRepo = new PgInvoiceRepository(pool);
     auditRepo = new PgAuditRepository(pool);
+    settingsRepo = new PgSettingsRepository(pool);
     tenant = await createTestTenant(pool);
     otherTenant = await createTestTenant(pool);
     jobId = await seedJobChain(tenant, 'VOID-1');
@@ -205,12 +210,11 @@ describe('Postgres integration — voiding an invoice kills its payment link + i
     const provider = new MockPaymentLinkProvider();
 
     // Mint through the real service → the guarded UPDATE persists the columns.
-    const minted = await createInvoicePaymentLink(
-      tenant.tenantId,
-      invoiceId,
+    const minted = await createInvoicePaymentLink(tenant.tenantId, invoiceId, {
       invoiceRepo,
       provider,
-    );
+      settingsRepo,
+    });
     const before = await linkColumns(tenant.tenantId, invoiceId);
     expect(before.url).toBe(minted.url);
     expect(before.id).not.toBeNull();
@@ -262,7 +266,7 @@ describe('Postgres integration — voiding an invoice kills its payment link + i
       { id: 'pi_live_secret', status: 'requires_confirmation' },
       { id: 'pi_already_paid', status: 'succeeded' },
     ]);
-    await createInvoicePaymentLink(tenant.tenantId, invoiceId, invoiceRepo, provider);
+    await createInvoicePaymentLink(tenant.tenantId, invoiceId, { invoiceRepo, provider, settingsRepo });
 
     await transitionInvoiceStatus(tenant.tenantId, invoiceId, 'void', invoiceRepo, undefined, {
       auditRepo,
@@ -294,13 +298,12 @@ describe('Postgres integration — voiding an invoice kills its payment link + i
     // One provider instance holds BOTH tenants' links — so if the void reached
     // across the tenant line, the neighbour's link would go dead here.
     const provider = new MockPaymentLinkProvider();
-    await createInvoicePaymentLink(tenant.tenantId, mineInvoiceId, invoiceRepo, provider);
-    await createInvoicePaymentLink(
-      otherTenant.tenantId,
-      theirInvoiceId,
+    await createInvoicePaymentLink(tenant.tenantId, mineInvoiceId, { invoiceRepo, provider, settingsRepo });
+    await createInvoicePaymentLink(otherTenant.tenantId, theirInvoiceId, {
       invoiceRepo,
       provider,
-    );
+      settingsRepo,
+    });
     const mineLinkId = (await linkColumns(tenant.tenantId, mineInvoiceId)).id!;
     const theirLinkId = (await linkColumns(otherTenant.tenantId, theirInvoiceId)).id!;
     expect(mineLinkId).not.toBe(theirLinkId);

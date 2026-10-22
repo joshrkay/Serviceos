@@ -1,10 +1,7 @@
 import { Proposal, ProposalType } from '../proposal';
 import { ExecutionHandler, ExecutionContext, ExecutionResult } from './handlers';
 import { Invoice, InvoiceRepository } from '../../invoices/invoice';
-import {
-  buildLineItem,
-  calculateDocumentTotals,
-} from '../../shared/billing-engine';
+import { buildLineItem } from '../../shared/billing-engine';
 import {
   RefreshJobMoneyStateDeps,
   refreshJobMoneyStateSafe,
@@ -40,10 +37,12 @@ export function lateFeeLineId(invoiceId: string, stepKey: string): string {
  * Executes an approved `apply_late_fee` proposal (collections cadence).
  *
  * Appends the already-computed late fee as a NON-TAXABLE line item to an
- * overdue invoice, recomputes the document totals through the shared billing
- * engine (so the cent-rounding convention can't drift from tax/discount
- * math), and refreshes the job money-state rollup. The fee amount is integer
- * cents end-to-end — no float ever enters this path.
+ * overdue invoice, moves the document totals by exactly the fee through the
+ * shared billing engine's adjustment path (`applyNonTaxableAdjustment` — tax,
+ * discount and processing fee stay as issued, so a discounted + taxed invoice
+ * can still be fee'd instead of tripping the #1288 mixed-taxability
+ * refusal), and refreshes the job money-state rollup. The fee amount is
+ * integer cents end-to-end — no float ever enters this path.
  *
  * Money-class: this only ever runs after explicit owner approval (money
  * proposals never auto-approve). Guards:
@@ -59,18 +58,22 @@ export function lateFeeLineId(invoiceId: string, stepKey: string): string {
  * passthrough when no invoiceRepo is wired, returns failed ExecutionResults
  * (never throws through), and emits a failure-soft audit event.
  *
- * DRY threshold breadcrumb: the append-line-then-recompute block below
- * (build the line, append it, `calculateDocumentTotals`, derive
- * `amountDueCents`) is mechanically identical to
- * `ApplyCreditExecutionHandler`'s (proposals/execution/
- * apply-credit-handler.ts, ~lines 154-160) — only the line's sign and
- * description differ. Left duplicated for these two; if a THIRD
- * append-a-line-to-invoice sibling shows up (e.g. a hypothetical
- * `apply_discount`), extract an `appendInvoiceLineAndRecompute(invoice,
- * line)` helper into the shared billing engine for this exact block.
- * Guards (idempotency, status precondition, floor checks) and audit
- * emission stay per-handler — they differ enough that folding them in
- * would obscure more than it'd save.
+ * The append-line-and-adjust write itself is shared with
+ * `ApplyCreditExecutionHandler`: both call
+ * `InvoiceRepository.applyNonTaxableAdjustmentAtomic` (one guarded write
+ * deriving amount due from the LIVE amount paid and re-checking status).
+ * Guards (idempotency, status precondition, floor checks) and audit emission
+ * stay per-handler — they differ enough that folding them in would obscure
+ * more than it'd save.
+ *
+ * ── No stale-link / PaymentIntent cleanup (unlike apply_credit; review H2) ──
+ * A fee RAISES the balance, so a hosted link or PaymentIntent minted before
+ * it is priced BELOW what is now owed. Paying one can never overcharge — it
+ * records a partial payment and the fee stays due. Cancelling them would
+ * only break a customer mid-checkout, and a cancelled PI is exactly what
+ * Stripe's idempotency key replays if the balance later returns to that
+ * amount. This handler therefore performs no external I/O: it stays a
+ * DB-only handler the executor runs fully atomically (Path A).
  */
 export class ApplyLateFeeExecutionHandler implements ExecutionHandler {
   proposalType: ProposalType = 'apply_late_fee';
@@ -132,6 +135,16 @@ export class ApplyLateFeeExecutionHandler implements ExecutionHandler {
       };
     }
 
+    // Review M2 — a credit can clear an invoice's balance without a payment
+    // (it then stays 'open' at $0 due). A fee raised before that credit must
+    // not resurrect a balance the owner already forgave.
+    if (invoice.amountDueCents <= 0) {
+      return {
+        success: false,
+        error: `Invoice ${invoice.invoiceNumber} has no balance due — late fee not applied.`,
+      };
+    }
+
     const feeLine = buildLineItem(
       feeLineId,
       'Late fee',
@@ -141,30 +154,50 @@ export class ApplyLateFeeExecutionHandler implements ExecutionHandler {
       false, // non-taxable: a late fee is not subject to sales tax
       'other',
     );
-    const lineItems = [...invoice.lineItems, feeLine];
-    const totals = calculateDocumentTotals(
-      lineItems,
-      invoice.totals.discountCents,
-      invoice.totals.taxRateBps,
-    );
-    const amountDueCents = Math.max(0, totals.totalCents - invoice.amountPaidCents);
-
+    // #10 — one atomic write: the repo appends the fee line, moves the totals
+    // by its amount (applyNonTaxableAdjustment semantics) and derives amount
+    // due from the row's LIVE amount paid, so a webhook payment committing
+    // after the read above is never overwritten by a snapshot figure.
     let updated: Invoice | null;
     try {
-      updated = await this.invoiceRepo.update(context.tenantId, invoice.id, {
-        lineItems,
-        totals,
-        amountDueCents,
-        updatedAt: new Date(),
-      });
+      updated = await this.invoiceRepo.applyNonTaxableAdjustmentAtomic(
+        context.tenantId,
+        invoice.id,
+        feeLine,
+        new Date(),
+      );
     } catch (err) {
+      // Review L5 — two approvals of the same accrual step raced: the other
+      // one's fee line (same deterministic id) won the primary key and this
+      // write rolled back. Deterministic and already satisfied — say so.
+      if ((err as { code?: unknown } | null)?.code === '23505') {
+        return {
+          success: false,
+          error: `A late fee for this step was already applied to invoice ${invoice.invoiceNumber} by another approval — not charged twice.`,
+        };
+      }
       return {
         success: false,
         error: err instanceof Error ? err.message : 'Failed to apply late fee',
       };
     }
     if (!updated) {
-      return { success: false, error: `Invoice ${invoiceId} not found in this tenant` };
+      // The atomic write's live status guard refused it: the invoice was
+      // paid / voided after the read above (or vanished). Nothing written.
+      const live = await this.invoiceRepo.findById(context.tenantId, invoice.id);
+      if (!live) {
+        return { success: false, error: `Invoice ${invoiceId} not found in this tenant` };
+      }
+      if ((live.status === 'open' || live.status === 'partially_paid') && live.amountDueCents <= 0) {
+        return {
+          success: false,
+          error: `Invoice ${live.invoiceNumber} has no balance due (a credit cleared it while the late fee was being applied) — late fee not applied.`,
+        };
+      }
+      return {
+        success: false,
+        error: `Invoice ${live.invoiceNumber} became '${live.status}' while the late fee was being applied — late fee not applied.`,
+      };
     }
 
     // §6 Time-to-Cash. Best-effort job money-state rollup.
@@ -194,7 +227,7 @@ export class ApplyLateFeeExecutionHandler implements ExecutionHandler {
               proposalType: 'apply_late_fee',
               stepKey,
               feeCents,
-              newAmountDueCents: amountDueCents,
+              newAmountDueCents: updated.amountDueCents,
             },
           }),
         );

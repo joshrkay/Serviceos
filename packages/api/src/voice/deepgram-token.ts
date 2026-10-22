@@ -51,8 +51,21 @@ export class DeepgramTokenPermissionError extends Error {
   }
 }
 
+/**
+ * What `STT_PROVIDER=fixture` hands the browser: the real-stack e2e lane
+ * (e2e/onboarding-v3.config.ts) intercepts the Deepgram socket with Playwright
+ * and plays scripted transcripts, so no key and no network are needed. Never a
+ * real credential: Deepgram refuses it.
+ */
+export const FIXTURE_STREAM_TOKEN = 'fixture-stt-token';
+export const FIXTURE_STREAM_MODEL = 'fixture';
+
 export interface MintDeepgramTokenDeps {
   apiKey?: string;
+  /** `fixture` mints FIXTURE_STREAM_TOKEN without Deepgram (dev and test only). */
+  sttProvider?: string;
+  /** Refuses the fixture in production and staging (production boot validation refuses it first). */
+  nodeEnv?: string;
   /** Injectable for tests; defaults to the global fetch. */
   fetchImpl?: typeof fetch;
   /** Requested TTL; clamped to [1, STREAM_TOKEN_TTL_SECONDS]. */
@@ -68,6 +81,13 @@ export interface DeepgramStreamToken {
 export async function mintDeepgramStreamToken(
   deps: MintDeepgramTokenDeps,
 ): Promise<DeepgramStreamToken> {
+  if (deps.sttProvider === 'fixture') {
+    if (deps.nodeEnv === 'production' || deps.nodeEnv === 'prod' || deps.nodeEnv === 'staging') {
+      throw new DeepgramTokenUnavailableError('STT_PROVIDER=fixture is refused outside dev and test');
+    }
+    return { token: FIXTURE_STREAM_TOKEN, expiresInSeconds: STREAM_TOKEN_TTL_SECONDS, model: FIXTURE_STREAM_MODEL };
+  }
+
   const apiKey = deps.apiKey;
   if (!apiKey) {
     throw new DeepgramTokenUnavailableError();

@@ -12,8 +12,12 @@ import type { AppConfig } from '../../shared/config';
 import type { AiRunRepository } from '../ai-run';
 import type { LLMTraceExporter } from './trace-exporter';
 import { CircuitBreakerRegistry, DEFAULT_BREAKER } from './breaker';
-import { createTenantQuotaStore, DEFAULT_TIER_CONFIG } from './tenant-quota';
-import { composeResilienceStack, type ResilienceStackOptions } from './compose-resilience';
+import { createTenantQuotaStore, resolveQuotaTierConfig } from './tenant-quota';
+import {
+  composeResilienceStack,
+  DEFAULT_FALLBACK_RESERVE_MS,
+  type ResilienceStackOptions,
+} from './compose-resilience';
 import {
   CachingGatewayWrapper,
   InMemoryCacheStore,
@@ -21,7 +25,8 @@ import {
 } from './cache';
 import { createRedisCacheStore } from './redis-cache-store';
 import { findProviderModelMismatch } from './provider-model-compat';
-import { DEFAULT_AI_ROUTING_CONFIG } from '../../config/ai-routing';
+import { findUnpricedModels } from './model-pricing';
+import { DEFAULT_AI_ROUTING_CONFIG, isVisionCapableModel } from '../../config/ai-routing';
 import {
   FallbackModelMapProvider,
   resolveFallbackTierModelsFromEnv,
@@ -156,6 +161,7 @@ export function createLLMGateway(
     // Also stderr so Railway logs show it even without a structured logger.
     process.stderr.write(`[ERROR] ${mismatch.reason}\n`);
   }
+  warnOnUnpricedModels(modelsToCheck, 'primary', opts.logger);
 
   const primaryProvider = new OpenAICompatibleProvider({
     apiKey: config.AI_PROVIDER_API_KEY,
@@ -186,8 +192,12 @@ export function createLLMGateway(
   // U3c — cluster-wide per-tenant quota when REDIS_URL is set (sync-return +
   // async Redis upgrade); per-replica in-memory registry otherwise. Identical
   // semantics; the seam is the same as the WS cap / gateway cache.
+  // GATEWAY-01 — tiers come from AI_QUOTA_TIERS_JSON over the defaults; an
+  // invalid table throws here, so the API fails to boot rather than run on
+  // limits ops did not intend.
   const quotaRegistry =
-    opts.resilience?.quota ?? createTenantQuotaStore(process.env.REDIS_URL, DEFAULT_TIER_CONFIG);
+    opts.resilience?.quota ??
+    createTenantQuotaStore(process.env.REDIS_URL, resolveQuotaTierConfig());
 
   // Publish the breaker registry for the health endpoint.
   sharedBreakerRegistry = breakerRegistry;
@@ -205,6 +215,8 @@ export function createLLMGateway(
     breakers: breakerRegistry,
     quota: quotaRegistry,
     fallbackProviders,
+    fallbackReserveMs:
+      opts.resilience?.fallbackReserveMs ?? resolveFallbackReserveMsFromEnv(),
   });
 
   const providers = new Map<string, LLMProvider>([[resilientProvider.name, resilientProvider]]);
@@ -385,6 +397,48 @@ function buildGatewayConfig(
 }
 
 /**
+ * GATEWAY-04 — boot-time warning when a model the gateway will route to has no
+ * price. Unpriced models deliberately record `costMicroCents: null` (never a
+ * guessed price — model-pricing.ts), and OpenAI models are unpriced by default,
+ * so without this the default deploy's spend telemetry is null with no signal.
+ * Warn, never fail: a missing price must not take the AI down.
+ */
+function warnOnUnpricedModels(
+  models: ReadonlyArray<string | undefined>,
+  role: 'primary' | 'fallback',
+  logger?: LLMGatewayLogger,
+): void {
+  const unpriced = findUnpricedModels(models);
+  if (unpriced.length === 0) return;
+  const message =
+    `AI ${role} model(s) have no price — ai_runs.cost_micro_cents and the spend metric ` +
+    `will be null for their calls until AI_MODEL_PRICING_JSON covers them`;
+  logger?.info(message, { level: 'warn', role, models: unpriced });
+  process.stderr.write(`[WARN] ${message}: ${unpriced.join(', ')}\n`);
+}
+
+/**
+ * AI_FALLBACK_RESERVE_MS — cap on the slice of a request's deadline held back
+ * for the fallback provider (GATEWAY-03; see `fallbackReserveFor`). A
+ * non-negative integer; 0 gives the primary the whole budget (the fallback then
+ * only runs after a FAST primary failure). Invalid values keep the default and
+ * warn on stderr. Exported for unit tests.
+ */
+export function resolveFallbackReserveMsFromEnv(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.AI_FALLBACK_RESERVE_MS?.trim();
+  if (!raw) return DEFAULT_FALLBACK_RESERVE_MS;
+  const parsed = Number(raw);
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    process.stderr.write(
+      `[WARN] AI_FALLBACK_RESERVE_MS="${raw}" is not a non-negative integer — ` +
+        `using ${DEFAULT_FALLBACK_RESERVE_MS}ms\n`,
+    );
+    return DEFAULT_FALLBACK_RESERVE_MS;
+  }
+  return parsed;
+}
+
+/**
  * Build zero-or-one fallback providers from env. Exported for unit tests.
  * Requires BOTH key and base URL; partial config is ignored (no boot crash).
  */
@@ -429,6 +483,16 @@ export function buildFallbackProvidersFromEnv(
   });
 
   const tiers = resolveFallbackTierModelsFromEnv(env);
+  warnOnUnpricedModels([tiers.lightweight, tiers.standard, tiers.complex], 'fallback', logger);
+  if (!isVisionCapableModel(tiers.complex)) {
+    // GATEWAY-06: mms_estimate (photo-to-quote) is complex-tier. With a
+    // text-only complex fallback, failover for it can never succeed.
+    const message =
+      'AI_FALLBACK_COMPLEX_MODEL is not vision-capable — photo-to-quote (mms_estimate) ' +
+      'cannot fail over to this provider';
+    logger?.info(message, { level: 'warn', complexModel: tiers.complex });
+    process.stderr.write(`[WARN] ${message}: ${tiers.complex}\n`);
+  }
   logger?.info('AI fallback provider wired', {
     host: parsedHost,
     lightweightModel: tiers.lightweight,

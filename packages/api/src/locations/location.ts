@@ -19,6 +19,13 @@ export type ServiceLocationAddressType = 'service' | 'billing' | 'both';
 
 export const ADDRESS_TYPES: readonly ServiceLocationAddressType[] = ['service', 'billing', 'both'];
 
+/**
+ * Dispatch FR-2 — where a location's coordinates came from (migration 327).
+ * `pending` waits for the geocode sweep, `ok` has coordinates, `failed` means
+ * the address could not be placed, so travel-time checks will skip it.
+ */
+export type GeocodeStatus = 'pending' | 'ok' | 'failed';
+
 export interface ServiceLocation {
   id: string;
   tenantId: string;
@@ -43,6 +50,10 @@ export interface ServiceLocation {
    * keep type-checking; repositories always return an array.
    */
   serviceTypes?: string[];
+  /** Optional so hand-built fixtures keep type-checking; repositories always set it. */
+  geocodeStatus?: GeocodeStatus;
+  geocodeAttempts?: number;
+  geocodedAt?: Date;
   isArchived: boolean;
   archivedAt?: Date;
   createdAt: Date;
@@ -221,6 +232,8 @@ export async function createLocation(
     isPrimary: input.isPrimary ?? false,
     addressType: input.addressType ?? 'service',
     serviceTypes: input.serviceTypes ? normalizeServiceTypes(input.serviceTypes) : [],
+    geocodeStatus: hasCoordinates(input) ? 'ok' : 'pending',
+    geocodeAttempts: 0,
     isArchived: false,
     createdAt: new Date(),
     updatedAt: new Date(),
@@ -257,6 +270,50 @@ export async function createLocation(
   return warnings ? { ...created, warnings } : created;
 }
 
+function hasCoordinates(c: { latitude?: number; longitude?: number }): boolean {
+  return typeof c.latitude === 'number' && typeof c.longitude === 'number';
+}
+
+const GEOCODED_ADDRESS_FIELDS = ['street1', 'street2', 'city', 'state', 'postalCode', 'country'] as const;
+
+/**
+ * Dispatch FR-2 — the geocode fields an update must write. Caller-supplied
+ * coordinates win and mark the row `ok`: both in this update when the address
+ * also changed, otherwise this update's value merged with the stored one (so
+ * a pin set one coordinate at a time is still the caller's, and the sweep
+ * never overwrites it). Otherwise a changed address clears
+ * the old coordinates (they now point at the wrong house) and queues the row
+ * for the geocode sweep. An update that leaves the address alone changes
+ * nothing here.
+ */
+export function geocodeResetFor(
+  existing: ServiceLocation,
+  input: UpdateLocationInput,
+): Partial<ServiceLocation> {
+  const addressChanged = GEOCODED_ADDRESS_FIELDS.some(
+    (f) => input[f] !== undefined && (input[f] ?? '').trim() !== (existing[f] ?? '').trim(),
+  );
+  const touchesCoordinates = input.latitude !== undefined || input.longitude !== undefined;
+  const pinned = addressChanged
+    ? hasCoordinates(input)
+    : touchesCoordinates &&
+      hasCoordinates({
+        latitude: input.latitude ?? existing.latitude,
+        longitude: input.longitude ?? existing.longitude,
+      });
+  if (pinned) {
+    return { geocodeStatus: 'ok', geocodeAttempts: 0, geocodedAt: new Date() };
+  }
+  if (!addressChanged) return {};
+  return {
+    latitude: undefined,
+    longitude: undefined,
+    geocodeStatus: 'pending',
+    geocodeAttempts: 0,
+    geocodedAt: undefined,
+  };
+}
+
 export async function getLocation(
   tenantId: string,
   id: string,
@@ -265,15 +322,34 @@ export async function getLocation(
   return repository.findById(tenantId, id);
 }
 
+/**
+ * The fields a caller may change on a location. PUT /api/locations/:id passes
+ * the raw request body, so anything else (geocode state, customerId,
+ * isPrimary, isArchived) is dropped here rather than reaching the repository.
+ */
+const UPDATABLE_LOCATION_FIELDS = [
+  'label', 'street1', 'street2', 'city', 'state', 'postalCode', 'country',
+  'latitude', 'longitude', 'accessNotes', 'addressType', 'serviceTypes',
+] as const satisfies readonly (keyof UpdateLocationInput)[];
+
+export function pickLocationUpdate(body: Record<string, unknown>): UpdateLocationInput {
+  const out: Record<string, unknown> = {};
+  for (const f of UPDATABLE_LOCATION_FIELDS) {
+    if (f in body) out[f] = body[f];
+  }
+  return out as UpdateLocationInput;
+}
+
 export async function updateLocation(
   tenantId: string,
   id: string,
-  input: UpdateLocationInput,
+  rawInput: UpdateLocationInput,
   repository: LocationRepository,
   auditRepo?: AuditRepository,
   actorId?: string,
   actorRole?: string,
 ): Promise<ServiceLocation | null> {
+  const input = pickLocationUpdate(rawInput as Record<string, unknown>);
   const existing = await repository.findById(tenantId, id);
   if (!existing) return null;
 
@@ -283,6 +359,7 @@ export async function updateLocation(
   const updated = await repository.update(tenantId, id, {
     ...input,
     ...(input.serviceTypes !== undefined ? { serviceTypes: normalizeServiceTypes(input.serviceTypes) } : {}),
+    ...geocodeResetFor(existing, input),
     updatedAt: new Date(),
   });
 

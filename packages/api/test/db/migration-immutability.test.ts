@@ -123,7 +123,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['063_language_detection', '918c4cd778821e6b38a381c6dfceb3e3446c9e390245fcb6eca0e486067b576f'],
   ['064_create_job_photos', '3ad6f895d04b29e6ef6f1d2d5b74757b6417fe9e73cfe61e61ebe31b15dfd2a7'],
   ['065_create_portal_sessions', '6b939dc150298e5af212577fda04ec07aec8338f026a6107c7ad09491f1ded10'],
-  ['066_create_voice_sessions_and_modes', '8268a58eecee1db168757965fe310b203a7bd9eb77b5b4fe2ed9e97d0bc94614'],
+  // Replay-clobber fix (2026-10-13): the owner can_field_serve backfill re-ran
+  // on every deploy (no ledger), re-flipping owners who had turned it off. It
+  // now runs only when the column is first added; same fresh-DB result.
+  ['066_create_voice_sessions_and_modes', 'da91abcaf6da051986b5135b03c9b1158915808e2d7223dbdffc5e951b0fe8bd'],
   ['067_create_time_entries', '069290a0144fb08de0171bb07d5255496236ef2d66a4dce40228a2de02c5a49f'],
   ['068_create_language_settings', 'dc485f4a1ec4e0bab7f3a58c6e54339d434057ceccbaa562c78952efa19e9931'],
   ['069_extend_leads_source_check', '881aeb61d3da8670bab3c92fb45c35cebd722ec3b3549cf6fe8b7f1e6047caff'],
@@ -216,7 +219,13 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['151_tenant_settings_bill_labor_from_time_entries', 'a33ab626d1b807c19dfd62180a9462c7cbdb41c8b358e89249fb2213f93ac145'],
   ['152_voice_parity_transfer_and_languages', '437c19e7db82a2a1ec8c04d62d433b13ec609dd55315b3fe859fee39bad680a0'],
   ['153_create_call_me_back_tasks', '9b9d430535e2f9d35c71de35e7389198a71ed8946f8262527ed9378535952abe'],
-  ['154_call_me_back_session_idempotency', 'a08d1ad3f4a42adb17e2fd5ea464b52fb87721d3dd5fe534c662dd787228c65e'],
+  // Deploy-blocker fix (2026-10-13): 154's body is now a deliberate no-op. The
+  // runner replays every migration on every deploy (no ledger), so 154's
+  // CREATE UNIQUE INDEX idx_cmb_session_unique (tenant_id, session_id) re-built
+  // the index that 268 drops over live data, and the first session with two
+  // call-me-back reasons failed it (23505), blocking every later deploy. 268
+  // alone yields the final state; pinned by migration-replay-populated-db.test.ts.
+  ['154_call_me_back_session_idempotency', 'c77b7234f9e1e318ebdebe9d6d50c547130ad10be3f34308467a16f19a455e5c'],
   // QA-2026-06-10: credentials column + google_business provider missing from tenant_integrations
   ['155_tenant_integrations_google_business', '58ba921c46731601640f6079796407fd4e06bfa51097b986c61c90b645331ae2'],
   // P2-034: SMS approval transport — proposal_sms_events
@@ -308,7 +317,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // U2 (PRD gap closure): 2hr post-job thank-you SMS — jobs.completed_at,
   // jobs.thank_you_sms_sent_at, tenant_settings.send_thank_you_sms, backfill,
   // partial index on the sweep-eligibility predicate.
-  ['194_thank_you_sms', '2a1b55639fd1e9f78b69ceb0074bdddb1ba702a812a7b3a71292457f27ed0552'],
+  // Replay-clobber fix (2026-10-13): the completed_at / thank_you_sms_sent_at
+  // backfill re-ran on every deploy (no ledger), stamping raw-status-completed
+  // jobs as thanked. It now runs only when thank_you_sms_sent_at is first added.
+  ['194_thank_you_sms', '02cf14482c3fa9b325943b802462680b542844a627f2bf7893519188bc2e8359'],
   // U1 (PRD gap closure): onboarding_session table for the conversational
   // FSM (ENABLE + FORCE RLS per gemini-code-assist review on PR #594).
   ['195_onboarding_session', '4ca725aa5bd1d9e3c516282f67349e3fc5f47f0228bdc0a5e2ee6ed995d2834d'],
@@ -357,7 +369,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // PRD US-340+US-341 — reminder cadence column default → [24, 2].
   ['213_tenant_settings_reminder_offsets_default', '451325d4c247a81f0b0d60b015b7af26329f38918bde6b579d40bb94e3a26668'],
   // PRD US-345 — 24h post-completion review-request sweep columns + backfill.
-  ['214_review_request_sweep', '3a843fa5148f8a2ce89fd5ea37647c2e29f0c0fa9d74d821c3f1b5a1afc37fc2'],
+  // Replay-clobber fix (2026-10-13): the review_request_sent_at backfill re-ran
+  // on every deploy (no ledger), suppressing the 24h request for every job still
+  // in 'completed'. It now runs only when the column is first added.
+  ['214_review_request_sweep', '94ea9fd29d9f895e2f8b098a1493acdd5a9ccd5af46214f6b69cba7d998591a0'],
   // Beta-verify fix — proposals.claimed_by UUID→TEXT (worker label, not a uuid);
   // the type mismatch broke proposal execution entirely.
   ['215_proposals_claimed_by_text', '35ffa973504fd016a63c3ef2e333de24070808889cf2c7159b34ee3c09857afa'],
@@ -555,7 +570,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['289_tenant_settings_default_tax_rate', '3e065ee911220c16d7f42a2da35cfc659b10aa8b00162e174c59565e5eb61694'],
   ['290_backfill_appointment_assignments_from_jobs', 'cd2d08fa8c0404df320d8a498f384e9822ba3a602355a2bae78f9b9c7e4c88bb'],
   ['291_tenant_settings_notify_technicians_by_sms', 'f5f7b81000e4bbff1e7941484798c722aea49e99e8d026cd02745bc1fe872daf'],
-  ['292_voice_approval_pin_lock_alerts_sent_at', 'b2682e45bffbc26193870e0da80e7f2a2bcde3b8bb52abe4a54ee1bfad8c617a'],
+  // Replay-clobber fix (2026-10-13): the settle-as-sent UPDATE re-ran on every
+  // deploy (no ledger) and marked alerts claimed-but-undelivered at deploy time
+  // as sent. It now runs only when sent_at is first added; same fresh-DB result.
+  ['292_voice_approval_pin_lock_alerts_sent_at', '5510223a858455661c8b30bae42c26c299a2ba8e449647fd976f902ed8afcea4'],
   // #1386 / O-2 — E1 reviewer attestation columns (NEW migration).
   ['293_tenant_settings_e1_script_attestation', '4db0f349da1c004770878534c24f4d07fc84d8c48470b8650ff8254ebcafda70'],
   // #1401 — service_locations.service_types (customers-directory chips).
@@ -581,6 +599,43 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['304_after_hours_voice_mode_default_backfill', '67993fc9f5a05c5c1ac7d63a37fb94c723234aacaad24ff9a337c92cbbb4af0c'],
   // #1602 — production voice-quality grades (voice_session_grades) + tenant_settings sampling bounds.
   ['305_voice_session_grades', '3d47b28627c77a500d18bbdd98637e343d01d59768cec9b875bcf96937cdae12'],
+  // Signup attribution — marketing first-touch columns on tenants.
+  ['306_tenant_signup_attribution', '84b60ec6dcae9cf9b2187861d6581c2e70f2ffe7619cb349b87e298396848751'],
+  // Platform-admin tenant usage report — ai_runs (tenant_id, created_at).
+  ['307_ai_runs_tenant_created_at_index', 'd40b650d25ab0e63f1deef7e8262123f32c60657037182ddc5d73280adc6464c'],
+  // Google Business OAuth states get their own provider (flow binding).
+  ['308_oauth_states_google_business_provider', '79915b29a7a0fe83f95f798f21646cccf3ea6c50ce323b5bdb4106a0b36eb3a1'],
+  // New owners default field-capable at INSERT now that 066's backfill is one-shot.
+  ['309_users_owner_can_field_serve_default', 'e84f9ebc0b7ca4f2bd596006e3c4a2d9394be92fc18732cc405c95a4f6372a33'],
+  ['310_regional_price_tiers', 'cc7cc980e77d57f58c5a3b595c5db8ce9a94764363f44ef38add18d114659795'],
+  ['311_onboarding_drafts', '355ea643b690822e5416a147d3836a7d768fb069e2b5aa238b045498a4715e39'],
+  ['312_tenant_settings_payment_collection_mode', '81ef124ca22d0db44e0744a24c2c41680cd644e7b5bffd57ddaaabb85c8bbc9e'],
+  ['313_onboarding_drafts_owner_phone', '56e08bca72775fcf3d39b5a00e87270a8a18f3ef64f7dbcaa91c8d90e4b65ca2'],
+  ['317_demo_calls', '1f2e2793272ab397224a1feb5307f583c121d5c138d06ed7fb533d6c698045de'],
+  // PRIV-3 — voice_recordings.pci_detected + audio_purged_at (card number said on the call).
+  ['314_voice_recordings_card_number_detected', '648f2696cce7ed17700f8b2d3b826ce8eb61987af91f7cbeed58c82ce01b0ce3'],
+  // S5a (U8) — durable per-link cleanup claim + live-payment-link partial index.
+  ['325_invoices_cleanup_claimed_at', 'e8643fd8984b82bdf4a081da109d699b96467a1ce71d6e8f249ca6d7bf3f5735'],
+  // PRIV-2 — voice_recordings.twilio_deleted_at + twilio_delete_attempted_at (Twilio copy deleted).
+  ['315_voice_recordings_twilio_copy_deleted', '02163cc28f90807433f2526555aaee5cc60ab3c36c5b5c60833c81084a73d1b9'],
+  // PRIV-1 — ai_runs.content_purged_at + partial due-index (prompt/reply content purged past retention).
+  ['316_ai_runs_content_purged_at', '9d5dedac62a55a87f961fb97814dc3e899ccc3a09a15c57ec9548ead00001b7a'],
+  // PRIV-1 (review round 2) — partial index on held voice_recordings (ai_runs purge legal-hold probe).
+  ['318_seeded_price_baseline', '19a3806bcb2f0be4cc31345f6c06d8a2b2a780da20afc3535c4243d7907ca628'],
+  ['321_voice_recordings_legal_hold_index', 'd76d4dfc8b243cbb41c97635409f9d53c076d1f5b59110141a9f767e4a9c9952'],
+  ['324_seeded_price_baseline', '19a3806bcb2f0be4cc31345f6c06d8a2b2a780da20afc3535c4243d7907ca628'],
+  // U1 reply-gap — call_transcript_turns.transport / reply timing columns + 2 NOT VALID CHECKs + partial index.
+  ['326_call_transcript_turns_reply_timing', 'bad452623ef0091588b40ccd2f8408de9935ee9ceb5d1fdae8386ef11acfe65b'],
+  // Dispatch FR-2 phase 1 — service_locations geocode status/attempts/geocoded_at + 1 NOT VALID CHECK + partial index.
+  ['327_service_locations_geocode_status', '8de7949551f27df07e557b82ce08edab52d318b0034fe46fce0230330c248c78'],
+  // Dispatch FR-2 phase 2 — users.skills + jobs.required_skills (TEXT[], no CHECK).
+  ['328_skill_tags', '7b58a5e30ea28966566996c314b41b155333fe55ce687e8463eabf92ad7261ea'],
+  // D-045 — message_dispatches outcome columns (scheduled/blocked) + 3 NOT VALID CHECKs + 3 partial indexes.
+  ['329_message_dispatch_outcomes', '928d38a17d9f73b2175b5a0d71557b8fbb15719bec0f0415d007b15731ef3ea4'],
+  // D-045 — customer_text_wording (owner's own wording per customer text), RLS, inline CHECKs only.
+  ['330_customer_text_wording', 'cb3931893bf7d7fdf018c8fb546cd0d0b15fbf8823a4ce1dbfd67e86195df1b7'],
+  // D-044 / #1763 — tenant_settings.get_found_online_dismissed_at, google_review_url_derived; review_poll_state.backoff_reason, auth_generation.
+  ['331_get_found_online', 'eb7e83e23154cb56342b21f1b83c90733349f649215af5206885b77bb3a639ca'],
 ];
 
 function hashMigration(value: string): string {

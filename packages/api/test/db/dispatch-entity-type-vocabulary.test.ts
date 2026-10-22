@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { getMigrationSQL } from '../../src/db/schema';
-import type { DispatchEntityType } from '../../src/notifications/dispatch-repository';
+import type { DispatchEntityType, DispatchStatus } from '../../src/notifications/dispatch-repository';
 import type { JobStatus } from '../../src/jobs/job';
 import type { ProposalStatus } from '../../src/proposals/proposal';
 import { LEAD_SOURCES } from '../../src/leads/enums';
@@ -61,6 +61,16 @@ const ALL_DISPATCH_ENTITY_TYPES: Record<DispatchEntityType, true> = {
   conversation_reply: true,
   portal_session: true,
   custom_message: true,
+  thank_you: true,
+};
+
+const ALL_DISPATCH_STATUSES: Record<DispatchStatus, true> = {
+  sent: true,
+  delivered: true,
+  failed: true,
+  bounced: true,
+  scheduled: true,
+  blocked: true,
 };
 
 const ALL_JOB_STATUSES: Record<JobStatus, true> = {
@@ -106,6 +116,13 @@ const PINS: VocabularyPin[] = [
     codeSource: 'DispatchEntityType (notifications/dispatch-repository.ts)',
     codeValues: Object.keys(ALL_DISPATCH_ENTITY_TYPES),
     minOccurrences: 6,
+  },
+  {
+    constraint: 'message_dispatches_status_check',
+    column: 'status',
+    codeSource: 'DispatchStatus (notifications/dispatch-repository.ts)',
+    codeValues: Object.keys(ALL_DISPATCH_STATUSES),
+    minOccurrences: 1,
   },
   {
     constraint: 'jobs_status_check',

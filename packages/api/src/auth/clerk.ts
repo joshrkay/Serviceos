@@ -1,6 +1,7 @@
 import * as crypto from 'crypto';
 import { Request, Response, NextFunction } from 'express';
 import { createLogger } from '../logging/logger';
+import type { SignupAttribution } from '@ai-service-os/shared';
 
 const authLogger = createLogger({
   service: 'auth',
@@ -265,10 +266,27 @@ function parseJwt(token: string): JwtParts {
  */
 function validateClerkClaims(
   payload: Record<string, unknown>,
-  options: { issuer?: string; clockToleranceSeconds?: number } = {}
+  options: {
+    issuer?: string;
+    clockToleranceSeconds?: number;
+    /**
+     * Hardening sweep 2026-10 — when non-empty, the token's `azp` (authorized
+     * party: the frontend origin Clerk minted it for) must be one of these.
+     * Stops a session token minted for a sibling origin on the same Clerk
+     * instance from being replayed against this API. Empty = not enforced
+     * (the pre-existing behaviour), so a deploy without the env var is
+     * unchanged.
+     */
+    authorizedParties?: readonly string[];
+  } = {}
 ): ClerkTokenPayload {
   const tolerance = options.clockToleranceSeconds ?? 0;
   const now = Math.floor(Date.now() / 1000);
+  if (options.authorizedParties && options.authorizedParties.length > 0) {
+    if (typeof payload.azp !== 'string' || !options.authorizedParties.includes(payload.azp)) {
+      throw new Error('Token authorized party (azp) not allowed');
+    }
+  }
 
   if (typeof payload.sub !== 'string' || !payload.sub) {
     throw new Error("Missing or invalid 'sub' (subject) claim");
@@ -317,9 +335,9 @@ function validateClerkClaims(
  *  - Looks up the signing key by `kid`.
  *  - On `kid` miss, refreshes the JWKS once and tries again.
  *  - Validates `iss`, `exp`, `nbf`, `role`.
- *  - Authorized-party (`azp`) is intentionally NOT enforced here — Clerk's
- *    audience model uses a list of permitted `azp` values that is per-app and
- *    out of scope for this story. Add when we know the canonical list.
+ *  - Authorized-party (`azp`) is enforced only when `authorizedParties` is
+ *    non-empty (production wires it from `CLERK_AUTHORIZED_PARTIES`, see
+ *    {@link parseAuthorizedParties}); unset keeps the historic no-check.
  *
  * @throws Error with one of the canonical messages used in the dev path so
  *   callers don't have to special-case which path produced the rejection.
@@ -332,6 +350,8 @@ export async function verifyRs256Token(
     /** Override the resolver-derived issuer host. Used by tests. */
     host?: string;
     clockToleranceSeconds?: number;
+    /** `azp` allowlist; empty/undefined = not enforced. */
+    authorizedParties?: readonly string[];
   }
 ): Promise<ClerkTokenPayload> {
   const resolver = options.resolver ?? defaultResolver;
@@ -371,7 +391,21 @@ export async function verifyRs256Token(
   return validateClerkClaims(parts.payloadJson, {
     issuer,
     clockToleranceSeconds: options.clockToleranceSeconds,
+    authorizedParties: options.authorizedParties,
   });
+}
+
+/**
+ * `CLERK_AUTHORIZED_PARTIES` → the `azp` allowlist: comma-separated origins
+ * (`https://app.example.com,https://staging.example.com`), trimmed, empties
+ * dropped. Returns `[]` when unset, which disables the check.
+ */
+export function parseAuthorizedParties(value: string | undefined): string[] {
+  if (!value) return [];
+  return value
+    .split(',')
+    .map((v) => v.trim())
+    .filter(Boolean);
 }
 
 export interface VerifyClerkSessionDeps {
@@ -389,7 +423,7 @@ export interface VerifyClerkSessionDeps {
   env?: NodeJS.ProcessEnv;
 }
 
-function isHmacDevModeEnabled(env: NodeJS.ProcessEnv): boolean {
+export function isHmacDevModeEnabled(env: NodeJS.ProcessEnv): boolean {
   if (env.CLERK_DEV_HMAC_TOKENS !== 'true') return false;
   // Defense in depth: even if validateEnvSchema misses (e.g. someone
   // bypasses it on boot), we refuse the HMAC path in production at runtime.
@@ -434,6 +468,7 @@ export function verifyClerkSession(
           payload = await verifyRs256Token(token, {
             pubKey,
             resolver: deps.jwksResolver,
+            authorizedParties: parseAuthorizedParties(env.CLERK_AUTHORIZED_PARTIES),
           });
         } catch (err) {
           rs256Error = err instanceof Error ? err : new Error(String(err));
@@ -651,4 +686,11 @@ export interface TenantRepository {
   findByOwner(ownerId: string): Promise<Tenant | null>;
   findById(id: string): Promise<Tenant | null>;
   create(data: { ownerId: string; ownerEmail: string; name: string }): Promise<Tenant>;
+  /**
+   * Record the marketing-site first touch on a tenant. Write-once: a no-op
+   * (returns false) when the tenant already has any attribution stored, so a
+   * webhook redelivery can never overwrite the original first touch.
+   * Optional — only the Postgres repository persists attribution.
+   */
+  setSignupAttribution?(tenantId: string, attribution: SignupAttribution): Promise<boolean>;
 }

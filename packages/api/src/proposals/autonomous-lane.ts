@@ -26,6 +26,14 @@
  * tenant opt-in gate — so the stamped reason (`platform_disabled`)
  * distinguishes an operator-level shutoff from a tenant simply not having
  * opted in.
+ *
+ * D-015 amendment (2026-10-16): autonomous approval requires the owner's cell
+ * (`owner_cell_missing`), an UNDO SMS channel that can deliver now
+ * (`undo_channel_unavailable`), localized caller copy (`language_unsupported`)
+ * and a slot-conflict check that ran (`conflict_check_unavailable`; a slot
+ * the check finds busy is refused before the lane runs). These are the
+ * `AutonomyOnlyInput` gates, which `evaluateBookingLaneForOwnerApproval`
+ * skips for the D-019 close, which the owner always approves.
  */
 import { actionClassForProposalType, type ProposalType } from './proposal';
 import { confidenceMetaBlocksAutoApprove } from './auto-approve';
@@ -88,6 +96,33 @@ export interface EvaluateAutonomousLaneInput {
    */
   platformDisabled?: boolean;
   settings?: AutonomousLaneSettings;
+  /**
+   * The owner's cell (`tenant_settings.owner_phone`). Required so every
+   * caller decides: the owner UNDO SMS is part of why the lane is safe, so a
+   * tenant with no cell on file never books autonomously.
+   */
+  ownerPhone: string | null | undefined;
+  /**
+   * True only when the owner UNDO SMS can actually be minted and sent now
+   * (`LaneUndoChannel` wired and `canDeliver()`, which follows the outbound
+   * SMS kill switch). Required so every caller decides; anything but true is
+   * `undo_channel_unavailable`.
+   */
+  undoChannelAvailable: boolean;
+  /**
+   * True only when the P0-035 slot-conflict check RAN before the hold and
+   * found the slot free. A busy slot never gets here (the hold is refused, or
+   * the memo path asks a clarification), so false means the check did not
+   * run; such a slot is never auto-booked (`conflict_check_unavailable`).
+   * Required.
+   */
+  slotConflictFree: boolean;
+  /**
+   * False when the live caller's language has no localized booking copy, so
+   * the binding "you're booked" line could not be spoken in it. Absent on
+   * surfaces with no caller to speak to (the memo router).
+   */
+  callerLanguageSupported?: boolean;
   proposalType: ProposalType;
   /**
    * True only for the inbound-receptionist path (customer-call FSM or the
@@ -120,6 +155,8 @@ export interface EvaluateAutonomousLaneInput {
     vulnerability?: boolean;
     emergency?: boolean;
     negotiation?: boolean;
+    /** The prompt-injection guard flagged the session: its model confidence is not trusted. */
+    injection?: boolean;
   };
 }
 
@@ -130,6 +167,10 @@ export type AutonomousLaneEvaluation =
 export type AutonomousLaneIneligibleReason =
   | 'platform_disabled'
   | 'tenant_not_opted_in'
+  | 'owner_cell_missing'
+  | 'undo_channel_unavailable'
+  | 'language_unsupported'
+  | 'conflict_check_unavailable'
   | 'proposal_type_not_eligible'
   | 'not_inbound_receptionist'
   | 'below_threshold'
@@ -143,11 +184,39 @@ export type AutonomousLaneIneligibleReason =
   | 'session_flagged';
 
 /**
- * All-gates evaluator. Order matters only for the audit reason (first
- * failing gate wins); eligibility requires every gate to pass.
+ * All-gates evaluator for AUTONOMOUS approval. Order matters only for the
+ * audit reason (first failing gate wins); eligibility requires every gate to
+ * pass.
  */
 export function evaluateAutonomousBookingLane(
   input: EvaluateAutonomousLaneInput,
+): AutonomousLaneEvaluation {
+  return evaluateLaneGates(input, true);
+}
+
+/**
+ * D-019 — every D-015 gate except the autonomy-only ones (`AutonomyOnlyInput`),
+ * for a booking a human approves (the on-call close's owner-approval chain).
+ * Those gates exist because the system approves alone; a close is never
+ * system-approved.
+ */
+export function evaluateBookingLaneForOwnerApproval(
+  input: Omit<EvaluateAutonomousLaneInput, AutonomyOnlyInput>,
+): AutonomousLaneEvaluation {
+  return evaluateLaneGates(input, false);
+}
+
+/** Inputs only autonomous (system) approval checks; the D-019 close omits them. */
+type AutonomyOnlyInput =
+  | 'ownerPhone'
+  | 'undoChannelAvailable'
+  | 'slotConflictFree'
+  | 'callerLanguageSupported';
+
+function evaluateLaneGates(
+  input: Omit<EvaluateAutonomousLaneInput, AutonomyOnlyInput> &
+    Partial<Pick<EvaluateAutonomousLaneInput, AutonomyOnlyInput>>,
+  autonomousApproval: boolean,
 ): AutonomousLaneEvaluation {
   if (input.platformDisabled) {
     return { eligible: false, reason: 'platform_disabled' };
@@ -164,8 +233,19 @@ export function evaluateAutonomousBookingLane(
   if (!input.inboundReceptionistSource) {
     return { eligible: false, reason: 'not_inbound_receptionist' };
   }
+  // After the structural gates, so traffic that could never take the lane
+  // (owner memos, non-booking types) keeps its structural audit reason.
+  if (autonomousApproval && !input.ownerPhone?.trim()) {
+    return { eligible: false, reason: 'owner_cell_missing' };
+  }
+  if (autonomousApproval && input.undoChannelAvailable !== true) {
+    return { eligible: false, reason: 'undo_channel_unavailable' };
+  }
+  if (autonomousApproval && input.callerLanguageSupported === false) {
+    return { eligible: false, reason: 'language_unsupported' };
+  }
   const flags = input.flags ?? {};
-  if (flags.vulnerability || flags.emergency || flags.negotiation) {
+  if (flags.vulnerability || flags.emergency || flags.negotiation || flags.injection) {
     return { eligible: false, reason: 'session_flagged' };
   }
   if (confidenceMetaBlocksAutoApprove(input.payload)) {
@@ -185,6 +265,9 @@ export function evaluateAutonomousBookingLane(
   }
   if (!input.holdExpiryAt || input.holdExpiryAt.getTime() <= input.now.getTime()) {
     return { eligible: false, reason: 'hold_expired' };
+  }
+  if (autonomousApproval && input.slotConflictFree !== true) {
+    return { eligible: false, reason: 'conflict_check_unavailable' };
   }
   if (!input.slotWithinBusinessHours) {
     return { eligible: false, reason: 'outside_business_hours' };

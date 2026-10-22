@@ -39,9 +39,14 @@ import {
   type VoicemailPersistedEvent,
 } from '../../src/telephony/voicemail-status-route';
 import { InMemoryLeadRepository } from '../../src/leads/in-memory-lead';
+import {
+  createVoicemailRedelivery,
+  type VoicemailRedelivery,
+} from '../../src/telephony/voicemail-redelivery';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryWebhookEventRepository } from '../../src/webhooks/in-memory-webhook-event';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
+import type { TwilioCopyRemover } from '../../src/telephony/twilio-recording-deleter';
 import type {
   StorageProvider,
   ObjectMetadata,
@@ -71,11 +76,18 @@ class FakeStorageProvider implements StorageProvider {
   public uploadKeys: string[] = [];
   public lastUploadBucket: string | null = null;
   public lastUploadContentType: string | null = null;
+  public lastUploadSizeBytes: number | null = null;
 
-  async generateUploadUrl(bucket: string, key: string, contentType: string): Promise<string> {
+  async generateUploadUrl(
+    bucket: string,
+    key: string,
+    contentType: string,
+    sizeBytes: number
+  ): Promise<string> {
     this.lastUploadBucket = bucket;
     this.uploadKeys.push(key);
     this.lastUploadContentType = contentType;
+    this.lastUploadSizeBytes = sizeBytes;
     return `https://s3.fake/${bucket}/${key}?sig=presigned-put`;
   }
   async generateDownloadUrl(bucket: string, key: string): Promise<string> {
@@ -180,6 +192,12 @@ interface HarnessOptions {
   withTranscriptionLeg?: boolean;
   /** Tenant fallback result for session-less callbacks. */
   resolveTenantId?: () => string | undefined;
+  /** PRIV-2 — the Twilio-copy delete after the whole pipeline. */
+  twilioCopyRemover?: TwilioCopyRemover;
+  /** Replace the fixed-token credential getter (outage tests). */
+  authTokenGetter?: Parameters<typeof createTelephonyRouter>[0]['authTokenGetter'];
+  /** LCR-04 — the redelivery queue for callbacks taken during an outage. */
+  redelivery?: VoicemailRedelivery;
 }
 
 function buildHarness(opts: HarnessOptions = {}) {
@@ -219,7 +237,7 @@ function buildHarness(opts: HarnessOptions = {}) {
     '/api/telephony',
     createTelephonyRouter({
       adapter,
-      authTokenGetter: () => AUTH_TOKEN,
+      authTokenGetter: opts.authTokenGetter ?? (() => AUTH_TOKEN),
       publicBaseUrl: PUBLIC_BASE_URL,
       resolveTenantId: opts.resolveTenantId ?? (() => TENANT_ID),
       pool: pool as unknown as import('pg').Pool,
@@ -245,10 +263,12 @@ function buildHarness(opts: HarnessOptions = {}) {
       },
       voicemail: {
         ...(withReceiptStore ? { webhookEventRepo } : {}),
+        ...(opts.redelivery ? { redelivery: opts.redelivery } : {}),
         options: {
           fetchRecording: fetchRecording as never,
           uploadObject: uploadObject as never,
           onVoicemailPersisted,
+          ...(opts.twilioCopyRemover ? { twilioCopyRemover: opts.twilioCopyRemover } : {}),
         },
       },
     }),
@@ -363,10 +383,12 @@ describe('U9 voicemail-status route', () => {
 
     // S3 upload used the voicemail-specific key (never the call-recording
     // key, which the live leg's <Start><Record> owns on the same CallSid).
-    const key = buildVoicemailStorageKey(TENANT_ID, 'CA-vm-1');
+    const key = buildVoicemailStorageKey(TENANT_ID, 'CA-vm-1', 'RE-vm-1');
     expect(key).toContain('-voicemail');
     expect(h.storage.uploadKeys).toEqual([key]);
     expect(h.storage.lastUploadBucket).toBe(STORAGE_BUCKET);
+    // The presign binds the exact fetched byte length as Content-Length.
+    expect(h.storage.lastUploadSizeBytes).toBe(Buffer.from('ID3FAKEVOICEMAIL').length);
 
     // voice_recordings row: idempotent insert, untrusted source, files FK.
     expect(h.pool.voiceRows).toHaveLength(1);
@@ -496,8 +518,8 @@ describe('U9 voicemail-status route', () => {
     expect(h.persistedEvents).toHaveLength(1);
     expect(h.persistedEvents[0].inserted).toBe(true);
     // Distinct S3 objects too — the voicemail key never clobbers the call leg's.
-    expect(h.storage.uploadKeys).toContain(buildVoicemailStorageKey(TENANT_ID, 'CA-vm-1'));
-    expect(h.storage.uploadKeys).toContain(`${TENANT_ID}/CA-vm-1.mp3`);
+    expect(h.storage.uploadKeys).toContain(buildVoicemailStorageKey(TENANT_ID, 'CA-vm-1', 'RE-vm-1'));
+    expect(h.storage.uploadKeys).toContain(`${TENANT_ID}/CA-vm-1-RE-live-1.mp3`);
   });
 
   it('cross-leg collision, voicemail FIRST: the later /recording callback still inserts the call-leg row', async () => {
@@ -601,5 +623,225 @@ describe('U9 voicemail-status route', () => {
     expect(await h.leadRepo.findByTenant(TENANT_ID)).toHaveLength(1);
     expect(h.pool.voiceRows).toHaveLength(0);
     expect(h.persistedEvents).toHaveLength(0);
+  });
+});
+
+// LCR-04 (review round 1) — Twilio never redelivers a recording callback that
+// answered 5xx. A voicemail recorded while the database is down (the
+// VoiceFallbackUrl voicemail, an uncached DID) must still be filed once the
+// database is back.
+describe('LCR-04 — a voicemail callback that arrives during a database outage', () => {
+  /** Routes a redelivery back into the same app, as the public URL would. */
+  function redeliverInto(app: () => express.Application) {
+    return createVoicemailRedelivery({
+      delaysMs: [20],
+      fetchImpl: (async (url: string, init: { headers: Record<string, string>; body: string }) => {
+        const path = new URL(url).pathname + new URL(url).search;
+        let req = request(app()).post(path).type('form');
+        for (const [k, v] of Object.entries(init.headers)) req = req.set(k, v);
+        const res = await req.send(init.body);
+        return { ok: res.status >= 200 && res.status < 300, status: res.status } as Response;
+      }) as unknown as typeof fetch,
+    });
+  }
+
+  it('credential lookup down (nothing cached): answered 200, then filed by redelivery once the database is back', async () => {
+    const db = { down: true };
+    let app!: express.Application;
+    const redelivery = redeliverInto(() => app);
+    const h = buildHarness({
+      authTokenGetter: () =>
+        db.down ? { outcome: 'misconfigured', reason: 'credential_lookup_failed' } : AUTH_TOKEN,
+      resolveTenantId: () => TENANT_ID,
+      redelivery,
+    });
+    app = h.app;
+
+    const res = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+    // Not a 5xx Twilio would drop: the callback is held for redelivery.
+    expect(res.status).toBe(200);
+    expect(redelivery.size()).toBe(1);
+    expect(await h.leadRepo.findByTenant(TENANT_ID)).toHaveLength(0);
+
+    // Still down at the first redelivery: kept, not dropped.
+    await new Promise((r) => {
+      setTimeout(r, 60);
+    });
+    expect(redelivery.size()).toBe(1);
+
+    db.down = false;
+    await vi.waitFor(() => expect(redelivery.size()).toBe(0), { timeout: 2_000 });
+    expect(await h.leadRepo.findByTenant(TENANT_ID)).toHaveLength(1);
+    expect(h.pool.voiceRows).toHaveLength(1);
+    expect(h.persistedEvents).toHaveLength(1);
+    redelivery.stop();
+  });
+
+  it('tenant lookup down (signature verified): answered 200, then filed by redelivery', async () => {
+    const db = { down: true };
+    let app!: express.Application;
+    const redelivery = redeliverInto(() => app);
+    const h = buildHarness({
+      resolveTenantId: (() => {
+        if (db.down) throw new Error('connection timeout');
+        return TENANT_ID;
+      }) as never,
+      redelivery,
+    });
+    app = h.app;
+
+    const res = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+    expect(res.status).toBe(200);
+    expect(redelivery.size()).toBe(1);
+
+    db.down = false;
+    await vi.waitFor(() => expect(redelivery.size()).toBe(0), { timeout: 2_000 });
+    expect(await h.leadRepo.findByTenant(TENANT_ID)).toHaveLength(1);
+    redelivery.stop();
+  });
+
+  it('a forged callback is queued but never filed: the redelivery is still signature-checked', async () => {
+    let app!: express.Application;
+    const db = { down: true };
+    const redelivery = redeliverInto(() => app);
+    const h = buildHarness({
+      authTokenGetter: () =>
+        db.down ? { outcome: 'misconfigured', reason: 'credential_lookup_failed' } : AUTH_TOKEN,
+      redelivery,
+    });
+    app = h.app;
+    const res = await request(h.app)
+      .post(`/api/telephony/voicemail-status${CALLER_QUERY}`)
+      .set('X-Twilio-Signature', 'forged')
+      .type('form')
+      .send(FINAL_PARAMS);
+    expect(res.status).toBe(200);
+    db.down = false;
+    // The redelivery is refused (403) and dropped, not retried for hours.
+    await vi.waitFor(() => expect(redelivery.size()).toBe(0), { timeout: 2_000 });
+    expect(await h.leadRepo.findByTenant(TENANT_ID)).toHaveLength(0);
+    redelivery.stop();
+  });
+});
+
+describe('PRIV-2 — the voicemail\'s Twilio copy is deleted only after the whole pipeline lands', () => {
+  it('deletes the Twilio copy after the row, the hand-off and the success receipt', async () => {
+    const order: string[] = [];
+    let h: ReturnType<typeof buildHarness>;
+    const twilioCopyRemover = vi.fn(async () => {
+      const receipt = await h.webhookEventRepo.findById(
+        'twilio_voicemail_transcription',
+        `${TENANT_ID}:RE-vm-1`,
+      );
+      order.push(`twilio_delete(rows=${h.pool.voiceRows.length},handoffs=${h.persistedEvents.length},receipt=${Boolean(receipt)})`);
+      return true;
+    });
+    h = buildHarness({ sessionCallSid: 'CA-vm-1', twilioCopyRemover });
+
+    const res = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+
+    expect(res.status).toBe(200);
+    expect(order).toEqual(['twilio_delete(rows=1,handoffs=1,receipt=true)']);
+    expect(twilioCopyRemover).toHaveBeenCalledWith({
+      tenantId: TENANT_ID,
+      voiceRecordingId: h.pool.voiceRows[0].id,
+      callSid: 'CA-vm-1',
+      recordingUrl: FINAL_PARAMS.RecordingUrl,
+    });
+  });
+
+  it('a failing hand-off keeps the Twilio copy, so the Twilio retry can still fetch it; the retry then deletes it', async () => {
+    const onVoicemailPersisted = vi
+      .fn()
+      .mockImplementationOnce(async () => {
+        throw new Error('queue unavailable');
+      })
+      .mockImplementation(async () => undefined);
+    const twilioCopyRemover = vi.fn(async () => true);
+    const h = buildHarness({ sessionCallSid: 'CA-vm-1', onVoicemailPersisted, twilioCopyRemover });
+
+    const first = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+    expect(first.status).toBe(500);
+    expect(twilioCopyRemover).not.toHaveBeenCalled();
+
+    const retry = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+    expect(retry.status).toBe(200);
+    expect(h.fetchRecording).toHaveBeenCalledTimes(2);
+    expect(twilioCopyRemover).toHaveBeenCalledOnce();
+  });
+
+  it('never deletes the Twilio copy when the S3 upload fails; the redelivery that stores it then deletes it', async () => {
+    const twilioCopyRemover = vi.fn(async () => true);
+    const uploadObject = vi
+      .fn<(url: string, bytes: Buffer, contentType: string) => Promise<void>>()
+      .mockRejectedValueOnce(new Error('S3 PUT failed 503'))
+      .mockResolvedValue(undefined);
+    const h = buildHarness({
+      sessionCallSid: 'CA-vm-1',
+      uploadObject,
+      twilioCopyRemover,
+    });
+
+    const res = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+
+    expect(res.status).toBe(500);
+    expect(h.pool.voiceRows).toHaveLength(0);
+    expect(twilioCopyRemover).not.toHaveBeenCalled();
+
+    // Positive control: Twilio retries, the upload lands, the pipeline
+    // completes, and only then is the Twilio copy deleted.
+    const retry = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+
+    expect(retry.status).toBe(200);
+    expect(h.pool.voiceRows).toHaveLength(1);
+    expect(twilioCopyRemover).toHaveBeenCalledOnce();
+    expect(twilioCopyRemover).toHaveBeenCalledWith(
+      expect.objectContaining({ voiceRecordingId: h.pool.voiceRows[0].id, recordingUrl: FINAL_PARAMS.RecordingUrl }),
+    );
+  });
+});
+
+// PRIV-2, review round 2 — the voicemail <Record> has no action, so Twilio
+// re-requests the after-hours TwiML and the caller can leave a SECOND message
+// on the same CallSid. With one storage key per call the second PUT
+// overwrote the first message's audio, and deleting each Twilio copy then
+// destroyed message 1 everywhere. Each recording gets its own key.
+describe('PRIV-2 (review round 2) — two voicemails on one call keep both messages', () => {
+  it('stores each RecordingSid under its own key, and puts each before deleting its Twilio copy', async () => {
+    const order: string[] = [];
+    const uploadObject = vi.fn(async (url: string) => {
+      order.push(`put ${new URL(url).pathname}`);
+    });
+    const twilioCopyRemover = vi.fn(async (args: { recordingUrl: string }) => {
+      order.push(`delete ${args.recordingUrl.split('/').pop()}`);
+      return true;
+    });
+    const h = buildHarness({ sessionCallSid: 'CA-vm-1', uploadObject, twilioCopyRemover });
+
+    const first = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+    const second = await signedVoicemailRequest(
+      h.app,
+      {
+        ...FINAL_PARAMS,
+        RecordingSid: 'RE-vm-2',
+        RecordingUrl: 'https://api.twilio.com/2010-04-01/Recordings/RE-vm-2',
+      },
+      CALLER_QUERY,
+    );
+
+    expect(first.status).toBe(200);
+    expect(second.status).toBe(200);
+    expect(h.storage.uploadKeys).toEqual([
+      `${TENANT_ID}/CA-vm-1-RE-vm-1-voicemail.mp3`,
+      `${TENANT_ID}/CA-vm-1-RE-vm-2-voicemail.mp3`,
+    ]);
+    expect(h.pool.voiceRows).toHaveLength(2);
+    expect(h.pool.fileRows.map((f) => f.s3_key)).toEqual(h.storage.uploadKeys);
+    expect(order).toEqual([
+      `put /${STORAGE_BUCKET}/${TENANT_ID}/CA-vm-1-RE-vm-1-voicemail.mp3`,
+      'delete RE-vm-1',
+      `put /${STORAGE_BUCKET}/${TENANT_ID}/CA-vm-1-RE-vm-2-voicemail.mp3`,
+      'delete RE-vm-2',
+    ]);
   });
 });

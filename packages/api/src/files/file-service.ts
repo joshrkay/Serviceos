@@ -89,7 +89,18 @@ export interface ObjectMetadata {
 // object's bytes are unavailable (missing key, or the dev provider which
 // discards payloads); callers must treat null as "skip processing".
 export interface StorageProvider {
-  generateUploadUrl(bucket: string, key: string, contentType: string): Promise<string>;
+  /**
+   * Presigned PUT URL. `sizeBytes` is the exact byte length the caller
+   * declared (and the route validated against its cap); real backends bind
+   * it into the signature as Content-Length so a PUT of any other length is
+   * rejected by the storage service itself.
+   */
+  generateUploadUrl(
+    bucket: string,
+    key: string,
+    contentType: string,
+    sizeBytes: number
+  ): Promise<string>;
   generateDownloadUrl(bucket: string, key: string): Promise<string>;
   getObjectMetadata(bucket: string, key: string): Promise<ObjectMetadata | null>;
   /** RV-006: fetch the full object body. Null when unavailable. */
@@ -162,6 +173,9 @@ export function validateUpload(request: UploadRequest): string[] {
   }
   if (!request.sizeBytes || request.sizeBytes <= 0) {
     errors.push('File size must be positive');
+  } else if (!Number.isSafeInteger(request.sizeBytes)) {
+    // Signed verbatim as the upload's Content-Length — must be a whole byte count.
+    errors.push('File size must be a whole number of bytes');
   } else if (request.sizeBytes > MAX_FILE_SIZE) {
     errors.push(`File size exceeds maximum of ${MAX_FILE_SIZE} bytes`);
   }

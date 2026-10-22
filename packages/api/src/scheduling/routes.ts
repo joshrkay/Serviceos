@@ -1,13 +1,15 @@
 import { Router, Response } from 'express';
 import { z } from 'zod';
 import { AuthenticatedRequest } from '../auth/clerk';
-import { requireAuth, requireTenant } from '../middleware/auth';
+import { requireAuth, requirePermission, requireTenant } from '../middleware/auth';
 import { toErrorResponse } from '../shared/errors';
 import { validate } from '../shared/validation';
 import { UserRepository } from '../users/user';
 import { SettingsRepository } from '../settings/settings';
 import { FeasibilityDependencies } from './feasibility-types';
 import { checkFeasibility } from './feasibility';
+import { suggestTechnicians } from './suggest-technicians';
+import { notFoundOnMalformedId } from '../middleware/validate-uuid-param';
 import {
   findBookableSlotsDetailed,
   schedulingConfigFromSettings,
@@ -130,6 +132,49 @@ export function createSchedulingRouter(
             notes: configNotes,
           },
         });
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  /**
+   * GET /appointments/:id/suggested-technicians — FR-2 phase 3. Every active
+   * technician checked against the visit's own window and ranked: feasible
+   * first, then the shortest known drive from their previous visit. Read-only
+   * (no audit event); the board turns a pick into a reassign_appointment
+   * proposal. Dispatch-only (dispatch:view): it lists the whole technician
+   * roster and the clashing visits' job summaries, and fans out a travel
+   * lookup per tech, none of which a technician needs.
+   */
+  router.get(
+    '/appointments/:id/suggested-technicians',
+    requireAuth,
+    requireTenant,
+    requirePermission('dispatch:view'),
+    notFoundOnMalformedId('Appointment not found'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const tenantId = req.auth!.tenantId;
+        const appointment = await deps.appointmentRepo.findById(tenantId, String(req.params.id));
+        if (!appointment) {
+          res.status(404).json({ error: 'APPOINTMENT_NOT_FOUND' });
+          return;
+        }
+        const [candidates, assignments] = await Promise.all([
+          userRepo.findByTenant(tenantId, { role: 'technician' }),
+          deps.assignmentRepo.findByAppointment(tenantId, appointment.id),
+        ]);
+        const result = await suggestTechnicians(deps, {
+          tenantId,
+          appointment,
+          candidates,
+          // Crew too: a crew member "reassigned" as primary would collide
+          // with their own existing row (no_double_booking).
+          assignedTechnicianIds: assignments.map((a) => a.technicianId),
+        });
+        res.json({ appointmentId: appointment.id, ...result });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

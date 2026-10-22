@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { isTwilioTestNumber } from '../telephony/phone-policy';
+import { PROVISIONING_FAILURE_CODES } from './provisioning-failure';
 
 const TimeOfDay = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'expected HH:MM');
 const DayHours = z.object({ open: TimeOfDay, close: TimeOfDay }).nullable();
@@ -133,10 +134,18 @@ export type OnboardingStepId = z.infer<typeof OnboardingStepIdSchema>;
 export const OnboardingStepStatusSchema = z.enum(['done', 'current', 'pending', 'error', 'skipped']);
 export type OnboardingStepStatus = z.infer<typeof OnboardingStepStatusSchema>;
 
+/**
+ * Why the phone step failed, as a closed code (onboarding/provisioning-failure.ts
+ * classifies the recorded text; the text itself never reaches the status).
+ */
+export const ProvisioningFailureCodeSchema = z.enum(PROVISIONING_FAILURE_CODES);
+
 export const OnboardingStepSchema = z.object({
   id: OnboardingStepIdSchema,
   status: OnboardingStepStatusSchema,
   blockers: z.array(z.string()).optional(),
+  /** Additive: set only on a failed phone step. */
+  failureCode: ProvisioningFailureCodeSchema.optional(),
   metadata: z.record(z.string(), z.unknown()).optional(),
 });
 export type OnboardingStep = z.infer<typeof OnboardingStepSchema>;
@@ -145,6 +154,28 @@ export const SubscriptionStatusSchema = z
   .enum(['trialing', 'active', 'past_due', 'canceled', 'incomplete'])
   .nullable();
 export type SubscriptionStatusValue = z.infer<typeof SubscriptionStatusSchema>;
+
+/**
+ * Where the approved draft's two proposals are on their way to execution
+ * (derived on read, never stored): `pending` all approved and waiting for the
+ * worker, `executing` work in flight, `executed` all done, `failed` a proposal
+ * is in `execution_failed` and every other one is approved/executing/executed
+ * (POST /draft/retry can re-queue it and the pair completes), `stopped` a
+ * proposal will never run and retry cannot recover it (undone or rejected from
+ * the inbox, expired, gone), even when another one failed: the shell must not
+ * offer Retry for it (POST /draft/retry answers 409 DRAFT_RETRY_UNSAFE). See
+ * `deriveDraftExecution` (derive-status.ts).
+ */
+export const DRAFT_EXECUTION_STATES = ['pending', 'executing', 'executed', 'failed', 'stopped'] as const;
+export type DraftExecution = (typeof DRAFT_EXECUTION_STATES)[number];
+
+/**
+ * The way out the shell may offer for a `failed` or `stopped` set (derived,
+ * never stored; `deriveDraftRecovery` in derive-status.ts): `reset` while the
+ * whole-draft reset can run, `settings` once only Settings can finish it.
+ */
+export const DRAFT_RECOVERY_HINTS = ['reset', 'settings'] as const;
+export type DraftRecovery = (typeof DRAFT_RECOVERY_HINTS)[number];
 
 export const OnboardingStatusResponseSchema = z.object({
   steps: z.array(OnboardingStepSchema).length(7),
@@ -163,5 +194,19 @@ export const OnboardingStatusResponseSchema = z.object({
   /** ISO-8601 timestamp of tenants.created_at. Lets the client tell a brand-new
    * account (welcome tour) from an established user (what's-new changelog). */
   accountCreatedAt: z.string().datetime().optional(),
+  /** "Pick, don't build" — the pre-approval draft's progress, when one exists. Additive. */
+  draft: z
+    .object({
+      status: z.enum(['draft', 'approved']),
+      choicesAnswered: z.number().int().min(0),
+      version: z.number().int().positive(),
+      /** Additive: null while the draft is still being edited (or has nothing to track). */
+      execution: z.enum(DRAFT_EXECUTION_STATES).nullable().optional(),
+      /** Additive: whether the whole-draft undo can still take back every listed proposal. Absent while editing. */
+      undoable: z.boolean().optional(),
+      /** Additive: present only while `execution` is `failed` or `stopped`. */
+      recovery: z.enum(DRAFT_RECOVERY_HINTS).optional(),
+    })
+    .optional(),
 });
 export type OnboardingStatusResponse = z.infer<typeof OnboardingStatusResponseSchema>;

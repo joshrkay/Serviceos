@@ -40,6 +40,7 @@ import {
   onboardingEstimateTemplatePayloadSchema,
   onboardingTeamMemberPayloadSchema,
   onboardingSchedulePayloadSchema,
+  onboardingVoicePolicyPayloadSchema,
 } from './contracts/onboarding';
 // P7-026 PR c — review_response_proposal schema lives in the shared
 // package (per the spec — single source of truth, re-exported via the
@@ -896,6 +897,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodType> = {
   onboarding_estimate_template: onboardingEstimateTemplatePayloadSchema,
   onboarding_team_member: onboardingTeamMemberPayloadSchema,
   onboarding_schedule: onboardingSchedulePayloadSchema,
+  onboarding_voice_policy: onboardingVoicePolicyPayloadSchema,
   review_response_proposal: reviewResponseProposalPayloadSchema,
   send_payment_reminder: sendPaymentReminderPayloadSchema,
   apply_late_fee: applyLateFeePayloadSchema,

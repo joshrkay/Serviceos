@@ -17,6 +17,16 @@
 
 export const MIN_RETRY_BUDGET_MS = 700;
 
+/**
+ * Hard ceiling on one gateway request's end-to-end deadline (GATEWAY-01).
+ * ProviderFailoverWrapper clamps `request.deadlineMs` to it and settles no
+ * later than its deadline, so this is also the longest a per-tenant quota
+ * lease can be held — the Redis lease TTL is derived from it. 60s equals the
+ * provider HTTP client's own timeout and sits well above every tuned
+ * production budget (classify 12s, complex 20s, completion probe ≤ 20s).
+ */
+export const MAX_GATEWAY_DEADLINE_MS = 60_000;
+
 export const STAGE_BUDGETS = {
   route: 100,
   connect: 500,

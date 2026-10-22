@@ -921,12 +921,16 @@ describe('BillingService', () => {
       pool.responses.set('SELECT stripe_subscription_id FROM tenants', {
         rows: [{ stripe_subscription_id: 'sub_live' }],
       });
+      // #1677 H1 — the subscription is read first (a re-click after the trial
+      // already ended must not end it again), then updated.
+      fetchFn.mockResolvedValueOnce(jsonOk({ id: 'sub_live', status: 'trialing' }));
       fetchFn.mockResolvedValueOnce(jsonOk({ id: 'sub_live', status: 'active' }));
       const svc = new BillingService({ pool: pool as never, config: { apiKey: 'sk_test' }, fetchFn });
       await svc.endTrialNow(TENANT);
 
-      expect(fetchFn.mock.calls[0][0]).toBe('https://api.stripe.com/v1/subscriptions/sub_live');
-      const body = fetchFn.mock.calls[0][1].body as URLSearchParams;
+      const update = fetchFn.mock.calls.find((c: unknown[]) => (c[1] as RequestInit).method === 'POST')!;
+      expect(update[0]).toBe('https://api.stripe.com/v1/subscriptions/sub_live');
+      const body = update[1].body as URLSearchParams;
       expect(body.get('trial_end')).toBe('now');
       expect(body.get('proration_behavior')).toBe('create_prorations');
     });
@@ -950,6 +954,7 @@ describe('BillingService', () => {
       pool.responses.set('SELECT stripe_subscription_id FROM tenants', {
         rows: [{ stripe_subscription_id: 'sub_live' }],
       });
+      fetchFn.mockResolvedValueOnce(jsonOk({ id: 'sub_live', status: 'trialing' }));
       fetchFn.mockResolvedValueOnce(jsonErr(500, { error: { message: 'stripe down' } }));
       const svc = new BillingService({ pool: pool as never, config: { apiKey: 'sk_test' }, fetchFn });
       await expect(svc.endTrialNow(TENANT)).rejects.toThrow(

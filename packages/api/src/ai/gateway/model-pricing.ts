@@ -188,18 +188,41 @@ export const MODEL_PRICING: Readonly<Record<string, ModelPriceRates>> = {
  * family (e.g. "claude-haiku-4-5-20251001" -> "claude-haiku-4-5"), mirroring
  * `isVisionCapableModel` in `config/ai-routing.ts`. Returns `null` for any
  * model not in `MODEL_PRICING` — deliberately never a guessed price.
+ *
+ * The snapshot match takes the LONGEST family the id extends (GATEWAY-04).
+ * OpenAI echoes dated ids such as "gpt-4o-mini-2024-07-18", which extends
+ * both "gpt-4o" and "gpt-4o-mini"; first-match-in-key-order priced it at
+ * gpt-4o rates whenever "gpt-4o" happened to be listed first.
  */
 export function resolveModelPricing(model: string | undefined): ModelPriceRates | null {
   if (!model) return null;
   const normalized = lastSegment(model);
   if (!normalized) return null;
-  if (MODEL_PRICING[normalized]) return MODEL_PRICING[normalized];
+  if (Object.hasOwn(MODEL_PRICING, normalized)) return MODEL_PRICING[normalized];
+  let bestFamily = '';
+  let best: ModelPriceRates | null = null;
   for (const [family, rates] of Object.entries(MODEL_PRICING)) {
-    if (normalized === family || normalized.startsWith(`${family}-`)) {
-      return rates;
+    if (normalized.startsWith(`${family}-`) && family.length > bestFamily.length) {
+      bestFamily = family;
+      best = rates;
     }
   }
-  return null;
+  return best;
+}
+
+/**
+ * The models in `models` that have no price, so every call they serve would
+ * record `costMicroCents: null` (GATEWAY-04). The gateway factory logs these
+ * at boot: unpriced spend is a deliberate fail-safe, but it must never be
+ * silent. De-duplicated, in input order.
+ */
+export function findUnpricedModels(models: ReadonlyArray<string | undefined>): string[] {
+  const unpriced: string[] = [];
+  for (const model of models) {
+    if (!model || unpriced.includes(model)) continue;
+    if (resolveModelPricing(model) === null) unpriced.push(model);
+  }
+  return unpriced;
 }
 
 /**

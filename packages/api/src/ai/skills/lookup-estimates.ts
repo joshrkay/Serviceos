@@ -18,10 +18,13 @@ import type {
   LookupEventService,
   RecordLookupEventInput,
 } from '../../lookup-events/lookup-event-service';
+import { customerJobsForLookup } from './customer-jobs';
 
 export interface LookupEstimatesInput {
   tenantId: string;
   customerId: string;
+  /** Only this job's records: the job on screen, or one the operator named and the resolver verified. */
+  jobId?: string;
   /** Max estimates returned (most recent first). Default 5. */
   limit?: number;
   timezone?: string;
@@ -143,7 +146,7 @@ export async function lookupEstimates(
 
   let jobs;
   try {
-    jobs = await deps.jobRepo.findByCustomer(input.tenantId, input.customerId, {
+    jobs = await customerJobsForLookup(deps.jobRepo, input.tenantId, input.customerId, input.jobId, {
       includeArchived: true,
     });
   } catch (err) {

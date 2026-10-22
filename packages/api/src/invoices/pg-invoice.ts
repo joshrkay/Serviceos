@@ -8,10 +8,14 @@ import {
   InvoiceRepository,
   InvoiceStatus,
   InvoiceUpdate,
+  type AttachPaymentLinkResult,
   DEFAULT_INVOICE_LIMIT,
   MAX_INVOICE_LIMIT,
+  clampCleanupPageSize,
 } from './invoice';
 import { LineItem } from '../shared/billing-engine';
+import { PAYMENT_MODE_READ_SQL, paymentModeLockKey } from './payment-collection-mode';
+import { LIVE_PAYMENT_LINK_PREDICATE } from './payment-mode-change';
 import { mapLineItemRow, mapDocumentTotalsRow } from '../shared/document-row-mappers';
 import { INVOICE_LIST_SORT, type InvoiceSortField } from '@ai-service-os/shared';
 import { sqlOrderBy, customerNameViaJobSql } from '../shared/list-sort';
@@ -306,6 +310,9 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       if (updates.stripePaymentLinkId !== undefined) {
         setClauses.push(`stripe_payment_link_id = $${paramIndex++}`);
         values.push(updates.stripePaymentLinkId);
+        // S5a-3 — the cleanup claim belongs to the link it claimed: any write
+        // of the link id drops it in the same statement (migration 322).
+        setClauses.push('cleanup_claimed_at = NULL');
       }
       if (updates.stripePaymentLinkUrl !== undefined) {
         setClauses.push(`stripe_payment_link_url = $${paramIndex++}`);
@@ -410,6 +417,86 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
     });
   }
 
+  async applyNonTaxableAdjustmentAtomic(
+    tenantId: string,
+    id: string,
+    line: LineItem,
+    now: Date,
+  ): Promise<Invoice | null> {
+    // Review L2 — this write never re-derives taxable_subtotal / tax, so a
+    // taxable line would silently leave tax stale: refuse it before any write.
+    if (line.taxable) {
+      throw new Error('applyNonTaxableAdjustmentAtomic requires a non-taxable line (tax is not re-derived)');
+    }
+    return this.withTenantTransaction(tenantId, async (client) => {
+      // #10 — one UPDATE deriving the new subtotal/total/due from the row's
+      // OWN current values (the SQL mirror of applyNonTaxableAdjustment: a
+      // non-taxable line moves the subtotal by its amount, leaves tax and
+      // discount alone and re-derives the surcharge), so a payment committed
+      // by incrementAmountPaidAtomic between the caller's read and this write is reflected in amount_due instead
+      // of being overwritten by a snapshot-derived figure, and two
+      // concurrent adjustments both apply. Column references on the right
+      // side read the PRE-update row. Both predicates are evaluated against
+      // the LIVE row: the status guard means a void/settle committing after
+      // the caller's status check matches 0 rows instead of re-pricing a
+      // dead invoice; the balance guard means a credit larger than the live
+      // amount due (a payment landed first) matches 0 rows, and the clearing
+      // floor keeps amount_paid <= total_cents (L4); the positive-adjustment
+      // guard means a late fee never lands on an invoice whose live balance
+      // is already $0 (a credit cleared it). Status is derived in the same
+      // statement (review M2): a credit that clears the balance of an invoice
+      // the customer has partly paid settles it as 'paid'; one with nothing
+      // paid stays as it was (a credit is not a payment — product posture,
+      // pinned in apply-credit-handler.test.ts). The line insert rides the
+      // same transaction, so the ledger (Σ lines == subtotal, L2) moves
+      // together.
+      //
+      // Review M3 — the processing-fee surcharge is re-derived at the stored
+      // processing_fee_bps on the new chargeable amount (subtotal' − discount
+      // + tax), mirroring applyBps' round-half-up (ROUND(numeric) rounds half
+      // away from zero; the base is clamped ≥ 0, so they agree). The new
+      // total is the old total + the adjustment + the surcharge change.
+      //
+      // Review N1 — a credit is judged against the live, surcharge-inclusive
+      // amount due (`-$3 <= total - paid`) and carries its share of the
+      // surcharge. One that reaches past the surcharge-free balance CLEARS
+      // the invoice: total = paid, and the surcharge keeps only the
+      // remainder that keeps total = subtotal − discount + tax + fee (L2b).
+      // Mirrors applyNonTaxableAdjustment(totals, adj, amountPaid).
+      const rateFee = `CASE WHEN COALESCE(processing_fee_bps, 0) > 0
+          THEN ROUND(GREATEST(0, subtotal_cents + $3 - discount_cents + tax_cents)::numeric
+                     * processing_fee_bps / 10000)::integer
+          ELSE processing_fee_cents END`;
+      const rateTotal = `(total_cents + $3 + COALESCE(${rateFee}, 0) - COALESCE(processing_fee_cents, 0))`;
+      const clears = `(${rateTotal} < amount_paid_cents)`;
+      const newFee = `CASE WHEN ${clears}
+          THEN amount_paid_cents - (subtotal_cents + $3 - discount_cents + tax_cents)
+          ELSE ${rateFee} END`;
+      const newTotal = `GREATEST(${rateTotal}, amount_paid_cents)`;
+      const { rows } = await client.query<{ id: string }>(
+        `UPDATE invoices
+         SET subtotal_cents       = subtotal_cents + $3,
+             processing_fee_cents = ${newFee},
+             total_cents          = ${newTotal},
+             amount_due_cents     = GREATEST(0, ${newTotal} - amount_paid_cents),
+             status = CASE
+               WHEN amount_paid_cents > 0 AND ${newTotal} - amount_paid_cents <= 0 THEN 'paid'
+               ELSE status
+             END,
+             updated_at           = $4
+         WHERE id = $2 AND tenant_id = $1
+           AND status IN ('open', 'partially_paid')
+           AND ($3 >= 0 OR -$3 <= total_cents - amount_paid_cents)
+           AND ($3 < 0 OR total_cents - amount_paid_cents > 0)
+         RETURNING id`,
+        [tenantId, id, line.totalCents, now],
+      );
+      if (rows.length === 0) return null;
+      await this.insertLineItems(client, tenantId, id, [line]);
+      return this.findByIdWithClient(client, tenantId, id);
+    });
+  }
+
   async decrementAmountPaidAtomic(
     tenantId: string,
     id: string,
@@ -486,34 +573,81 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
   }
 
   /**
-   * P0-9 (mint leg) — guarded link persist: the payable-status, exact-balance
-   * and no-existing-link predicates live in the UPDATE itself, so a link
-   * minted concurrently with a void/credit (or with another mint) can never
-   * be attached to an invoice it no longer prices. Null → the caller must
-   * deactivate the link it just minted.
+   * P0-9 (mint leg) + S5a-4 (U8) — guarded link persist under the shared
+   * per-tenant payment-mode lock. Three statements, in this order:
+   *
+   *   1. `pg_advisory_xact_lock_shared(hashtext('payment_mode:<tenant>'))` —
+   *      a statement of its own, so statement 2's READ COMMITTED snapshot is
+   *      taken AFTER the grant. Shared, so concurrent checkouts of one tenant
+   *      never queue on each other; the settings write that names
+   *      `payment_collection_mode` takes the same key EXCLUSIVELY, so it
+   *      either waits for this attach to commit (its cleanup then finds the
+   *      link) or commits first (and statement 2 sees its value) — whether
+   *      or not a settings row existed before, because the key exists for
+   *      every tenant where a row may not.
+   *   2. The mode: `COALESCE(stored, 'pay_link')` — a missing row and an
+   *      unset key are both the D-039/D-040 default.
+   *   3. The guarded UPDATE: payable status, exact balance, no other link,
+   *      and the mode predicate again as belt and braces.
+   *
+   * All three run inside a SAVEPOINT. On the operator route this method
+   * runs on the request-scoped client (pg-base.ts), whose transaction ends
+   * only at the response; a refusal or a throw therefore rolls back to the
+   * savepoint, which RELEASES the lock taken inside it (so the caller's
+   * follow-up Stripe deactivation never runs under it) and leaves the
+   * request transaction usable for the caller's audit rows and CAS clear.
+   * Only a stored link keeps the lock, until the commit that publishes it.
    */
-  async setPaymentLinkIfPayable(
+  async attachPaymentLink(
     tenantId: string,
     id: string,
     link: { linkId: string; linkUrl: string },
     expectedAmountDueCents: number,
     now: Date,
-  ): Promise<Invoice | null> {
+  ): Promise<AttachPaymentLinkResult> {
     return this.withTenantTransaction(tenantId, async (client) => {
-      const { rows } = await client.query<{ id: string }>(
-        `UPDATE invoices
-         SET stripe_payment_link_id = $3,
-             stripe_payment_link_url = $4,
-             updated_at = $5
-         WHERE id = $2 AND tenant_id = $1
-           AND status IN ('open', 'partially_paid')
-           AND amount_due_cents = $6
-           AND stripe_payment_link_id IS NULL
-         RETURNING id`,
-        [tenantId, id, link.linkId, link.linkUrl, now, expectedAmountDueCents],
-      );
-      if (rows.length === 0) return null;
-      return this.findByIdWithClient(client, tenantId, id);
+      await client.query('SAVEPOINT attach_payment_link');
+      let result: AttachPaymentLinkResult;
+      try {
+        await client.query('SELECT pg_advisory_xact_lock_shared(hashtext($1))', [paymentModeLockKey(tenantId)]);
+        const { rows: modeRows } = await client.query<{ mode: string }>(PAYMENT_MODE_READ_SQL, [tenantId]);
+        if (modeRows[0]?.mode !== 'pay_link') {
+          result = { ok: false, reason: 'mode_not_pay_link' };
+        } else {
+          const { rows } = await client.query<{ id: string }>(
+            `UPDATE invoices
+             SET stripe_payment_link_id = $3,
+                 stripe_payment_link_url = $4,
+                 cleanup_claimed_at = NULL,
+                 updated_at = $5
+             WHERE id = $2 AND tenant_id = $1
+               AND status IN ('open', 'partially_paid')
+               AND amount_due_cents = $6
+               AND stripe_payment_link_id IS NULL
+               AND COALESCE(
+                 (SELECT payment_collection_mode FROM tenant_settings WHERE tenant_id = $1),
+                 'pay_link'
+               ) = 'pay_link'
+             RETURNING id`,
+            [tenantId, id, link.linkId, link.linkUrl, now, expectedAmountDueCents],
+          );
+          const invoice = rows.length > 0 ? await this.findByIdWithClient(client, tenantId, id) : null;
+          result = invoice ? { ok: true, invoice } : { ok: false, reason: 'not_payable' };
+        }
+      } catch (err) {
+        await client
+          .query('ROLLBACK TO SAVEPOINT attach_payment_link')
+          .then(() => client.query('RELEASE SAVEPOINT attach_payment_link'))
+          .catch(() => undefined);
+        throw err;
+      }
+      if (result.ok) {
+        await client.query('RELEASE SAVEPOINT attach_payment_link');
+      } else {
+        await client.query('ROLLBACK TO SAVEPOINT attach_payment_link');
+        await client.query('RELEASE SAVEPOINT attach_payment_link');
+      }
+      return result;
     });
   }
 
@@ -532,10 +666,47 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
         `UPDATE invoices
          SET stripe_payment_link_id = NULL,
              stripe_payment_link_url = NULL,
+             cleanup_claimed_at = NULL,
              updated_at = NOW()
          WHERE id = $2 AND tenant_id = $1
            AND stripe_payment_link_id = $3`,
         [tenantId, id, expectedLinkId],
+      );
+      return (rowCount ?? 0) > 0;
+    });
+  }
+
+  /**
+   * S5a-3 (U8) — keyset page of the tenant's invoices that can still capture
+   * money through a hosted link (served by migration 322's partial index).
+   */
+  async findOpenWithPaymentLink(tenantId: string, afterId: string | null, limit: number): Promise<Invoice[]> {
+    return this.withTenant(tenantId, async (client) => {
+      const { rows } = await client.query(
+        `SELECT * FROM invoices
+          WHERE tenant_id = $1
+            AND ${LIVE_PAYMENT_LINK_PREDICATE}
+            AND ($2::uuid IS NULL OR id > $2::uuid)
+          ORDER BY id
+          LIMIT $3`,
+        [tenantId, afterId, clampCleanupPageSize(limit)],
+      );
+      return this.mapRowsToInvoices(client, tenantId, rows);
+    });
+  }
+
+  /**
+   * S5a-3 (U8) — drop the cleanup claim marker only while the row still
+   * holds `linkId` (CAS on the link id). The link columns are untouched.
+   */
+  async releaseCleanupClaim(tenantId: string, id: string, linkId: string): Promise<boolean> {
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const { rowCount } = await client.query(
+        `UPDATE invoices
+            SET cleanup_claimed_at = NULL
+          WHERE id = $2 AND tenant_id = $1
+            AND stripe_payment_link_id = $3`,
+        [tenantId, id, linkId],
       );
       return (rowCount ?? 0) > 0;
     });
@@ -690,6 +861,7 @@ export class PgInvoiceRepository extends PgBaseRepository implements InvoiceRepo
       viewCount: row.view_count !== undefined && row.view_count !== null ? Number(row.view_count) : undefined,
       stripePaymentLinkId: row.stripe_payment_link_id ?? undefined,
       stripePaymentLinkUrl: row.stripe_payment_link_url ?? undefined,
+      cleanupClaimedAt: row.cleanup_claimed_at ? new Date(row.cleanup_claimed_at) : undefined,
       originatingLeadId: row.originating_lead_id ?? undefined,
       scheduleId: row.schedule_id ?? undefined,
       milestoneIndex:

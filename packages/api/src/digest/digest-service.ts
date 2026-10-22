@@ -21,7 +21,7 @@ import type { EstimateRepository } from '../estimates/estimate';
 import type { JobRepository } from '../jobs/job';
 import type { AppointmentRepository } from '../appointments/appointment';
 import type { ProposalRepository, Proposal, ProposalStatus } from '../proposals/proposal';
-import { missingFieldsFor } from '../proposals/proposal';
+import { laneBookingUndoneByOwner, missingFieldsFor } from '../proposals/proposal';
 import type { CustomerRepository } from '../customers/customer';
 import type { SettingsRepository } from '../settings/settings';
 import type { CorrectionLessonRepository } from '../learning/corrections/correction-lesson';
@@ -30,6 +30,7 @@ import type { SupervisorReview } from '../ai/supervisor/types';
 import type { AuditRepository } from '../audit/audit';
 import { prioritizeProposals } from '../proposals/prioritization';
 import { AUTO_APPROVE_BLOCKING_CONFIDENCE_LEVELS } from '../proposals/auto-approve';
+import { voidsCustomerAcceptance } from '../proposals/acceptance-void';
 import { findJobsRequiringInvoicing } from '../invoices/invoicing-queue';
 import {
   resolveDayWindow,
@@ -60,12 +61,20 @@ export interface DigestPendingApproval {
    */
   overallConfidence?: string;
   /**
-   * True when the proposal's confidence is too low for a one-tap link.
+   * True when the proposal's confidence is too low for a one-tap link, or
+   * when approving it voids a customer's signed acceptance (OVAS-01).
    * The web digest view uses this to route the operator to the in-app
    * review flow instead of offering a one-tap approve button.
    * Absent (falsy) when one-tap is allowed.
    */
   reviewInApp?: true;
+  /**
+   * OVAS-01 — true when the payload carries the RV-042 acceptance-void
+   * marker: approving voids the customer's signed acceptance. The worker
+   * keeps such a proposal out of the one-tap links and the APPROVE ALL set
+   * so a human sees the warning before it can execute. Absent otherwise.
+   */
+  voidsAcceptance?: true;
   /**
    * True when the proposal has unresolved `missingFields` (e.g. an ambiguous
    * catalog line on a draft estimate). `approveProposal` rejects such
@@ -151,15 +160,19 @@ export interface DigestSupervisorChecks {
 
 /**
  * D-015 amendment — "Auto-booked: N appointment(s)" reflection. `undone` is a
- * real signal (status 'undone' AT GENERATION TIME, same snapshot caveat as
- * unsureAbout/DigestUnsureOutcome) — a real owner one-tap UNDO on an
- * autonomous-lane booking sets this status (proposals/one-tap-undo.ts), so
- * unlike WS6's dropped `flaggedFixed` this count is not an approximation.
+ * real signal AT GENERATION TIME (same snapshot caveat as
+ * unsureAbout/DigestUnsureOutcome): only the owner's one-tap UNDO counts,
+ * before execution (status 'undone') or after it (the route's
+ * `sourceContext.ownerUndo` stamp). A later cancellation by the customer or
+ * from the app is not an UNDO, so this count is not an approximation.
  */
 export interface DigestAutonomousBookings {
-  /** Autonomous-lane-eligible proposals created today (capped at DIGEST_MAX_AUTONOMOUS_BOOKINGS). */
+  /**
+   * Lane bookings the machine booked today (`findAutonomousLaneApprovedForDay`;
+   * capped at DIGEST_MAX_AUTONOMOUS_BOOKINGS).
+   */
   count: number;
-  /** Of those, status 'undone' at generation time. */
+  /** Of those, undone by the owner's one-tap UNDO (`laneBookingUndoneByOwner`). */
   undone: number;
 }
 
@@ -407,6 +420,7 @@ export function summarizeProposalForDigest(proposal: Proposal): DigestPendingApp
   const customerName = extractCustomerName(proposal);
   const overallConfidence = extractOverallConfidence(proposal.payload ?? {});
   const hasMissingFields = missingFieldsFor(proposal).length > 0;
+  const voidsAcceptance = voidsCustomerAcceptance(proposal.payload);
   return {
     proposalId: proposal.id,
     proposalType: proposal.proposalType,
@@ -414,8 +428,11 @@ export function summarizeProposalForDigest(proposal: Proposal): DigestPendingApp
     ...(customerName !== undefined ? { customerName } : {}),
     ...(amountCents !== undefined ? { amountCents } : {}),
     ...(overallConfidence !== undefined ? { overallConfidence } : {}),
-    ...(isBlockingConfidence(overallConfidence) ? { reviewInApp: true as const } : {}),
+    ...(isBlockingConfidence(overallConfidence) || voidsAcceptance
+      ? { reviewInApp: true as const }
+      : {}),
     ...(hasMissingFields ? { hasMissingFields: true as const } : {}),
+    ...(voidsAcceptance ? { voidsAcceptance: true as const } : {}),
   };
 }
 
@@ -1046,11 +1063,14 @@ export async function computeDigestPayload(
   // D-015 amendment — "Auto-booked: N appointment(s)" reflection. Omitted
   // when no autonomous-lane bookings ran today (count===0), per the "omit if
   // zero" convention shared with unsureAbout/learnedToday/supervisorChecks.
+  // Undone = the owner's UNDO before execution (status 'undone') or after
+  // it (the 'executed' proposal's ownerUndo stamp — the common case once the
+  // 5 s window has passed). Read from the rows already loaded: no lookups.
   const autonomousBookings: DigestAutonomousBookings | undefined =
     autonomousLaneProposals.length > 0
       ? {
           count: autonomousLaneProposals.length,
-          undone: autonomousLaneProposals.filter((p) => p.status === 'undone').length,
+          undone: autonomousLaneProposals.filter(laneBookingUndoneByOwner).length,
         }
       : undefined;
 

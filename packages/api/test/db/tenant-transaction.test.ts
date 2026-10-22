@@ -6,6 +6,7 @@ import {
   withTenantConnection,
 } from '../../src/db/tenant-transaction';
 import { tenantContextStore } from '../../src/middleware/tenant-context';
+import { PgBaseRepository } from '../../src/db/pg-base';
 
 const tenantId = '550e8400-e29b-41d4-a716-446655440000';
 
@@ -57,6 +58,33 @@ describe('PgTenantTransactionRunner', () => {
     });
 
     expect(seenTenant).toBe(tenantId);
+  });
+
+  it('TI-01 — work that outlives run() opens its own transaction instead of reusing the settled client', async () => {
+    // A `void` spawn inside the unit of work inherits the runner's
+    // AsyncLocalStorage entry. After COMMIT + release that client belongs to
+    // whoever checks it out next, so a late repo call must start over.
+    const { pool, calls } = fakePool();
+    class LateRepo extends PgBaseRepository {
+      touch(t: string): Promise<unknown> {
+        return this.withTenant(t, (client) => client.query('UPDATE ai_runs SET status = $1', ['completed']));
+      }
+    }
+    const repo = new LateRepo(pool);
+    const runner = new PgTenantTransactionRunner(pool);
+
+    let late: Promise<unknown> | undefined;
+    await runner.run(tenantId, async () => {
+      late = new Promise((r) => setTimeout(r, 5)).then(() => repo.touch(tenantId));
+    });
+    await late;
+
+    const texts = calls.map((c) => c.text);
+    const afterRunnerCommit = texts.slice(texts.indexOf('COMMIT') + 1);
+    expect(afterRunnerCommit[0]).toBe('BEGIN');
+    expect(afterRunnerCommit[1]).toContain("set_config('app.current_tenant_id'");
+    expect(afterRunnerCommit).toContain('UPDATE ai_runs SET status = $1');
+    expect(afterRunnerCommit).toContain('COMMIT');
   });
 
   it('takes a transaction-scoped advisory lock when lock() is called', async () => {

@@ -1,5 +1,6 @@
 import NodeWebSocket from 'ws';
 import { TranscriptionProvider } from './voice-service';
+import type { DownloadUrlPolicy, DownloadUrlRejection } from '../files/download-url-policy';
 
 export type FetchLike = typeof fetch;
 
@@ -106,12 +107,44 @@ export class WhisperServerError extends Error {
 }
 
 export class WhisperClientError extends Error {
-  readonly code = 'WHISPER_CLIENT_ERROR';
-  readonly retriable = false;
+  readonly code: string = 'WHISPER_CLIENT_ERROR';
+  readonly retriable: boolean = false;
   constructor(public readonly status: number, public readonly body: string) {
     super(`Whisper client error ${status}: ${body}`);
     this.name = 'WhisperClientError';
   }
+}
+
+/**
+ * H2 — the audio URL is not one the configured storage provider mints, so it
+ * is never fetched. Non-retriable: the same URL is refused on every attempt.
+ * The message names the rule, never the URL (it becomes the recording's
+ * user-visible errorMessage).
+ */
+export class AudioUrlRejectedError extends Error {
+  readonly code = 'AUDIO_URL_REJECTED';
+  readonly retriable = false;
+  constructor(public readonly reason: DownloadUrlRejection) {
+    super(`Audio URL refused: not a download URL of the configured storage (${reason})`);
+    this.name = 'AudioUrlRejectedError';
+  }
+}
+
+export interface WhisperTranscriptionProviderOptions {
+  apiKey: string;
+  /**
+   * H2 — only URLs this policy accepts are fetched. Required, no default:
+   * production builds it from the storage config (createStorageProvider's
+   * `downloadUrlPolicy`), so a missing wire is a compile error, not an
+   * open fetch.
+   */
+  audioUrlPolicy: DownloadUrlPolicy;
+  model?: string;
+  fetchImpl?: FetchLike;
+  timeoutMs?: number;
+  maxBytes?: number;
+  /** Where audio-fetch diagnostics go (the URL never goes into an error). */
+  logger?: Pick<Console, 'warn'>;
 }
 
 export interface WhisperTranscribeOptions {
@@ -121,32 +154,87 @@ export interface WhisperTranscribeOptions {
 }
 
 export class WhisperTranscriptionProvider implements TranscriptionProvider {
-  constructor(
-    private readonly apiKey: string,
-    private readonly model: string = 'whisper-1',
-    private readonly fetchImpl: FetchLike = fetch,
-    private readonly timeoutMs: number = 30_000,
-    private readonly maxBytes: number = WHISPER_MAX_BYTES
-  ) {}
+  private readonly apiKey: string;
+  private readonly audioUrlPolicy: DownloadUrlPolicy;
+  private readonly model: string;
+  private readonly fetchImpl: FetchLike;
+  private readonly timeoutMs: number;
+  private readonly maxBytes: number;
+  private readonly logger: Pick<Console, 'warn'>;
+
+  constructor(options: WhisperTranscriptionProviderOptions) {
+    this.apiKey = options.apiKey;
+    this.audioUrlPolicy = options.audioUrlPolicy;
+    this.model = options.model ?? 'whisper-1';
+    this.fetchImpl = options.fetchImpl ?? fetch;
+    this.timeoutMs = options.timeoutMs ?? 30_000;
+    this.maxBytes = options.maxBytes ?? WHISPER_MAX_BYTES;
+    this.logger = options.logger ?? console;
+  }
 
   async transcribe(
     audioUrl: string,
     options: WhisperTranscribeOptions = {}
   ): Promise<TranscriptionResult> {
-    // 1) Fetch audio bytes from the signed URL.
-    const audioRes = await this.fetchImpl(audioUrl);
-    if (!audioRes.ok) {
-      throw new WhisperClientError(
-        audioRes.status,
-        `Failed to fetch audio from ${audioUrl}: HTTP ${audioRes.status}`
-      );
+    // 0) H2 — never fetch a URL the configured storage did not mint.
+    const rejection = this.audioUrlPolicy.rejectionFor(audioUrl);
+    if (rejection) {
+      this.logger.warn('[transcription] audio URL refused by storage policy', {
+        reason: rejection,
+        audio: withoutQuery(audioUrl),
+      });
+      throw new AudioUrlRejectedError(rejection);
     }
-    const audioBlob = await audioRes.blob();
 
-    // 2) Pre-flight size guard — reject before upload to save bandwidth and
-    //    return a clear error rather than letting OpenAI return a 413.
-    if (audioBlob.size > this.maxBytes) {
-      throw new WhisperFileTooLargeError(audioBlob.size, this.maxBytes);
+    // 1) Fetch audio bytes from the signed URL — bounded in time (H2: fetch
+    //    has no default timeout; a stalled GET would pin the worker) and
+    //    never redirected: the policy vetted THIS URL, not wherever a 3xx
+    //    points (storage presigned GETs answer directly).
+    const audioSignal = AbortSignal.timeout(this.timeoutMs);
+    let audioRes: Response;
+    try {
+      audioRes = await this.fetchImpl(audioUrl, { signal: audioSignal, redirect: 'error' });
+    } catch (err) {
+      if (audioSignal.aborted) {
+        throw new WhisperTimeoutError(this.timeoutMs);
+      }
+      throw err;
+    }
+    if (!audioRes.ok) {
+      // H2 — never the URL: this message becomes the recording's
+      // user-visible errorMessage, and the URL is a presigned secret.
+      await audioRes.body?.cancel().catch(() => undefined);
+      this.logger.warn('[transcription] audio fetch failed', {
+        status: audioRes.status,
+        audio: withoutQuery(audioUrl),
+      });
+      const message = `Failed to fetch audio: HTTP ${audioRes.status}`;
+      // Storage 5xx / 429 is transient (retriable); any other status is not.
+      if (audioRes.status >= 500 || audioRes.status === 429) {
+        throw new WhisperServerError(audioRes.status, message);
+      }
+      throw new WhisperClientError(audioRes.status, message);
+    }
+    // H2 — a declared length over the cap is refused before a byte is read.
+    const declaredBytes = Number(audioRes.headers.get('content-length'));
+    if (Number.isFinite(declaredBytes) && declaredBytes > this.maxBytes) {
+      await audioRes.body?.cancel().catch(() => undefined);
+      throw new WhisperFileTooLargeError(declaredBytes, this.maxBytes);
+    }
+
+    // 2) Read the body under a byte cap — rejects (and cancels the stream)
+    //    on the chunk that crosses the cap, so neither a lying nor a missing
+    //    Content-Length can make the process buffer an unbounded response.
+    //    The cap is Whisper's own upload limit, so this also stands in for
+    //    the old post-download size check.
+    let audioBlob: Blob;
+    try {
+      audioBlob = await readBodyCapped(audioRes, this.maxBytes);
+    } catch (err) {
+      if (audioSignal.aborted) {
+        throw new WhisperTimeoutError(this.timeoutMs);
+      }
+      throw err;
     }
 
     // 3) Build multipart form. Field names are required by Whisper.
@@ -194,6 +282,9 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
       if (res.status >= 500) {
         throw new WhisperServerError(res.status, body);
       }
+      if (res.status === 401 || res.status === 403) {
+        throw new WhisperAuthError(res.status, body);
+      }
       throw new WhisperClientError(res.status, body);
     }
 
@@ -207,6 +298,56 @@ export class WhisperTranscriptionProvider implements TranscriptionProvider {
       },
     };
   }
+}
+
+/**
+ * H2 review round 2 (N1) — Whisper rejected OUR credentials (401/403: a
+ * revoked or rotated OpenAI key). Not input-determined, so not terminal:
+ * marked retriable so the transcription worker hands it to the queue's
+ * retry → dead-letter path, where a key outage shows up in the DLQ depth
+ * gauge instead of vanishing as acked jobs. Still a WhisperClientError.
+ */
+export class WhisperAuthError extends WhisperClientError {
+  readonly code = 'WHISPER_AUTH_FAILED';
+  readonly retriable = true;
+  constructor(status: number, body: string) {
+    super(status, body);
+    this.name = 'WhisperAuthError';
+  }
+}
+
+/** H2 — origin + path only: a presigned URL's query string is its signature. */
+function withoutQuery(url: string): string {
+  try {
+    const parsed = new URL(url);
+    return `${parsed.origin}${parsed.pathname}`;
+  } catch {
+    return '<unparseable url>';
+  }
+}
+
+/**
+ * H2 — drain `res.body` into a Blob typed by its Content-Type, throwing
+ * {@link WhisperFileTooLargeError} (after cancelling the stream) as soon as
+ * more than `maxBytes` have arrived.
+ */
+async function readBodyCapped(res: Response, maxBytes: number): Promise<Blob> {
+  const type = res.headers.get('content-type') ?? '';
+  if (!res.body) return new Blob([], { type });
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    received += value.byteLength;
+    if (received > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw new WhisperFileTooLargeError(received, maxBytes);
+    }
+    chunks.push(value);
+  }
+  return new Blob(chunks, { type });
 }
 
 async function safeReadText(res: Response): Promise<string> {
@@ -239,6 +380,16 @@ export interface StreamingTranscriptEvent {
   transcript: string;
   confidence: number;
   isFinal: boolean;
+  /**
+   * U1 (voice parity) — `final` only: when the caller's LAST word ended, in
+   * milliseconds on the provider's own stream clock (Deepgram counts from the
+   * first sample it received). The adapter anchors that clock to wall time at
+   * the first sample it forwards, so the reply gap is measured from the moment
+   * the caller stopped speaking rather than from the recogniser's endpoint.
+   * Absent when the provider sent no timing for the sentence; the turn then
+   * keeps `last_word_at` null rather than guessing.
+   */
+  lastWordEndMs?: number;
 }
 
 export type StreamingTranscriptCallback = (event: StreamingTranscriptEvent) => void;
@@ -246,9 +397,14 @@ export type StreamingTranscriptCallback = (event: StreamingTranscriptEvent) => v
 export interface StreamingSession {
   /** Push raw PCM audio (16 kHz, 16-bit mono LE) into the stream. */
   send(chunk: Buffer): void;
-  /** Signal end of audio — provider flushes any pending results, then closes. */
+  /**
+   * Signal end of audio, then close. The session emits no further events:
+   * results the provider sends while closing — including the rest of a
+   * sentence that was cut off — are dropped, so no turn is dispatched into a
+   * leg that is tearing down (LCR-03).
+   */
   finish(): void;
-  /** Abort immediately without waiting for results. */
+  /** Abort immediately without waiting for results; emits no further events. */
   destroy(): void;
 }
 
@@ -310,6 +466,31 @@ function stripKeytermWeightSuffix(term: string): string {
   return term.replace(/:\d+$/, '');
 }
 
+/**
+ * U1 — the end (ms, stream clock) of a Deepgram `Results` segment's last word:
+ * the last `words[].end` when word timing is present, else `start + duration`
+ * (the segment's audio span). `null` when the frame carried neither.
+ */
+export function segmentLastWordEndMs(
+  start: number | undefined,
+  duration: number | undefined,
+  words: ReadonlyArray<{ end?: number }> | undefined,
+): number | null {
+  const lastWord = words && words.length > 0 ? words[words.length - 1]?.end : undefined;
+  if (typeof lastWord === 'number' && Number.isFinite(lastWord)) {
+    return Math.round(lastWord * 1000);
+  }
+  if (
+    typeof start === 'number' &&
+    Number.isFinite(start) &&
+    typeof duration === 'number' &&
+    Number.isFinite(duration)
+  ) {
+    return Math.round((start + duration) * 1000);
+  }
+  return null;
+}
+
 export class DeepgramStreamingProvider implements StreamingTranscriptionProvider {
   private readonly defaultLanguage: 'en' | 'es';
   /** A2 — Deepgram model pin; drives which boost param buildWsUrl emits. */
@@ -341,6 +522,10 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
       'wss://api.deepgram.com/v1/listen' +
       `?model=${this.model}&language=${language}&encoding=linear16&sample_rate=16000` +
       `&channels=1&interim_results=true&smart_format=true&endpointing=${endpointing}`;
+    // PRIV-3 — have Deepgram redact a recited card number before it reaches
+    // us. Entity (`pci`) redaction is English-only on streaming; Spanish
+    // relies on the app-side scrubber in callerTranscriptText.
+    if (language === 'en') url += '&redact=pci';
     if (options.keywords && options.keywords.length > 0) {
       // A2 — Nova-3 replaced Deepgram's legacy `keywords` boost param with
       // `keyterm` prompting; `keywords` is a Nova-2-era feature that Nova-3
@@ -373,6 +558,10 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
         .join('&');
       url += `&${params}`;
     }
+    // LCR-03 — ask for an UtteranceEnd frame after 1 s without a word, the
+    // end-of-sentence signal for segments that never get a speech_final
+    // (requires interim_results=true, set above).
+    url += '&utterance_end_ms=1000';
     return url;
   }
 
@@ -444,21 +633,102 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
       );
     });
 
+    // LCR-03 — one caller sentence is one `final`. With interim_results on,
+    // Deepgram closes segments mid-sentence (`is_final:true,
+    // speech_final:false`) and marks the end of the sentence with
+    // `speech_final:true` — often on an EMPTY trailing segment — or, when the
+    // endpoint is missed, with a separate `UtteranceEnd` frame. Segments are
+    // buffered until then and emitted as ONE final (joined text, weakest
+    // confidence). Meanwhile every segment and interim is forwarded as a
+    // partial carrying the sentence so far, so barge-in, the life-safety
+    // latch and the interim emergency scan still see a phrase that spans a
+    // segment boundary. Mirrors packages/web useDeepgramDictation.
+    const segments: Array<{ transcript: string; confidence: number }> = [];
+    // U1 — the end of the sentence's last word on Deepgram's stream clock
+    // (seconds → ms). Each `is_final` segment's `words[].end` (or, failing
+    // that, `start + duration`) advances it; an `UtteranceEnd` frame's own
+    // `last_word_end` wins when present. Null until some segment carried
+    // timing, so a final with no timing leaves `last_word_at` null.
+    let sentenceLastWordEndMs: number | null = null;
+    // Set by finish()/destroy(): nothing is emitted after teardown (Deepgram
+    // still sends its remaining results in answer to CloseStream).
+    let ended = false;
+    const sentenceSoFar = (live?: string): string =>
+      [...segments.map((seg) => seg.transcript), ...(live ? [live] : [])].join(' ');
+    const weakestConfidence = (): number =>
+      Math.min(...segments.map((seg) => seg.confidence));
+    const flushSentence = (lastWordEndSec?: number): void => {
+      if (segments.length === 0) return;
+      const transcript = sentenceSoFar();
+      const confidence = weakestConfidence();
+      segments.length = 0;
+      const lastWordEndMs =
+        typeof lastWordEndSec === 'number' && Number.isFinite(lastWordEndSec)
+          ? Math.round(lastWordEndSec * 1000)
+          : sentenceLastWordEndMs;
+      sentenceLastWordEndMs = null;
+      onEvent({
+        type: 'final',
+        transcript,
+        confidence,
+        isFinal: true,
+        ...(lastWordEndMs !== null ? { lastWordEndMs } : {}),
+      });
+    };
+
     ws.addEventListener('message', (msg) => {
+      if (ended) return;
       try {
         const data = JSON.parse(msg.data as string) as {
           type?: string;
-          channel?: { alternatives?: Array<{ transcript: string; confidence: number }> };
+          channel?: {
+            alternatives?: Array<{
+              transcript: string;
+              confidence?: number;
+              words?: Array<{ end?: number }>;
+            }>;
+          };
           is_final?: boolean;
+          speech_final?: boolean;
+          /** Segment start / length in seconds on the stream clock. */
+          start?: number;
+          duration?: number;
+          /** UtteranceEnd only: seconds, the end of the last word Deepgram heard. */
+          last_word_end?: number;
         };
+        if (data.type === 'UtteranceEnd') {
+          flushSentence(data.last_word_end);
+          return;
+        }
         if (data.type !== 'Results') return;
         const alt = data.channel?.alternatives?.[0];
-        if (!alt || alt.transcript.trim() === '') return;
+        const text = alt?.transcript.trim() ?? '';
+        if (data.is_final) {
+          if (text !== '') {
+            segments.push({ transcript: text, confidence: alt?.confidence ?? 1 });
+            const segmentEndMs = segmentLastWordEndMs(data.start, data.duration, alt?.words);
+            if (segmentEndMs !== null) {
+              sentenceLastWordEndMs = Math.max(sentenceLastWordEndMs ?? 0, segmentEndMs);
+            }
+            if (!data.speech_final) {
+              onEvent({
+                type: 'partial',
+                transcript: sentenceSoFar(),
+                confidence: weakestConfidence(),
+                isFinal: false,
+              });
+            }
+          }
+          // Read BEFORE the empty check: the endpoint frame is often empty.
+          if (data.speech_final) flushSentence();
+          return;
+        }
+        if (text === '') return;
         onEvent({
-          type: data.is_final ? 'final' : 'partial',
-          transcript: alt.transcript,
-          confidence: alt.confidence ?? 1,
-          isFinal: data.is_final ?? false,
+          type: 'partial',
+          transcript: sentenceSoFar(text),
+          confidence: alt?.confidence ?? 1,
+          isFinal: false,
         });
       } catch {
         // malformed JSON from provider — ignore single frame
@@ -475,12 +745,19 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
         if (ws.readyState === WebSocketClient.OPEN) ws.send(chunk);
       },
       finish() {
+        // LCR-03 — a sentence still buffered here was cut off by the leg
+        // ending (hang-up, idle timeout, language switch): drop it rather
+        // than dispatch a turn into a closing or replaced session.
+        ended = true;
+        segments.length = 0;
         // Deepgram flushes on close_stream message
         if (ws.readyState === WebSocketClient.OPEN) {
           ws.send(JSON.stringify({ type: 'CloseStream' }));
         }
       },
       destroy() {
+        ended = true;
+        segments.length = 0;
         ws.close();
       },
     };
@@ -501,16 +778,22 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
  */
 export function createWhisperTranscriptionProvider(
   env: { OPENAI_API_KEY?: string; AI_PROVIDER_API_KEY?: string; WHISPER_MODEL?: string },
-  deps: { fetchImpl?: FetchLike; logger?: Pick<Console, 'warn'> } = {}
+  deps: {
+    /** H2 — createStorageProvider(...).downloadUrlPolicy in app.ts. */
+    audioUrlPolicy: DownloadUrlPolicy;
+    fetchImpl?: FetchLike;
+    logger?: Pick<Console, 'warn'>;
+  }
 ): TranscriptionProvider {
   const logger = deps.logger ?? console;
   const apiKey = env.OPENAI_API_KEY || env.AI_PROVIDER_API_KEY;
   if (apiKey) {
-    return new WhisperTranscriptionProvider(
+    return new WhisperTranscriptionProvider({
       apiKey,
-      env.WHISPER_MODEL ?? 'whisper-1',
-      deps.fetchImpl
-    );
+      audioUrlPolicy: deps.audioUrlPolicy,
+      model: env.WHISPER_MODEL ?? 'whisper-1',
+      fetchImpl: deps.fetchImpl,
+    });
   }
   logger.warn(
     '[transcription] Neither OPENAI_API_KEY nor AI_PROVIDER_API_KEY set — ' +

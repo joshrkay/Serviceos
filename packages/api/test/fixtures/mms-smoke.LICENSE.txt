@@ -1,0 +1,12 @@
+Fixture: mms-smoke.jpg
+Original title: Drywall shaft damage.jpg
+Author: Achim Hering
+Date: 2007-03-11
+Source: https://commons.wikimedia.org/wiki/File:Drywall_shaft_damage.jpg
+Original: https://upload.wikimedia.org/wikipedia/commons/5/55/Drywall_shaft_damage.jpg
+License: Public domain, released worldwide by the copyright holder.
+Downloaded unchanged on 2026-10-07.
+SHA-256: 91dca645a74176b03d34f20bb22343b765598ea326da34d9b40c6f81285a3590
+
+This is a real photograph of damaged drywall around mechanical services.
+It is used only as a reproducible vision-test input, not customer data.

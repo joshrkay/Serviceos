@@ -80,6 +80,8 @@ const STALE_SQL = `
     FROM call_usage_settlements s
     JOIN tenants t ON t.id = s.tenant_id
    WHERE s.status IN ('pending', 'failed')
+     AND t.demo = false
+     AND t.platform = false
      AND s.updated_at < $1
    ORDER BY s.updated_at ASC
    LIMIT ${BATCH_LIMIT}
@@ -96,6 +98,8 @@ const GAP_TENANTS_SQL = `
   SELECT id, plan_id, current_period_start, current_period_end
     FROM tenants
    WHERE subscription_status IN ('active', 'past_due')
+     AND demo = false
+     AND platform = false
      AND plan_id IN ('starter', 'growth')
      AND current_period_start IS NOT NULL
      AND current_period_end IS NOT NULL

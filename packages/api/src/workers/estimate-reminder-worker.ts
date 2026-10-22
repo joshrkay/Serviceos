@@ -23,6 +23,7 @@ import { EstimateRepository } from '../estimates/estimate';
 import { AuditRepository } from '../audit/audit';
 import { SendChannel, SendService } from '../notifications/send-service';
 import { dispatchEstimateNudge } from '../estimates/estimate-nudge';
+import { SmsDeferredError } from '../notifications/gated-message-delivery';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -57,7 +58,7 @@ export interface EstimateReminderWorkerDeps {
 
 export async function runEstimateReminderSweep(
   deps: EstimateReminderWorkerDeps,
-): Promise<{ tenants: number; reminders: number; failed: number }> {
+): Promise<{ tenants: number; reminders: number; failed: number; deferred: number }> {
   const now = deps.now ?? (() => new Date());
   const reminderAfterDays = deps.reminderAfterDays ?? 3;
   const maxReminders = deps.maxReminders ?? 1;
@@ -70,13 +71,16 @@ export async function runEstimateReminderSweep(
     deps.logger.error('Estimate-reminder sweep: failed to list tenants', {
       error: err instanceof Error ? err.message : String(err),
     });
-    return { tenants: 0, reminders: 0, failed: 0 };
+    return { tenants: 0, reminders: 0, failed: 0, deferred: 0 };
   }
 
   const asOf = now(); // One snapshot for the entire sweep.
   const sentBefore = new Date(asOf.getTime() - reminderAfterDays * DAY_MS);
   let reminders = 0;
   let failed = 0;
+  // Held back by the recipient's quiet hours — reminder count untouched, so
+  // the next in-window sweep sends it.
+  let deferred = 0;
 
   for (const tenantId of tenantIds) {
     let candidates;
@@ -133,10 +137,22 @@ export async function runEstimateReminderSweep(
             channel,
             asOf,
             actorId: 'estimate-reminder-worker',
+            // An automatic nudge is non-transactional: it waits for the
+            // recipient's daytime window.
+            quietHours: 'defer',
           },
         );
         reminders++;
       } catch (err) {
+        if (err instanceof SmsDeferredError) {
+          deferred++;
+          deps.logger.info('Estimate-reminder sweep: deferred to the recipient send window', {
+            tenantId,
+            estimateId: estimate.id,
+            nextAllowedAt: err.nextAllowedAt.toISOString(),
+          });
+          continue;
+        }
         // A single estimate's send failure (e.g. recipient has no phone,
         // delivery provider error) must not skip the rest of the tenant.
         failed++;
@@ -153,7 +169,8 @@ export async function runEstimateReminderSweep(
     tenants: tenantIds.length,
     reminders,
     failed,
+    deferred,
   });
 
-  return { tenants: tenantIds.length, reminders, failed };
+  return { tenants: tenantIds.length, reminders, failed, deferred };
 }

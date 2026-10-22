@@ -3,6 +3,7 @@ import {
   BusinessIdentityInputSchema,
   PackPickInputSchema,
   OnboardingStatusResponseSchema,
+  ProvisioningFailureCodeSchema,
 } from '../../src/onboarding/contracts';
 
 describe('BusinessIdentityInputSchema', () => {
@@ -188,5 +189,94 @@ describe('OnboardingStatusResponseSchema', () => {
       subscriptionStatus: 'trialing' as const,
     };
     expect(OnboardingStatusResponseSchema.parse(value)).toEqual(value);
+  });
+});
+
+describe('OnboardingStatusResponseSchema — draft.execution', () => {
+  const steps = ['signup', 'identity', 'pack', 'phone', 'billing', 'ai_check', 'test_call'].map((id) => ({
+    id: id as 'signup',
+    status: 'pending' as const,
+  }));
+  const base = {
+    steps,
+    currentStep: 'identity' as const,
+    isComplete: false,
+    voiceAgentLive: false,
+    tenantId: '00000000-0000-0000-0000-000000000001',
+    subscriptionStatus: null,
+  };
+  const draft = { status: 'approved' as const, choicesAnswered: 7, version: 3 };
+
+  it.each(['pending', 'executing', 'executed', 'failed', 'stopped', null] as const)('parses execution %s', (execution) => {
+    expect(OnboardingStatusResponseSchema.parse({ ...base, draft: { ...draft, execution } }).draft?.execution).toBe(execution);
+  });
+
+  it('parses a draft without execution (older clients and fixtures)', () => {
+    expect(OnboardingStatusResponseSchema.safeParse({ ...base, draft }).success).toBe(true);
+  });
+
+  it('rejects an unknown execution value and a steps array that is not seven long', () => {
+    expect(OnboardingStatusResponseSchema.safeParse({ ...base, draft: { ...draft, execution: 'weird' } }).success).toBe(false);
+    expect(OnboardingStatusResponseSchema.safeParse({ ...base, steps: steps.slice(0, 6) }).success).toBe(false);
+  });
+});
+
+describe('OnboardingStatusResponseSchema — the phone step\'s failureCode (S5b-1)', () => {
+  const ids = ['signup', 'identity', 'pack', 'billing', 'phone', 'ai_check', 'test_call'] as const;
+  const response = (phone: Record<string, unknown>) => ({
+    steps: ids.map((id) => (id === 'phone' ? { id, ...phone } : { id, status: 'done' })),
+    currentStep: 'phone',
+    isComplete: false,
+    voiceAgentLive: false,
+    tenantId: '00000000-0000-0000-0000-000000000001',
+    subscriptionStatus: 'trialing',
+  });
+
+  it('exports the four codes as a schema', () => {
+    expect(ProvisioningFailureCodeSchema.options).toEqual(['area_code_unavailable', 'credentials_missing', 'provider_error', 'unknown']);
+  });
+
+  it.each(['area_code_unavailable', 'credentials_missing', 'provider_error', 'unknown'] as const)(
+    'parses a failed phone step carrying %s, and keeps it',
+    (failureCode) => {
+      const parsed = OnboardingStatusResponseSchema.parse(
+        response({ status: 'error', failureCode, blockers: ['twilio_provisioning_failed'], metadata: { lineState: 'failed' } }),
+      );
+      expect(parsed.steps[4]).toEqual({ id: 'phone', status: 'error', failureCode, blockers: ['twilio_provisioning_failed'], metadata: { lineState: 'failed' } });
+    },
+  );
+
+  it('parses a response without failureCode (an older server, a step that did not fail)', () => {
+    const parsed = OnboardingStatusResponseSchema.parse(response({ status: 'error', blockers: ['twilio_provisioning_failed'] }));
+    expect(parsed.steps[4]).not.toHaveProperty('failureCode');
+    expect(OnboardingStatusResponseSchema.safeParse(response({ status: 'current', metadata: { lineState: 'claiming' } })).success).toBe(true);
+  });
+
+  it('rejects a failureCode outside the four, and the steps stay exactly seven', () => {
+    expect(OnboardingStatusResponseSchema.safeParse(response({ status: 'error', failureCode: 'rate_limited' })).success).toBe(false);
+    expect(OnboardingStatusResponseSchema.safeParse(response({ status: 'error', failureCode: '' })).success).toBe(false);
+    const eight = response({ status: 'error', failureCode: 'unknown' });
+    expect(OnboardingStatusResponseSchema.safeParse({ ...eight, steps: [...eight.steps, { id: 'signup', status: 'done' }] }).success).toBe(false);
+  });
+
+  it('every other step keeps its shape: id, status, optional blockers and metadata', () => {
+    const parsed = OnboardingStatusResponseSchema.parse({
+      ...response({ status: 'error', failureCode: 'provider_error' }),
+      steps: ids.map((id) =>
+        id === 'phone'
+          ? { id, status: 'error', failureCode: 'provider_error' }
+          : id === 'ai_check'
+            ? { id, status: 'error', blockers: ['ai_verification_failed'], metadata: { error: 'x' } }
+            : { id, status: 'pending' },
+      ),
+    });
+    expect(parsed.steps.filter((s) => s.id !== 'phone')).toEqual([
+      { id: 'signup', status: 'pending' },
+      { id: 'identity', status: 'pending' },
+      { id: 'pack', status: 'pending' },
+      { id: 'billing', status: 'pending' },
+      { id: 'ai_check', status: 'error', blockers: ['ai_verification_failed'], metadata: { error: 'x' } },
+      { id: 'test_call', status: 'pending' },
+    ]);
   });
 });

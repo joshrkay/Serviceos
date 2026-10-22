@@ -86,6 +86,18 @@ export class PgConversationRepository extends PgBaseRepository implements Conver
     });
   }
 
+  async findByEntities(tenantId: string, entityType: string, entityIds: string[]): Promise<Conversation[]> {
+    if (entityIds.length === 0) return [];
+    return this.withTenant(tenantId, async (client) => {
+      // entity_id is TEXT (polymorphic reference), so the array is text[].
+      const result = await client.query(
+        `SELECT * FROM conversations WHERE tenant_id = $1 AND entity_type = $2 AND entity_id = ANY($3::text[]) ORDER BY created_at DESC`,
+        [tenantId, entityType, entityIds]
+      );
+      return result.rows.map(mapConversationRow);
+    });
+  }
+
   async addMessage(input: CreateMessageInput): Promise<Message> {
     const id = uuidv4();
     const now = new Date();

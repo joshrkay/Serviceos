@@ -82,6 +82,10 @@ updates:
         applies-to: version-updates
         update-types: ['minor', 'patch']
     ignore:
+      # Mobile runs on the same Node 20 runtime as root CI. Vitest 5 drops
+      # Node 20 support; move both test toolchains with the runtime migration.
+      - dependency-name: 'vitest'
+        update-types: ['version-update:semver-major']
       # Expo SDK majors move react-native, react, and the whole native module
       # set together; they are migrations, not dependency bumps.
       - dependency-name: 'expo'
@@ -119,6 +123,16 @@ updates:
       # jest-expo ~52 hard-pins its Jest internals to ^29; jest 30 cannot be
       # taken until the Expo SDK upgrade (#1610, #1622).
       - dependency-name: 'jest'
+        update-types: ['version-update:semver-major']
+      # Expo SDK 52 tooling/native pins (#1645 TS 7, #1648 Babel 8, #1649 gesture-
+      # handler 3): move with the SDK via `npx expo install` (#1610).
+      - dependency-name: 'typescript'
+        update-types: ['version-update:semver-major']
+      - dependency-name: '@babel/core'
+        update-types: ['version-update:semver-major']
+      - dependency-name: 'react-native-gesture-handler'
+        update-types: ['version-update:semver-major']
+      - dependency-name: 'react-native-reanimated'
         update-types: ['version-update:semver-major']
       # jest-expo is released per SDK (52 -> 57 is "align to SDK 57"); it must
       # track the installed expo major. #1325 (52 -> 57) failed e2e.

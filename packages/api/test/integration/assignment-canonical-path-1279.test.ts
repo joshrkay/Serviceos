@@ -39,7 +39,9 @@ import { getDispatchBoardData } from '../../src/dispatch/board-query';
 import { MIGRATIONS } from '../../src/db/schema';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
-const DAY = '2026-10-14';
+// Appointment creation rejects a start in the past (#1402), so the booked day
+// must always be in the future; a fixed date ages out and turns the suite red.
+const DAY = new Date(Date.now() + 2 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
 const at = (hhmm: string) => new Date(`${DAY}T${hhmm}:00.000Z`);
 
 describe('Postgres integration — canonical technician assignment path (#1279)', () => {

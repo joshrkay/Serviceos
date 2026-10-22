@@ -74,6 +74,8 @@ import { ProposalExecutor } from '../../src/proposals/execution/executor';
 import { recordCorrectionLessonsOnExecution } from '../../src/learning/corrections/record-on-execution';
 import { createPgConfigPorts } from '../../src/learning/corrections/pg-config-ports';
 import type { ConfigPorts } from '../../src/learning/corrections/lesson-applicator';
+import { createCatalogItem } from '../../src/catalog/catalog-item';
+import type { Role } from '../../src/auth/rbac';
 
 async function seedJob(
   pool: Pool,
@@ -384,5 +386,184 @@ describe('9.8/9.9 reachability — real edit→approve→execute pipeline for a 
     ).rejects.toThrow();
     expect((await lessonRepo.findById(tenantB.tenantId, lessonsB[0].id))!.status).toBe('applied');
     expect((await settingsRepo.findByTenant(tenantB.tenantId))!.laborRateCentsPerHour).toBe(9900);
+  });
+});
+
+// PI-3 — the lesson cascade rewrote the tenant price book and labor rate for
+// WHOEVER approved the edited card: a dispatcher (proposals:edit +
+// proposals:approve, no settings:update) changed a catalog-bound line's price
+// on PUT /api/proposals/:id, approved it, and the execution's lesson wrote
+// catalog_items.unit_price_cents and the tenant labor rate — authority the
+// catalog routes and the lesson undo both reserve for settings:update. The
+// audit then named the DRAFTER with role 'owner'.
+describe('PI-3 — a correction cascades into tenant config only under an approver who holds settings:update', () => {
+  let pool: Pool;
+  let proposalRepo: PgProposalRepository;
+  let executionRepo: PgProposalExecutionRepository;
+  let estimateRepo: PgEstimateRepository;
+  let settingsRepo: PgSettingsRepository;
+  let catalogRepo: PgCatalogItemRepository;
+  let lessonRepo: PgCorrectionLessonRepository;
+  let auditRepo: PgAuditRepository;
+  let ports: ConfigPorts;
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    proposalRepo = new PgProposalRepository(pool);
+    executionRepo = new PgProposalExecutionRepository(pool);
+    estimateRepo = new PgEstimateRepository(pool);
+    settingsRepo = new PgSettingsRepository(pool);
+    catalogRepo = new PgCatalogItemRepository(pool);
+    lessonRepo = new PgCorrectionLessonRepository(pool);
+    auditRepo = new PgAuditRepository(pool);
+    ports = createPgConfigPorts({ settingsRepo, catalogRepo });
+  });
+
+  const line = (id: string, category: string, cents: number, catalogItemId?: string) => ({
+    id,
+    description: category === 'labor' ? 'Standard Labor' : 'Smoke Detector',
+    category,
+    quantity: 1,
+    unitPriceCents: cents,
+    totalCents: cents,
+    sortOrder: id === 'l1' ? 0 : 1,
+    taxable: true,
+    ...(catalogItemId ? { catalogItemId } : {}),
+  });
+
+  /** AI draft at the tenant's prices → edited by `editor` → approved by `approver` → executed. */
+  async function editApproveExecute(role: Role) {
+    const tenant = await createTestTenant(pool);
+    const { jobId, customerId } = await seedJob(pool, tenant.tenantId, tenant.userId);
+    await settingsRepo.create({
+      id: uuidv4(),
+      tenantId: tenant.tenantId,
+      businessName: 'Price Book Co',
+      timezone: 'America/Chicago',
+      estimatePrefix: 'EST-',
+      invoicePrefix: 'INV-',
+      nextEstimateNumber: 1,
+      nextInvoiceNumber: 1,
+      defaultPaymentTermDays: 30,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    await settingsRepo.update(tenant.tenantId, { laborRateCentsPerHour: 11500 });
+    const detector = await catalogRepo.create(
+      createCatalogItem({
+        tenantId: tenant.tenantId,
+        name: 'Smoke Detector',
+        category: 'Materials',
+        unit: 'each',
+        unitPriceCents: 4500,
+      }),
+    );
+    // The approver: the tenant owner (seeded by createTestTenant) or a
+    // dispatcher member of the same tenant.
+    const approverId = role === 'owner' ? tenant.userId : uuidv4();
+    if (role !== 'owner') {
+      await pool.query(
+        `INSERT INTO users (id, tenant_id, clerk_user_id, email, role) VALUES ($1, $2, $3, $4, $5)`,
+        [approverId, tenant.tenantId, approverId, `${role}-${approverId.slice(0, 6)}@example.com`, role],
+      );
+    }
+
+    const draft = createProposal({
+      tenantId: tenant.tenantId,
+      proposalType: 'draft_estimate',
+      payload: {
+        jobId,
+        customerId,
+        lineItems: [line('l1', 'labor', 11500), line('p1', 'material', 4500, detector.id)],
+      },
+      summary: 'Estimate for job',
+      // Drafted by someone other than the approver, so attribution is tested.
+      createdBy: 'ai-drafter',
+    });
+    await proposalRepo.create(draft);
+
+    // PUT /api/proposals/:id (proposals:edit, which a dispatcher holds).
+    await editProposal(
+      proposalRepo,
+      tenant.tenantId,
+      draft.id,
+      approverId,
+      role,
+      { lineItems: [line('l1', 'labor', 13500), line('p1', 'material', 5200, detector.id)] },
+      auditRepo,
+    );
+    // POST /api/proposals/:id/approve.
+    await approveProposal(proposalRepo, tenant.tenantId, draft.id, approverId, role, auditRepo);
+    await proposalRepo.updateStatus(tenant.tenantId, draft.id, 'approved', {
+      approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100),
+    });
+
+    const registry = createExecutionHandlerRegistry({ estimateRepo, settingsRepo, auditRepo });
+    const executor = new ProposalExecutor(registry, proposalRepo, new IdempotencyGuard(executionRepo, proposalRepo), auditRepo, {
+      executionRepo,
+      onExecuted: async (event) => {
+        if (event.status !== 'succeeded') return;
+        await recordCorrectionLessonsOnExecution(
+          { tenantId: event.tenantId, proposalId: event.proposalId },
+          { proposalRepo, proposalExecutionRepo: executionRepo, settingsRepo, lessonRepo, catalogRepo, ports, auditRepo },
+        );
+      },
+    });
+    // Exactly what the execution sweep passes (workers/execution-worker.ts).
+    const stamped = (await proposalRepo.findById(tenant.tenantId, draft.id))!;
+    const { result } = await executor.execute(stamped, {
+      tenantId: tenant.tenantId,
+      executedBy: stamped.executedBy ?? stamped.createdBy,
+      ...(stamped.executedByRole ? { executedByRole: stamped.executedByRole } : {}),
+    });
+    expect(result.success).toBe(true);
+
+    const { rows: price } = await pool.query(
+      `SELECT unit_price_cents FROM catalog_items WHERE tenant_id = $1 AND id = $2`,
+      [tenant.tenantId, detector.id],
+    );
+    const { rows: applied } = await pool.query(
+      `SELECT actor_id, actor_role, metadata->>'lessonType' AS lesson_type FROM audit_events
+        WHERE tenant_id = $1 AND event_type = 'correction_lesson.applied'
+          AND metadata->>'sourceProposalId' = $2`,
+      [tenant.tenantId, draft.id],
+    );
+    return {
+      tenant,
+      approverId,
+      proposalId: draft.id,
+      estimateId: result.resultEntityId!,
+      catalogPriceCents: Number(price[0].unit_price_cents),
+      laborRateCents: (await settingsRepo.findByTenant(tenant.tenantId))!.laborRateCentsPerHour,
+      lessons: await lessonRepo.findBySourceProposal(tenant.tenantId, draft.id),
+      applied,
+    };
+  }
+
+  it('a DISPATCHER-approved correction leaves the catalog price and the labor rate unchanged, and records no lesson', async () => {
+    const res = await editApproveExecute('dispatcher');
+
+    // The document itself still executes at the corrected prices.
+    const estimate = await estimateRepo.findById(res.tenant.tenantId, res.estimateId);
+    expect(estimate!.lineItems.map((li) => li.unitPriceCents)).toEqual([13500, 5200]);
+
+    expect(res.catalogPriceCents).toBe(4500);
+    expect(res.laborRateCents).toBe(11500);
+    expect(res.lessons).toEqual([]);
+    expect(res.applied).toEqual([]);
+  });
+
+  it('an OWNER-approved correction applies both lessons, audited with the owner id and actor_role owner', async () => {
+    const res = await editApproveExecute('owner');
+
+    expect(res.catalogPriceCents).toBe(5200);
+    expect(res.laborRateCents).toBe(13500);
+    expect(res.lessons.map((l) => l.lessonType).sort()).toEqual(['labor_rate_changed', 'part_price_changed']);
+    expect(res.lessons.every((l) => l.ownerId === res.approverId)).toBe(true);
+    expect(res.applied).toHaveLength(2);
+    for (const row of res.applied) {
+      expect(row.actor_id).toBe(res.approverId);
+      expect(row.actor_role).toBe('owner');
+    }
   });
 });

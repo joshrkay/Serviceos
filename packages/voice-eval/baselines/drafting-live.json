@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "eval": "drafting",
+  "mode": "live",
+  "status": "placeholder",
+  "recordedAt": null,
+  "goldenSet": null,
+  "metrics": {},
+  "tolerance": 0.2,
+  "recordCommand": "AI_PROVIDER_API_KEY=... AI_PROVIDER_BASE_URL=https://api.openai.com/v1 AI_DEFAULT_MODEL=gpt-4o-mini AI_LIGHTWEIGHT_MODEL=gpt-4o-mini AI_STANDARD_MODEL=gpt-4o-mini AI_COMPLEX_MODEL=gpt-4o VOICE_EVAL_COST_CAP_CENTS=25 npx tsx packages/api/scripts/drafting-golden-eval.ts --live --record-baseline packages/voice-eval/baselines/drafting-live.json"
+}

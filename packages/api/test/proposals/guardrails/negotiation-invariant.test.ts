@@ -92,7 +92,7 @@ const NON_CONCESSION_TYPES: readonly string[] = [
   'add_service_location', 'log_time_entry', 'notify_delay', 'request_feedback',
   'emergency_dispatch', 'onboarding_tenant_settings',
   'onboarding_service_category', 'onboarding_estimate_template',
-  'onboarding_team_member', 'onboarding_schedule', 'review_response_proposal',
+  'onboarding_team_member', 'onboarding_schedule', 'onboarding_voice_policy', 'review_response_proposal',
   'send_payment_reminder', 'create_standing_instruction', 'update_catalog_item',
   'adopt_entity_alias', 'update_brand_voice', 'send_customer_message',
   'create_change_order', 'create_service_agreement', 'add_material',

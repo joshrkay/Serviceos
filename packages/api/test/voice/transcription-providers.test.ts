@@ -15,6 +15,13 @@ import {
   DeepgramStreamingProvider,
   DEEPGRAM_OPEN_TIMEOUT_MS,
 } from '../../src/voice/transcription-providers';
+import { createDownloadUrlPolicy } from '../../src/files/download-url-policy';
+
+// H2 — the provider only fetches URLs its storage policy accepts.
+const CDN_POLICY = createDownloadUrlPolicy({
+  allowedOrigins: ['https://cdn.example'],
+  productionLike: true,
+});
 
 function audioResponse(ok = true, status = 200, sizeBytes = 1024): Response {
   return new Response(new Blob([new Uint8Array(sizeBytes)], { type: 'audio/webm' }), {
@@ -41,7 +48,7 @@ describe('WhisperTranscriptionProvider', () => {
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ text: 'hello world' }), { status: 200 })
       );
-    const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+    const provider = new WhisperTranscriptionProvider({ apiKey: 'sk_test', model: 'whisper-1', fetchImpl: fetchMock, audioUrlPolicy: CDN_POLICY });
 
     const result = await provider.transcribe('https://cdn.example/audio.webm');
 
@@ -61,7 +68,7 @@ describe('WhisperTranscriptionProvider', () => {
 
   it('throws WhisperClientError when the audio URL returns non-OK', async () => {
     const fetchMock = vi.fn().mockResolvedValueOnce(new Response('not found', { status: 404 }));
-    const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+    const provider = new WhisperTranscriptionProvider({ apiKey: 'sk_test', model: 'whisper-1', fetchImpl: fetchMock, audioUrlPolicy: CDN_POLICY });
 
     await expect(provider.transcribe('https://cdn.example/missing.webm')).rejects.toThrow(
       WhisperClientError
@@ -74,7 +81,7 @@ describe('WhisperTranscriptionProvider', () => {
       .fn()
       .mockResolvedValueOnce(audioResponse())
       .mockResolvedValueOnce(new Response('rate limited', { status: 429 }));
-    const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+    const provider = new WhisperTranscriptionProvider({ apiKey: 'sk_test', model: 'whisper-1', fetchImpl: fetchMock, audioUrlPolicy: CDN_POLICY });
 
     await expect(provider.transcribe('https://cdn.example/audio.webm')).rejects.toThrow(
       WhisperRateLimitError
@@ -86,7 +93,7 @@ describe('WhisperTranscriptionProvider', () => {
       .fn()
       .mockResolvedValueOnce(audioResponse())
       .mockResolvedValueOnce(new Response('internal error', { status: 503 }));
-    const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+    const provider = new WhisperTranscriptionProvider({ apiKey: 'sk_test', model: 'whisper-1', fetchImpl: fetchMock, audioUrlPolicy: CDN_POLICY });
 
     await expect(provider.transcribe('https://cdn.example/audio.webm')).rejects.toThrow(
       WhisperServerError
@@ -100,7 +107,7 @@ describe('WhisperTranscriptionProvider', () => {
     const fetchMock = vi
       .fn()
       .mockResolvedValueOnce(new Response(oversizedBlob, { status: 200 }));
-    const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+    const provider = new WhisperTranscriptionProvider({ apiKey: 'sk_test', model: 'whisper-1', fetchImpl: fetchMock, audioUrlPolicy: CDN_POLICY });
 
     await expect(provider.transcribe('https://cdn.example/audio.webm')).rejects.toThrow(
       WhisperFileTooLargeError
@@ -113,7 +120,7 @@ describe('WhisperTranscriptionProvider', () => {
       .fn()
       .mockResolvedValueOnce(audioResponse())
       .mockResolvedValueOnce(new Response(JSON.stringify({}), { status: 200 }));
-    const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+    const provider = new WhisperTranscriptionProvider({ apiKey: 'sk_test', model: 'whisper-1', fetchImpl: fetchMock, audioUrlPolicy: CDN_POLICY });
 
     const result = await provider.transcribe('https://cdn.example/audio.webm');
     expect(result.transcript).toBe('');
@@ -126,7 +133,7 @@ describe('WhisperTranscriptionProvider', () => {
       .mockResolvedValueOnce(
         new Response(JSON.stringify({ text: 'hola mundo' }), { status: 200 })
       );
-    const provider = new WhisperTranscriptionProvider('sk_test', 'whisper-1', fetchMock);
+    const provider = new WhisperTranscriptionProvider({ apiKey: 'sk_test', model: 'whisper-1', fetchImpl: fetchMock, audioUrlPolicy: CDN_POLICY });
 
     await provider.transcribe('https://cdn.example/audio.webm', { language: 'es' });
 
@@ -137,13 +144,13 @@ describe('WhisperTranscriptionProvider', () => {
 
 describe('createWhisperTranscriptionProvider', () => {
   it('returns WhisperTranscriptionProvider when OPENAI_API_KEY is set', () => {
-    const provider = createWhisperTranscriptionProvider({ OPENAI_API_KEY: 'sk_live' });
+    const provider = createWhisperTranscriptionProvider({ OPENAI_API_KEY: 'sk_live' }, { audioUrlPolicy: CDN_POLICY });
     expect(provider).toBeInstanceOf(WhisperTranscriptionProvider);
   });
 
   it('returns DevNoopTranscriptionProvider and warns when neither key is set', () => {
     const warnMock = vi.fn();
-    const provider = createWhisperTranscriptionProvider({}, { logger: { warn: warnMock } });
+    const provider = createWhisperTranscriptionProvider({}, { audioUrlPolicy: CDN_POLICY, logger: { warn: warnMock } });
     expect(provider).toBeInstanceOf(DevNoopTranscriptionProvider);
     expect(warnMock).toHaveBeenCalledWith(expect.stringContaining('AI_PROVIDER_API_KEY'));
   });
@@ -152,7 +159,7 @@ describe('createWhisperTranscriptionProvider', () => {
     const warnMock = vi.fn();
     const provider = createWhisperTranscriptionProvider(
       { AI_PROVIDER_API_KEY: 'sk-test-fallback' },
-      { logger: { warn: warnMock } },
+      { audioUrlPolicy: CDN_POLICY, logger: { warn: warnMock } },
     );
     expect(provider).not.toBeInstanceOf(DevNoopTranscriptionProvider);
     expect(warnMock).not.toHaveBeenCalled();
@@ -198,6 +205,18 @@ describe('DeepgramStreamingProvider URL builder', () => {
       buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
     }).buildWsUrl('en');
     expect(url).toContain('model=nova-3');
+  });
+
+  it('asks Deepgram for an UtteranceEnd after 1s without words, with or without boost terms (LCR-03)', () => {
+    const build = (provider as unknown as {
+      buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
+    }).buildWsUrl.bind(provider);
+    for (const url of [build('en'), build('es'), build('en', { keywords: ['heat pump:3'] })]) {
+      const params = new URL(url).searchParams;
+      expect(params.getAll('utterance_end_ms')).toEqual(['1000']);
+      // UtteranceEnd is only sent when interim results are on.
+      expect(params.get('interim_results')).toBe('true');
+    }
   });
 });
 
@@ -360,5 +379,35 @@ describe('DeepgramStreamingProvider open timeout (VOX-01)', () => {
     const session = await openPromise;
     expect(session).toHaveProperty('send');
     expect(fakeWs.close).not.toHaveBeenCalled();
+  });
+});
+
+describe('DeepgramStreamingProvider URL builder — card redaction (PRIV-3)', () => {
+  // Deepgram's `redact=pci` entity redaction is English-only on streaming
+  // (developers.deepgram.com/docs/redaction); Spanish sessions rely on the
+  // app-side scrub in callerTranscriptText, so the parameter is sent on
+  // English sessions only and a Spanish handshake is never put at risk.
+  type UrlBuilder = {
+    buildWsUrl: (
+      lang: 'en' | 'es',
+      options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number },
+    ) => string;
+  };
+  const provider = new DeepgramStreamingProvider('test-key') as unknown as UrlBuilder;
+
+  it('asks Deepgram to redact card numbers on an English stream', () => {
+    const url = new URL(provider.buildWsUrl('en'));
+    expect(url.searchParams.getAll('redact')).toEqual(['pci']);
+  });
+
+  it('keeps the parameter alongside boost terms', () => {
+    const url = new URL(provider.buildWsUrl('en', { keywords: ['heat pump:3'] }));
+    expect(url.searchParams.getAll('redact')).toEqual(['pci']);
+    expect(url.searchParams.getAll('keyterm')).toEqual(['heat pump']);
+  });
+
+  it('does not send the English-only entity redaction on a Spanish stream', () => {
+    const url = new URL(provider.buildWsUrl('es'));
+    expect(url.searchParams.has('redact')).toBe(false);
   });
 });

@@ -1,5 +1,17 @@
 import { describe, it, expect } from 'vitest';
-import { deriveOnboardingStatus, type OnboardingFacts } from '../../src/onboarding/derive-status';
+import {
+  deriveDraftExecution,
+  deriveOnboardingStatus,
+  type DraftProposalMember,
+  type OnboardingFacts,
+} from '../../src/onboarding/derive-status';
+import { UNDO_WINDOW_MS, isInUndoWindow } from '../../src/proposals/lifecycle';
+
+/** A listed proposal row as the status read sees it; approved long ago unless stated. */
+const member = (status: string, approvedAt: Date | null = new Date('2026-01-01T00:00:00Z')): DraftProposalMember => ({
+  status,
+  approvedAt,
+});
 
 function facts(overrides: Partial<OnboardingFacts> = {}): OnboardingFacts {
   return {
@@ -324,5 +336,301 @@ describe('deriveOnboardingStatus', () => {
     }));
     expect(r.steps[6].status).toBe('skipped');
     expect(r.isComplete).toBe(true);
+  });
+});
+
+describe('deriveOnboardingStatus — pick-don\'t-build draft facts', () => {
+  it('surfaces the draft additively and keeps exactly seven steps', () => {
+    const r = deriveOnboardingStatus(facts({ draft: { status: 'draft', choicesAnswered: 3, version: 4 } }));
+    expect(r.steps).toHaveLength(7);
+    expect(r.draft).toEqual({ status: 'draft', choicesAnswered: 3, version: 4, execution: null });
+  });
+  it('omits draft when the tenant has none', () => {
+    expect(deriveOnboardingStatus(facts({ draft: null }))).not.toHaveProperty('draft');
+    expect(deriveOnboardingStatus(facts())).not.toHaveProperty('draft');
+  });
+});
+
+describe('deriveDraftExecution', () => {
+  const tracked = (statuses: string[], expected = 2) => ({ expected, members: statuses.map((st) => member(st)) });
+
+  it.each([
+    [['approved', 'approved'], 'pending'],
+    [['approved', 'executing'], 'executing'],
+    [['executing', 'executing'], 'executing'],
+    // One half finished, the other still waiting for the worker: work is in flight.
+    [['executed', 'approved'], 'executing'],
+    [['executed', 'executing'], 'executing'],
+    [['executed', 'executed'], 'executed'],
+    // `failed` only while retry can complete the pair: every OTHER member is
+    // still approved/executing/executed, so re-queueing the failed one finishes it.
+    [['execution_failed', 'approved'], 'failed'],
+    [['execution_failed', 'executing'], 'failed'],
+    [['execution_failed', 'executed'], 'failed'],
+    [['approved', 'execution_failed'], 'failed'],
+    [['execution_failed', 'execution_failed'], 'failed'],
+    // States the owner can land in through the inbox. Retry cannot leave them
+    // (POST /draft/retry only re-queues execution_failed), so they are `stopped`,
+    // never `failed`: the shell must neither wait forever nor offer a dead Retry.
+    [['undone', 'approved'], 'stopped'],
+    [['expired', 'executed'], 'stopped'],
+    [['rejected', 'approved'], 'stopped'],
+    [['draft', 'approved'], 'stopped'],
+    [['ready_for_review', 'executed'], 'stopped'],
+    [['undone', 'undone'], 'stopped'],
+    // A failure next to a member retry cannot recover is `stopped`, NOT `failed`:
+    // re-queueing only the failed half would execute it while the other stays
+    // undone/rejected/expired, leaving half the approved configuration live.
+    [['execution_failed', 'undone'], 'stopped'],
+    [['undone', 'execution_failed'], 'stopped'],
+    [['execution_failed', 'rejected'], 'stopped'],
+    [['rejected', 'execution_failed'], 'stopped'],
+    [['execution_failed', 'expired'], 'stopped'],
+    [['expired', 'execution_failed'], 'stopped'],
+    [['execution_failed', 'draft'], 'stopped'],
+    [['execution_failed', 'ready_for_review'], 'stopped'],
+  ])('approved draft with proposals %j is %s', (statuses, expected) => {
+    expect(deriveDraftExecution('approved', tracked(statuses))).toBe(expected);
+  });
+
+  it('a listed proposal that no longer exists (fewer rows than ids) is stopped, not failed', () => {
+    expect(deriveDraftExecution('approved', tracked(['executed'], 2))).toBe('stopped');
+    expect(deriveDraftExecution('approved', tracked([], 2))).toBe('stopped');
+    // A failure among the rows that remain does not change that: the missing
+    // sibling cannot be re-queued, so retrying only the failed half would
+    // execute half the configuration. Stopped wins over failed.
+    expect(deriveDraftExecution('approved', tracked(['execution_failed'], 2))).toBe('stopped');
+    expect(deriveDraftExecution('approved', tracked(['execution_failed', 'approved'], 3))).toBe('stopped');
+    // The full set present and failed alongside a retryable sibling is still failed.
+    expect(deriveDraftExecution('approved', tracked(['execution_failed', 'executed'], 2))).toBe('failed');
+  });
+
+  it('an approved draft with nothing to track is null, never a vacuous executed', () => {
+    expect(deriveDraftExecution('approved', tracked([], 0))).toBeNull();
+    expect(deriveDraftExecution('approved', undefined)).toBeNull();
+  });
+
+  it('a draft still being edited has no execution state', () => {
+    expect(deriveDraftExecution('draft', tracked(['approved', 'approved']))).toBeNull();
+    expect(deriveDraftExecution('draft', undefined)).toBeNull();
+  });
+});
+
+describe('deriveOnboardingStatus — draft execution on the status', () => {
+  const approved = (statuses: string[]) =>
+    facts({
+      draft: { status: 'approved', choicesAnswered: 7, version: 3, proposals: { expected: 2, members: statuses.map((st) => member(st)) } },
+    });
+
+  it('carries execution in draft, keeps seven steps, and does not leak the raw statuses', () => {
+    const r = deriveOnboardingStatus(approved(['execution_failed', 'executed']));
+    expect(r.draft).toEqual({ status: 'approved', choicesAnswered: 7, version: 3, execution: 'failed', undoable: false, recovery: 'settings' });
+    expect(r.draft).not.toHaveProperty('proposals');
+    expect(r.steps).toHaveLength(7);
+  });
+
+  it('does not change a single step id or status with or without the draft', () => {
+    const base = deriveOnboardingStatus(facts());
+    const withDraft = deriveOnboardingStatus(approved(['approved', 'approved']));
+    expect(withDraft.steps).toEqual(base.steps);
+    expect(withDraft.currentStep).toBe(base.currentStep);
+    expect(withDraft.draft?.execution).toBe('pending');
+  });
+});
+
+describe('deriveOnboardingStatus — the phone step\'s failure code (S5b-1)', () => {
+  const lineFacts = { twilioPhoneNumber: '+12165550123', twilioLineState: 'failed' as const, twilioPendingNumber: '+12165550199' };
+  const phone = (r: ReturnType<typeof deriveOnboardingStatus>) => r.steps.find((s) => s.id === 'phone')!;
+
+  it.each([
+    ['area_code_unavailable', ['area_code_unavailable', 'twilio_provisioning_failed']],
+    ['credentials_missing', ['twilio_credentials_missing', 'twilio_provisioning_failed']],
+    ['provider_error', ['twilio_provider_error', 'twilio_provisioning_failed']],
+    ['unknown', ['twilio_provisioning_failed']],
+  ] as const)('a failed row with %s → error, the code, and its blockers', (code, blockers) => {
+    const r = deriveOnboardingStatus(billingDoneFacts({ twilioStatus: 'failed', twilioFailureCode: code, ...lineFacts }));
+    expect(phone(r)).toEqual({
+      id: 'phone',
+      status: 'error',
+      failureCode: code,
+      blockers,
+      metadata: { phoneNumber: '+12165550123', lineState: 'failed', pendingNumber: '+12165550199' },
+    });
+  });
+
+  it('a failed row with no code in the facts reads as unknown (a failed step always carries a code)', () => {
+    const r = deriveOnboardingStatus(billingDoneFacts({ twilioStatus: 'failed' }));
+    expect(phone(r)).toEqual({ id: 'phone', status: 'error', failureCode: 'unknown', blockers: ['twilio_provisioning_failed'] });
+  });
+
+  it.each([
+    ['full_readiness', 'done'],
+    ['t0_requested', 'current'],
+  ] as const)('a row that did not fail (%s) carries no failureCode, even if a stale one is in the facts', (twilioStatus, status) => {
+    const r = deriveOnboardingStatus(billingDoneFacts({
+      twilioStatus,
+      twilioFailureCode: 'provider_error',
+      twilioPhoneNumber: '+12165550123',
+      twilioLineState: twilioStatus === 'full_readiness' ? 'active' : 'claiming',
+      twilioPendingNumber: '+12165550199',
+    }));
+    const step = phone(r);
+    expect(step.status).toBe(status);
+    expect(step).not.toHaveProperty('failureCode');
+    expect(step).not.toHaveProperty('blockers');
+    expect(step.metadata).toEqual({
+      phoneNumber: '+12165550123',
+      lineState: twilioStatus === 'full_readiness' ? 'active' : 'claiming',
+      pendingNumber: '+12165550199',
+    });
+  });
+
+  it('no other step gains a failureCode', () => {
+    const r = deriveOnboardingStatus(billingDoneFacts({ twilioStatus: 'failed', twilioFailureCode: 'provider_error' }));
+    for (const s of r.steps.filter((x) => x.id !== 'phone')) expect(s).not.toHaveProperty('failureCode');
+  });
+});
+
+/**
+ * S4 (U9) — the two derived hints on the status draft block. Both are computed
+ * on a FIXED clock (deriveOnboardingStatus's second argument), one second ahead
+ * of it, so the shell is never offered an Undo or a Start over the endpoint
+ * would refuse.
+ */
+describe('deriveOnboardingStatus — draft undoable and recovery (fixed clock)', () => {
+  const T0 = new Date('2026-10-19T12:00:00.000Z');
+  const at = (ms: number) => new Date(T0.getTime() + ms);
+  const statusOf = (members: DraftProposalMember[], now: Date, expected = 2) =>
+    deriveOnboardingStatus(
+      facts({ draft: { status: 'approved', choicesAnswered: 7, version: 3, proposals: { expected, members } } }),
+      now,
+    ).draft!;
+  /** Approved at T0 (the window opens there). */
+  const fresh = (status = 'approved') => member(status, T0);
+
+  describe('undoable', () => {
+    it('is absent while the draft is still being edited, and so is recovery', () => {
+      const d = deriveOnboardingStatus(facts({ draft: { status: 'draft', choicesAnswered: 3, version: 4 } }), at(0)).draft!;
+      expect(d).not.toHaveProperty('undoable');
+      expect(d).not.toHaveProperty('recovery');
+    });
+
+    it('is false for an approved draft with nothing listed and for a listed proposal that no longer exists', () => {
+      const none = deriveOnboardingStatus(facts({ draft: { status: 'approved', choicesAnswered: 7, version: 2 } }), at(0)).draft!;
+      expect(none.undoable).toBe(false);
+      expect(statusOf([], at(0), 0).undoable).toBe(false);
+      expect(statusOf([fresh()], at(1000), 2).undoable).toBe(false);
+    });
+
+    it('is true only while every member is approved inside its window, one second early', () => {
+      expect(statusOf([fresh(), fresh()], at(0)).undoable).toBe(true);
+      expect(statusOf([fresh(), fresh()], at(3900)).undoable).toBe(true);
+      expect(statusOf([fresh(), fresh()], at(4000)).undoable).toBe(false);
+      expect(statusOf([fresh(), fresh()], at(UNDO_WINDOW_MS)).undoable).toBe(false);
+      // One member approved later (a fresh window) does not reopen the older one.
+      expect(statusOf([fresh(), member('approved', at(3000))], at(4000)).undoable).toBe(false);
+      // An approved row with no approval stamp is outside its window.
+      expect(statusOf([fresh(), member('approved', null)], at(0)).undoable).toBe(false);
+    });
+
+    it.each(['executing', 'executed', 'execution_failed', 'undone', 'rejected', 'expired'])(
+      'is false when a member is %s beside one still inside its window',
+      (other) => {
+        expect(statusOf([fresh(), fresh(other)], at(1000)).undoable).toBe(false);
+        expect(statusOf([fresh(other), fresh()], at(1000)).undoable).toBe(false);
+      },
+    );
+  });
+
+  describe('recovery', () => {
+    it.each<[string, number, 'reset' | 'settings', DraftProposalMember[]]>([
+      // Something already ran or is running: only Settings can finish it.
+      ['failed beside executing', 1000, 'settings', [fresh('execution_failed'), fresh('executing')]],
+      ['failed beside executed', 1000, 'settings', [fresh('execution_failed'), fresh('executed')]],
+      ['undone beside executed', 1000, 'settings', [fresh('undone'), fresh('executed')]],
+      ['expired beside executing', 1000, 'settings', [fresh('expired'), fresh('executing')]],
+      ['rejected beside executed, either order', 1000, 'settings', [fresh('executed'), fresh('rejected')]],
+      // An approved member: reset only while its window is open, one second early.
+      ['failed beside approved at 3.9 s', 3900, 'reset', [fresh('execution_failed'), fresh()]],
+      ['failed beside approved at 4.0 s', 4000, 'settings', [fresh('execution_failed'), fresh()]],
+      ['failed beside approved with no stamp', 0, 'settings', [fresh('execution_failed'), member('approved', null)]],
+      ['undone beside approved at 3.9 s', 3900, 'reset', [fresh('undone'), fresh()]],
+      ['undone beside approved at 4.0 s', 4000, 'settings', [fresh('undone'), fresh()]],
+      ['rejected beside approved in its window', 1000, 'reset', [fresh('rejected'), fresh()]],
+      // Nothing ran and nothing approved: reset can always clear it.
+      ['failed beside undone', 9000, 'reset', [fresh('execution_failed'), fresh('undone')]],
+      ['undone beside failed', 9000, 'reset', [fresh('undone'), fresh('execution_failed')]],
+      ['undone beside undone', 9000, 'reset', [fresh('undone'), fresh('undone')]],
+      ['failed beside failed', 9000, 'reset', [fresh('execution_failed'), fresh('execution_failed')]],
+      ['failed beside a stuck draft', 9000, 'reset', [fresh('execution_failed'), fresh('draft')]],
+      ['expired beside rejected', 9000, 'reset', [fresh('expired'), fresh('rejected')]],
+    ])('%s, read at +%i ms, is %s', (_label, offset, expected, members) => {
+      const d = statusOf(members, at(offset));
+      expect(['failed', 'stopped']).toContain(d.execution);
+      expect(d.recovery).toBe(expected);
+    });
+
+    it('is reset for a missing member beside one approved inside its window, settings once it closes', () => {
+      expect(statusOf([fresh()], at(1000), 2)).toMatchObject({ execution: 'stopped', recovery: 'reset' });
+      expect(statusOf([fresh()], at(4000), 2)).toMatchObject({ execution: 'stopped', recovery: 'settings' });
+      expect(statusOf([], at(9000), 2)).toMatchObject({ execution: 'stopped', recovery: 'reset' });
+    });
+
+    it.each<[string, DraftProposalMember[]]>([
+      ['pending', [fresh(), fresh()]],
+      ['executing', [fresh(), fresh('executing')]],
+      ['executed', [fresh('executed'), fresh('executed')]],
+    ])('is absent while the set is %s', (execution, members) => {
+      const d = statusOf(members, at(1000));
+      expect(d.execution).toBe(execution);
+      expect(d).not.toHaveProperty('recovery');
+    });
+
+    it('keeps seven steps with the same ids whatever the hints say', () => {
+      const base = deriveOnboardingStatus(facts(), at(0));
+      const r = deriveOnboardingStatus(
+        facts({ draft: { status: 'approved', choicesAnswered: 7, version: 3, proposals: { expected: 2, members: [fresh('undone'), fresh()] } } }),
+        at(1000),
+      );
+      expect(r.steps.map((s) => s.id)).toEqual(['signup', 'identity', 'pack', 'billing', 'phone', 'ai_check', 'test_call']);
+      expect(r.steps).toEqual(base.steps);
+    });
+  });
+
+  /**
+   * The hints never promise more than the endpoints grant. Undo wants every
+   * member approved inside its window at the instant it runs; reset wants
+   * nothing executing or executed and every approved member inside its window.
+   * Both predicates are written here from lifecycle's own `isInUndoWindow` at
+   * the status clock with NO margin, independent of the derivation under test.
+   */
+  it('sweep 0..8 s in 250 ms steps: undoable implies undo is allowed, reset implies reset is allowed', () => {
+    const sets: DraftProposalMember[][] = [
+      [fresh(), fresh()],
+      [fresh(), member('approved', at(2000))],
+      [fresh('undone'), fresh()],
+      [fresh('execution_failed'), member('approved', at(1500))],
+      [fresh('rejected'), fresh()],
+    ];
+    const undoAllowed = (members: DraftProposalMember[], nowMs: number) =>
+      members.length === 2 && members.every((m) => isInUndoWindow(m, nowMs));
+    const resetAllowed = (members: DraftProposalMember[], nowMs: number) =>
+      !members.some((m) => m.status === 'executing' || m.status === 'executed') &&
+      members.filter((m) => m.status === 'approved').every((m) => isInUndoWindow(m, nowMs));
+
+    const seen = { undoable: new Set<boolean>(), recovery: new Set<string | undefined>() };
+    for (const members of sets) {
+      for (let offset = 0; offset <= 8000; offset += 250) {
+        const now = at(offset);
+        const d = statusOf(members, now);
+        seen.undoable.add(d.undoable!);
+        seen.recovery.add(d.recovery);
+        if (d.undoable) expect(undoAllowed(members, now.getTime()), `undo at +${offset} ms`).toBe(true);
+        if (d.recovery === 'reset') expect(resetAllowed(members, now.getTime()), `reset at +${offset} ms`).toBe(true);
+      }
+    }
+    // Not vacuous: the sweep crosses both edges of both hints.
+    expect([...seen.undoable].sort()).toEqual([false, true]);
+    expect(seen.recovery).toEqual(new Set([undefined, 'reset', 'settings']));
   });
 });

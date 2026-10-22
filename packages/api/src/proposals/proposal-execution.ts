@@ -109,7 +109,18 @@ export class InMemoryProposalExecutionRepository implements ProposalExecutionRep
           r.proposalId === input.proposalId &&
           r.idempotencyKey === input.idempotencyKey,
       );
-      if (existing) return { ...existing };
+      if (existing) {
+        // Mirrors the Pg upsert: a prior failed attempt takes the retry's
+        // outcome; a succeeded/undone row keeps the first execution.
+        if (existing.status === 'failed') {
+          existing.status = input.status;
+          existing.errorMessage = input.errorMessage;
+          existing.executedPayload = { ...input.executedPayload };
+          existing.executedBy = input.executedBy;
+          existing.executedAt = input.executedAt ?? new Date();
+        }
+        return { ...existing };
+      }
     }
 
     const now = new Date();

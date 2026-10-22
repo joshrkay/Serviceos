@@ -36,7 +36,10 @@ function settingsRow(escalationSettings?: TenantSettings['escalationSettings']):
   };
 }
 
-async function buildApp(escalationSettings?: TenantSettings['escalationSettings']) {
+async function buildApp(
+  escalationSettings?: TenantSettings['escalationSettings'],
+  role: NonNullable<AuthenticatedRequest['auth']>['role'] = 'owner',
+) {
   const settingsRepo = new InMemorySettingsRepository();
   await settingsRepo.create(settingsRow(escalationSettings));
   const pool = {
@@ -50,7 +53,7 @@ async function buildApp(escalationSettings?: TenantSettings['escalationSettings'
       userId: USER_ID,
       sessionId: 'session-1595',
       tenantId: TENANT_ID,
-      role: 'owner',
+      role,
     };
     next();
   });
@@ -84,5 +87,14 @@ describe('#1595 — GET /api/onboarding/operator-hours afterHoursVoiceMode', () 
 
     expect(res.status).toBe(200);
     expect(res.body.afterHoursVoiceMode).toBe('voicemail');
+  });
+});
+
+describe('PUT /api/onboarding/operator-hours is owner-only', () => {
+  // Business hours drive after-hours voice routing and booking windows.
+  it('403s a technician', async () => {
+    const app = await buildApp(undefined, 'technician');
+    const res = await request(app).put('/api/onboarding/operator-hours').send({ businessHours: BUSINESS_HOURS });
+    expect(res.status).toBe(403);
   });
 });

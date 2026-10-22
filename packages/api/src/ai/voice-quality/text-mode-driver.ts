@@ -61,7 +61,7 @@
 import { performance } from 'node:perf_hooks';
 import { v4 as uuidv4 } from 'uuid';
 import { LLMGateway } from '../gateway/gateway';
-import { isApproverPhone } from '../../proposals/approver-identity';
+import { resolveOwnerSession } from '../voice-turn/shared/owner-session';
 import {
   createVoiceTurnProcessor,
   type VoiceTurnProcessor,
@@ -160,7 +160,7 @@ export interface TextModeDriverDeps {
    * `establishInboundSession` does; without it only the owner line has an
    * actor.
    */
-  userRepo?: Pick<UserRepository, 'findByMobileNumber' | 'findByTenant'>;
+  userRepo?: Pick<UserRepository, 'findByMobileNumber' | 'findByTenant' | 'findById'>;
   /**
    * #869 — the shared lookup bundle, IDENTICAL in shape to the one the live
    * phone takes (`app.ts` builds one and hands it to every surface). Omit it
@@ -488,16 +488,10 @@ export class TextModeDriver implements AgentDriver {
    */
   private async resolveOwnerSession(opts: AgentDriverStartOpts): Promise<boolean> {
     if (opts.callerIsOwner === true) return true;
-    if (!this.deps.settingsRepo || !opts.callerId) return false;
-    try {
-      return await isApproverPhone(
-        { settingsRepo: this.deps.settingsRepo },
-        opts.tenantId,
-        opts.callerId,
-      );
-    } catch {
-      return false;
-    }
+    // #1601 step 2 — the shared RV-070 resolver the Gather adapter uses
+    // (`ai/voice-turn/shared/owner-session.ts`), userRepo included, so the
+    // backup supervisor's mobile is an owner line here as in production.
+    return resolveOwnerSession(this.deps, opts.tenantId, opts.callerId ?? undefined);
   }
 
   async speak(

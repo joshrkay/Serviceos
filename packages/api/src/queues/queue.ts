@@ -1,4 +1,5 @@
 import { randomUUID } from 'crypto';
+import type { PoolClient } from 'pg';
 import { Logger } from '../logging/logger';
 import { createHash } from 'crypto';
 
@@ -129,6 +130,21 @@ export interface Queue {
     idempotencyKey?: string,
     options?: SendOptions,
   ): Promise<string>;
+  /**
+   * S5a-3 (U8) — enqueue on the CALLER's client, inside the caller's open
+   * transaction: the row commits or rolls back with the caller's writes (the
+   * payment-mode switch writes its cleanup job in the settings transaction).
+   * Same `ON CONFLICT (idempotency_key) DO NOTHING` dedupe as `send`; no
+   * BEGIN/COMMIT of its own. PgQueue bootstraps its tables on its OWN
+   * connection first, never inside the caller's transaction.
+   */
+  sendOn<T>(
+    client: PoolClient,
+    type: string,
+    payload: T,
+    idempotencyKey: string,
+    options?: SendOptions,
+  ): Promise<string>;
   receive<T>(): Promise<QueueMessage<T> | null>;
   /**
    * Scale-to-1000 (P3): atomically claim up to `max` visible messages in one
@@ -155,12 +171,14 @@ export interface Queue {
    */
   depth(): Promise<QueueDepth>;
   /**
-   * WS15 (SLO monitor) — count of pending messages older than
-   * `olderThanSeconds`. The poll loop drains every second, so an old pending
-   * row means the queue is STUCK (dead poller, wedged handler, poison-retry
-   * loop) — the staleness signal the queue_staleness SLO alerts on, distinct
-   * from raw depth (which a healthy burst can also raise). Cheap COUNT on an
-   * interval — never called on the hot path.
+   * WS15 (SLO monitor) — count of messages that have been DUE (visible) and
+   * unclaimed for longer than `olderThanSeconds`. The poll loop drains every
+   * second, so a long-due row means the queue is STUCK (dead poller, wedged
+   * handler) — the staleness signal the queue_staleness SLO alerts on,
+   * distinct from raw depth (which a healthy burst can also raise). Measured
+   * from visibility, not creation: a delayed message (durable timer, A2P
+   * poll) is scheduled work until it falls due, and an in-flight one is
+   * invisible. Cheap COUNT on an interval — never called on the hot path.
    */
   stalePendingCount(olderThanSeconds: number): Promise<number>;
   getConfig(): QueueConfig;
@@ -235,6 +253,17 @@ export class InMemoryQueue implements Queue {
       visibleAt: Date.now() + delayMs,
     });
     return id;
+  }
+
+  /** No transaction to join in memory: a plain send (same dedupe, same delay). */
+  async sendOn<T>(
+    _client: PoolClient,
+    type: string,
+    payload: T,
+    idempotencyKey: string,
+    options?: SendOptions,
+  ): Promise<string> {
+    return this.send(type, payload, idempotencyKey, options);
   }
 
   async receive<T>(): Promise<QueueMessage<T> | null> {
@@ -323,10 +352,10 @@ export class InMemoryQueue implements Queue {
     return { pending: this.messages.length, deadLetter: this.dlq.length };
   }
 
-  /** WS15 — mirror of PgQueue.stalePendingCount (created_at age filter). */
+  /** WS15 — mirror of PgQueue.stalePendingCount (due-and-unclaimed age). */
   async stalePendingCount(olderThanSeconds: number): Promise<number> {
     const cutoff = Date.now() - Math.max(0, olderThanSeconds) * 1000;
-    return this.messages.filter((m) => new Date(m.createdAt).getTime() < cutoff).length;
+    return this.messages.filter((m) => m.visibleAt < cutoff).length;
   }
 }
 

@@ -261,6 +261,9 @@ export type VoiceErrorKind =
   // WS3 — the pre-connect health circuit was open, so a new inbound call was
   // steered to Gather instead of the realtime (Media Streams) path.
   | 'realtime_circuit_open'
+  // LCR-06 — the tenant already had its cap of live realtime calls, so a new
+  // inbound call was steered to Gather instead of a refused Media Stream.
+  | 'tenant_connection_cap'
   // WS7 — a LIVE realtime call was steered to Gather mid-call via the REST
   // redirect (Deepgram/transport failure recovered without dead air).
   | 'degraded_to_gather'
@@ -283,7 +286,14 @@ export type VoiceErrorKind =
   | 'low_stt_confidence'
   // A3 — MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS back-to-back low-confidence
   // finals; the caller was handed off gracefully instead of being looped.
-  | 'low_stt_confidence_repeated';
+  | 'low_stt_confidence_repeated'
+  // Realtime hand-off — Twilio refused (or timed out) the inline-TwiML REST
+  // update that bridges a stream call to a human; the call fell back to the
+  // Gather degrade, whose webhook delivers the same hand-off.
+  | 'handoff_delivery_failed'
+  // Realtime hand-off — the transfer AND the Gather degrade were both
+  // refused: the caller was told no one could be reached and the call ended.
+  | 'handoff_undeliverable';
 
 /** Which transport/surface the voice error occurred on. */
 export type VoiceErrorChannel = 'media_streams' | 'gather' | 'worker';

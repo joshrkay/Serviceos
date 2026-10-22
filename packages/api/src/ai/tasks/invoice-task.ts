@@ -1,4 +1,4 @@
-import { TaskHandler, TaskContext, TaskResult } from './task-handlers';
+import { TaskHandler, TaskContext, TaskResult, draftingRunLink, draftingRunMetadata } from './task-handlers';
 import { taskMessageForPrompt } from './task-input';
 import { createProposal, CreateProposalInput, type Proposal } from '../../proposals/proposal';
 import { LLMGateway } from '../gateway/gateway';
@@ -341,6 +341,8 @@ export class InvoiceTaskHandler implements TaskHandler {
       tenantId: context.tenantId,
       messages: [...systemMessages, { role: 'user', content: userMessage }],
       responseFormat: 'json',
+      // OBS-2 — ai_runs.correlation_id → this conversation.
+      ...draftingRunMetadata(context),
     });
 
     const parsed = tryParseInvoiceJson(llmResponse.content);
@@ -625,6 +627,8 @@ export class InvoiceTaskHandler implements TaskHandler {
       tenantId: context.tenantId,
       proposalType: this.taskType,
       payload,
+      // OBS-2 — the drafting run that authored this payload.
+      ...draftingRunLink(llmResponse),
       summary: context.message,
       confidenceScore,
       confidenceFactors,

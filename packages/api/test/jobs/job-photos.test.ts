@@ -43,8 +43,16 @@ const JOB_BAD_FILE_ID = '8e2d4c6a-1f3b-4a5c-9e7d-0b2a4c6e8f13';
 const JOB_BAD_CAT_ID = 'c5f1a3e7-9b2d-4c8e-a6f0-1d3b5a7c9e02';
 const JOB_ISO_ID = '1b7d9f3a-5c2e-4e8b-b4a6-7f9d1c3e5a84';
 
+const uploadUrlCalls: Array<{ key: string; sizeBytes: number }> = [];
+
 class FakeStorageProvider implements StorageProvider {
-  async generateUploadUrl(bucket: string, key: string): Promise<string> {
+  async generateUploadUrl(
+    bucket: string,
+    key: string,
+    _contentType: string,
+    sizeBytes: number
+  ): Promise<string> {
+    uploadUrlCalls.push({ key, sizeBytes });
     return `https://fake.local/put/${bucket}/${key}`;
   }
   async generateDownloadUrl(bucket: string, key: string): Promise<string> {
@@ -131,6 +139,19 @@ describe('job-photo router (P12-001)', () => {
     // rejects it before our content-type narrowing fires — both layers
     // produce 400, which is what we want.
     expect(wrongType.status).toBe(400);
+  });
+
+  // Security audit: the declared size must reach the presign so it is
+  // signed as Content-Length — the 10MB photo cap is otherwise advisory.
+  it('presign-upload passes the declared sizeBytes through to the presigned upload URL', async () => {
+    uploadUrlCalls.length = 0;
+    const jobId = '4c8e2a6f-3d1b-4f9a-8e5c-2b6a4d8f0c17';
+    const ok = await request(app)
+      .post(`/api/jobs/${jobId}/photos/presign-upload`)
+      .send({ filename: 'before.jpg', contentType: 'image/jpeg', sizeBytes: 777 });
+    expect(ok.status).toBe(201);
+    const stored = await fileRepo.findById(TENANT_A, ok.body.fileId);
+    expect(uploadUrlCalls).toEqual([{ key: stored!.storageKey, sizeBytes: 777 }]);
   });
 
   it('attach + list + delete round-trips a job-photo', async () => {

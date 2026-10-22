@@ -42,6 +42,7 @@
 import type { Pool } from 'pg';
 import type { Estimate, EstimateRepository } from './estimate';
 import type { SendChannel, SendResult, SendService } from '../notifications/send-service';
+import type { SmsQuietHoursPolicy } from '../notifications/delivery-provider';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { withSendClaim } from '../notifications/send-claim-ledger';
 
@@ -72,6 +73,11 @@ export interface DispatchEstimateNudgeInput {
   actorId: string;
   /** Optional note appended to the outbound message. */
   customMessage?: string;
+  /**
+   * 'defer' for the automatic reminder sweep (non-transactional). The
+   * owner-approved send_estimate_nudge omits it: a human sending now.
+   */
+  quietHours?: SmsQuietHoursPolicy;
 }
 
 /** Thrown when a concurrent attempt already claimed this exact nudge occurrence. */
@@ -116,6 +122,7 @@ export async function dispatchEstimateNudge(
     estimateId: estimate.id,
     channel,
     ...(input.customMessage !== undefined ? { customMessage: input.customMessage } : {}),
+    ...(input.quietHours ? { quietHours: input.quietHours } : {}),
     // #1145 — same per-revision, per-occurrence identity as this module's
     // own send_claims claimKey below, so SendService's dispatch idempotency
     // key can't collide with an unrelated owner manual send or
@@ -128,7 +135,7 @@ export async function dispatchEstimateNudge(
   };
 
   // #1528 — the channel the nudge actually went out on. With 'auto' the
-  // send picks it (email on file, else a text); the audit names what it
+  // send picks it (a text when the customer can be texted, else email; D-045); the audit names what it
   // picked. A reconciled 'sent' tombstone carries no send result, so it keeps
   // the requested channel.
   let sentChannel: SendChannel = channel;

@@ -49,6 +49,7 @@ import { classifyCallerSafety } from '../../../src/ai/agents/customer-calling/em
 import { EMERGENCY_SAFETY_LINE } from '../../../src/ai/agents/customer-calling/emergency-detector';
 import { UpdateBrandVoiceExecutionHandler } from '../../../src/proposals/execution/brand-voice-handler';
 import { InMemoryBrandVoiceRepository } from '../../../src/tenants/brand/in-memory-brand-voice-repository';
+import { markExecuted } from '../../helpers/proposal-status';
 
 /** A configured (opted-in) discount policy + a grounded $250 quote, for U6 tests. */
 const u6DiscountDeps = {
@@ -2265,7 +2266,7 @@ describe('ANS-001 — E1 booking revocation (conditional write + compensation)',
         createdBy: 'voice',
       }),
     );
-    await proposalRepo.updateStatus('tenant-e1', booking.id, 'executed', {
+    await markExecuted(proposalRepo, 'tenant-e1', booking.id, {
       resultEntityId: 'appt-77',
     });
     session.proposalIds.push(booking.id);
@@ -2404,6 +2405,24 @@ describe('ANS-001 — E1 booking revocation (conditional write + compensation)',
 });
 
 describe('ANS-001 — E1 tenant alert (owner cell, durable fallback, push fan-out)', () => {
+  it('tags every E1 text life-safety, so the outbound SMS kill switch cannot silence it', async () => {
+    const sent: Array<{ to: string; body: string; alertClass?: string }> = [];
+    const { processor, session } = await makeE1Ctx({
+      settings: { ownerPhone: '+15125550111', transferNumber: '+15125550999' },
+      deliveryProvider: {
+        sendSms: async (args: { to: string; body: string; alertClass?: string }) => {
+          sent.push(args);
+          return {};
+        },
+      },
+    });
+
+    await processor.executeSideEffects(session, [NOTIFY_FX], 'tenant-e1');
+
+    expect(sent).toHaveLength(2);
+    expect(sent.every((s) => s.alertClass === 'life_safety')).toBe(true);
+  });
+
   it('texts EVERY configured number — owner cell AND transfer line (S2: no preference chain)', async () => {
     // ownerPhone can be a stale identity field, and a Twilio-ACCEPTED send to
     // a stale number throws nothing — a preference chain can silently alert
@@ -2465,22 +2484,36 @@ describe('ANS-001 — E1 tenant alert (owner cell, durable fallback, push fan-ou
     expect(sent).toHaveLength(1);
   });
 
-  it('does NOT file the durable task when at least one of the two texts delivered', async () => {
+  it('files the durable task even when every text was ACCEPTED by the provider', async () => {
+    // Acceptance is not delivery: with the from-number's A2P registration
+    // incomplete, Twilio accepts and carriers silently drop. The task is the
+    // one channel that cannot be filtered, so it is filed whatever the SMS did.
     const { processor, session, callMeBackRepo } = await makeE1Ctx({
       settings: { ownerPhone: '+15125550111', transferNumber: '+15125550999' },
-      deliveryProvider: {
-        sendSms: async ({ to }) => {
-          if (to === '+15125550111') throw new Error('unreachable');
-          return {};
-        },
-      },
+      deliveryProvider: { sendSms: async () => ({}) },
     });
 
     await processor.executeSideEffects(session, [NOTIFY_FX], 'tenant-e1');
 
     const reasons = (await callMeBackRepo.listPending('tenant-e1')).map((t) => t.reason);
-    // One delivered alert = a notified tenant; the fallback is for total failure.
-    expect(reasons).not.toContain('life_safety_e1');
+    expect(reasons).toContain('life_safety_e1');
+  });
+
+  it('a replayed E1 turn whose texts were accepted still files ONE task (keyed on session + reason)', async () => {
+    // The task is now filed on every E1 alert attempt, so a webhook retry of
+    // the same turn must reuse it — call_me_back is idempotent on
+    // (tenant, session, reason) (migration 268), and the task carries both.
+    const { processor, session, callMeBackRepo } = await makeE1Ctx({
+      settings: { ownerPhone: '+15125550111', transferNumber: '+15125550999' },
+      deliveryProvider: { sendSms: async () => ({}) },
+    });
+
+    await processor.executeSideEffects(session, [NOTIFY_FX], 'tenant-e1');
+    await processor.executeSideEffects(session, [NOTIFY_FX], 'tenant-e1');
+
+    const tasks = await callMeBackRepo.listPending('tenant-e1');
+    expect(tasks.filter((t) => t.reason === 'life_safety_e1')).toHaveLength(1);
+    expect(tasks[0].sessionId).toBe(session.id);
   });
 
   it('files the durable task when EVERY configured number fails', async () => {
@@ -2534,7 +2567,7 @@ describe('ANS-001 — E1 tenant alert (owner cell, durable fallback, push fan-ou
         createdBy: 'voice',
       }),
     );
-    await proposalRepo.updateStatus('tenant-e1', booking.id, 'executed');
+    await markExecuted(proposalRepo, 'tenant-e1', booking.id);
     session.proposalIds.push(booking.id);
 
     // Same order the FSM emits them in.

@@ -32,6 +32,7 @@ import {
   isMemoryWatermarkHigh,
 } from './reconnect-guard';
 import {
+  WS_AUTH_REVALIDATE_INTERVAL_MS,
   WS_CLOSE_CODE,
   WS_HEARTBEAT_INTERVAL_MS,
   WS_IDLE_TIMEOUT_MS,
@@ -55,16 +56,33 @@ const logger = createLogger({
 const SURFACE = 'client_gateway';
 export const CLIENT_GATEWAY_PATH = '/api/ws';
 
+/** Outcome of re-checking an open connection's authorization. */
+export type RevalidateOutcome = 'ok' | 'revoked' | 'unavailable';
+
 export interface AuthResolver {
   /** Resolve auth from upgrade request. Return null to reject 401. */
   authenticate(req: IncomingMessage): Promise<AuthResult | null> | AuthResult | null;
+  /**
+   * Re-check an open connection's authorization (live membership). Called
+   * periodically for the life of the socket; 'revoked' closes it with 4403,
+   * 'unavailable' (or a throw) fails closed with 1013 try-again-later.
+   */
+  revalidate?(auth: AuthResult): Promise<RevalidateOutcome>;
 }
 
 export interface AuthResult {
   tenantId: string;
+  /** Authenticated subject (the Clerk `sub`). */
   userId?: string;
+  /** DB-authoritative role when a membership loader is wired, else the token claim. */
+  role?: string;
   tenantTier?: string;
+  /** Epoch ms at which the upgrade credential expires; the socket closes then. */
+  expiresAtMs?: number;
 }
+
+/** setTimeout's max delay; longer waits are re-armed in chunks. */
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 
 /** Presence entry as sent to clients on the dispatch channel. */
 export interface DispatchPresenceEntry {
@@ -108,6 +126,8 @@ export interface ClientGatewayDeps {
   reconnectGuard?: ReconnectGuard;
   heartbeatIntervalMs?: number;
   idleTimeoutMs?: number;
+  /** How often to call `auth.revalidate` on an open connection. */
+  revalidateIntervalMs?: number;
   /** Per-connection queue caps. */
   queueMaxMsgs?: number;
   queueMaxBytes?: number;
@@ -134,6 +154,13 @@ export class ClientGatewayConnection {
   private readonly queue: BoundedSendQueue;
   private readonly heartbeatTimer: NodeJS.Timeout;
   private idleTimer: NodeJS.Timeout | null = null;
+  /** Closes the socket when the upgrade credential's `exp` passes. */
+  private expiryTimer: NodeJS.Timeout | null = null;
+  /** Periodic live-membership re-check (only when a revalidator is wired). */
+  private revalidateTimer: NodeJS.Timeout | null = null;
+  private revalidating = false;
+  private readonly auth: AuthResult;
+  private readonly revalidate?: (auth: AuthResult) => Promise<RevalidateOutcome>;
   private subscriptions: Set<string> = new Set();
   private closed = false;
   private draining = false;
@@ -154,8 +181,12 @@ export class ClientGatewayConnection {
       queueMaxMsgs: number;
       queueMaxBytes: number;
       dispatchPresence?: DispatchPresenceGatewayDeps;
+      revalidate?: (auth: AuthResult) => Promise<RevalidateOutcome>;
+      revalidateIntervalMs?: number;
     },
   ) {
+    this.auth = auth;
+    this.revalidate = cfg.revalidate;
     this.tenantId = auth.tenantId;
     this.userId = auth.userId;
     this.tenantTier = auth.tenantTier ?? 'standard';
@@ -197,6 +228,14 @@ export class ClientGatewayConnection {
     }
     this.armIdleTimer(cfg.idleTimeoutMs);
 
+    if (this.revalidate) {
+      this.revalidateTimer = setInterval(
+        () => void this.runRevalidation(),
+        cfg.revalidateIntervalMs ?? WS_AUTH_REVALIDATE_INTERVAL_MS,
+      );
+      if (typeof this.revalidateTimer.unref === 'function') this.revalidateTimer.unref();
+    }
+
     ws.on('message', (data) => this.onMessage(data));
     ws.on('close', () => this.onClose('client_close'));
     ws.on('error', () => this.onClose('ws_error'));
@@ -206,6 +245,55 @@ export class ClientGatewayConnection {
       serverTimeMs: Date.now(),
       heartbeatIntervalMs: cfg.heartbeatIntervalMs,
     });
+
+    // Armed last: an already-expired credential terminates synchronously, and
+    // every listener/timer above must exist so onClose tears them down.
+    this.armExpiryTimer();
+  }
+
+  /**
+   * A long-lived socket must not outlive the credential it was opened with.
+   * Clients reconnect with a fresh token (useResilientStream re-dials on
+   * token change), so this only cuts off a holder who can't refresh.
+   */
+  private armExpiryTimer(): void {
+    const expiresAtMs = this.auth.expiresAtMs;
+    if (expiresAtMs === undefined || this.closed) return;
+    const remaining = expiresAtMs - Date.now();
+    if (remaining <= 0) {
+      this.terminate('token_expired', WS_CLOSE_CODE.unauthorized);
+      return;
+    }
+    this.expiryTimer = setTimeout(
+      () => this.armExpiryTimer(),
+      Math.min(remaining, MAX_TIMER_DELAY_MS),
+    );
+    if (typeof this.expiryTimer.unref === 'function') this.expiryTimer.unref();
+  }
+
+  /**
+   * Re-check the caller's live membership. A user suspended / deleted /
+   * removed mid-session is disconnected within one interval instead of
+   * receiving tenant broadcasts until they happen to disconnect. Fails closed
+   * on an unavailable authorization backend.
+   */
+  private async runRevalidation(): Promise<void> {
+    if (!this.revalidate || this.closed || this.revalidating) return;
+    this.revalidating = true;
+    let outcome: RevalidateOutcome;
+    try {
+      outcome = await this.revalidate(this.auth);
+    } catch {
+      outcome = 'unavailable';
+    } finally {
+      this.revalidating = false;
+    }
+    if (this.closed) return;
+    if (outcome === 'revoked') {
+      this.terminate('access_revoked', WS_CLOSE_CODE.forbidden);
+    } else if (outcome === 'unavailable') {
+      this.terminate('authz_unavailable', WS_CLOSE_CODE.try_again_later);
+    }
   }
 
   /** Push a server frame to the client. */
@@ -455,6 +543,10 @@ export class ClientGatewayConnection {
     clearInterval(this.heartbeatTimer);
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = null;
+    if (this.expiryTimer) clearTimeout(this.expiryTimer);
+    this.expiryTimer = null;
+    if (this.revalidateTimer) clearInterval(this.revalidateTimer);
+    this.revalidateTimer = null;
     this.subscriptions.clear();
     this.queue.clear();
     for (const unsubscribe of this.dispatchBoardSubs.values()) unsubscribe();
@@ -567,6 +659,8 @@ export function attachClientGateway(
     queueMaxMsgs: deps.queueMaxMsgs ?? 200,
     queueMaxBytes: deps.queueMaxBytes ?? 4 * 1024 * 1024,
     dispatchPresence: deps.dispatchPresence,
+    revalidate: deps.auth.revalidate?.bind(deps.auth),
+    revalidateIntervalMs: deps.revalidateIntervalMs ?? WS_AUTH_REVALIDATE_INTERVAL_MS,
   };
 
   const upgradeHandler = (req: IncomingMessage, socket: Socket, head: Buffer): void => {

@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { ConflictError } from '../shared/errors';
+import { assertStatusWrite } from './lifecycle';
 import {
   confidenceMetaBlocksAutoApprove,
   resolveAutoApproveThreshold,
@@ -27,7 +28,46 @@ export type ProposalStatus =
   // or re-executed. If the operator wants to proceed after undoing,
   // they draft a new proposal. Decision 9 ("5-second undo window").
   | 'undone';
-export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'update_job' | 'create_appointment' | 'create_booking' | 'callback' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'create_invoice_schedule' | 'batch_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'add_crew_member' | 'remove_crew_member' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'send_estimate' | 'send_estimate_nudge' | 'record_payment' | 'log_expense' | 'convert_lead' | 'confirm_appointment' | 'mark_lead_lost' | 'add_service_location' | 'log_time_entry' | 'notify_delay' | 'request_feedback' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'review_response_proposal' | 'send_payment_reminder' | 'apply_late_fee' | 'create_standing_instruction' | 'update_catalog_item' | 'adopt_entity_alias' | 'update_brand_voice' | 'record_refund' | 'apply_credit' | 'send_customer_message' | 'create_change_order' | 'create_service_agreement' | 'add_material' | 'add_catalog_item';
+export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'update_job' | 'create_appointment' | 'create_booking' | 'callback' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'create_invoice_schedule' | 'batch_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'add_crew_member' | 'remove_crew_member' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'send_estimate' | 'send_estimate_nudge' | 'record_payment' | 'log_expense' | 'convert_lead' | 'confirm_appointment' | 'mark_lead_lost' | 'add_service_location' | 'log_time_entry' | 'notify_delay' | 'request_feedback' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'onboarding_voice_policy' | 'review_response_proposal' | 'send_payment_reminder' | 'apply_late_fee' | 'create_standing_instruction' | 'update_catalog_item' | 'adopt_entity_alias' | 'update_brand_voice' | 'record_refund' | 'apply_credit' | 'send_customer_message' | 'create_change_order' | 'create_service_agreement' | 'add_material' | 'add_catalog_item';
+
+/**
+ * D-015 — a lane booking that went live: approved, mid-execution, executed,
+ * or failed in execution after the caller was told it was booked. The
+ * owner's one-tap UNDO acts on exactly these.
+ */
+export const LANE_BOOKING_LIVE_STATUSES: readonly ProposalStatus[] = [
+  'approved',
+  'executing',
+  'executed',
+  'execution_failed',
+];
+
+/** What the digest counts as auto-booked: live, or already undone by the owner. */
+export const LANE_BOOKING_BOOKED_STATUSES: readonly ProposalStatus[] = [
+  ...LANE_BOOKING_LIVE_STATUSES,
+  'undone',
+];
+
+/**
+ * The machine approved this proposal at creation: `createProposal` stamps a
+ * born-approved proposal's `approvedAt` with the same instant as its
+ * `createdAt` (D9 undo window), while a human approval of a held proposal
+ * stamps `approvedAt` later. The digest counts only these lane bookings as
+ * auto-booked.
+ */
+export function laneBookingMachineApproved(p: Pick<Proposal, 'approvedAt' | 'createdAt'>): boolean {
+  return p.approvedAt !== undefined && p.approvedAt.getTime() === p.createdAt.getTime();
+}
+
+/**
+ * The owner undid this lane booking: before execution (status 'undone') or
+ * after it, when the one-tap route cancels the appointment and stamps
+ * `sourceContext.ownerUndo` because 'executed' stays terminal.
+ */
+export function laneBookingUndoneByOwner(p: Pick<Proposal, 'status' | 'sourceContext'>): boolean {
+  const stamp = p.sourceContext?.ownerUndo;
+  return p.status === 'undone' || (typeof stamp === 'object' && stamp !== null);
+}
 
 export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'create_customer',
@@ -69,6 +109,7 @@ export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'onboarding_estimate_template',
   'onboarding_team_member',
   'onboarding_schedule',
+  'onboarding_voice_policy',
   'review_response_proposal',
   'send_payment_reminder',
   'apply_late_fee',
@@ -356,6 +397,7 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     case 'onboarding_estimate_template':
     case 'onboarding_team_member':
     case 'onboarding_schedule':
+    case 'onboarding_voice_policy':
     case 'log_expense':
     // Converting a lead to a customer is a low-risk capture: it promotes
     // an existing CRM record. It moves no money and is reversible (the
@@ -370,10 +412,12 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     case 'add_service_location':
     case 'log_time_entry':
     // UB-A2 — capturing a standing instruction WRITES a directive row, moves
-    // no money and contacts no customer; the instruction only ever shapes
-    // future DRAFTS (which are themselves reviewed). Capture-class, but the
+    // no money and contacts no customer directly. Capture-class, but the
     // voice task handler deliberately omits sourceTrustTier, so the
-    // instruction itself always lands for human review in v1.
+    // instruction itself always lands for human review in v1. It is NOT
+    // harmless config: it shapes every future draft AND the unreviewed
+    // dropped-call recovery SMS, so approving it is config-writing
+    // (PI-2 — actions.ts CONFIG_WRITING_PROPOSAL_TYPES, settings:update).
     case 'create_standing_instruction':
     // WS20 — updating a catalog item's unit price is a config change: it moves
     // no money (only shapes FUTURE drafts, which are themselves reviewed),
@@ -551,7 +595,9 @@ export function decideInitialStatus(input: {
    * UB-D / D-015 — autonomous booking lane. Set ONLY by the
    * inbound-receptionist booking call sites after
    * `evaluateAutonomousBookingLane` passed every gate (tenant opt-in,
-   * booking capture types only, clean resolution, live held slot in
+   * booking capture types only, the autonomy-only gates of
+   * `AutonomyOnlyInput` (owner cell, deliverable UNDO channel, caller
+   * language, conflict check ran), clean resolution, live held slot in
    * business hours, no session flags). When present-and-eligible AND the
    * tenant is unsupervised (threshold resolution returned null), the lane's
    * dedicated (stricter) threshold is used instead of categorically
@@ -913,6 +959,16 @@ export interface ProposalRepository {
    */
   createMany(proposals: Proposal[]): Promise<Proposal[]>;
   findById(tenantId: string, id: string): Promise<Proposal | null>;
+  /**
+   * The locking read of a proposal SET (onboarding/draft/locked-set.ts): this
+   * tenant's rows among `ids`, ordered by id, each `SELECT ... FOR UPDATE` until
+   * the request transaction ends. A missing or foreign id is simply absent from
+   * the result. The fixed order means two callers locking the same set cannot
+   * deadlock. Only meaningful inside the /api request transaction: the Pg
+   * implementation refuses to run outside one (a lock taken on a throwaway
+   * connection is released at once). In memory it is a plain ordered read.
+   */
+  findByIdsForUpdate(tenantId: string, ids: string[]): Promise<Proposal[]>;
   findByTenant(tenantId: string): Promise<Proposal[]>;
   findByStatus(tenantId: string, status: ProposalStatus): Promise<Proposal[]>;
   /**
@@ -956,12 +1012,14 @@ export interface ProposalRepository {
     limit?: number,
   ): Promise<Proposal[]>;
   /**
-   * D-015 amendment — proposals created in [from, to) that took the
-   * autonomous booking lane (`sourceContext.autonomousLaneEvaluation.eligible
-   * === true`). Drives the digest "Auto-booked: N appointment(s)"
-   * reflection. Newest first, capped at `limit`. Optional so partial test
-   * doubles still satisfy the interface; the digest falls back to an empty
-   * section when it is absent.
+   * D-015 amendment — lane bookings created in [from, to) that the machine
+   * actually booked: lane-eligible (`sourceContext.autonomousLaneEvaluation
+   * .eligible === true`), approved at creation (`laneBookingMachineApproved`;
+   * a held booking a human approved later is not), and in
+   * `LANE_BOOKING_BOOKED_STATUSES`. Drives the digest "Auto-booked: N
+   * appointment(s)" reflection. Newest first, capped at `limit`. Optional so
+   * partial test doubles still satisfy the interface; the digest falls back
+   * to an empty section when it is absent.
    */
   findAutonomousLaneApprovedForDay?(
     tenantId: string,
@@ -1083,16 +1141,34 @@ export interface ProposalRepository {
         | 'approvedAt'
         | 'executedAt'
         | 'executedBy'
+        | 'executedByRole'
         | 'executionError'
         | 'undoneAt'
         | 'undoneBy'
       >
     >
   ): Promise<Proposal | null>;
+  /**
+   * Owner-driven retry of a failed execution (onboarding/draft/retry.ts): ONE
+   * atomic conditional write, valid only for status 'execution_failed'
+   * (lifecycle allows execution_failed -> draft). Moves the row to 'draft' and
+   * clears the stale attempt state: `approvedAt`, `executionError`, `claimedBy`,
+   * `claimedAt`, and `executionRetryCount` (back to 0).
+   *
+   * `updateStatusIf` cannot do this: it skips undefined values, so it can never
+   * null `approved_at`, and `transitionProposal` stamps `approvedAt` only when it
+   * is unset, so a stale value would make the re-approval reuse a closed undo
+   * window and the worker would run the proposal at once. A stale retry count
+   * would also let the next stale sweep terminalize the row immediately.
+   *
+   * Returns the reset row, or null when it is missing, another tenant's, or not
+   * execution_failed. Leaves `executedBy` / `executedByRole`: approval re-stamps them.
+   */
+  resetFailedForRetry(tenantId: string, id: string): Promise<Proposal | null>;
   update(
     tenantId: string,
     id: string,
-    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt'>>
+    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt' | 'status'>>
   ): Promise<Proposal | null>;
 
   /**
@@ -1373,6 +1449,15 @@ export class InMemoryProposalRepository implements ProposalRepository {
     return { ...proposal };
   }
 
+  /** Plain ordered read: in-memory callers are single-threaded, so there is nothing to lock. */
+  async findByIdsForUpdate(tenantId: string, ids: string[]): Promise<Proposal[]> {
+    return [...new Set(ids)]
+      .sort()
+      .map((id) => this.proposals.get(id))
+      .filter((p): p is Proposal => !!p && p.tenantId === tenantId)
+      .map((p) => ({ ...p }));
+  }
+
   async findByTenant(tenantId: string): Promise<Proposal[]> {
     return Array.from(this.proposals.values())
       .filter((p) => p.tenantId === tenantId)
@@ -1463,7 +1548,10 @@ export class InMemoryProposalRepository implements ProposalRepository {
         return (
           !!evaluation &&
           typeof evaluation === 'object' &&
-          (evaluation as Record<string, unknown>).eligible === true
+          (evaluation as Record<string, unknown>).eligible === true &&
+          // Actually auto-booked (mirrors the Postgres query).
+          LANE_BOOKING_BOOKED_STATUSES.includes(p.status) &&
+          laneBookingMachineApproved(p)
         );
       })
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
@@ -1591,6 +1679,7 @@ export class InMemoryProposalRepository implements ProposalRepository {
   ): Promise<Proposal | null> {
     const proposal = this.proposals.get(id);
     if (!proposal || proposal.tenantId !== tenantId) return null;
+    assertStatusWrite(proposal.status, status);
 
     proposal.status = status;
     proposal.updatedAt = new Date();
@@ -1625,6 +1714,7 @@ export class InMemoryProposalRepository implements ProposalRepository {
         | 'approvedAt'
         | 'executedAt'
         | 'executedBy'
+        | 'executedByRole'
         | 'executionError'
         | 'undoneAt'
         | 'undoneBy'
@@ -1634,21 +1724,40 @@ export class InMemoryProposalRepository implements ProposalRepository {
     // Same precondition the pg impl folds into its WHERE clause: the row must
     // exist, belong to this tenant, and still sit in one of `fromStatuses`.
     // Single-threaded here, so the check + write are trivially atomic.
+    for (const from of fromStatuses) assertStatusWrite(from, to);
     const proposal = this.proposals.get(id);
     if (!proposal || proposal.tenantId !== tenantId) return null;
     if (!fromStatuses.includes(proposal.status)) return null;
     return this.updateStatus(tenantId, id, to, updates);
   }
 
+  async resetFailedForRetry(tenantId: string, id: string): Promise<Proposal | null> {
+    const proposal = this.proposals.get(id);
+    if (!proposal || proposal.tenantId !== tenantId) return null;
+    if (proposal.status !== 'execution_failed') return null;
+    proposal.status = 'draft';
+    proposal.updatedAt = new Date();
+    delete proposal.approvedAt;
+    delete proposal.executionError;
+    delete proposal.claimedBy;
+    delete proposal.claimedAt;
+    proposal.executionRetryCount = 0;
+    this.proposals.set(id, proposal);
+    return { ...proposal };
+  }
+
   async update(
     tenantId: string,
     id: string,
-    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt'>>
+    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt' | 'status'>>
   ): Promise<Proposal | null> {
     const proposal = this.proposals.get(id);
     if (!proposal || proposal.tenantId !== tenantId) return null;
 
-    Object.assign(proposal, updates, { updatedAt: new Date() });
+    // Parity with the pg repo, which has no status column in its field map:
+    // status moves only through updateStatus and its gate.
+    const { status: _ignored, ...fields } = updates as Partial<Proposal>;
+    Object.assign(proposal, fields, { updatedAt: new Date() });
     this.proposals.set(id, proposal);
     return { ...proposal };
   }

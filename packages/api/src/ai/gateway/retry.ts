@@ -121,6 +121,54 @@ export class ProviderRateLimitError extends Error {
 }
 
 /**
+ * Thrown by a provider adapter when the request never got an HTTP answer:
+ * the socket was reset or refused, DNS failed, or the client's own
+ * transport timeout fired.
+ *
+ * With the SDK's own retries disabled (PROVIDER_SDK_MAX_RETRIES = 0), the
+ * OpenAI SDK surfaces these as `APIConnectionError` with the message
+ * "Connection error.", no status, and the real network error in `cause`.
+ * Nothing in that shape tells `classifyError` it is transient, so it was
+ * treated as permanent and never retried. This typed error keeps the cause
+ * (and its errno-style `code`) and classifies as transient.
+ *
+ * It is NOT a local deadline: our own AbortSignal surfaces as the SDK's
+ * `APIUserAbortError`, which adapters must leave untouched. An upstream that
+ * drops or never answers is a provider-health signal, so the breaker counts
+ * this error (see `isLocalDeadlineOrAbort`).
+ */
+export class ProviderNetworkError extends Error {
+  readonly code = 'PROVIDER_NETWORK';
+  readonly providerName: string;
+  /** The underlying network error code (ECONNRESET, EAI_AGAIN, ...) when known. */
+  readonly causeCode?: string;
+
+  constructor(opts: { providerName: string; message: string; causeCode?: string; cause?: unknown }) {
+    super(opts.message, opts.cause !== undefined ? { cause: opts.cause } : undefined);
+    this.name = 'ProviderNetworkError';
+    this.providerName = opts.providerName;
+    this.causeCode = opts.causeCode;
+  }
+}
+
+/** Socket / DNS failure signals, matched against an error's code or message. */
+const NETWORK_SIGNALS = ['econnreset', 'etimedout', 'socket hang up', 'econnrefused', 'eai_again'];
+
+function hasNetworkSignal(text: unknown): boolean {
+  if (typeof text !== 'string' || text.length === 0) return false;
+  const lower = text.toLowerCase();
+  return NETWORK_SIGNALS.some((signal) => lower.includes(signal));
+}
+
+/** True when the error's `cause` carries a socket/DNS failure code or message. */
+function causeHasNetworkSignal(err: Error): boolean {
+  const cause = (err as { cause?: unknown }).cause;
+  if (!cause || typeof cause !== 'object') return false;
+  const { code, message } = cause as { code?: unknown; message?: unknown };
+  return hasNetworkSignal(code) || hasNetworkSignal(message);
+}
+
+/**
  * True for any provider throttle — our typed error, or a raw SDK/HTTP error
  * that carries status 429 (so the check keeps working for providers whose
  * adapter has not been normalized yet).
@@ -163,6 +211,8 @@ export function classifyError(err: unknown): ErrorClass {
     // carries no HTTP status, so without this it would fall through to
     // 'permanent' and never be retried.
     if ((err as { code?: string }).code === 'PROVIDER_EMPTY_RESPONSE') return 'transient';
+    // GATEWAY-02: socket / DNS failure normalized by the provider adapter.
+    if ((err as { code?: string }).code === 'PROVIDER_NETWORK') return 'transient';
     const msg = err.message.toLowerCase();
     const status = (err as { status?: number; statusCode?: number }).status
       ?? (err as { statusCode?: number }).statusCode;
@@ -174,17 +224,13 @@ export function classifyError(err: unknown): ErrorClass {
     }
 
     // node-fetch / undici / openai SDK transient signals
-    if (
-      msg.includes('econnreset') ||
-      msg.includes('etimedout') ||
-      msg.includes('socket hang up') ||
-      msg.includes('econnrefused') ||
-      msg.includes('eai_again') ||
-      msg.includes('aborted') ||
-      msg.includes('timeout')
-    ) {
+    if (hasNetworkSignal(msg) || msg.includes('aborted') || msg.includes('timeout')) {
       return 'transient';
     }
+    // An adapter that did not normalize (e.g. the SDK's raw APIConnectionError,
+    // whose message is just "Connection error.") still carries the network
+    // error in `cause`.
+    if (causeHasNetworkSignal(err)) return 'transient';
   }
   return 'permanent';
 }

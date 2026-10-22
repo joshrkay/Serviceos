@@ -39,6 +39,8 @@ import { SUPERVISOR_MARKER_PATH } from '../../../src/proposals/supervisor/marker
 import type { SupervisorRules } from '../../../src/proposals/supervisor/policy';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import { InMemoryProposalRepository } from '../../../src/proposals/proposal';
+import { tenantContextStore } from '../../../src/middleware/tenant-context';
+import type { PoolClient } from 'pg';
 
 const TENANT = '11111111-1111-1111-1111-111111111111';
 const NOW = new Date('2026-06-11T17:45:00.000Z');
@@ -511,5 +513,34 @@ describe('recordExecutedProposalSpend (executor onExecuted seam)', () => {
       baseInput({ proposalType: 'issue_invoice', payload: { totalCents: 1_000 } }),
     );
     expect(JSON.stringify(next.payload._meta)).toMatch(/daily spend cap/);
+  });
+});
+
+describe('TI-01 — the background snapshot refresh is detached from the triggering request', () => {
+  it("a cold-cache evaluate() inside a request does not hand the request's pg client to the refresh", async () => {
+    // The refresh is shared (deduplicated in-flight) and cached for 30s for
+    // every later request of the tenant; its reads land after the
+    // proposal-creating request may already have committed and released its
+    // client — under another tenant's RLS they read null policy / zero
+    // counters and the caps fail open.
+    const { service, policies, counters } = await installService(null, { prime: false });
+    const seen: unknown[] = [];
+    const getActive = policies.getActive.bind(policies);
+    vi.spyOn(policies, 'getActive').mockImplementation(async (tenantId) => {
+      seen.push(tenantContextStore.getStore());
+      return getActive(tenantId);
+    });
+    const read = counters.read.bind(counters);
+    vi.spyOn(counters, 'read').mockImplementation(async (...args) => {
+      seen.push(tenantContextStore.getStore());
+      return read(...args);
+    });
+
+    tenantContextStore.run({ client: {} as PoolClient, tenantId: TENANT }, () => {
+      service.evaluate({ tenantId: TENANT, proposalType: 'create_customer', actionClass: 'capture', amountCents: null });
+    });
+    await vi.waitFor(() => expect(seen).toHaveLength(3));
+
+    expect(seen).toEqual([undefined, undefined, undefined]);
   });
 });

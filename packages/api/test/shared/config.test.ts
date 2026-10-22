@@ -304,9 +304,16 @@ describe('P0-006 — Secrets/config framework', () => {
       ).toThrow(/REDIS_URL/);
     });
 
-    it('prod + NUM_REPLICAS=2 + REDIS_URL set — passes', () => {
+    it('prod + NUM_REPLICAS=2 + REDIS_URL set on a worker — passes', () => {
+      // LCR-05 — only a worker may scale out: every other role answers calls,
+      // and a call's state lives on the replica that took it (see below).
       expect(() =>
-        loadConfig({ ...baseMultiReplica, NUM_REPLICAS: '2', REDIS_URL: 'redis://cache:6379' })
+        loadConfig({
+          ...baseMultiReplica,
+          PROCESS_ROLE: 'worker',
+          NUM_REPLICAS: '2',
+          REDIS_URL: 'redis://cache:6379',
+        })
       ).not.toThrow();
     });
 
@@ -326,6 +333,63 @@ describe('P0-006 — Secrets/config framework', () => {
       expect(() =>
         loadConfig({ ...baseMultiReplica, NODE_ENV: 'dev', NUM_REPLICAS: '2' })
       ).not.toThrow();
+    });
+  });
+
+  describe('LCR-05 — more than one replica is refused on a process that answers calls', () => {
+    // A live call's session is held in the memory of the process that took it.
+    // With two replicas the stream upgrade and every /gather turn are separate
+    // requests the load balancer may send to the other replica, which has no
+    // session: the stream is refused (403) or the caller hears "your session
+    // has ended" and is hung up. REDIS_URL does not fix that (it only mirrors
+    // events), so it must not unlock the scale-out.
+    const base = {
+      NODE_ENV: 'prod',
+      DATABASE_URL: 'postgres://u:p@h/d',
+      CLERK_SECRET_KEY: 'sk_x',
+      CLERK_PUBLISHABLE_KEY: 'pk_x',
+      CLERK_WEBHOOK_SECRET: 'whsec_x',
+      STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
+      AI_PROVIDER_API_KEY: 'ak_x',
+      CORS_ORIGIN: 'https://app.example.com',
+      WEB_URL: 'https://app.example.com',
+      PUBLIC_API_URL: 'https://api.example.com',
+      // TELEPHONY_ENABLED=false only stops outbound SMS: inbound calls are
+      // still answered in every role but worker, so the guard ignores it.
+      TELEPHONY_ENABLED: 'false',
+      EMAIL_ENABLED: 'false',
+      STORAGE_ENABLED: 'false',
+      RLS_RUNTIME_ROLE: 'true',
+      TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
+      REDIS_URL: 'redis://cache:6379',
+      NUM_REPLICAS: '2',
+    };
+
+    it.each(['voice', 'web', 'all'])(
+      'prod + PROCESS_ROLE=%s + NUM_REPLICAS=2 + REDIS_URL set — fails naming NUM_REPLICAS',
+      (role) => {
+        expect(() => loadConfig({ ...base, PROCESS_ROLE: role })).toThrow(
+          new RegExp(`NUM_REPLICAS=2 on PROCESS_ROLE=${role}`),
+        );
+      },
+    );
+
+    it('PROCESS_ROLE unset resolves to all and is refused too', () => {
+      expect(() => loadConfig({ ...base })).toThrow(/NUM_REPLICAS=2 on PROCESS_ROLE=all/);
+    });
+
+    it('PROCESS_ROLE=worker may run more than one replica', () => {
+      expect(() => loadConfig({ ...base, PROCESS_ROLE: 'worker' })).not.toThrow();
+    });
+
+    it('NUM_REPLICAS=1 on a voice process still boots', () => {
+      expect(() => loadConfig({ ...base, PROCESS_ROLE: 'voice', NUM_REPLICAS: '1' })).not.toThrow();
+    });
+
+    it('staging is guarded the same way', () => {
+      expect(() => loadConfig({ ...base, NODE_ENV: 'staging', PROCESS_ROLE: 'voice' })).toThrow(
+        /NUM_REPLICAS=2 on PROCESS_ROLE=voice/,
+      );
     });
   });
 
@@ -872,6 +936,35 @@ describe('P0-006 — Secrets/config framework', () => {
     });
   });
 
+  describe('U1 — reply-gap SLO knobs (D-043)', () => {
+    it('defaults: 1500ms P95, 1% unacked ceiling, 30-reply sample floor', () => {
+      const c = loadConfig({ NODE_ENV: 'dev' });
+      expect(c.SLO_REPLY_GAP_P95_MS).toBe(1500);
+      expect(c.SLO_REPLY_UNACKED_RATE_MAX).toBe(0.01);
+      expect(c.SLO_REPLY_GAP_MIN_SAMPLE).toBe(30);
+    });
+
+    it('coerces string overrides to numbers', () => {
+      const c = loadConfig({
+        NODE_ENV: 'dev',
+        SLO_REPLY_GAP_P95_MS: '1200',
+        SLO_REPLY_UNACKED_RATE_MAX: '0.05',
+        SLO_REPLY_GAP_MIN_SAMPLE: '60',
+      });
+      expect(c.SLO_REPLY_GAP_P95_MS).toBe(1200);
+      expect(c.SLO_REPLY_UNACKED_RATE_MAX).toBe(0.05);
+      expect(c.SLO_REPLY_GAP_MIN_SAMPLE).toBe(60);
+    });
+
+    it('rejects a non-positive threshold, a rate above 1, and a non-integer floor', () => {
+      expect(() => loadConfig({ NODE_ENV: 'dev', SLO_REPLY_GAP_P95_MS: '0' })).toThrow();
+      resetConfig();
+      expect(() => loadConfig({ NODE_ENV: 'dev', SLO_REPLY_UNACKED_RATE_MAX: '1.5' })).toThrow();
+      resetConfig();
+      expect(() => loadConfig({ NODE_ENV: 'dev', SLO_REPLY_GAP_MIN_SAMPLE: '2.5' })).toThrow();
+    });
+  });
+
   describe('U5 — VOICE_MAX_CALL_DURATION_MS', () => {
     it('defaults to 15 minutes when unset', () => {
       const c = loadConfig({ NODE_ENV: 'dev' });
@@ -904,6 +997,14 @@ describe('P0-026 — validateEnvSchema (Zod startup validation)', () => {
     WEB_URL: 'https://app.example.com',
     PUBLIC_API_URL: 'https://api.example.com',
   };
+
+  it('treats an empty value as unset in dev (CI exports DATABASE_URL= for in-memory boot)', () => {
+    expect(() => validateEnvSchema({ NODE_ENV: 'dev', DATABASE_URL: '', DEV_AUTH_BYPASS: 'true' })).not.toThrow();
+  });
+
+  it('still rejects an empty required var in production', () => {
+    expect(() => validateEnvSchema({ ...fullProdEnv, DATABASE_URL: '' })).toThrow(/DATABASE_URL: Required/);
+  });
 
   it('happy path — all vars present, returns typed Env object', () => {
     const env = validateEnvSchema(fullProdEnv);
@@ -1002,6 +1103,11 @@ describe('P0-026 — validateEnvSchema (Zod startup validation)', () => {
     expect(() =>
       validateEnvSchema({ NODE_ENV: 'development', CORS_ORIGIN: 'true' })
     ).not.toThrow();
+  });
+
+  it('validateEnvSchema — STT_PROVIDER=fixture is forbidden in production, allowed in dev', () => {
+    expect(() => validateEnvSchema({ ...fullProdEnv, STT_PROVIDER: 'fixture' })).toThrow(/STT_PROVIDER/);
+    expect(() => validateEnvSchema({ NODE_ENV: 'dev', DATABASE_URL: '', STT_PROVIDER: 'fixture' })).not.toThrow();
   });
 
   it('validateEnvSchema — DEV_AUTH_BYPASS=true is forbidden in production', () => {

@@ -144,7 +144,8 @@ export function createAttachmentsRouter(deps: AttachmentsRouterDeps): Router {
       const uploadUrl = await storage.generateUploadUrl(
         created.storageBucket,
         created.storageKey,
-        created.contentType
+        created.contentType,
+        created.sizeBytes
       );
 
       await auditRepo.create(

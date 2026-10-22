@@ -28,9 +28,13 @@
 | `TWILIO_DEFAULT_TENANT_ID` | Unless `TELEPHONY_ENABLED=false` | Inbound call tenant resolution |
 | `SENDGRID_API_KEY` | Unless `EMAIL_ENABLED=false` | Invoice/estimate email |
 | `SENDGRID_FROM_EMAIL` | Unless `EMAIL_ENABLED=false` | Invoice/estimate email |
-| `R2_ACCOUNT_ID` | Unless `STORAGE_ENABLED=false` | Recordings + uploads |
-| `R2_ACCESS_KEY_ID` | Unless `STORAGE_ENABLED=false` | Recordings + uploads |
-| `R2_SECRET_ACCESS_KEY` | Unless `STORAGE_ENABLED=false` | Recordings + uploads |
+| `STORAGE_BUCKET` | Unless `STORAGE_ENABLED=false` | Recordings + uploads + inbound MMS photos. ONE contract: `shared/storage-config.ts` resolves it for both the boot validator and `createStorageProvider`, so they cannot disagree (pinned by `test/files/storage-env-contract.test.ts`). Alias `R2_BUCKET`; defaults to `serviceos-uploads` when `R2_ACCOUNT_ID` supplies the endpoint |
+| `STORAGE_ENDPOINT` | Same | S3-compatible endpoint (R2: `https://<account-id>.r2.cloudflarestorage.com`). Alias: set `R2_ACCOUNT_ID` and the endpoint is derived |
+| `STORAGE_REGION` | Same | `auto` for R2 (implied when the endpoint is derived from `R2_ACCOUNT_ID`) |
+| `STORAGE_ACCESS_KEY_ID` | Same | Alias `R2_ACCESS_KEY_ID`. The key id and secret are taken as a pair from ONE family — mixing `STORAGE_*` with `R2_*` is rejected at boot |
+| `STORAGE_SECRET_ACCESS_KEY` | Same | Alias `R2_SECRET_ACCESS_KEY` |
+| `STORAGE_PUBLIC_URL` | Optional | Download base URL; unset = presigned GETs. `R2_PUBLIC_URL` is **not** read by anything |
+| `STORAGE_ENABLED=false` | Explicit opt-out | **Not a fix for a boot failure.** The process boots on a no-op dev provider: uploads, recordings and inbound MMS photos are **not persisted**, download URLs 404, and a boot-time WARN says so. The `R2_*` alias is not consulted under it (a complete `STORAGE_*` set still is). `/api/telephony/health` reports `capabilities.recording: false` |
 
 ## Runtime-fail (boot OK; feature broken or insecure)
 
@@ -56,7 +60,7 @@ Sentry→Slack/DM rules in `docs/runbooks/alerting.md`) and, optionally,
 
 | Variable | Default | Notes |
 |----------|---------|-------|
-| `ALERT_SMS_TO` | unset (SMS channel off) | Operator phone (E.164); sent owner-class, never consent-suppressed |
+| `ALERT_SMS_TO` | unset (SMS channel off) | Operator phone (E.164); sent owner-class with `alertClass: 'operator'` — never consent/DNC-suppressed and NOT stopped by `TELEPHONY_ENABLED=false`. Still needs the Twilio SMS credentials (no delivery provider → no SMS) and is best-effort: a provider/carrier failure is logged, not retried. With neither this nor `SENTRY_DSN` set (or this set without the Twilio SMS credentials), prod/staging boot logs a `configuration warning` |
 | `SLO_CALL_COMPLETION_MIN` | `0.85` | Min completion rate, trailing 60 min |
 | `SLO_CALL_COMPLETION_MIN_SAMPLE` | `5` | Sample floor before completion rule can breach |
 | `SLO_QUEUE_STALE_MIN` | `15` | Pending job age (min) that counts as a stuck queue |
@@ -127,6 +131,8 @@ a one-time manual re-point at the voice domain in the Twilio console. See
 | Variable | Notes |
 |----------|-------|
 | `SENTRY_DSN` | Error tracking; no-op without it |
+| `DB_SSL_CA` | Provider CA certificate (PEM) for Postgres TLS. When set, every pool verifies the server certificate (`rejectUnauthorized: true`, audit T4-F13); unset keeps the historic encrypted-but-unverified connection and logs one boot warning. Railway: Postgres → Connect → download the CA, paste with `\n` escapes. |
+| `CLERK_AUTHORIZED_PARTIES` | Comma-separated frontend origins whose Clerk session tokens the API accepts (checked against the token's `azp`). Set to the web origin(s), e.g. `https://app.therivetapp.com`; unset = any `azp` (historic behaviour). |
 | `DEEPGRAM_API_KEY` | Streaming STT for inbound voice **and** browser dictation (`POST /api/voice/stream-token` → Deepgram `/v1/auth/grant`). Must be a key with **Member** (or higher) permissions — a usage-only key returns `403 Insufficient permissions` on grant and breaks AI conversation dictation. Create via Deepgram Console → API Keys → Create Key → Advanced → Member. |
 | `TTS_PROVIDER` / `ELEVENLABS_API_KEY` | TTS when not using OpenAI default |
 | `TWILIO_MEDIA_STREAMS_ENABLED` | Realtime voice master switch (WS7). `false`=Gather-only kill switch; `true`=forced on (requires `TTS_PROVIDER=elevenlabs`+`ELEVENLABS_API_KEY`); **unset/`auto`**=on iff `TTS_PROVIDER=elevenlabs`+`ELEVENLABS_API_KEY`+`DEEPGRAM_API_KEY` all set. See `docs/runbooks/voice-realtime-rollout.md`. |

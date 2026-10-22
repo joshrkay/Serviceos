@@ -484,3 +484,68 @@ describe('assignTechnician — cross-midnight windows vs modeled hours (Codex P2
     ).rejects.toThrow(/spans multiple local days/i);
   });
 });
+
+describe('assignTechnician — required-skill precondition (Dispatch FR-2)', () => {
+  let assignmentRepo: InMemoryAssignmentRepository;
+  let appointmentRepo: InMemoryAppointmentRepository;
+
+  beforeEach(() => {
+    assignmentRepo = new InMemoryAssignmentRepository();
+    appointmentRepo = new InMemoryAppointmentRepository();
+  });
+
+  const makeAppt = () =>
+    createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        scheduledStart: new Date('2026-06-15T17:00:00Z'),
+        scheduledEnd: new Date('2026-06-15T18:00:00Z'),
+        timezone: 'America/Los_Angeles',
+        createdBy: 'disp-1',
+      },
+      appointmentRepo,
+    );
+
+  const input = (appointmentId: string) => ({
+    tenantId: 'tenant-1',
+    appointmentId,
+    technicianId: 'tech-1',
+    technicianRole: 'technician',
+    assignedBy: 'disp-1',
+  });
+
+  const matcher = (required: string[], held: string[]) => ({
+    requiredSkillsForJob: async () => required,
+    skillsForTechnician: async () => held,
+  });
+
+  it('refuses (409) a technician missing a required skill, and writes nothing', async () => {
+    const appt = await makeAppt();
+    await expect(
+      assignTechnician(input(appt.id), assignmentRepo, {
+        appointmentRepo,
+        skillMatcher: matcher(['gas_certified', 'hvac'], ['hvac']),
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('gas_certified') });
+    expect(await assignmentRepo.findByAppointment('tenant-1', appt.id)).toHaveLength(0);
+  });
+
+  it('assigns a technician who holds every required skill', async () => {
+    const appt = await makeAppt();
+    const a = await assignTechnician(input(appt.id), assignmentRepo, {
+      appointmentRepo,
+      skillMatcher: matcher(['hvac'], ['hvac', 'electrical']),
+    });
+    expect(a.technicianId).toBe('tech-1');
+  });
+
+  it('assigns anyone when the job has no required skills', async () => {
+    const appt = await makeAppt();
+    const a = await assignTechnician(input(appt.id), assignmentRepo, {
+      appointmentRepo,
+      skillMatcher: matcher([], []),
+    });
+    expect(a.technicianId).toBe('tech-1');
+  });
+});

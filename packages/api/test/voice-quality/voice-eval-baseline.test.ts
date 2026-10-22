@@ -111,6 +111,20 @@ describe('baseline file round-trip + validation', () => {
     expect(fs.readFileSync(p, 'utf8').endsWith('\n')).toBe(true);
   });
 
+  // OBS-3 review round 1 — the drafting golden set (draft_estimate, brand
+  // voice, review reply) gates against a baseline of the same shape.
+  it('accepts a drafting baseline, live or placeholder', () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-eval-baseline-'));
+    const p = path.join(dir, 'drafting.json');
+    const b = buildBaseline(run({ 'quality.overall': 1 }, { eval: 'drafting', mode: 'live' }), {
+      tolerance: 0.15,
+      recordedAt: '2026-10-19T00:00:00.000Z',
+      recordCommand: 'npx tsx packages/api/scripts/drafting-golden-eval.ts --live --record-baseline x',
+    });
+    writeBaseline(p, b);
+    expect(readBaseline(p)).toEqual(b);
+  });
+
   it('rejects a malformed baseline file instead of silently passing', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'voice-eval-baseline-'));
     const p = path.join(dir, 'bad.json');

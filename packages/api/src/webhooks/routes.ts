@@ -54,10 +54,12 @@ import {
 import { PROVISION_TWILIO_JOB_TYPE, ProvisionTwilioPayload } from '../workers/provision-twilio';
 import { VERIFY_AI_JOB_TYPE, type VerifyAiPayload } from '../workers/verify-ai';
 import { recordFunnelEvent } from '../analytics/posthog';
+import { sanitizeSignupAttribution, signupAttributionProperties } from '@ai-service-os/shared';
 import { verifyTwilioSignature, reconstructWebhookUrl } from '../telephony/twilio-signature';
 import { handleVapiCallEvent } from '../integrations/vapi/webhook';
 import type { SendEmailFn } from '../voice/check-upgrade-nudge';
 import { verifySendGridSignature } from './sendgrid-signature';
+import { createAuthFailureThrottle } from './auth-failure-throttle';
 import { createAuditEvent, AuditRepository } from '../audit/audit';
 import { EstimateRepository } from '../estimates/estimate';
 import { RefreshJobMoneyStateDeps } from '../jobs/job-money-state';
@@ -355,6 +357,23 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
   }): Promise<void> => {
     logger.warn('Stripe capture exceeds recorded credit (unapplied capture)', { ...params });
     if (!deps.auditRepo) return;
+    // Review M1 — ONE unapplied-capture row per Stripe event. The capped
+    // branches audit BEFORE crediting, so a delivery that fails afterwards is
+    // redelivered by Stripe; that redelivery must not add a second (and, on
+    // the checkout path, wrong — "not_payable, credited 0") row for the same
+    // capture. Best-effort lookup: on a read failure we still audit.
+    const prior = await deps.auditRepo
+      .findByCorrelation(params.tenantId, params.providerReference)
+      .catch(() => []);
+    if (
+      prior.some(
+        (e) =>
+          e.eventType === 'payment.unapplied_capture' &&
+          (e.metadata as Record<string, unknown> | undefined)?.stripeEventId === params.eventId,
+      )
+    ) {
+      return;
+    }
     await deps.auditRepo
       .create(
         createAuditEvent({
@@ -923,6 +942,27 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             signupCorrelationId,
           });
 
+          // Marketing-site first touch, forwarded by the signup page as Clerk
+          // unsafe_metadata. Browser-controlled, so it is re-validated with
+          // the same shared rules before use. Persisted write-once (the repo
+          // only fills a tenant with no attribution yet), deliberately NOT
+          // gated on result.created: a Clerk retry forced by a later failure
+          // in this handler arrives with created=false and must still be
+          // able to record it. Best-effort — never fails the signup.
+          const unsafeMetadata = userData.unsafe_metadata as { signupAttribution?: unknown } | null | undefined;
+          const signupAttribution = sanitizeSignupAttribution(unsafeMetadata?.signupAttribution);
+          if (signupAttribution && deps.tenantRepo.setSignupAttribution) {
+            try {
+              await deps.tenantRepo.setSignupAttribution(result.tenantId, signupAttribution);
+            } catch (err) {
+              logger.warn('Signup attribution persist failed', {
+                tenantId: result.tenantId,
+                signupCorrelationId,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            }
+          }
+
           // Server-side funnel: every Clerk userId here matches the
           // distinctId the browser SDK identifies with, so this single
           // event closes the gap between the page load that fires
@@ -934,6 +974,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               properties: {
                 tenantId: result.tenantId,
                 emailDomain: primaryEmail.split('@')[1] ?? null,
+                ...signupAttributionProperties(signupAttribution),
               },
             });
           }
@@ -987,6 +1028,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                 clerkUserId: userId,
                 email: primaryEmail,
                 created: result.created,
+                signupAttribution,
               },
             }));
           }
@@ -1705,7 +1747,21 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                 }
               } else {
                 const capped = invoice.amountDueCents;
-                const { invoice: creditedInvoice } = await recordPayment(
+                // Review M1 — audit the excess BEFORE the capped credit. The
+                // capped recordPayment COMMITS and then runs side effects
+                // whose failures bubble; Stripe's redelivery then never
+                // re-reaches this branch, so an audit written after it is
+                // lost and the excess sits at Stripe with no trail. The cap
+                // is already known here; the audit dedupes per Stripe event.
+                await auditUnappliedCapture({
+                  tenantId, invoiceId, eventId: event.id,
+                  providerReference: paymentIntentRef,
+                  capturedCents: amountTotal,
+                  creditedCents: capped,
+                  invoiceStatus: invoice.status,
+                  reason: 'capped_to_balance',
+                });
+                await recordPayment(
                   {
                     tenantId,
                     invoiceId,
@@ -1727,14 +1783,6 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                 );
                 logger.info('Invoice paid at capped amount', {
                   tenantId, invoiceId, requested: amountTotal, paid: capped,
-                });
-                await auditUnappliedCapture({
-                  tenantId, invoiceId, eventId: event.id,
-                  providerReference: paymentIntentRef,
-                  capturedCents: amountTotal,
-                  creditedCents: capped,
-                  invoiceStatus: creditedInvoice.status,
-                  reason: 'capped_to_balance',
                 });
               }
             } else if (payErr.message.includes('status')) {
@@ -2058,23 +2106,73 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             tenantId, invoiceId, amountCents, paymentIntentId: piId,
           });
         } catch (payErr) {
-          if (
+          const exceedsBalance =
+            payErr instanceof ValidationError && payErr.message.includes('exceeds amount due');
+          const invoiceForCap = exceedsBalance
+            ? await deps.invoiceRepo.findById(tenantId, invoiceId)
+            : null;
+          if (exceedsBalance && invoiceForCap && invoiceForCap.amountDueCents > 0) {
+            // P0-9 — parity with checkout.session.completed: an intent minted
+            // at a balance that has since shrunk (an approved credit, a
+            // partial cash payment) captured MORE than is owed. Crediting
+            // nothing would leave real customer money unrecorded and the
+            // invoice open for a second charge. Cap the invoice credit to the
+            // remaining balance (over-crediting would be worse) under the
+            // same intent-keyed reference, and audit the uncredited excess so
+            // reconciliation can refund it.
+            const capped = invoiceForCap.amountDueCents;
+            // Review M1 — audit the excess BEFORE the capped credit: it
+            // COMMITS and then runs side effects whose failures bubble, and
+            // the redelivery short-circuits on the completed capped row, so an
+            // audit written afterwards would be lost. Dedupes per Stripe event.
+            await auditUnappliedCapture({
+              tenantId, invoiceId, eventId: event.id,
+              providerReference: piId,
+              capturedCents: amountCents,
+              creditedCents: capped,
+              invoiceStatus: invoiceForCap.status,
+              reason: 'capped_to_balance_payment_intent',
+            });
+            await recordPayment(
+              {
+                tenantId,
+                invoiceId,
+                amountCents: capped,
+                method: mapStripePaymentMethod(pi),
+                providerReference: piId,
+                processedBy: 'stripe_webhook',
+              },
+              deps.invoiceRepo,
+              deps.paymentRepo,
+              buildMoneyStateDeps(deps),
+              deps.paymentReceiptNotifier,
+              deps.auditRepo,
+              { actorRole: 'system', correlationId: piId },
+              undefined,
+              deps.paymentLinkProvider
+                ? { provider: deps.paymentLinkProvider, connectAccountResolver: deps.connectAccountResolver }
+                : undefined,
+            );
+            logger.info('Invoice paid at capped amount via payment_intent.succeeded', {
+              tenantId, invoiceId, requested: amountCents, paid: capped, paymentIntentId: piId,
+            });
+          } else if (
             payErr instanceof ValidationError &&
-            (payErr.message.includes('status') || payErr.message.includes('exceeds amount due'))
+            (payErr.message.includes('status') || exceedsBalance)
           ) {
-            // Invoice already settled — idempotent for the EVENT, but this is
-            // still a succeeded capture with no intent-keyed payment row
-            // (P0-9): either the same money was recorded under the checkout
-            // session-id fallback reference (benign; the audit row is a
-            // reviewable false positive), or a genuinely stale/direct intent
-            // captured against a settled/void invoice (real unapplied money).
-            // Audit it either way and retry the stale-link kill — the
-            // reconciliation trail must not depend on which Stripe event
-            // shape happened to arrive.
+            // Invoice already settled (or carries no balance) — idempotent for
+            // the EVENT, but this is still a succeeded capture with no
+            // intent-keyed payment row (P0-9): either the same money was
+            // recorded under the checkout session-id fallback reference
+            // (benign; the audit row is a reviewable false positive), or a
+            // genuinely stale/direct intent captured against a settled/void
+            // invoice (real unapplied money). Audit it either way and retry
+            // the stale-link kill — the reconciliation trail must not depend
+            // on which Stripe event shape happened to arrive.
             logger.info('Invoice already settled, ignoring payment_intent.succeeded', {
               tenantId, invoiceId,
             });
-            const invoice = await deps.invoiceRepo.findById(tenantId, invoiceId);
+            const invoice = invoiceForCap ?? (await deps.invoiceRepo.findById(tenantId, invoiceId));
             if (invoice) {
               await auditUnappliedCapture({
                 tenantId, invoiceId, eventId: event.id,
@@ -2082,7 +2180,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                 capturedCents: amountCents,
                 creditedCents: 0,
                 invoiceStatus: invoice.status,
-                reason: payErr.message.includes('exceeds amount due')
+                reason: exceedsBalance
                   ? 'exceeds_balance_payment_intent'
                   : 'not_payable_payment_intent',
               });
@@ -3071,7 +3169,24 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     }
   });
 
+  // Failures before the request is authenticated (no integration for the
+  // path tenant / bad signature) are attacker-volume: tenant ids are public.
+  // Throttle their audit rows; account_sid_mismatch follows a VALID
+  // signature, so it is always recorded.
+  const UNAUTHENTICATED_REJECT_REASONS = new Set(['tenant_mismatch', 'invalid_signature']);
+  const authFailureThrottle = createAuthFailureThrottle({ windowMs: 10 * 60 * 1000, maxKeys: 10_000 });
   const rejectBound = async (tenantId: string, reason: string, meta: Record<string, unknown>) => {
+    let metadata = meta;
+    if (UNAUTHENTICATED_REJECT_REASONS.has(reason)) {
+      const admitted = authFailureThrottle.admit(`${tenantId}:${reason}:${String(meta.kind)}`);
+      if (!admitted) {
+        logger.warn('webhook auth failure (audit throttled)', { tenantId, reason, kind: meta.kind });
+        return;
+      }
+      if (admitted.suppressedSinceLast > 0) {
+        metadata = { ...meta, suppressedSinceLast: admitted.suppressedSinceLast };
+      }
+    }
     if (deps.auditRepo) {
       await deps.auditRepo.create(createAuditEvent({
         tenantId,
@@ -3080,7 +3195,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         eventType: 'webhook.auth_failed',
         entityType: 'webhook',
         entityId: reason,
-        metadata: meta,
+        metadata,
       }));
     }
   };

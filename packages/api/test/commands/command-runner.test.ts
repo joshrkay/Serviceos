@@ -8,7 +8,8 @@
  * @ts-expect-error cases at the bottom — this file is type-checked by tsc.
  */
 import { describe, it, expect } from 'vitest';
-import type { PoolClient } from 'pg';
+import type { Pool, PoolClient } from 'pg';
+import { PgBaseRepository } from '../../src/db/pg-base';
 import {
   executeAudited,
   runInTenantTransaction,
@@ -77,6 +78,30 @@ describe('runInTenantTransaction', () => {
       }),
     ).rejects.toThrow('state change failed');
     expect(client.events).toEqual(['BEGIN', 'ROLLBACK']);
+  });
+
+  it('TI-01 — a repo call that outlives the transaction does not reuse the caller-owned client', async () => {
+    // The owner (e.g. the idempotency lock provider) keeps this client after
+    // COMMIT and runs its own unlock on it; a late `void` spawn from inside
+    // `fn` must not slip a statement onto it after the transaction ended.
+    const owned = new RecordingClient();
+    const fresh = new RecordingClient();
+    const pool = { connect: async () => fresh } as unknown as Pool;
+    class LateRepo extends PgBaseRepository {
+      touch(t: string): Promise<unknown> {
+        return this.withTenant(t, (client) => client.query('UPDATE ai_runs SET status = $1', ['completed']));
+      }
+    }
+    const repo = new LateRepo(pool);
+
+    let late: Promise<unknown> | undefined;
+    await runInTenantTransaction(asPoolClient(owned), TENANT, async () => {
+      late = new Promise((r) => setTimeout(r, 5)).then(() => repo.touch(TENANT));
+    });
+    await late;
+
+    expect(owned.events).toEqual(['BEGIN', 'COMMIT']);
+    expect(fresh.events).toEqual(['BEGIN', 'COMMIT']);
   });
 
   it('runs the callback directly with no client (no transaction to open)', async () => {

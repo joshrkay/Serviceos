@@ -2,12 +2,18 @@ import type { Pool } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
 import { PgBaseRepository } from '../db/pg-base';
 import { normalizeDispatchProvider } from './provider-names';
+import type { MessagePurpose } from './outbound-messaging';
 
 /**
  * Persistent record of every customer-facing send. Ensures we have an
  * audit trail of what message went where, with what provider message
  * ID — needed for delivery webhooks (later) and for support workflows
  * ("did the customer receive their estimate?").
+ *
+ * D-045 — outbound messaging also records texts that did not reach a
+ * provider: 'scheduled' (held for the customer's daytime window) and
+ * 'blocked' (refused, with the reason). One row per message, keyed by its
+ * dedupe key, linked to the customer and, when there is one, the job.
  */
 
 export type DispatchEntityType =
@@ -36,9 +42,23 @@ export type DispatchEntityType =
   // 270_dispatch_entity_custom_message (db/schema.ts) — the current final
   // widening; test/db/dispatch-entity-type-vocabulary.test.ts pins this
   // union against the CHECK constraint's effective value list.
-  | 'custom_message';
+  | 'custom_message'
+  // D-045 — the after-job thank-you text (entity_id = jobs.id). Migration
+  // 329_message_dispatch_outcomes.
+  | 'thank_you';
 export type DispatchChannel = 'sms' | 'email';
-export type DispatchStatus = 'sent' | 'delivered' | 'failed' | 'bounced';
+export const DISPATCH_STATUSES = ['sent', 'delivered', 'failed', 'bounced', 'scheduled', 'blocked'] as const;
+export type DispatchStatus = (typeof DISPATCH_STATUSES)[number];
+
+/**
+ * Provider of a sent record backfilled by a retry that knew only that the
+ * text went out (no number, no receipt). The attempt that sent it may still
+ * fill in the real receipt over it.
+ */
+export const UNKNOWN_PROVIDER = 'unknown';
+
+/** Statuses of a message that reached a provider — what "was it sent?" asks. */
+export const PROVIDER_ATTEMPT_STATUSES: readonly DispatchStatus[] = ['sent', 'delivered', 'failed', 'bounced'];
 
 export interface MessageDispatch {
   id: string;
@@ -52,8 +72,41 @@ export interface MessageDispatch {
   status: DispatchStatus;
   errorMessage?: string;
   idempotencyKey?: string;
+  /** Time of the latest outcome (for scheduled and blocked rows, when it was recorded). */
   sentAt: Date;
   deliveredAt?: Date;
+  customerId?: string;
+  jobId?: string;
+  purpose?: MessagePurpose;
+  /** For 'scheduled': when the customer's send window opens. */
+  scheduledFor?: Date;
+  /** For 'blocked': why, and whether it will clear without someone acting. */
+  blockReason?: string;
+  blockPermanent?: boolean;
+}
+
+/**
+ * One message's outcome, recorded by outbound messaging under its dedupe key.
+ * A later outcome for the same key replaces an earlier scheduled or blocked
+ * one; a row that reached a provider (sent, delivered, failed, bounced) is
+ * never overwritten, except that a real receipt replaces a backfilled
+ * placeholder (`UNKNOWN_PROVIDER`).
+ */
+export interface RecordOutcomeInput {
+  tenantId: string;
+  idempotencyKey: string;
+  entityType: DispatchEntityType;
+  entityId: string;
+  channel: DispatchChannel;
+  /** '' when the text was blocked before a number was known. */
+  recipient: string;
+  purpose: MessagePurpose;
+  customerId?: string;
+  jobId?: string;
+  outcome:
+    | { status: 'sent'; provider: string; providerMessageId?: string }
+    | { status: 'scheduled'; scheduledFor: Date }
+    | { status: 'blocked'; reason: string; permanent: boolean; detail?: string };
 }
 
 export interface CreateDispatchInput {
@@ -67,12 +120,19 @@ export interface CreateDispatchInput {
   status?: DispatchStatus;
   errorMessage?: string;
   idempotencyKey?: string;
+  /** The customer and job the message is about, so the status bubble finds it. */
+  customerId?: string;
+  jobId?: string;
+  purpose?: MessagePurpose;
 }
 
 export interface DispatchListOptions {
   limit?: number;
   offset?: number;
   entityType?: DispatchEntityType;
+  status?: DispatchStatus;
+  customerId?: string;
+  jobId?: string;
 }
 
 export interface DispatchListResult {
@@ -83,11 +143,13 @@ export interface DispatchListResult {
 export interface DispatchRepository {
   create(input: CreateDispatchInput): Promise<MessageDispatch>;
   findById(tenantId: string, id: string): Promise<MessageDispatch | null>;
+  /** Rows that reached a provider (see `PROVIDER_ATTEMPT_STATUSES`), newest first. */
   findByEntity(
     tenantId: string,
     entityType: DispatchEntityType,
     entityId: string
   ): Promise<MessageDispatch[]>;
+  recordOutcome(input: RecordOutcomeInput): Promise<MessageDispatch>;
   updateStatus(
     tenantId: string,
     id: string,
@@ -122,6 +184,9 @@ export class InMemoryDispatchRepository implements DispatchRepository {
       errorMessage: input.errorMessage,
       idempotencyKey: input.idempotencyKey,
       sentAt: new Date(),
+      customerId: input.customerId,
+      jobId: input.jobId,
+      purpose: input.purpose,
     };
     this.rows.set(row.id, row);
     return { ...row };
@@ -143,7 +208,8 @@ export class InMemoryDispatchRepository implements DispatchRepository {
         (r) =>
           r.tenantId === tenantId &&
           r.entityType === entityType &&
-          r.entityId === entityId
+          r.entityId === entityId &&
+          PROVIDER_ATTEMPT_STATUSES.includes(r.status)
       )
       .sort((a, b) => b.sentAt.getTime() - a.sentAt.getTime())
       .map((r) => ({ ...r }));
@@ -168,6 +234,23 @@ export class InMemoryDispatchRepository implements DispatchRepository {
     return { ...updated };
   }
 
+  async recordOutcome(input: RecordOutcomeInput): Promise<MessageDispatch> {
+    const existing = Array.from(this.rows.values()).find(
+      (r) => r.tenantId === input.tenantId && r.idempotencyKey === input.idempotencyKey,
+    );
+    if (existing && !replaces(existing, input)) return { ...existing };
+    const columns = outcomeColumns(input);
+    const row: MessageDispatch = {
+      ...columns,
+      // A backfill that never learned the number keeps the one already known.
+      recipient: columns.recipient || existing?.recipient || '',
+      id: existing?.id ?? uuidv4(),
+      sentAt: new Date(),
+    };
+    this.rows.set(row.id, row);
+    return { ...row };
+  }
+
   async findByIdempotencyKey(tenantId: string, idempotencyKey: string): Promise<MessageDispatch | null> {
     const row = Array.from(this.rows.values()).find(
       (r) => r.tenantId === tenantId && r.idempotencyKey === idempotencyKey,
@@ -181,6 +264,9 @@ export class InMemoryDispatchRepository implements DispatchRepository {
     if (options?.entityType) {
       rows = rows.filter((r) => r.entityType === options.entityType);
     }
+    if (options?.status) rows = rows.filter((r) => r.status === options.status);
+    if (options?.customerId) rows = rows.filter((r) => r.customerId === options.customerId);
+    if (options?.jobId) rows = rows.filter((r) => r.jobId === options.jobId);
     rows.sort((a, b) => b.sentAt.getTime() - a.sentAt.getTime());
     const total = rows.length;
     const offset = options?.offset ?? 0;
@@ -201,8 +287,9 @@ export class PgDispatchRepository extends PgBaseRepository implements DispatchRe
       const { rows } = await client.query(
         `INSERT INTO message_dispatches
           (id, tenant_id, entity_type, entity_id, channel, recipient,
-           provider, provider_message_id, status, error_message, idempotency_key)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+           provider, provider_message_id, status, error_message, idempotency_key,
+           customer_id, job_id, purpose)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
          RETURNING *`,
         [
           id,
@@ -216,6 +303,9 @@ export class PgDispatchRepository extends PgBaseRepository implements DispatchRe
           status,
           input.errorMessage ?? null,
           input.idempotencyKey ?? null,
+          input.customerId ?? null,
+          input.jobId ?? null,
+          input.purpose ?? null,
         ]
       );
       return mapRow(rows[0]);
@@ -241,8 +331,9 @@ export class PgDispatchRepository extends PgBaseRepository implements DispatchRe
       const { rows } = await client.query(
         `SELECT * FROM message_dispatches
          WHERE tenant_id = $1 AND entity_type = $2 AND entity_id = $3
+           AND status = ANY($4::text[])
          ORDER BY sent_at DESC`,
-        [tenantId, entityType, entityId]
+        [tenantId, entityType, entityId, PROVIDER_ATTEMPT_STATUSES]
       );
       return rows.map(mapRow);
     });
@@ -266,6 +357,67 @@ export class PgDispatchRepository extends PgBaseRepository implements DispatchRe
         [id, tenantId, status, deliveredAt ?? null, errorMessage ?? null]
       );
       return rows.length ? mapRow(rows[0]) : null;
+    });
+  }
+
+  async recordOutcome(input: RecordOutcomeInput): Promise<MessageDispatch> {
+    const c = outcomeColumns(input);
+    return this.withTenant(input.tenantId, async (client) => {
+      // One row per message: a later outcome replaces a scheduled or blocked
+      // one, and a row that reached a provider is never overwritten (save a
+      // backfilled placeholder, which a real receipt fills in). Same rule as
+      // `replaces` below.
+      const { rows } = await client.query(
+        `INSERT INTO message_dispatches
+          (id, tenant_id, entity_type, entity_id, channel, recipient, provider,
+           provider_message_id, status, error_message, idempotency_key,
+           customer_id, job_id, purpose, scheduled_for, block_reason, block_permanent)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+         ON CONFLICT (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL
+         DO UPDATE SET
+           entity_type = EXCLUDED.entity_type, entity_id = EXCLUDED.entity_id,
+           channel = EXCLUDED.channel,
+           -- A backfill that never learned the number keeps the one already known.
+           recipient = COALESCE(NULLIF(EXCLUDED.recipient, ''), message_dispatches.recipient),
+           provider = EXCLUDED.provider, provider_message_id = EXCLUDED.provider_message_id,
+           status = EXCLUDED.status, error_message = EXCLUDED.error_message,
+           customer_id = EXCLUDED.customer_id, job_id = EXCLUDED.job_id,
+           purpose = EXCLUDED.purpose, scheduled_for = EXCLUDED.scheduled_for,
+           block_reason = EXCLUDED.block_reason, block_permanent = EXCLUDED.block_permanent,
+           sent_at = NOW()
+         WHERE message_dispatches.status IN ('scheduled', 'blocked')
+            OR (message_dispatches.status = 'sent'
+                AND message_dispatches.provider = '${UNKNOWN_PROVIDER}'
+                AND EXCLUDED.status = 'sent'
+                AND EXCLUDED.provider <> '${UNKNOWN_PROVIDER}')
+         RETURNING *`,
+        [
+          uuidv4(),
+          c.tenantId,
+          c.entityType,
+          c.entityId,
+          c.channel,
+          c.recipient,
+          c.provider,
+          c.providerMessageId ?? null,
+          c.status,
+          c.errorMessage ?? null,
+          c.idempotencyKey,
+          c.customerId ?? null,
+          c.jobId ?? null,
+          c.purpose,
+          c.scheduledFor ?? null,
+          c.blockReason ?? null,
+          c.blockPermanent ?? null,
+        ],
+      );
+      if (rows.length) return mapRow(rows[0]);
+      // Already sent or delivered: the existing row stands.
+      const existing = await client.query(
+        `SELECT * FROM message_dispatches WHERE tenant_id = $1 AND idempotency_key = $2`,
+        [c.tenantId, c.idempotencyKey],
+      );
+      return mapRow(existing.rows[0]);
     });
   }
 
@@ -293,6 +445,16 @@ export class PgDispatchRepository extends PgBaseRepository implements DispatchRe
         countParams.push(entityTypeFilter);
         dataParams.push(entityTypeFilter);
         whereClause += ` AND entity_type = $${countParams.length}`;
+      }
+      for (const [column, value] of [
+        ['status', options?.status],
+        ['customer_id', options?.customerId],
+        ['job_id', options?.jobId],
+      ] as const) {
+        if (!value) continue;
+        countParams.push(value);
+        dataParams.push(value);
+        whereClause += ` AND ${column} = $${countParams.length}`;
       }
 
       const countResult = await client.query(
@@ -328,5 +490,45 @@ function mapRow(row: Record<string, any>): MessageDispatch {
     idempotencyKey: row.idempotency_key ?? undefined,
     sentAt: new Date(row.sent_at),
     deliveredAt: row.delivered_at ? new Date(row.delivered_at) : undefined,
+    customerId: row.customer_id ?? undefined,
+    jobId: row.job_id ?? undefined,
+    purpose: row.purpose ?? undefined,
+    scheduledFor: row.scheduled_for ? new Date(row.scheduled_for) : undefined,
+    blockReason: row.block_reason ?? undefined,
+    blockPermanent: row.block_permanent ?? undefined,
   };
+}
+
+/** The row a recorded outcome describes, minus id and time. */
+function outcomeColumns(input: RecordOutcomeInput): Omit<MessageDispatch, 'id' | 'sentAt'> & { idempotencyKey: string } {
+  const { outcome } = input;
+  return {
+    tenantId: input.tenantId,
+    entityType: input.entityType,
+    entityId: input.entityId,
+    channel: input.channel,
+    recipient: input.recipient,
+    idempotencyKey: input.idempotencyKey,
+    customerId: input.customerId,
+    jobId: input.jobId,
+    purpose: input.purpose,
+    status: outcome.status,
+    provider: outcome.status === 'sent' ? normalizeDispatchProvider(outcome.provider) : 'none',
+    providerMessageId: outcome.status === 'sent' ? outcome.providerMessageId : undefined,
+    scheduledFor: outcome.status === 'scheduled' ? outcome.scheduledFor : undefined,
+    blockReason: outcome.status === 'blocked' ? outcome.reason : undefined,
+    blockPermanent: outcome.status === 'blocked' ? outcome.permanent : undefined,
+    errorMessage: outcome.status === 'blocked' ? outcome.detail : undefined,
+  };
+}
+
+/** Whether a new outcome may replace the recorded one for the same message. */
+function replaces(existing: MessageDispatch, input: RecordOutcomeInput): boolean {
+  if (existing.status === 'scheduled' || existing.status === 'blocked') return true;
+  return (
+    existing.status === 'sent' &&
+    existing.provider === UNKNOWN_PROVIDER &&
+    input.outcome.status === 'sent' &&
+    normalizeDispatchProvider(input.outcome.provider) !== UNKNOWN_PROVIDER
+  );
 }

@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import express, { NextFunction, Request, Response } from 'express';
 import request from 'supertest';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
+import { InMemoryFileRepository, type FileRecord, type StorageProvider } from '../../src/files/file-service';
 import { InMemoryJobRepository, type Job } from '../../src/jobs/job';
 import type { Queue } from '../../src/queues/queue';
 import { createVoiceRouter } from '../../src/routes/voice';
@@ -10,6 +11,7 @@ import { InMemoryVoiceRepository } from '../../src/voice/voice-service';
 const TENANT_ID = 'a1b2c3d4-e5f6-4890-abcd-ef1234567890';
 const OTHER_TENANT_ID = 'b2c3d4e5-f6a7-4901-bcde-f12345678901';
 const JOB_ID = '3b6cbf1a-bd8a-45f7-8b84-ce6b43a231d1';
+const FILE_ID = '7c2d4e6f-8a9b-4c1d-9e2f-3a4b5c6d7e8f';
 
 function job(tenantId: string): Job {
   return {
@@ -25,6 +27,29 @@ function job(tenantId: string): Job {
     createdAt: new Date(),
     updatedAt: new Date(),
   };
+}
+
+// H2 — POST /recordings mints the transcription URL from the tenant's files
+// row (app.ts always wires fileRepo + storage), so the harness seeds one.
+function buildFileDeps(): { fileRepo: InMemoryFileRepository; storage: StorageProvider } {
+  const fileRepo = new InMemoryFileRepository();
+  void fileRepo.create({
+    id: FILE_ID,
+    tenantId: TENANT_ID,
+    filename: 'voice.m4a',
+    contentType: 'audio/mp4',
+    sizeBytes: 1024,
+    storageBucket: 'voice',
+    storageKey: `${TENANT_ID}/${FILE_ID}/voice.m4a`,
+    entityType: 'voice_recording',
+    uploadedBy: 'user-1',
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  } as FileRecord);
+  const storage = {
+    generateDownloadUrl: async () => 'https://files.example.test/voice.m4a?sig=server',
+  } as unknown as StorageProvider;
+  return { fileRepo, storage };
 }
 
 function buildApp(jobRepo: Pick<InMemoryJobRepository, 'findById'>) {
@@ -49,13 +74,13 @@ function buildApp(jobRepo: Pick<InMemoryJobRepository, 'findById'>) {
     undefined,
     undefined,
     undefined,
-    { jobRepo },
+    { jobRepo, ...buildFileDeps() },
   ));
   return { app, send, createRecording };
 }
 
 const recordingBody = {
-  fileId: 'file-1',
+  fileId: FILE_ID,
   audioUrl: 'https://files.example.test/voice.m4a',
 };
 

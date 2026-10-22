@@ -10,8 +10,11 @@ import helmet from 'helmet';
  *
  * Production behaviour:
  *   - CSP whitelists the production frontend's external deps: Clerk
- *     (auth UI + JS), Stripe Elements, Twilio Voice JS SDK, Sentry browser
- *     SDK.
+ *     (auth UI + JS), Stripe Elements, Deepgram dictation, PostHog, Pendo,
+ *     signed storage URLs. Twilio Voice JS and the Sentry browser SDK were
+ *     removed in the 2026-10 hardening sweep — the web app imports neither,
+ *     and the nginx edge (packages/web/security-headers.conf) never listed
+ *     them, so the two CSPs now match.
  *   - HSTS = 1 year, includeSubDomains, preload=false (preload list
  *     submission must be a deliberate human action).
  *   - X-Frame-Options DENY, X-Content-Type-Options nosniff, Referrer-Policy
@@ -44,18 +47,24 @@ export function buildHelmetOptions(isProd: boolean): Parameters<typeof helmet>[0
               // Clerk sign-up bot protection (Cloudflare Turnstile).
               'https://challenges.cloudflare.com',
               'https://*.protect.clerk.com',
-              'https://sdk.twilio.com',
-              'https://media.twiliocdn.com',
               // PostHog analytics: posthog-js lazy-loads optional modules
               // (surveys, web-vitals, exception capture) from the assets host.
               'https://us-assets.i.posthog.com',
+              // Pendo: the inline loader in packages/web/index.html (pinned by
+              // hash — regenerate if that snippet changes) fetches the agent
+              // from the CDN. Same entries as packages/web/security-headers.conf;
+              // the API serves the SPA shell too, so the two must stay in sync.
+              'https://cdn.pendo.io',
+              "'sha256-aZMpeYECdzzxmDLBhnOjENAvYOF7sj61Qkt1ogk9GMk='",
             ],
             styleSrc: [
               "'self'",
               "'unsafe-inline'",
+              'https://fonts.googleapis.com',
               'https://*.clerk.com',
               'https://clerk.com',
             ],
+            fontSrc: ["'self'", 'https://fonts.gstatic.com'],
             imgSrc: ["'self'", 'data:', 'https:', 'blob:'],
             connectSrc: [
               "'self'",
@@ -65,8 +74,6 @@ export function buildHelmetOptions(isProd: boolean): Parameters<typeof helmet>[0
               'https://clerk.com',
               'https://*.clerk.accounts.dev',
               'https://*.protect.clerk.com:*',
-              'wss://*.twilio.com',
-              'https://*.twilio.com',
               // Live voice dictation streams mic audio from the browser
               // straight to Deepgram's realtime STT WebSocket (see the web
               // useDeepgramDictation hook — it opens wss://api.deepgram.com/v1/
@@ -75,8 +82,6 @@ export function buildHelmetOptions(isProd: boolean): Parameters<typeof helmet>[0
               // assistant's conversation/dictation mode fails with "Lost the
               // dictation connection. Please try again."
               'wss://api.deepgram.com',
-              'https://*.ingest.sentry.io',
-              'https://*.ingest.us.sentry.io',
               // PostHog analytics (US cloud): event ingestion + remote config.
               // Without these, posthog-js is silently blocked by CSP in prod
               // and no browser events reach PostHog even with the key set.
@@ -84,6 +89,9 @@ export function buildHelmetOptions(isProd: boolean): Parameters<typeof helmet>[0
               // custom host would need to be added here too.
               'https://us.i.posthog.com',
               'https://us-assets.i.posthog.com',
+              'https://data.pendo.io',
+              // Signed upload/download URLs for file attachments.
+              'https://*.storage.googleapis.com',
             ],
             frameSrc: [
               "'self'",

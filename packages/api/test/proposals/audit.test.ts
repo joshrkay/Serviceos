@@ -1,3 +1,5 @@
+import { readFileSync, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import {
   createProposal,
@@ -28,6 +30,25 @@ describe('P2-006 — Proposal audit timeline and entity linkage', () => {
   beforeEach(() => {
     auditRepo = new InMemoryAuditRepository();
     proposalRepo = new InMemoryProposalRepository();
+  });
+
+  it('registers the owner-driven retry of a failed execution', () => {
+    expect(PROPOSAL_EVENT_TYPES).toContain('proposal.retried');
+  });
+
+  // The registry claims to be the inventory of proposal-lifecycle events: every
+  // `proposal.*` literal the lifecycle actions and the onboarding draft writers
+  // emit must be in it (proposal.undone shipped emitted but unlisted).
+  it('lists every proposal.* event that proposals/actions.ts and onboarding/draft/*.ts emit', () => {
+    const src = join(__dirname, '../../src');
+    const draftDir = join(src, 'onboarding/draft');
+    const files = [join(src, 'proposals/actions.ts'), ...readdirSync(draftDir).filter((f) => f.endsWith('.ts')).map((f) => join(draftDir, f))];
+    const emitted = new Set<string>();
+    for (const file of files) {
+      for (const m of readFileSync(file, 'utf8').matchAll(/'(proposal\.[a-z_]+)'/g)) emitted.add(m[1]);
+    }
+    expect(emitted).toContain('proposal.undone');
+    expect([...emitted].filter((e) => !(PROPOSAL_EVENT_TYPES as readonly string[]).includes(e))).toEqual([]);
   });
 
   it('happy path — logs proposal event and retrieves timeline', async () => {

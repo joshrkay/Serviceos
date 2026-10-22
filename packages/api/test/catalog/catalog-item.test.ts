@@ -245,6 +245,36 @@ describe('InMemoryCatalogItemRepository.listByTenant limit', () => {
   });
 });
 
+// Seeded-price baseline (U6): the unit double mirrors the Pg repository — any
+// write that carries a price ends repricing in the same update, even at the
+// amount the item already holds; a patch without a price leaves it.
+describe('InMemoryCatalogItemRepository.update clears the seeded baseline on a price write', () => {
+  let repo: InMemoryCatalogItemRepository;
+
+  beforeEach(async () => {
+    repo = new InMemoryCatalogItemRepository();
+    await repo.create(
+      makeItem({ id: 'labor', name: 'HVAC Labor', unitPriceCents: 11000, seedKey: 'hvac:labor', seededUnitPriceCents: 11000 }),
+    );
+  });
+
+  it('a new price clears it and keeps the seed key', async () => {
+    const updated = await repo.update(TENANT, 'labor', { unitPriceCents: 11500 });
+    expect(updated).toMatchObject({ unitPriceCents: 11500, seedKey: 'hvac:labor', seededUnitPriceCents: null });
+    expect(await repo.findById(TENANT, 'labor')).toMatchObject({ seededUnitPriceCents: null });
+  });
+
+  it('the seeded amount saved again still clears it', async () => {
+    const updated = await updateCatalogItem(repo, TENANT, 'labor', { unitPriceCents: 11000 });
+    expect(updated).toMatchObject({ unitPriceCents: 11000, seededUnitPriceCents: null });
+  });
+
+  it('a patch without a price leaves it', async () => {
+    const updated = await repo.update(TENANT, 'labor', { description: 'Shop labor' });
+    expect(updated).toMatchObject({ seedKey: 'hvac:labor', seededUnitPriceCents: 11000 });
+  });
+});
+
 describe('createCatalogItemSchema validation (price/name rules live here)', () => {
   const base = { name: 'Pipe', category: 'Parts', unit: 'each', unitPriceCents: 100 };
 

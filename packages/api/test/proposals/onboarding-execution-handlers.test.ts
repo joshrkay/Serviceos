@@ -279,6 +279,53 @@ describe('OnboardingTenantSettingsExecutionHandler', () => {
     expect(identityFields).not.toHaveProperty('jobBufferMinutes');
   });
 
+  describe('ownerPhone', () => {
+    function auditMetadata(audit: { create: ReturnType<typeof vi.fn> }) {
+      return audit.create.mock.calls.map((c) => c[0]).find((e) => e.eventType === 'tenant.identity_set').metadata;
+    }
+
+    it('writes a canonical cell through upsertIdentityFields', async () => {
+      const result = await handler().execute(proposalOf('onboarding_tenant_settings', { ...base, ownerPhone: '+12165550142' }), context);
+      expect(result.success).toBe(true);
+      expect(settingsRepo.upsertIdentityFields).toHaveBeenCalledWith(TENANT, expect.objectContaining({ ownerPhone: '+12165550142' }));
+      const fields = settingsRepo.upsertIdentityFields.mock.calls[0][1];
+      expect(Object.prototype.hasOwnProperty.call(fields, 'ownerPhone')).toBe(true);
+    });
+
+    // Regression pin for the tri-state: the repository treats the KEY'S PRESENCE as
+    // "write this value", so a present-but-undefined key would clear a stored number.
+    it('without ownerPhone the key is absent from the identity fields', async () => {
+      const result = await handler().execute(proposalOf('onboarding_tenant_settings', base), context);
+      expect(result.success).toBe(true);
+      expect(settingsRepo.upsertIdentityFields.mock.calls[0][1]).not.toHaveProperty('ownerPhone');
+    });
+
+    it('normalises a normalisable but non-canonical cell', async () => {
+      await handler().execute(proposalOf('onboarding_tenant_settings', { ...base, ownerPhone: '(216) 555-0142' }), context);
+      expect(settingsRepo.upsertIdentityFields.mock.calls[0][1]).toMatchObject({ ownerPhone: '+12165550142' });
+    });
+
+    it.each(['555', 12165550142, null])('refuses %j and writes nothing', async (ownerPhone) => {
+      const result = await handler().execute(proposalOf('onboarding_tenant_settings', { ...base, ownerPhone }), context);
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('ownerPhone');
+      expect(settingsRepo.upsertIdentityFields).not.toHaveBeenCalled();
+      expect(activatePackWithSeed).not.toHaveBeenCalled();
+    });
+
+    it('audits ownerPhoneSet, never the number', async () => {
+      const audit = { create: vi.fn().mockResolvedValue(undefined) };
+      await handler(audit as never).execute(proposalOf('onboarding_tenant_settings', { ...base, ownerPhone: '+12165550142' }), context);
+      const metadata = auditMetadata(audit);
+      expect(metadata.ownerPhoneSet).toBe(true);
+      expect(JSON.stringify(metadata)).not.toContain('5550142');
+
+      const audit2 = { create: vi.fn().mockResolvedValue(undefined) };
+      await handler(audit2 as never).execute(proposalOf('onboarding_tenant_settings', base), context);
+      expect(auditMetadata(audit2)).not.toHaveProperty('ownerPhoneSet');
+    });
+  });
+
   // Still "never writes a timezone it was not told" — the refusal is just
   // LOUD now instead of a silent omission. A silent omission left
   // tenant_settings.timezone NULL while the proposal reported success, and

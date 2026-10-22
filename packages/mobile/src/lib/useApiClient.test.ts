@@ -18,7 +18,7 @@ const h = vi.hoisted(() => ({
   config: undefined as unknown as CapturedConfig,
 }));
 
-vi.mock('@clerk/clerk-expo', () => ({ useAuth: () => ({ getToken: h.getToken }) }));
+vi.mock('@clerk/expo', () => ({ useAuth: () => ({ getToken: h.getToken }) }));
 vi.mock('expo-router', () => ({
   useRouter: () => ({ replace: h.replace }),
   usePathname: () => h.pathname,

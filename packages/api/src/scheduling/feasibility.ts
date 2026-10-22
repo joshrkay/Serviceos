@@ -7,6 +7,7 @@ import { Appointment } from '../appointments/appointment';
 import { getDayOfWeekInTimezone } from '../appointments/time';
 import { localDateKey } from '../shared/timezone';
 import { LatLng } from './travel-time/provider';
+import { missingSkills } from './skill-matcher';
 
 const WINDOW_MS = 24 * 60 * 60 * 1000;
 
@@ -30,8 +31,15 @@ async function loadTechnicianAppointmentsInWindow(
   windowEnd: Date,
 ): Promise<Array<Appointment & { technicianId: string }>> {
   const assignments = await deps.assignmentRepo.findByTechnician(tenantId, technicianId);
+  // Skip the per-appointment read for assignments whose denormalised window
+  // (kept in sync by migration 131's triggers) lies outside this one, so a
+  // long-tenured tech costs one query, not one per historical visit. Rows
+  // without the copy are still loaded; the real times decide below.
+  const candidates = assignments.filter(
+    (a) => !a.scheduledStart || !a.scheduledEnd || (a.scheduledEnd > windowStart && a.scheduledStart < windowEnd),
+  );
   const appts = await Promise.all(
-    assignments.map((a) => deps.appointmentRepo.findById(tenantId, a.appointmentId)),
+    candidates.map((a) => deps.appointmentRepo.findById(tenantId, a.appointmentId)),
   );
   return appts
     .filter((a): a is Appointment => a !== null)
@@ -122,22 +130,30 @@ async function locationCoordsFor(
   deps: FeasibilityDependencies,
   tenantId: string,
   jobId: string,
-): Promise<{ coords: LatLng | null }> {
+): Promise<LocationCoords> {
   const job = await deps.jobRepo.findById(tenantId, jobId);
   const locationId = (job as any)?.locationId as string | undefined;
   if (!locationId) return { coords: null };
   return coordsOfLocation(deps, tenantId, locationId);
 }
 
+/** `unplaceable` is true when the geocoder answered that the address does not exist, so waiting will not fill it in. */
+interface LocationCoords {
+  coords: LatLng | null;
+  unplaceable?: boolean;
+}
+
 async function coordsOfLocation(
   deps: FeasibilityDependencies,
   tenantId: string,
   locationId: string,
-): Promise<{ coords: LatLng | null }> {
+): Promise<LocationCoords> {
   const loc = await deps.locationRepo.findById(tenantId, locationId);
   const lat = (loc as any)?.latitude;
   const lng = (loc as any)?.longitude;
-  if (typeof lat !== 'number' || typeof lng !== 'number') return { coords: null };
+  if (typeof lat !== 'number' || typeof lng !== 'number') {
+    return { coords: null, unplaceable: (loc as any)?.geocodeStatus === 'failed' };
+  }
   return { coords: { latitude: lat, longitude: lng } };
 }
 
@@ -154,17 +170,14 @@ async function skillMatchIssues(
   // read required skills from — say so rather than query with an empty id.
   if (!input.appointment.jobId) return { issues: [], constraints: 'not_evaluated' };
   const required = await deps.skillMatcher.requiredSkillsForJob(input.tenantId, input.appointment.jobId);
-  // The wired matcher is StubSkillMatcher, so this is today's normal path.
-  // `none_configured` says so out loud; it is NOT the same claim as
-  // "skills were checked and the technician holds them".
+  // A job with no required skills. `none_configured` says so out loud; it is
+  // NOT the same claim as "skills were checked and the technician holds them".
   if (required.length === 0) return { issues: [], constraints: 'none_configured' };
   const held = await deps.skillMatcher.skillsForTechnician(input.tenantId, input.proposedTechnicianId);
-  const missing = required.filter((s) => !held.includes(s));
+  const missing = missingSkills(required, held);
   if (missing.length === 0) return { issues: [], constraints: 'evaluated' };
   // Contract #12/#13: "holds required skill for service type if skills are
-  // modeled" is a precondition → blocking. Vacuously clean while the wired
-  // matcher is the stub (requiredSkillsForJob returns []); the moment a real
-  // skills model lands, this gate enforces it with no further change.
+  // modeled" is a precondition → blocking.
   return {
     issues: [{
       check: 'skill_match' as const,
@@ -194,7 +207,7 @@ async function travelTimeIssues(
   const next = siblings.find((a) => a.scheduledStart >= input.proposedScheduledEnd) ?? null;
 
   const summary: TravelTimeSummary = {
-    fromPrevSeconds: null, toNextSeconds: null,
+    fromPrevSeconds: null, prevEndsAt: prev?.scheduledEnd ?? null, toNextSeconds: null,
     estimateSource: 'unknown', degraded: false,
   };
   const issues: FeasibilityIssue[] = [];
@@ -211,12 +224,21 @@ async function travelTimeIssues(
     if (!neighbor) continue;
     const neighborCoords = await locationCoordsFor(deps, input.tenantId, neighbor.jobId);
     if (!target.coords || !neighborCoords.coords) {
+      // Dispatch FR-2 — an address the geocoder could not find will never get
+      // coordinates on its own; say so, so the owner fixes the address.
+      const unplaceable = Boolean(target.unplaceable || neighborCoords.unplaceable);
       issues.push({
         check: 'travel_time' as const,
         severity: 'info' as const,
-        message: 'Travel-time unverified — neighbor or target location is missing coordinates.',
+        message: unplaceable
+          ? 'Travel-time unverified — an address on this route could not be found on the map. Check it for typos.'
+          : 'Travel-time unverified — neighbor or target location is missing coordinates.',
         conflictingEntityId: neighbor.id,
-        metadata: { reason: 'missing_coords', neighborAppointmentId: neighbor.id, kind },
+        metadata: {
+          reason: unplaceable ? 'address_not_found' : 'missing_coords',
+          neighborAppointmentId: neighbor.id,
+          kind,
+        },
       });
       continue;
     }

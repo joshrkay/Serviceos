@@ -12,6 +12,11 @@ jobs:
   mms-vision:
     runs-on: ubuntu-latest
     timeout-minutes: 5
+    env:
+      # The repository already provisions OPENAI_API_KEY for live evaluations.
+      # Keep the dedicated override available for independently scoped keys.
+      AI_PROVIDER_API_KEY: ${{ secrets.AI_PROVIDER_API_KEY || secrets.OPENAI_API_KEY }}
+      SLACK_WEBHOOK_URL: ${{ secrets.SLACK_ALERTS_WEBHOOK }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
@@ -25,19 +30,16 @@ jobs:
       - name: Verify API key is present
         run: |
           if [ -z "$AI_PROVIDER_API_KEY" ]; then
-            echo "::error::MMS vision smoke requires AI_PROVIDER_API_KEY secret. It is empty."
+            echo "::error::MMS vision smoke requires AI_PROVIDER_API_KEY or OPENAI_API_KEY. Both are empty."
             echo "This workflow cannot pass without a real API key — skipped tests do not constitute a green gate."
             exit 1
           fi
           echo "API key verified present."
-        env:
-          AI_PROVIDER_API_KEY: ${{ secrets.AI_PROVIDER_API_KEY }}
       - name: Real vision smoke — draft an estimate from a fixture photo
         run: npx vitest run test/smoke/mms-vision-real.test.ts
         working-directory: packages/api
         env:
           MMS_VISION_SMOKE: '1'
-          AI_PROVIDER_API_KEY: ${{ secrets.AI_PROVIDER_API_KEY }}
           # mms_estimate routes to the COMPLEX tier, which defaults to
           # claude-sonnet-4-6. The smoke uses the default OpenAI-compatible
           # provider (AI_PROVIDER_API_KEY), so without this it would send a
@@ -45,7 +47,7 @@ jobs:
           # vision-capable OpenAI model so the smoke actually exercises vision.
           AI_COMPLEX_MODEL: gpt-4o
       - name: Notify Slack on failure
-        if: failure()
+        if: failure() && env.SLACK_WEBHOOK_URL != ''
         uses: slackapi/slack-github-action@fcfb566f8b0aab22203f066d80ca1d7e4b5d05b3 # v1.27.1
         with:
           payload: |
@@ -53,5 +55,4 @@ jobs:
               "text": ":rotating_light: mms-vision-smoke FAILED — ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             }
         env:
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_ALERTS_WEBHOOK }}
           SLACK_WEBHOOK_TYPE: INCOMING_WEBHOOK

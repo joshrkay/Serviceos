@@ -6,6 +6,12 @@ import { InMemoryAuditRepository } from '../../../../src/audit/audit';
 import { InMemoryOnCallRepository } from '../../../../src/oncall/rotation';
 import { InMemoryVoiceSessionRepository } from '../../../../src/voice/voice-session';
 import type { LLMGateway, LLMResponse } from '../../../../src/ai/gateway/gateway';
+import { LLMGateway as RealLLMGateway } from '../../../../src/ai/gateway/gateway';
+import { composeResilienceStack } from '../../../../src/ai/gateway/compose-resilience';
+import {
+  DEFAULT_TIER_CONFIG,
+  TenantQuotaRegistry,
+} from '../../../../src/ai/gateway/tenant-quota';
 import type { TtsProvider } from '../../../../src/ai/tts/tts-provider';
 import type { SchedulingEntityResolution } from '../../../../src/ai/agents/customer-calling/entity-resolution';
 import type { CallingAgentEvent, SideEffect } from '../../../../src/ai/agents/customer-calling/types';
@@ -553,6 +559,48 @@ describe('InAppVoiceAdapter', () => {
       },
     );
 
+    it('audits a REAL per-tenant quota rejection from the gateway as quota (GATEWAY-01)', async () => {
+      // Real LLMGateway + resilience stack + quota registry. A classifier tier
+      // with zero slots rejects deterministically. Before GATEWAY-01 the
+      // gateway re-wrapped this as LLM_PROVIDER_ERROR and it was audited as
+      // classifier_provider_failure ("the AI is broken").
+      const provider = {
+        name: 'stub',
+        complete: vi.fn(),
+        isAvailable: async () => true,
+      };
+      const stack = composeResilienceStack(provider, {
+        quota: new TenantQuotaRegistry({
+          ...DEFAULT_TIER_CONFIG,
+          classifier_standard: { ...DEFAULT_TIER_CONFIG.classifier_standard, maxConcurrency: 0 },
+        }),
+      });
+      const gateway = new RealLLMGateway(
+        { defaultProvider: stack.name },
+        new Map([[stack.name, stack]]),
+      );
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+
+      const result = await adapter.handleInput(sessionId, 'private customer transcript');
+
+      expect(provider.complete).not.toHaveBeenCalled();
+      const failure = result.sideEffects.find(
+        (effect) => effect.payload.eventType === 'classifier_quota_failure',
+      );
+      expect(failure?.payload).toEqual({
+        eventType: 'classifier_quota_failure',
+        failureClass: 'quota',
+        errorCode: 'TENANT_CONCURRENCY_EXCEEDED',
+      });
+    });
+
     it('uses a provider fallback class without exposing unknown error details', async () => {
       const adapter = new InAppVoiceAdapter({
         store,
@@ -1053,6 +1101,33 @@ describe('InAppVoiceAdapter', () => {
 
       expect(result.state).toBe('escalating');
       expect(result.ttsText).not.toMatch(/say that again/i);
+    });
+
+    it('PRIV-3: a recited card number reaches neither the transcript, the classifier nor any drafted proposal', async () => {
+      const gateway = scriptedGateway([
+        JSON.stringify({
+          intentType: 'complaint',
+          confidence: 0.9,
+          extractedEntities: {},
+        }),
+      ]);
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway,
+        proposalRepo,
+        auditRepo,
+        onCallRepo,
+      });
+      const { sessionId } = await adapter.startSession(TENANT, USER);
+      await adapter.handleInput(sessionId, 'I was double charged on my card 4111, 1111, 1111, 1111.');
+
+      const session = store.peek(sessionId)!;
+      expect(session.transcript).toContain('caller: I was double charged on my card [card number].');
+      const sent = (gateway.complete as ReturnType<typeof vi.fn>).mock.calls.map((c) => c[0]);
+      expect(sent.length).toBeGreaterThan(0);
+      expect(JSON.stringify(sent)).not.toContain('4111');
+      expect(JSON.stringify(session.transcript)).not.toContain('4111');
+      expect(JSON.stringify(await proposalRepo.findByTenant(TENANT))).not.toContain('4111');
     });
 
     it('a classified negotiation reaches the FSM negotiation guard (holding line), not the generic reprompt', async () => {

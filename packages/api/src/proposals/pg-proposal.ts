@@ -1,8 +1,16 @@
 import { Pool, PoolClient } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
 import { ConflictError } from '../shared/errors';
+import { assertStatusWrite } from './lifecycle';
 import { PgBaseRepository } from '../db/pg-base';
-import { Proposal, ProposalRepository, ProposalStatus, ProposalType } from './proposal';
+import { currentTenantContext } from '../middleware/tenant-context';
+import {
+  LANE_BOOKING_BOOKED_STATUSES,
+  Proposal,
+  ProposalRepository,
+  ProposalStatus,
+  ProposalType,
+} from './proposal';
 
 function mapRow(row: Record<string, unknown>): Proposal {
   return {
@@ -160,6 +168,20 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
     });
   }
 
+  async findByIdsForUpdate(tenantId: string, ids: string[]): Promise<Proposal[]> {
+    if (currentTenantContext()?.tenantId !== tenantId) {
+      throw new Error('findByIdsForUpdate requires the request transaction: a row lock taken outside it is released immediately');
+    }
+    if (ids.length === 0) return [];
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        'SELECT * FROM proposals WHERE tenant_id = $1 AND id = ANY($2::uuid[]) ORDER BY id FOR UPDATE',
+        [tenantId, ids]
+      );
+      return result.rows.map(mapRow);
+    });
+  }
+
   async findByTenant(tenantId: string): Promise<Proposal[]> {
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query(
@@ -230,9 +252,17 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
            WHERE tenant_id = $1
              AND created_at >= $2 AND created_at < $3
              AND source_context->'autonomousLaneEvaluation'->>'eligible' = 'true'
+             -- Actually auto-booked: a lane-eligible booking stored for review
+             -- (supervisor cap, executability hold) never was, and one a
+             -- human approved later has approved_at after created_at
+             -- (laneBookingMachineApproved).
+             AND status = ANY($4::text[])
+             AND approved_at = created_at
            ORDER BY created_at DESC
-           ${typeof limit === 'number' ? 'LIMIT $4' : ''}`,
-        typeof limit === 'number' ? [tenantId, from, to, limit] : [tenantId, from, to],
+           ${typeof limit === 'number' ? 'LIMIT $5' : ''}`,
+        typeof limit === 'number'
+          ? [tenantId, from, to, LANE_BOOKING_BOOKED_STATUSES, limit]
+          : [tenantId, from, to, LANE_BOOKING_BOOKED_STATUSES],
       );
       return result.rows.map(mapRow);
     });
@@ -409,10 +439,11 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
   ): Promise<Proposal | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
       const lock = await client.query(
-        'SELECT id FROM proposals WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+        'SELECT status FROM proposals WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
         [tenantId, id]
       );
       if (lock.rows.length === 0) return null;
+      assertStatusWrite(lock.rows[0].status as ProposalStatus, status);
 
       const setClauses = ['status = $3', 'updated_at = NOW()'];
       const params: unknown[] = [tenantId, id, status];
@@ -427,7 +458,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
       if (updates?.executedByRole !== undefined)    { setClauses.push(`executed_by_role = $${p++}`); params.push(updates.executedByRole); }
       if (updates?.executionError !== undefined)    { setClauses.push(`execution_error = $${p++}`);  params.push(updates.executionError); }
       if (updates?.undoneAt !== undefined)          { setClauses.push(`undone_at = $${p++}`);        params.push(updates.undoneAt); }
-      if (updates?.undoneBy !== undefined)          { setClauses.push(`undone_by = $${p++}`);        params.push(updates.undoneBy); }
+      if (updates?.undoneBy !== undefined)          { setClauses.push(`undone_by = $${p}`);         params.push(updates.undoneBy); }
 
       const result = await client.query(
         `UPDATE proposals SET ${setClauses.join(', ')}
@@ -463,12 +494,14 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
         | 'approvedAt'
         | 'executedAt'
         | 'executedBy'
+        | 'executedByRole'
         | 'executionError'
         | 'undoneAt'
         | 'undoneBy'
       >
     >
   ): Promise<Proposal | null> {
+    for (const from of fromStatuses) assertStatusWrite(from, to);
     return this.withTenant(tenantId, async (client) => {
       const setClauses = ['status = $4', 'updated_at = NOW()'];
       const params: unknown[] = [tenantId, id, fromStatuses, to];
@@ -480,9 +513,10 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
       if (updates?.approvedAt !== undefined)        { setClauses.push(`approved_at = $${p++}`);      params.push(updates.approvedAt); }
       if (updates?.executedAt !== undefined)        { setClauses.push(`executed_at = $${p++}`);      params.push(updates.executedAt); }
       if (updates?.executedBy !== undefined)        { setClauses.push(`executed_by = $${p++}`);      params.push(updates.executedBy); }
+      if (updates?.executedByRole !== undefined)    { setClauses.push(`executed_by_role = $${p++}`); params.push(updates.executedByRole); }
       if (updates?.executionError !== undefined)    { setClauses.push(`execution_error = $${p++}`);  params.push(updates.executionError); }
       if (updates?.undoneAt !== undefined)          { setClauses.push(`undone_at = $${p++}`);        params.push(updates.undoneAt); }
-      if (updates?.undoneBy !== undefined)          { setClauses.push(`undone_by = $${p++}`);        params.push(updates.undoneBy); }
+      if (updates?.undoneBy !== undefined)          { setClauses.push(`undone_by = $${p}`);         params.push(updates.undoneBy); }
 
       const result = await client.query(
         `UPDATE proposals SET ${setClauses.join(', ')}
@@ -494,10 +528,31 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
     });
   }
 
+  /**
+   * Owner-driven retry: execution_failed -> draft in ONE conditional UPDATE that
+   * also clears the stale attempt state (see ProposalRepository.resetFailedForRetry
+   * for why updateStatusIf cannot). Runs on the request client when there is one,
+   * so the caller's draft row lock is held to commit.
+   */
+  async resetFailedForRetry(tenantId: string, id: string): Promise<Proposal | null> {
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE proposals
+            SET status = 'draft', approved_at = NULL, execution_error = NULL,
+                claimed_by = NULL, claimed_at = NULL, execution_retry_count = 0,
+                updated_at = NOW()
+          WHERE tenant_id = $1 AND id = $2 AND status = 'execution_failed'
+          RETURNING *`,
+        [tenantId, id]
+      );
+      return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+    });
+  }
+
   async update(
     tenantId: string,
     id: string,
-    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt'>>
+    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt' | 'status'>>
   ): Promise<Proposal | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
       // Status transitions MUST go through updateStatus() which uses

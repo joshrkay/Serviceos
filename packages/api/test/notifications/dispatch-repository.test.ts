@@ -15,6 +15,88 @@ const TENANT = '11111111-1111-1111-1111-111111111111';
 const OTHER = '22222222-2222-2222-2222-222222222222';
 
 describe('InMemoryDispatchRepository', () => {
+  describe('recorded outcomes (D-045)', () => {
+    const base = {
+      tenantId: TENANT,
+      entityType: 'thank_you' as const,
+      entityId: 'job-1',
+      channel: 'sms' as const,
+      recipient: '+15550001111',
+      purpose: 'automated_nudge' as const,
+      customerId: 'cust-1',
+      jobId: 'job-1',
+    };
+
+    it('keeps held and blocked texts out of findByEntity, which asks what reached a provider', async () => {
+      const repo = new InMemoryDispatchRepository();
+      await repo.recordOutcome({ ...base, idempotencyKey: 'k-1', outcome: { status: 'blocked', reason: 'dnc', permanent: true } });
+      await repo.recordOutcome({
+        ...base,
+        idempotencyKey: 'k-2',
+        outcome: { status: 'scheduled', scheduledFor: new Date('2026-10-23T15:00:00Z') },
+      });
+      expect(await repo.findByEntity(TENANT, 'thank_you', 'job-1')).toEqual([]);
+
+      await repo.recordOutcome({ ...base, idempotencyKey: 'k-3', outcome: { status: 'sent', provider: 'twilio-sms' } });
+      expect((await repo.findByEntity(TENANT, 'thank_you', 'job-1')).map((d) => d.status)).toEqual(['sent']);
+    });
+
+    it('lets a real receipt replace a backfilled placeholder, never the reverse', async () => {
+      const repo = new InMemoryDispatchRepository();
+      await repo.recordOutcome({ ...base, recipient: '', idempotencyKey: 'k-1', outcome: { status: 'sent', provider: 'unknown' } });
+      await repo.recordOutcome({
+        ...base,
+        idempotencyKey: 'k-1',
+        outcome: { status: 'sent', provider: 'twilio-sms', providerMessageId: 'SM1' },
+      });
+      await repo.recordOutcome({ ...base, recipient: '', idempotencyKey: 'k-1', outcome: { status: 'sent', provider: 'unknown' } });
+
+      const [row] = (await repo.listByTenant(TENANT)).dispatches;
+      expect(row).toMatchObject({ provider: 'sms-gateway', providerMessageId: 'SM1', recipient: '+15550001111' });
+    });
+
+    it('keeps a known number when a sent backfill replaces a blocked text', async () => {
+      const repo = new InMemoryDispatchRepository();
+      await repo.recordOutcome({ ...base, idempotencyKey: 'k-1', outcome: { status: 'blocked', reason: 'send_failed', permanent: false } });
+
+      const after = await repo.recordOutcome({ ...base, recipient: '', idempotencyKey: 'k-1', outcome: { status: 'sent', provider: 'unknown' } });
+
+      expect(after).toMatchObject({ status: 'sent', recipient: '+15550001111' });
+    });
+
+    it('keeps a failed or bounced row when a retry backfills sent', async () => {
+      const repo = new InMemoryDispatchRepository();
+      const sent = await repo.recordOutcome({
+        ...base,
+        idempotencyKey: 'k-1',
+        outcome: { status: 'sent', provider: 'twilio-sms', providerMessageId: 'SM1' },
+      });
+      await repo.updateStatus(TENANT, sent.id, 'failed', undefined, 'undeliverable');
+
+      const after = await repo.recordOutcome({ ...base, recipient: '', idempotencyKey: 'k-1', outcome: { status: 'sent', provider: 'unknown' } });
+
+      expect(after).toMatchObject({ status: 'failed', providerMessageId: 'SM1', errorMessage: 'undeliverable' });
+    });
+
+    it('filters the list by status, customer and job', async () => {
+      const repo = new InMemoryDispatchRepository();
+      await repo.recordOutcome({ ...base, idempotencyKey: 'k-1', outcome: { status: 'blocked', reason: 'dnc', permanent: true } });
+      await repo.recordOutcome({
+        ...base,
+        idempotencyKey: 'k-2',
+        customerId: 'cust-2',
+        jobId: 'job-2',
+        outcome: { status: 'sent', provider: 'twilio-sms' },
+      });
+
+      const ids = async (o: Parameters<typeof repo.listByTenant>[1]) =>
+        (await repo.listByTenant(TENANT, o)).dispatches.map((d) => d.idempotencyKey);
+      expect(await ids({ status: 'blocked' })).toEqual(['k-1']);
+      expect(await ids({ customerId: 'cust-2' })).toEqual(['k-2']);
+      expect(await ids({ jobId: 'job-1' })).toEqual(['k-1']);
+    });
+  });
+
   it('defaults status to sent and leaves providerMessageId undefined when omitted', async () => {
     const repo = new InMemoryDispatchRepository();
     const row = await repo.create({

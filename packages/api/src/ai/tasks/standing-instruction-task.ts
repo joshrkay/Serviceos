@@ -23,7 +23,7 @@ import {
 import { createProposal, CreateProposalInput } from '../../proposals/proposal';
 import { LLMGateway } from '../gateway/gateway';
 import { ExtractedEntities } from '../orchestration/intent-classifier';
-import { TaskContext, TaskHandler, TaskResult } from './task-handlers';
+import { TaskContext, TaskHandler, TaskResult, draftingRunLink, draftingRunMetadata } from './task-handlers';
 import { entitiesFrom, inputFor } from './task-input';
 
 const STANDING_INSTRUCTION_SYSTEM_PROMPT = `You normalize a spoken standing instruction for a field-service business into a stored directive.
@@ -79,6 +79,8 @@ export class CreateStandingInstructionTaskHandler implements TaskHandler {
       // standing instruction can never auto-approve regardless of
       // confidence or supervisor presence.
       ...inputFor(context, this.taskType, payload, missing),
+      // OBS-2 — the normalization run, when its output shaped the payload.
+      ...draftingRunLink(normalized),
       // Summary is a normalized readback of the instruction, not the raw
       // transcript inputFor defaults to — overridden here, same idiom
       // LogTimeEntryTaskHandler uses in voice-extended-tasks.ts.
@@ -99,7 +101,7 @@ export class CreateStandingInstructionTaskHandler implements TaskHandler {
     context: TaskContext,
     spoken: string,
     ee: ExtractedEntities,
-  ): Promise<{ instruction?: string; scope?: StandingInstructionScope } | undefined> {
+  ): Promise<{ instruction?: string; scope?: StandingInstructionScope; aiRunId?: string } | undefined> {
     try {
       const response = await this.gateway.complete({
         taskType: 'create_standing_instruction',
@@ -118,7 +120,8 @@ export class CreateStandingInstructionTaskHandler implements TaskHandler {
           },
         ],
         responseFormat: 'json',
-        metadata: { tenantId: context.tenantId },
+        // OBS-2 — plus the join keys back to this conversation.
+        metadata: { tenantId: context.tenantId, ...draftingRunMetadata(context).metadata },
       });
 
       const parsed = JSON.parse(response.content) as Record<string, unknown>;
@@ -135,7 +138,7 @@ export class CreateStandingInstructionTaskHandler implements TaskHandler {
         scope = scopeResult.success ? scopeResult.data : undefined;
       }
 
-      return { instruction, scope };
+      return { instruction, scope, ...draftingRunLink(response) };
     } catch {
       return undefined;
     }

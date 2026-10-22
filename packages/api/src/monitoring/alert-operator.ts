@@ -10,8 +10,10 @@
  *   - SMS: when ALERT_SMS_TO is configured AND a MessageDeliveryProvider is
  *     wired, send an SMS with recipientClass 'owner' — the operator/on-call
  *     class that BYPASSES the GatedMessageDelivery consent+DNC gate (see
- *     notifications/delivery-provider.ts). A 'customer'-class send would fail
- *     closed (missing_consent_context) and silently suppress the page.
+ *     notifications/delivery-provider.ts) — tagged alertClass 'operator', which
+ *     also passes the TELEPHONY_ENABLED=false kill switch. A 'customer'-class
+ *     send would fail closed (missing_consent_context) and silently suppress
+ *     the page.
  *
  * Failure posture: NEVER throws into the caller (the SLO sweep / shutdown
  * path) — every channel failure is swallowed and logged, same posture as the
@@ -34,6 +36,13 @@ export interface OperatorAlert {
   severity: 'warning' | 'critical';
   /** Stable rule key — also the cooldown key (e.g. 'call_completion_rate'). */
   rule: string;
+  /**
+   * Bounded label for slo_alerts_sent_total when `rule` is not bounded — a
+   * per-tenant rule keys its cooldown by tenant, but a tenant id must never
+   * become a metric label (permanent, scraped, never purged on erasure).
+   * Defaults to `rule`.
+   */
+  metricRule?: string;
   /** One-line human summary — becomes the Sentry message + SMS body lead. */
   summary: string;
   /** Structured context — appended to the SMS body and logged. */
@@ -88,7 +97,7 @@ export function createAlertOperator(deps: AlertOperatorDeps): AlertOperatorFn {
       // Sentry→Slack/DM rules fire; no-op client when unconfigured.
       try {
         deps.sentry.captureMessage(message, 'error');
-        sloAlertsSentTotal.inc({ rule: alert.rule, channel: 'sentry' });
+        sloAlertsSentTotal.inc({ rule: alert.metricRule ?? alert.rule, channel: 'sentry' });
       } catch (err) {
         deps.logger.error('SLO alert: Sentry channel failed', {
           rule: alert.rule,
@@ -99,16 +108,19 @@ export function createAlertOperator(deps: AlertOperatorDeps): AlertOperatorFn {
       // Channel 2 — operator SMS (only when configured + provider wired).
       // recipientClass 'owner' is REQUIRED: it bypasses the consent+DNC gate
       // (GatedMessageDelivery) so an operator page can never be suppressed as
-      // an unconsented customer send.
+      // an unconsented customer send. alertClass 'operator' lets it through
+      // the customer-facing TELEPHONY_ENABLED=false kill switch too — with
+      // SENTRY_DSN unset this SMS is the only channel that reaches a human.
       if (deps.alertSmsTo && deps.delivery) {
         try {
           await deps.delivery.sendSms({
             to: deps.alertSmsTo,
             body: message.slice(0, 320),
             recipientClass: 'owner',
+            alertClass: 'operator',
             idempotencyKey: `slo-alert-${alert.rule}-${t}`,
           });
-          sloAlertsSentTotal.inc({ rule: alert.rule, channel: 'sms' });
+          sloAlertsSentTotal.inc({ rule: alert.metricRule ?? alert.rule, channel: 'sms' });
         } catch (err) {
           deps.logger.error('SLO alert: SMS channel failed', {
             rule: alert.rule,

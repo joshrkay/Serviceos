@@ -1,17 +1,43 @@
 import { ConflictError, NotFoundError, ValidationError } from '../shared/errors';
 import { PaymentLinkProvider } from '../payments/payment-link-provider';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import type { SettingsRepository } from '../settings/settings';
 // Type-only: `invoice.ts` calls back into this module at runtime
 // (transitionInvoiceStatus → deactivateInvoicePaymentLink), so a value
 // import from './invoice' here would create a require cycle.
 import type { ConnectAccountResolver } from './public-invoice-service';
-import type { Invoice, InvoiceRepository } from './invoice';
+import type { AttachPaymentLinkResult, Invoice, InvoiceRepository } from './invoice';
+import {
+  auditPaymentModeUnavailable,
+  CollectOnSiteError,
+  PaymentModeUnavailableError,
+  readPaymentCollectionMode,
+} from './payment-collection-mode';
 
 const PAYABLE_STATUSES = new Set(['open', 'partially_paid']);
 
 export interface InvoicePaymentLinkResult {
   url: string;
   expiresAt: string | null;
+}
+
+export interface CreateInvoicePaymentLinkDeps {
+  invoiceRepo: InvoiceRepository;
+  provider: PaymentLinkProvider;
+  /**
+   * S5a-1 (U8) — the tenant's `payment_collection_mode` is read here, BEFORE
+   * any provider call: "Collect on the spot" means no link anywhere, and a
+   * policy that cannot be read never becomes `pay_link`.
+   */
+  settingsRepo: SettingsRepository;
+  connectAccountResolver?: ConnectAccountResolver;
+  /**
+   * When wired, a loser-link cleanup failure on the mint-guard path is
+   * audited with the link id — the id was never persisted anywhere else, so
+   * without this a still-live stale link would vanish without a trace. Also
+   * records `invoice.payment_mode_unavailable` (surface `checkout`).
+   */
+  auditRepo?: AuditRepository;
 }
 
 /**
@@ -22,19 +48,29 @@ export interface InvoicePaymentLinkResult {
 export async function createInvoicePaymentLink(
   tenantId: string,
   invoiceId: string,
-  invoiceRepo: InvoiceRepository,
-  provider: PaymentLinkProvider,
-  connectAccountResolver?: ConnectAccountResolver,
-  /**
-   * When wired, a loser-link cleanup failure on the mint-guard path is
-   * audited with the link id — the id was never persisted anywhere else, so
-   * without this a still-live stale link would vanish without a trace.
-   */
-  auditRepo?: AuditRepository,
+  deps: CreateInvoicePaymentLinkDeps,
 ): Promise<InvoicePaymentLinkResult> {
+  const { invoiceRepo, provider, settingsRepo, connectAccountResolver, auditRepo } = deps;
   const invoice = await invoiceRepo.findById(tenantId, invoiceId);
   if (!invoice) {
     throw new NotFoundError('Invoice', invoiceId);
+  }
+
+  // Policy before state: a collect-on-site tenant gets no link even when one
+  // is still stored (the switch cleanup, S5a-5, may not have run yet), and an
+  // unreadable policy is a 503 the operator retries — never a mint.
+  const mode = await readPaymentCollectionMode(settingsRepo, tenantId);
+  if (!mode.ok) {
+    await auditPaymentModeUnavailable(auditRepo, {
+      tenantId,
+      invoiceId: invoice.id,
+      surface: 'checkout',
+      error: mode.error,
+    });
+    throw new PaymentModeUnavailableError();
+  }
+  if (mode.mode === 'collect_on_site') {
+    throw new CollectOnSiteError();
   }
 
   if (!PAYABLE_STATUSES.has(invoice.status)) {
@@ -76,14 +112,31 @@ export async function createInvoicePaymentLink(
   // payable at EXACTLY the balance the link was priced at and carries no
   // other link; when it loses, the link we just minted must die (it prices
   // a state that no longer exists) and the caller re-resolves.
-  const persisted = await invoiceRepo.setPaymentLinkIfPayable(
-    tenantId,
-    invoice.id,
-    { linkId: link.linkId, linkUrl: link.linkUrl },
-    invoice.amountDueCents,
-    new Date(),
-  );
-  if (!persisted) {
+  // S5a-4 (U8) — and only while the mode is still pay_link, re-read under
+  // the payment-mode lock: the owner's switch to "Collect on the spot" may
+  // have committed during the mint. That refusal (and a throw, which is an
+  // unreadable mode) is NOT a lost mint race: the fresh link dies through
+  // the audited deactivation and the answer is 409 / 503, never "invoice
+  // changed" and never a competing mint's link.
+  let attached: AttachPaymentLinkResult;
+  try {
+    attached = await invoiceRepo.attachPaymentLink(
+      tenantId,
+      invoice.id,
+      { linkId: link.linkId, linkUrl: link.linkUrl },
+      invoice.amountDueCents,
+      new Date(),
+    );
+  } catch (error) {
+    await retireCheckoutLink({ tenantId, invoice, linkId: link.linkId, invoiceRepo, provider, connectAccountResolver, auditRepo });
+    await auditPaymentModeUnavailable(auditRepo, { tenantId, invoiceId: invoice.id, surface: 'checkout', error });
+    throw new PaymentModeUnavailableError();
+  }
+  if (!attached.ok && attached.reason === 'mode_not_pay_link') {
+    await retireCheckoutLink({ tenantId, invoice, linkId: link.linkId, invoiceRepo, provider, connectAccountResolver, auditRepo });
+    throw new CollectOnSiteError();
+  }
+  if (!attached.ok) {
     try {
       await provider.deactivateLink(link.linkId, stripeAccountId);
     } catch (err) {
@@ -128,6 +181,32 @@ export async function createInvoicePaymentLink(
   };
 }
 
+/**
+ * S5a-4 (U8) — kill a link a checkout minted but the attach refused because
+ * the mode changed (or could not be read) during the mint. Goes through
+ * `deactivateInvoicePaymentLink` with the unpersisted link id on the
+ * invoice, so the minting-scope fallback and both audit outcomes apply, and
+ * its CAS clear also covers an attach whose acknowledgement was lost (a row
+ * that does hold this link is cleared, never left serving a dead link). No
+ * inactive message: this link was never shown to anyone. Never throws.
+ */
+export async function retireCheckoutLink(params: {
+  tenantId: string;
+  invoice: Invoice;
+  linkId: string;
+  invoiceRepo: InvoiceRepository;
+  provider: PaymentLinkProvider;
+  connectAccountResolver?: ConnectAccountResolver;
+  auditRepo?: AuditRepository;
+}): Promise<void> {
+  const { invoice, linkId, ...rest } = params;
+  await deactivateInvoicePaymentLink({
+    ...rest,
+    invoice: { ...invoice, stripePaymentLinkId: linkId },
+    reason: 'payment_mode_changed_during_checkout',
+  }).catch(() => undefined);
+}
+
 export function isPayableInvoice(invoice: Invoice): boolean {
   return PAYABLE_STATUSES.has(invoice.status) && invoice.amountDueCents > 0;
 }
@@ -158,15 +237,48 @@ export async function deactivateInvoicePaymentLink(params: {
    * letting it live invites a capture whose excess has nowhere to go. A
    * fresh link at the current balance is minted on demand by the pay-now
    * flows once the columns are cleared.
+   * payment_mode_changed — S5a (U8): the owner switched to "Collect on the
+   * spot", so no pay link may stay live;
+   * payment_mode_changed_during_checkout — the same switch caught a link
+   * minted by a checkout that was already in flight when it committed.
    */
-  reason: 'voided' | 'canceled' | 'settled' | 'repriced';
+  reason:
+    | 'voided'
+    | 'canceled'
+    | 'settled'
+    | 'repriced'
+    | 'payment_mode_changed'
+    | 'payment_mode_changed_during_checkout';
   invoiceRepo: InvoiceRepository;
   provider: PaymentLinkProvider;
   connectAccountResolver?: ConnectAccountResolver;
   auditRepo?: AuditRepository;
   actor?: { actorId: string; actorRole: string };
+  /**
+   * S5a-3 — the customer-facing text the dead link's hosted page shows
+   * (`renderCollectOnSiteInactiveMessage`), sent in the same provider call.
+   */
+  inactiveMessage?: string;
+  /**
+   * S5a-3 — the caller (the payment-mode cleanup) claimed this invoice's
+   * link (`cleanup_claimed_at`) before calling. On a provider failure the
+   * claim is released so the next pass can retry; on success the CAS clear
+   * drops it with the link columns.
+   */
+  claimed?: boolean;
 }): Promise<{ deactivated: boolean }> {
-  const { tenantId, invoice, reason, invoiceRepo, provider, connectAccountResolver, auditRepo, actor } = params;
+  const {
+    tenantId,
+    invoice,
+    reason,
+    invoiceRepo,
+    provider,
+    connectAccountResolver,
+    auditRepo,
+    actor,
+    inactiveMessage,
+    claimed,
+  } = params;
   const linkId = invoice.stripePaymentLinkId;
   if (!linkId) return { deactivated: false };
 
@@ -206,7 +318,7 @@ export async function deactivateInvoicePaymentLink(params: {
   let deactivated = false;
   for (const scope of scopes) {
     try {
-      await provider.deactivateLink(linkId, scope);
+      await provider.deactivateLink(linkId, scope, inactiveMessage ? { inactiveMessage } : undefined);
       deactivated = true;
       break;
     } catch (err) {
@@ -214,10 +326,21 @@ export async function deactivateInvoicePaymentLink(params: {
     }
   }
   if (!deactivated) {
+    // A claimed link that is still live goes back to the pool: the release is
+    // a CAS on the link id, so it can never un-claim a different link.
+    let claimReleaseError: string | undefined;
+    if (claimed) {
+      try {
+        await invoiceRepo.releaseCleanupClaim(tenantId, invoice.id, linkId);
+      } catch (err) {
+        claimReleaseError = err instanceof Error ? err.message : String(err);
+      }
+    }
     await emit('invoice.payment_link_deactivation_failed', {
       stripePaymentLinkId: linkId,
       reason,
       error: lastError instanceof Error ? lastError.message : String(lastError),
+      ...(claimReleaseError !== undefined ? { claimReleaseError } : {}),
     });
     return { deactivated: false };
   }
@@ -295,7 +418,15 @@ export async function deactivateInvoicePaymentLink(params: {
 export async function cancelInvoicePaymentIntents(params: {
   tenantId: string;
   invoice: Invoice;
-  reason: 'voided' | 'canceled';
+  /**
+   * voided/canceled — the invoice left the payable world (P0-1);
+   * repriced — an owner-approved credit LOWERED the balance a minted PI was
+   * priced at (P0-9), so its client secret would capture more than is owed.
+   * Only PIs priced above the new balance are cancelled. The pay page mints
+   * a fresh PI at the current balance (its idempotency key carries the
+   * invoice's line-item count, so it never replays a cancelled one).
+   */
+  reason: 'voided' | 'canceled' | 'repriced';
   provider: PaymentLinkProvider;
   connectAccountResolver?: ConnectAccountResolver;
   auditRepo?: AuditRepository;
@@ -358,6 +489,18 @@ export async function cancelInvoicePaymentIntents(params: {
     }
     for (const intent of intents) {
       if (TERMINAL_PI_STATUSES.has(intent.status)) continue;
+      // Repriced (a credit LOWERED the balance): only a PI priced ABOVE what
+      // is now owed can overcharge. One at or below the balance just records
+      // a (partial) payment, so leave it confirmable — cancelling it would
+      // only break a customer mid-checkout. A PI whose amount the provider
+      // did not report is cancelled (fail safe toward never overcharging).
+      if (
+        reason === 'repriced' &&
+        typeof intent.amount === 'number' &&
+        intent.amount <= invoice.amountDueCents
+      ) {
+        continue;
+      }
       try {
         await cancel(intent.id, scope);
         canceled.push(intent.id);
