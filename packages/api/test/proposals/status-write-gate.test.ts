@@ -66,4 +66,14 @@ describe('proposal status-write gate', () => {
     ).rejects.toThrow(ConflictError);
     expect((await repo.findById('tenant-1', id))?.status).toBe('draft');
   });
+
+  it('the generic update cannot move status, even when a caller smuggles one in', async () => {
+    const { repo, id } = await seeded('executed');
+    const updated = await repo.update('tenant-1', id, {
+      summary: 'renamed',
+      ...({ status: 'ready_for_review' } as object),
+    });
+    expect(updated?.summary).toBe('renamed');
+    expect(updated?.status).toBe('executed');
+  });
 });

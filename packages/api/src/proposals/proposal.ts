@@ -1168,7 +1168,7 @@ export interface ProposalRepository {
   update(
     tenantId: string,
     id: string,
-    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt'>>
+    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt' | 'status'>>
   ): Promise<Proposal | null>;
 
   /**
@@ -1749,12 +1749,15 @@ export class InMemoryProposalRepository implements ProposalRepository {
   async update(
     tenantId: string,
     id: string,
-    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt'>>
+    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt' | 'status'>>
   ): Promise<Proposal | null> {
     const proposal = this.proposals.get(id);
     if (!proposal || proposal.tenantId !== tenantId) return null;
 
-    Object.assign(proposal, updates, { updatedAt: new Date() });
+    // Parity with the pg repo, which has no status column in its field map:
+    // status moves only through updateStatus and its gate.
+    const { status: _ignored, ...fields } = updates as Partial<Proposal>;
+    Object.assign(proposal, fields, { updatedAt: new Date() });
     this.proposals.set(id, proposal);
     return { ...proposal };
   }

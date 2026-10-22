@@ -19,6 +19,7 @@ import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import { assembleTypicalShop } from '../../../src/onboarding/choices/assemble';
 import { InMemoryRegionalPriceTierRepository } from '../../../src/onboarding/choices/price-tiers';
 import { ConflictError } from '../../../src/shared/errors';
+import { forceStatus } from '../../helpers/proposal-status';
 
 const TENANT = '00000000-0000-0000-0000-00000000e0b1';
 const CLE = { standard: { tripFeeCents: 8900, hourlyRateCents: 15000 }, premium: { tripFeeCents: 12900, hourlyRateCents: 18500 } };
@@ -44,7 +45,7 @@ describe('undoApprovedDraft', () => {
   });
 
   async function force(id: string, status: ProposalStatus, extra: Partial<Proposal> = {}): Promise<void> {
-    await proposalRepo.update(TENANT, id, { status, ...extra });
+    forceStatus(proposalRepo, TENANT, id, status, extra);
   }
 
   beforeEach(async () => {

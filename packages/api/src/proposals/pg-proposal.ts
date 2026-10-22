@@ -552,7 +552,7 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
   async update(
     tenantId: string,
     id: string,
-    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt'>>
+    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt' | 'status'>>
   ): Promise<Proposal | null> {
     return this.withTenantTransaction(tenantId, async (client) => {
       // Status transitions MUST go through updateStatus() which uses

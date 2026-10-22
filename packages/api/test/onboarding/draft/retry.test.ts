@@ -13,6 +13,7 @@ import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import { assembleTypicalShop } from '../../../src/onboarding/choices/assemble';
 import { InMemoryRegionalPriceTierRepository } from '../../../src/onboarding/choices/price-tiers';
 import { ConflictError, NotFoundError } from '../../../src/shared/errors';
+import { forceStatus } from '../../helpers/proposal-status';
 
 const TENANT = '00000000-0000-0000-0000-00000000e0a1';
 const CLE = { standard: { tripFeeCents: 8900, hourlyRateCents: 15000 }, premium: { tripFeeCents: 12900, hourlyRateCents: 18500 } };
@@ -47,8 +48,7 @@ describe('retryFailedDraftProposals', () => {
 
   /** Force a proposal into a status the way the worker / sweeper would have left it. */
   async function force(id: string, status: ProposalStatus, extra: Partial<Proposal> = {}): Promise<void> {
-    await proposalRepo.update(TENANT, id, {
-      status,
+    forceStatus(proposalRepo, TENANT, id, status, {
       ...(status === 'execution_failed'
         ? {
             approvedAt: new Date(Date.now() - 3_600_000),
