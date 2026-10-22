@@ -72,6 +72,7 @@ async function setup(steps: DripStep[], overrides: Partial<DripEngineDeps> = {})
     findTargets: vi.fn(async () => []),
     findBookingSince: vi.fn(async () => null),
     hasRepliedSince: vi.fn(async () => false),
+    hasRenewedMembership: vi.fn(async () => false),
   };
   const customer = { current: makeCustomer() as Customer | null };
   const now = { current: NOW };
@@ -220,6 +221,30 @@ describe('drip engine — exit conditions and quiet hours', () => {
     expect(await auditTypes(h)).toEqual(expect.arrayContaining(['drip.booking_attributed', 'drip.enrollment_exited']));
   });
 
+  it('exits as renewed once the membership it was enrolled for is renewed (#1735)', async () => {
+    const h = await setup([sms]);
+    const enrollment = enrollmentOf(h);
+    enrollment.sourceEntityType = 'service_agreement';
+    enrollment.sourceEntityId = 'agr-1';
+    h.signals.hasRenewedMembership.mockResolvedValueOnce(true);
+    await createDripEngine(h.deps).runTenant(TENANT);
+    expect(h.sendText).not.toHaveBeenCalled();
+    expect(h.signals.hasRenewedMembership).toHaveBeenCalledWith(TENANT, enrollment.id);
+    expect(enrollmentOf(h)).toMatchObject({ status: 'exited', exitReason: 'renewed' });
+  });
+
+  it('keeps reminding while the membership is not renewed, and never asks for non-membership enrollments', async () => {
+    const renewal = await setup([sms]);
+    enrollmentOf(renewal).sourceEntityType = 'service_agreement';
+    enrollmentOf(renewal).sourceEntityId = 'agr-1';
+    await createDripEngine(renewal.deps).runTenant(TENANT);
+    expect(renewal.sendText).toHaveBeenCalledTimes(1);
+
+    const lapsed = await setup([sms]);
+    await createDripEngine(lapsed.deps).runTenant(TENANT);
+    expect(lapsed.signals.hasRenewedMembership).not.toHaveBeenCalled();
+  });
+
   it('exits as replied', async () => {
     const h = await setup([sms]);
     h.signals.hasRepliedSince.mockResolvedValueOnce(true);
@@ -297,5 +322,7 @@ describe('drip engine — enrollment', () => {
     expect(await engine.enrollTargets(TENANT, SEQ, { userId: 'owner', role: 'owner' })).toBe(1);
     expect(await engine.enrollTargets(TENANT, SEQ, { userId: 'owner', role: 'owner' })).toBe(0);
     expect(await auditTypes(h)).toContain('drip.targets_enrolled');
+    // The sequence id is passed so already-enrolled customers are skipped before the cap.
+    expect(h.signals.findTargets).toHaveBeenCalledWith(TENANT, 'lapsed_customers', 180, NOW, 200, SEQ);
   });
 });

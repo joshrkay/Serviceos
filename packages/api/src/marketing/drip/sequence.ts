@@ -15,7 +15,7 @@ export const DRIP_FEATURE_FLAG = 'drip_campaigns';
 export const DRIP_CHANNELS = ['sms', 'call', 'email'] as const;
 export type DripChannel = (typeof DRIP_CHANNELS)[number];
 
-export const DRIP_TARGET_KINDS = ['lapsed_customers', 'unsold_estimates'] as const;
+export const DRIP_TARGET_KINDS = ['lapsed_customers', 'unsold_estimates', 'membership_renewals'] as const;
 export type DripTargetKind = (typeof DRIP_TARGET_KINDS)[number];
 
 export const DRIP_MAX_STEPS = 8;
@@ -64,7 +64,10 @@ export type DripStep = z.infer<typeof dripStepSchema>;
 export const createDripSequenceSchema = z.object({
   name: z.string().trim().min(1).max(120),
   targetKind: z.enum(DRIP_TARGET_KINDS),
-  /** Lapsed: days since the last job. Unsold estimates: days since the estimate was sent. */
+  /**
+   * Lapsed: days since the last job. Unsold estimates: days since the estimate
+   * was sent. Membership renewals: days before the membership ends.
+   */
   targetDays: z.number().int().min(1).max(3650).optional(),
   steps: z.array(dripStepSchema).min(1).max(DRIP_MAX_STEPS),
 });
@@ -92,14 +95,18 @@ export type DripExitReason =
   | 'replied'
   | 'opted_out'
   | 'customer_unavailable'
-  | 'cancelled';
+  | 'cancelled'
+  /** Membership renewals: the membership was renewed (term extended, auto-renew on, or a new one). */
+  | 'renewed';
+
+export type DripSourceEntityType = 'estimate' | 'service_agreement';
 
 export interface DripEnrollment {
   id: string;
   tenantId: string;
   sequenceId: string;
   customerId: string;
-  sourceEntityType: 'estimate' | null;
+  sourceEntityType: DripSourceEntityType | null;
   sourceEntityId: string | null;
   status: DripEnrollmentStatus;
   exitReason: DripExitReason | null;
@@ -115,6 +122,7 @@ export interface DripEnrollment {
 export const DEFAULT_TARGET_DAYS: Record<DripTargetKind, number> = {
   lapsed_customers: 180,
   unsold_estimates: 3,
+  membership_renewals: 30,
 };
 
 export function addMinutes(date: Date, minutes: number): Date {

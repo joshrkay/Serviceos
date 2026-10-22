@@ -5,6 +5,7 @@ import type {
   DripExitReason,
   DripSequence,
   DripSequenceStatus,
+  DripSourceEntityType,
   DripTargetKind,
 } from './sequence';
 
@@ -16,8 +17,13 @@ import type {
 /** A customer a sequence's targeting rule picked, with what made them eligible. */
 export interface DripTarget {
   customerId: string;
-  sourceEntityType: 'estimate' | null;
+  sourceEntityType: DripSourceEntityType | null;
   sourceEntityId: string | null;
+  /**
+   * Membership renewals: the membership's end date (YYYY-MM-DD) when it was
+   * targeted, kept on the enrollment so any later extension reads as renewed.
+   */
+  sourceDueOn?: string | null;
 }
 
 export interface DripBooking {
@@ -83,11 +89,20 @@ export interface DripSignals {
     days: number,
     now: Date,
     limit: number,
+    /** Customers already enrolled in this sequence are excluded before `limit` applies. */
+    sequenceId: string,
   ): Promise<DripTarget[]>;
   /** First non-cancelled appointment booked for the customer's jobs after `since`. */
   findBookingSince(tenantId: string, customerId: string, since: Date): Promise<DripBooking | null>;
   /** True when the customer texted us after `since`. */
   hasRepliedSince(tenantId: string, customerId: string, since: Date): Promise<boolean>;
+  /**
+   * Membership renewals: true once the enrollment's customer no longer needs
+   * reminding: the enrolled membership (or one started after enrollment) is
+   * active and auto-renewing, open-ended, or now ends after the end date it
+   * had when targeted.
+   */
+  hasRenewedMembership(tenantId: string, enrollmentId: string): Promise<boolean>;
 }
 
 export class InMemoryDripRepository implements DripRepository {
