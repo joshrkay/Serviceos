@@ -1,4 +1,4 @@
-import { Proposal, ProposalStatus } from './proposal';
+import type { Proposal, ProposalStatus } from './proposal';
 import { ConflictError, ForbiddenError } from '../shared/errors';
 
 /**
@@ -21,12 +21,18 @@ const VALID_TRANSITIONS: Record<ProposalStatus, ProposalStatus[]> = {
   // refuses a draft with unfilled missingFields, so a half-extracted
   // payload can't be approved straight from 'draft'.
   draft: ['ready_for_review', 'approved', 'rejected', 'expired'],
-  ready_for_review: ['approved', 'rejected', 'expired'],
+  // → draft: a supervisor hold pulls a queued card back out of review
+  // (ai/supervisor/reviewer.ts) so no one-tap link or approval text goes out.
+  ready_for_review: ['approved', 'rejected', 'expired', 'draft'],
   // Decision 9 undo window: approved proposals can transition to
   // 'undone' within UNDO_WINDOW_MS. After the window passes, the
   // only valid next states are 'executed' / 'execution_failed'.
-  approved: ['executed', 'execution_failed', 'undone'],
-  executing: ['executed', 'execution_failed'],
+  // → executing: the execution sweep's claim. → rejected: a caller revoking
+  // their own still-unexecuted booking mid-call (E1, voice-turn processor).
+  approved: ['executing', 'executed', 'execution_failed', 'undone', 'rejected'],
+  // → approved: the executor releases a claimed chain dependent whose parent
+  // has not executed yet, so the next sweep tick retries it.
+  executing: ['executed', 'execution_failed', 'approved'],
   rejected: ['draft'],
   expired: [],
   executed: [],
@@ -128,6 +134,16 @@ export function undoRemainingMs(
 export function canTransition(from: ProposalStatus, to: ProposalStatus): boolean {
   const allowed = VALID_TRANSITIONS[from];
   return allowed !== undefined && allowed.includes(to);
+}
+
+/**
+ * The status-write gate. Every repository status write runs it, so a caller
+ * cannot move a proposal along an edge the table above does not list. A write
+ * to the status the row already has is a re-stamp, not a move, and passes.
+ */
+export function assertStatusWrite(from: ProposalStatus, to: ProposalStatus): void {
+  if (from === to || canTransition(from, to)) return;
+  throw new ConflictError(`Cannot transition proposal from '${from}' to '${to}'`);
 }
 
 export function isTerminalStatus(status: ProposalStatus): boolean {

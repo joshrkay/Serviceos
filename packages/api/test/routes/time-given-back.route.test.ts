@@ -68,12 +68,12 @@ describe('GET /api/reports/time-given-back', () => {
       summary: 's',
       createdBy: 'user-r1',
     });
-    await proposalRepo.create(p);
     // currentWeekWindow is [now - 7d, now) — strictly less than now — so
     // executedAt must be in the past, not exactly now.
-    await proposalRepo.updateStatus('tenant-r1', p.id, 'executed', {
-      executedAt: new Date(Date.now() - 60_000),
-    });
+    // Seeded executed: the status-write gate refuses draft → executed.
+    p.status = 'executed';
+    p.executedAt = new Date(Date.now() - 60_000);
+    await proposalRepo.create(p);
     const res = await request(app).get('/api/reports/time-given-back');
     expect(res.status).toBe(200);
     expect(res.body.data.receipt.proposalsHandled).toBe(1);
