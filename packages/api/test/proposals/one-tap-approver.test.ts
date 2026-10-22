@@ -80,6 +80,7 @@ describe('B1 — routeUnsupervisedProposal mints the link for its recipient', ()
     const sms: { to: string; body: string }[] = [];
     const anchors: string[] = [];
     const lookups: string[] = [];
+    const forms: unknown[] = [];
     const run = routeUnsupervisedProposal(
       {
         auditRepo,
@@ -103,10 +104,13 @@ describe('B1 — routeUnsupervisedProposal mints the link for its recipient', ()
         channel: 'other',
         ownerPhone,
         summaryText: 'Book Mrs Lee',
-        renderSmsBody: (url) => (url ? `Book Mrs Lee. Tap: ${url}` : 'Book Mrs Lee. Review in the app.'),
+        renderSmsBody: (url, form) => {
+          forms.push(form);
+          return url ? `Book Mrs Lee. Tap: ${url}` : 'Book Mrs Lee. Review in the app.';
+        },
       },
     );
-    return { run, auditRepo, sms, anchors, lookups };
+    return { run, auditRepo, sms, anchors, lookups, forms };
   }
 
   const tokenIn = (body: string) => body.match(/token=([A-Za-z0-9._-]+)/)?.[1];
@@ -128,6 +132,7 @@ describe('B1 — routeUnsupervisedProposal mints the link for its recipient', ()
     await r.run;
 
     expect(Object.keys(payloadOf(tokenIn(r.sms[0].body)!)).sort()).toEqual(['e', 'n', 'p', 't']);
+    expect(r.forms).toEqual([{ recipientCannotApprove: false }]);
   });
 
   it.each([
@@ -142,6 +147,9 @@ describe('B1 — routeUnsupervisedProposal mints the link for its recipient', ()
     expect(result.approveLinkExpiresAt).toBeUndefined();
     expect(r.sms[0].body).not.toContain('token=');
     expect(r.anchors).toEqual(['review_required_rendered']);
+    // B1 follow-up — the renderer is told, so it drops every reply prompt
+    // (their Y, N and EDIT are all refused), not just the link.
+    expect(r.forms).toEqual([{ recipientCannotApprove: true }]);
     const routed = r.auditRepo.getAll().find((e) => e.eventType === 'unsupervised_proposal_routed');
     expect(routed?.metadata).toMatchObject({ suppressReason: 'recipient_cannot_approve' });
   });

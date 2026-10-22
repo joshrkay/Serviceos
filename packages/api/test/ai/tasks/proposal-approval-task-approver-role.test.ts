@@ -220,4 +220,32 @@ describe('B1 — the voice one-tap fallback link approves as its recipient', () 
       verifyOneTapApproveToken({ token, secret: 'voice-b1-secret', consumeNonce: createInMemoryNonceStore() }),
     ).resolves.toMatchObject({ ok: true, confirm: true, approver: { userId: BACKUP_SUBJECT, role: 'dispatcher' } });
   });
+
+  // B1 follow-up — the phone the fallback texts can be a backup who cannot
+  // approve (demoted since the call began). No link, and no reply prompt:
+  // their texted N and EDIT are refused too.
+  it('a fallback texted to a backup who cannot approve is for-your-info only', async () => {
+    const h = makeHarness();
+    const sent: { to: string; body: string }[] = [];
+    h.deps.oneTapFallback = {
+      sendSms: async (to, body) => {
+        sent.push({ to, body });
+      },
+      secret: 'voice-b1-secret',
+      buildApproveUrl: (token) => `https://x.test/approve?token=${token}`,
+      resolveOwnerPhone: async () => '+15125550111',
+      resolveLinkApprover: async () => ({ role: 'technician', userId: BACKUP_SUBJECT, via: 'backup_supervisor' }),
+    };
+    await seed(h.proposalRepo, {
+      proposalType: 'record_payment',
+      payload: { customerName: 'Acme Corp', amountCents: 20000 },
+      summary: 'Record $200 payment from Acme',
+    });
+
+    await startVoiceApproval(h.deps, { ...backupDispatcher, action: 'approve', reference: 'the Acme payment' });
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0].body).toContain('For your info — the owner needs to review this in the app.');
+    expect(sent[0].body).not.toMatch(/approve in the app|reply N|EDIT|token=/);
+  });
 });

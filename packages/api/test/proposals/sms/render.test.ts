@@ -965,3 +965,50 @@ describe('OVAS-01 — the acceptance-void warning always prints', () => {
     expect(body).toContain(`Check: ${ACCEPTANCE_VOID_MARKER.reason}`);
   });
 });
+
+// B1 follow-up — a phone that cannot approve (a legacy technician backup, or
+// an unrecognised recipient) gets no link, and the reply handler refuses its
+// Y, N and EDIT alike. Every form sent to it is for-your-info only.
+describe('B1 — a recipient who cannot approve gets the for-your-info form', () => {
+  const FYI = 'For your info — the owner needs to review this in the app.';
+
+  it.each([
+    ['a capture card', 'create_booking' as const, {}],
+    ['a money card', 'record_payment' as const, { amountCents: 20000 }],
+    ['a low-confidence card', 'create_booking' as const, { _meta: { overallConfidence: 'low' } }],
+  ])('%s: no Reply Y, N, EDIT or link', (_label, proposalType, payload) => {
+    const body = renderProposalSms(
+      { proposalType, summary: 'Book Mrs Lee Tuesday 2pm', payload },
+      { approveUrl: URL, recipientCannotApprove: true },
+    );
+    expect(body).toBe(`Book Mrs Lee Tuesday 2pm ${FYI}`);
+  });
+
+  it('keeps the not-executable-yet ask and the acceptance-void warning, within the cap', () => {
+    const ask = "This can't go ahead yet: what's the service address?";
+    const body = renderProposalSms(
+      {
+        proposalType: 'update_estimate',
+        summary: 'Take the disposal fee off the Garcia estimate '.repeat(10),
+        payload: { _meta: { overallConfidence: 'high', markers: [ACCEPTANCE_VOID_MARKER] } },
+      },
+      { blockedBy: ask, recipientCannotApprove: true },
+    );
+    expect(body).toContain(ask);
+    expect(body).toContain(FYI);
+    expect(body).toContain(`Check: ${ACCEPTANCE_VOID_MARKER.reason}`);
+    expect(body).not.toMatch(/Reply Y|reply N|EDIT/);
+    expect(body.length).toBeLessThanOrEqual(PROPOSAL_SMS_MAX_CHARS);
+  });
+
+  it('a chain: no Reply Y, no star legend, no link', () => {
+    const body = renderChainSms(
+      [
+        { proposalType: 'create_customer', summary: 'Add Jane Doe', payload: {} },
+        { proposalType: 'send_estimate', summary: 'Send Jane the estimate', payload: {} },
+      ],
+      { approveUrl: URL, recipientCannotApprove: true },
+    );
+    expect(body).toBe(`2 linked actions: 1) Add Jane Doe 2) Send Jane the estimate ${FYI}`);
+  });
+});

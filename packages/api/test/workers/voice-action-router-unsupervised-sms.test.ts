@@ -179,6 +179,52 @@ describe('voice-action-router — P12-004 unsupervised routing', () => {
     expect(verified).toMatchObject({ ok: true, approver: { userId: 'clerk-backup', role: 'dispatcher' } });
   });
 
+  // B1 follow-up — a legacy technician backup gets no link (they cannot
+  // approve), and their texted Y / N / EDIT are all refused. The body must
+  // not ask them for any of those replies.
+  it('queue_and_sms to a technician backup sends the for-your-info form: no Reply Y, no N, no link', async () => {
+    const sendSms = vi.fn(async (_to: string, _body: string) => {});
+    const recordSmsEvent = vi.fn(async () => {});
+    const worker = createVoiceActionRouterWorker({
+      tenantSchedulingResolver: async () => ({ timezone: 'America/Phoenix' }),
+      gateway: bookingGateway(),
+      proposalRepo,
+      unsupervisedRouting: {
+        auditRepo,
+        sendSms,
+        secret: 'test-secret',
+        buildApproveUrl: (token) => `https://api.example.com/approve?token=${token}`,
+        resolveOwnerPhone: async () => '+15125550111',
+        resolveLinkApprover: async () => ({ role: 'technician', userId: 'clerk-tech', via: 'backup_supervisor' }),
+        resolveRouting: async () => 'queue_and_sms',
+        recordSmsEvent,
+      },
+    });
+
+    await worker.handle(
+      msg({ tenantId: 't-unsup', userId: 'u-1', transcript: 'Book Mrs Lee next Tuesday at 2pm' }),
+      silentLogger(),
+    );
+
+    const [proposal] = await proposalRepo.findByTenant('t-unsup');
+    expect(sendSms).toHaveBeenCalledTimes(1);
+    const [to, body] = sendSms.mock.calls[0];
+    expect(to).toBe('+15125550111');
+    expect(body).toContain(proposal.summary);
+    expect(body).toContain('For your info — the owner needs to review this in the app.');
+    expect(body).not.toMatch(/Reply Y/i);
+    expect(body).not.toMatch(/reply N|N to reject/i);
+    expect(body).not.toMatch(/EDIT/);
+    expect(body).not.toContain('token=');
+    expect(recordSmsEvent).toHaveBeenCalledWith(
+      expect.objectContaining({ proposalId: proposal.id, kind: 'review_required_rendered' }),
+    );
+    const routed = (await auditRepo.findByEntity('t-unsup', 'proposal', proposal.id)).find(
+      (e) => e.eventType === 'unsupervised_proposal_routed',
+    );
+    expect(routed?.metadata).toMatchObject({ approveLinkSuppressed: true, suppressReason: 'recipient_cannot_approve' });
+  });
+
   it('queue_and_sms: a non-holding supervisor review attaches an N-002 marker that reaches the rendered SMS', async () => {
     // N-004 regression: the gate writes supervisor markers to the proposal via
     // proposalRepo but historically returned only `{ hold }`, leaving the

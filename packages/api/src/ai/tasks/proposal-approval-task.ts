@@ -1099,14 +1099,15 @@ async function sendOneTapFallback(
         confirmNonCapture: true,
         ...(ownerPhone ? { ownerPhone } : {}),
         summaryText: proposal.summary,
-        renderSmsBody: (approveUrl: string) =>
+        renderSmsBody: (approveUrl: string, { recipientCannotApprove }) =>
           renderProposalSms(
             {
               proposalType: proposal.proposalType,
               summary: proposal.summary,
               payload: proposal.payload,
             },
-            { approveUrl: approveUrl || undefined },
+            // B1 follow-up — a recipient who cannot approve is asked for no reply.
+            { approveUrl: approveUrl || undefined, recipientCannotApprove },
           ),
         // RV-074 (F-4) — pass payload so the routing site can guard
         // low/very_low proposals against one-tap Y-able links.

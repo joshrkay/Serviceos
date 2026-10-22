@@ -621,8 +621,12 @@ export interface RouteUnsupervisedProposalInput {
    * P2-034 — full SMS body builder (proposal summary + key facts + reply
    * tokens + the one-tap link). When absent the legacy link-only body is
    * sent, so existing callers keep their exact behavior.
+   *
+   * B1 follow-up — `form` says who the body is for: when the recipient cannot
+   * approve, the renderer must drop every reply prompt (Y, N and EDIT from
+   * that phone are all refused), not only the link the router withheld.
    */
-  renderSmsBody?: (approveUrl: string) => string;
+  renderSmsBody?: (approveUrl: string, form: UnsupervisedSmsForm) => string;
   /**
    * RV-074 (F-4) — proposal payload used to check _meta.overallConfidence.
    * When present and confidence is low/very_low, the one-tap Y-able link is
@@ -660,6 +664,19 @@ export interface RouteUnsupervisedProposalInput {
    */
   confirmNonCapture?: boolean;
   nowMs?: number;
+}
+
+/** B1 follow-up — what `renderSmsBody` must know about the send beyond the link. */
+export interface UnsupervisedSmsForm {
+  /**
+   * The phone the SMS goes to cannot approve: a backup whose role lacks
+   * proposals:approve (a legacy technician backup), a recipient who is not a
+   * recognised approver, or one whose lookup failed (`resolveLinkApprover`).
+   * The reply handler refuses their Y, N and EDIT alike, so the body is for
+   * their information only (renderProposalSms / renderChainSms
+   * `recipientCannotApprove`).
+   */
+  recipientCannotApprove: boolean;
 }
 
 export interface RouteUnsupervisedProposalResult {
@@ -721,14 +738,16 @@ export async function routeUnsupervisedProposal(
       // signed acceptance; a single tap must never do that. No token; the
       // renderer prints the warning on the review form.
       const voidsAcceptance = voidsCustomerAcceptance(input.payload);
-      // B1 — who the link approves as. Only asked when a link would be
-      // minted. A recipient who is not a recognised approver, or whose role
-      // cannot approve (a technician backup), gets none — and so does a
-      // failed lookup: fail closed to the review form.
-      const linkWouldMint =
-        !isLowConfidence && input.suppressApproveLink !== true && !voidsAcceptance && Boolean(deps.secret);
+      const reviewFormAnyway = isLowConfidence || input.suppressApproveLink === true || voidsAcceptance;
+      // B1 — who the SMS is for, asked whenever one will go out (the review
+      // form, or a link to mint). A recipient who is not a recognised
+      // approver, or whose role cannot approve (a technician backup), gets no
+      // link — and so does a failed lookup: fail closed to the review form.
+      // B1 follow-up — asked for the review form too: their N and EDIT are
+      // refused as well, so even that form must not ask them for a reply.
+      const smsWillGoOut = reviewFormAnyway || Boolean(deps.secret);
       let recipient: ResolvedApprover | null | undefined;
-      if (linkWouldMint && deps.resolveLinkApprover) {
+      if (smsWillGoOut && deps.resolveLinkApprover) {
         try {
           recipient = await deps.resolveLinkApprover(input.tenantId, input.ownerPhone);
         } catch (err) {
@@ -743,8 +762,7 @@ export async function routeUnsupervisedProposal(
       const recipientCannotApprove =
         recipient === null ||
         (recipient !== undefined && !hasPermission(recipient.role, 'proposals:approve'));
-      const reviewRequired =
-        isLowConfidence || input.suppressApproveLink === true || voidsAcceptance || recipientCannotApprove;
+      const reviewRequired = reviewFormAnyway || recipientCannotApprove;
 
       let body: string;
       let expiresAt: Date | undefined;
@@ -768,17 +786,18 @@ export async function routeUnsupervisedProposal(
           : `/p/approve?token=${encodeURIComponent(token)}`;
         const summary = input.summaryText ?? 'A proposal needs your approval';
         body = input.renderSmsBody
-          ? input.renderSmsBody(url)
+          ? input.renderSmsBody(url, { recipientCannotApprove: false })
           : `${summary}. Tap to approve (link expires in 30 min): ${url}`;
         approveLinkExpiresAt = expiresAt;
       } else if (reviewRequired) {
         // Low/very_low confidence OR caller-asserted suppression: no token,
         // no Y-able link. The renderer (renderProposalSms / renderChainSms)
-        // emits the review-in-app form; pass an empty string so the
+        // emits the review-in-app form — or, for a recipient who cannot
+        // approve, the for-your-info form; pass an empty string so the
         // renderSmsBody callback signature is satisfied.
         const summary = input.summaryText ?? 'A proposal needs your approval';
         body = input.renderSmsBody
-          ? input.renderSmsBody('')
+          ? input.renderSmsBody('', { recipientCannotApprove })
           : `${summary}. Review in app.`;
         approveLinkSuppressed = true;
         suppressReason = [

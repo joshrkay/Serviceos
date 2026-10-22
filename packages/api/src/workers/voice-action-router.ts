@@ -2422,14 +2422,15 @@ async function processChain(
           channel: 'other',
           ...(ownerPhone ? { ownerPhone } : {}),
           summaryText: reviewedHead.summary,
-          renderSmsBody: (approveUrl: string) =>
+          renderSmsBody: (approveUrl: string, { recipientCannotApprove }) =>
             renderChainSms(
               ordered.map((p) => ({
                 proposalType: p.proposalType,
                 summary: p.summary,
                 payload: p.payload,
               })),
-              { approveUrl: approveUrl || undefined },
+              // B1 follow-up — a recipient who cannot approve is asked for no reply.
+              { approveUrl: approveUrl || undefined, recipientCannotApprove },
             ),
           // Blocking-member payload (if any) drives the token-suppression /
           // review_required_rendered anchoring; otherwise the head's.
@@ -2849,7 +2850,7 @@ export function createVoiceActionRouterWorker(
                 summaryText: proposal.summary,
                 // P2-034 — full reply-token body (summary + facts +
                 // "Reply Y/N/EDIT" + the one-tap link).
-                renderSmsBody: (approveUrl: string) =>
+                renderSmsBody: (approveUrl: string, { recipientCannotApprove }) =>
                   renderProposalSms(
                     {
                       proposalType: proposal.proposalType,
@@ -2859,6 +2860,8 @@ export function createVoiceActionRouterWorker(
                     {
                       approveUrl: approveUrl || undefined,
                       ...(executabilityAsk ? { blockedBy: executabilityAsk } : {}),
+                      // B1 follow-up — a recipient who cannot approve is asked for no reply.
+                      recipientCannotApprove,
                     },
                   ),
                 ...(executabilityAsk ? { suppressApproveLink: true } : {}),

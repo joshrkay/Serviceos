@@ -28,6 +28,12 @@
  * the "Check: approving voids the customer's prior acceptance" line, at any
  * confidence level and on every form — the review-in-app and not-executable-
  * yet forms too (proposals/acceptance-void.ts).
+ *
+ * B1 follow-up — a recipient who cannot approve (`recipientCannotApprove`: a
+ * legacy technician backup, or a phone that is not a recognised approver)
+ * gets the review-only form with a for-your-info line instead of any reply
+ * prompt, single cards and chains alike: the reply handler refuses their Y,
+ * N and EDIT, so asking for one would be a promise the reply cannot keep.
  */
 import type { ProposalType } from '../proposal';
 import { actionClassForProposalType } from '../proposal';
@@ -56,6 +62,11 @@ const NON_CAPTURE_NO_LINK_INSTRUCTIONS =
 // at THIS proposal. Approval stays in-app only.
 const REVIEW_IN_APP_INSTRUCTIONS =
   'Needs review in app before approval — reply N to reject.';
+// B1 follow-up — the phone this goes to cannot approve (a legacy technician
+// backup, or a recipient who is not a recognised approver): the reply handler
+// refuses its Y, N and EDIT alike, so no form may ask it for a reply.
+const RECIPIENT_CANNOT_APPROVE_INSTRUCTIONS =
+  'For your info — the owner needs to review this in the app.';
 
 export interface RenderProposalSmsInput {
   proposalType: ProposalType;
@@ -78,6 +89,13 @@ export interface RenderProposalSmsOptions {
    * review instructions; the summary gives way first.
    */
   blockedBy?: string;
+  /**
+   * B1 follow-up — the recipient cannot approve (routeUnsupervisedProposal's
+   * `recipient_cannot_approve`). Renders the review-only form with the
+   * for-your-info line in place of every reply prompt: no Reply Y, no N, no
+   * EDIT, no link, whatever the class or confidence.
+   */
+  recipientCannotApprove?: boolean;
 }
 
 const formatCents = formatUsdCentsFixed;
@@ -244,16 +262,21 @@ export function renderProposalSms(
   // the customer's signed acceptance, whatever the owner is asked to do next.
   const voidsAcceptance = voidsCustomerAcceptance(input.payload);
   const acceptanceCheckLine = voidsAcceptance ? `\nCheck: ${ACCEPTANCE_VOID_MARKER.reason}` : '';
+  // B1 follow-up — a recipient who cannot approve is asked for no reply at all.
+  const reviewOnlyInstructions = options.recipientCannotApprove
+    ? RECIPIENT_CANNOT_APPROVE_INSTRUCTIONS
+    : REVIEW_IN_APP_INSTRUCTIONS;
 
   // ── #1485 — not executable yet: never-approvable form + the ask ──
   if (options.blockedBy) {
-    const tail = `${options.blockedBy} ${REVIEW_IN_APP_INSTRUCTIONS}${acceptanceCheckLine}`;
+    const tail = `${options.blockedBy} ${reviewOnlyInstructions}${acceptanceCheckLine}`;
     const summaryBudget = Math.max(PROPOSAL_SMS_MAX_CHARS - prefix.length - 1 - tail.length, 20);
     return `${prefix}${truncate(summary, summaryBudget)} ${tail}`;
   }
 
-  // ── LOW / VERY_LOW: never-approvable form — no Reply Y, no one-tap link ──
-  if (isBlocking(overallConfidence)) {
+  // ── LOW / VERY_LOW, or a recipient who cannot approve: never-approvable
+  //    form — no Reply Y, no one-tap link ──
+  if (options.recipientCannotApprove || isBlocking(overallConfidence)) {
     // Same truncation contract as the normal form: the instructions (and the
     // acceptance warning) are sacred ("reply N to reject" must survive), the
     // summary gives way.
@@ -261,11 +284,11 @@ export function renderProposalSms(
       PROPOSAL_SMS_MAX_CHARS -
         prefix.length -
         1 - // space before instructions
-        REVIEW_IN_APP_INSTRUCTIONS.length -
+        reviewOnlyInstructions.length -
         acceptanceCheckLine.length,
       20,
     );
-    return `${prefix}${truncate(summary, summaryBudget)} ${REVIEW_IN_APP_INSTRUCTIONS}${acceptanceCheckLine}`;
+    return `${prefix}${truncate(summary, summaryBudget)} ${reviewOnlyInstructions}${acceptanceCheckLine}`;
   }
 
   // ── HIGH (or absent _meta): existing behavior, byte-identical ──
@@ -423,6 +446,11 @@ export interface ChainSmsMember {
 export interface RenderChainSmsOptions {
   /** Public one-tap approve URL for the chain HEAD (already token-signed). */
   approveUrl?: string;
+  /**
+   * B1 follow-up — the recipient cannot approve: the whole chain renders the
+   * review form with the for-your-info line (no Reply Y, no N, no link).
+   */
+  recipientCannotApprove?: boolean;
 }
 
 const CHAIN_SEPARATE_APPROVAL_LEGEND = '*Approval follows separately.';
@@ -459,7 +487,7 @@ export function renderChainSms(
   // case uses; the send site suppresses the token to match).
   const headNotCapture =
     members.length > 0 && actionClassForProposalType(members[0].proposalType) !== 'capture';
-  const reviewForm = anyBlocking || headNotCapture;
+  const reviewForm = anyBlocking || headNotCapture || options.recipientCannotApprove === true;
 
   // Per-member fragments. Money facts reuse the single-proposal
   // extraction rules (integer cents only, never derived floats; skipped
@@ -485,7 +513,11 @@ export function renderChainSms(
 
   const prefix = `${members.length} linked actions: `;
   const legend = items.some((i) => i.flagged) ? ` ${CHAIN_SEPARATE_APPROVAL_LEGEND}` : '';
-  const instructions = reviewForm ? REVIEW_IN_APP_INSTRUCTIONS : CHAIN_REPLY_INSTRUCTIONS;
+  const instructions = options.recipientCannotApprove
+    ? RECIPIENT_CANNOT_APPROVE_INSTRUCTIONS
+    : reviewForm
+      ? REVIEW_IN_APP_INSTRUCTIONS
+      : CHAIN_REPLY_INSTRUCTIONS;
   const checkLine = members.some((m) => voidsCustomerAcceptance(m.payload))
     ? `\nCheck: ${ACCEPTANCE_VOID_MARKER.reason}`
     : '';
