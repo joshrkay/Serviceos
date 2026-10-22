@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RivetVoiceContext, useRivetVoice } from '../../../hooks/useRivetVoice';
 import { expectTapTarget } from '../../../test-utils/tap-target';
 import { AnswerAsScreen, type AnswerAsScreenProps } from './AnswerAsScreen';
+import { NAME_SETTLE_MS } from './intro-speech';
 
 vi.mock('../../../lib/analytics', () => ({ trackFunnel: vi.fn(), track: vi.fn() }));
 
@@ -200,6 +201,14 @@ describe('AnswerAsScreen', () => {
         for (let i = 0; i < 10; i += 1) await Promise.resolve();
       });
     const said = () => batches.flat();
+    /** A name is read back once the owner has been quiet long enough that it is finished. */
+    const nameSettles = () =>
+      act(
+        () =>
+          new Promise<void>((done) => {
+            setTimeout(done, NAME_SETTLE_MS + 50);
+          }),
+      );
 
     beforeEach(() => {
       FakeWebSocket.instances = [];
@@ -298,6 +307,7 @@ describe('AnswerAsScreen', () => {
       expect(said()).toContain("What's your business called?");
 
       hear("It's Walsh Plumbing.");
+      await nameSettles();
       expect(nameField()).toHaveValue('Walsh Plumbing');
       expect(transcript()).toHaveTextContent(
         "I've got Walsh Plumbing. If that's not right, say “spell it”, or type it above. What's your trade: plumbing, HVAC, electrical, or something else?",
@@ -326,6 +336,7 @@ describe('AnswerAsScreen', () => {
     it('a trade it did not catch, or two trades, is asked again and no chip is picked', async () => {
       await startOutLoud();
       hear('Walsh');
+      await nameSettles();
       hear('banana');
       expect(transcript()).toHaveTextContent("I didn't catch the trade. Plumbing, HVAC, electrical, or something else?");
       hear('plumbing, heating and air');
@@ -338,6 +349,7 @@ describe('AnswerAsScreen', () => {
     it("a number that is not a US cell shows in the field with the form's message, said aloud; no number says so", async () => {
       const { onSubmit } = await startOutLoud();
       hear('Walsh Plumbing');
+      await nameSettles();
       hear('plumbing');
       hear('five five five zero one four two');
       expect(screen.getByLabelText('Your cell')).toHaveValue('5550142');
@@ -361,9 +373,11 @@ describe('AnswerAsScreen', () => {
     it('"spell it" takes the name letter by letter; "change the trade" goes back to the trade', async () => {
       await startOutLoud();
       hear('Welsh Plumbing');
+      await nameSettles();
       hear('spell it');
       expect(transcript()).toHaveTextContent('Go ahead and spell it, letter by letter.');
       hear('W A L S H plumbing');
+      await nameSettles();
       expect(nameField()).toHaveValue('Walsh Plumbing');
       hear('electrical');
       hear('216 555 0142');
@@ -377,6 +391,7 @@ describe('AnswerAsScreen', () => {
     it('"say that again" repeats the question; a tapped chip answers the trade question too', async () => {
       await startOutLoud();
       hear('Walsh Plumbing');
+      await nameSettles();
       hear('say that again');
       expect(transcript()).toHaveTextContent("I've got Walsh Plumbing.");
       fireEvent.click(screen.getByRole('button', { name: 'Electrical' }));
@@ -386,11 +401,120 @@ describe('AnswerAsScreen', () => {
     it('"type it" stops listening and puts the owner on the field Rivet asked for', async () => {
       await startOutLoud();
       hear('Walsh Plumbing');
+      await nameSettles();
       hear('plumbing');
       hear("I'll type it");
       expect(mic()).toHaveAttribute('aria-pressed', 'false');
       expect(transcript()).toHaveTextContent('Go ahead and type it.');
       expect(screen.getByLabelText('Your cell')).toHaveFocus();
+    });
+
+    it('typing pauses listening: words said while a field is in use answer nothing, and leaving it moves Rivet on', async () => {
+      await startOutLoud();
+      await userEvent.click(nameField());
+      expect(mic()).toHaveAttribute('aria-pressed', 'false');
+      await userEvent.type(nameField(), 'Walsh');
+      hear('plumbing');
+      expect(nameField()).toHaveValue('Walsh');
+      await userEvent.click(screen.getByLabelText('Your cell'));
+      expect(transcript()).toHaveTextContent("What's your trade: plumbing, HVAC, electrical, or something else?");
+      await userEvent.type(screen.getByLabelText('Your cell'), '2165550142');
+      act(() => screen.getByLabelText('Your cell').blur());
+      await flush();
+      open();
+      hear('plumbing');
+      expect(screen.getByRole('button', { name: 'Plumbing' })).toHaveAttribute('aria-pressed', 'true');
+      expect(transcript()).toHaveTextContent('Walsh, plumbing, and your cell is 2 1 6, 5 5 5, 0 1 4 2.');
+    });
+
+    it('after "type it" and a typed answer, Rivet asks what is missing now and the next words answer that', async () => {
+      const { onSubmit } = await startOutLoud();
+      hear('Walsh Plumbing');
+      await nameSettles();
+      hear('plumbing');
+      hear("I'll type it");
+      expect(screen.getByLabelText('Your cell')).toHaveFocus();
+      await userEvent.type(screen.getByLabelText('Your cell'), '2165550142');
+      act(() => screen.getByLabelText('Your cell').blur());
+      expect(transcript()).toHaveTextContent('Walsh Plumbing, plumbing, and your cell is 2 1 6, 5 5 5, 0 1 4 2.');
+      await flush();
+      open();
+      hear('show me my shop');
+      expect(onSubmit).toHaveBeenCalledWith({ packId: 'plumbing', businessName: 'Walsh Plumbing', phone: '2165550142' });
+    });
+
+    it('"type it" on the trade holds listening until a chip is tapped', async () => {
+      await startOutLoud();
+      hear('Walsh Plumbing');
+      await nameSettles();
+      hear('type it');
+      expect(mic()).toHaveAttribute('aria-pressed', 'false');
+      hear('electrical');
+      expect(screen.getByRole('button', { name: 'Electrical' })).toHaveAttribute('aria-pressed', 'false');
+      fireEvent.click(screen.getByRole('button', { name: 'HVAC' }));
+      expect(transcript()).toHaveTextContent("Got it, HVAC. What's your cell number, with the area code?");
+      await flush();
+      open();
+      expect(mic()).toHaveAttribute('aria-pressed', 'true');
+    });
+
+    it('editing the name while it is still being heard cancels its read-back; leaving the field moves on', async () => {
+      await startOutLoud();
+      hear('Welsh Plumbing');
+      await userEvent.click(nameField());
+      await nameSettles();
+      expect(transcript()).toHaveTextContent("What's your business called?");
+      act(() => nameField().blur());
+      expect(transcript()).toHaveTextContent("What's your trade: plumbing, HVAC, electrical, or something else?");
+    });
+
+    it('a pause inside a name or a cell does not split the answer', async () => {
+      await startOutLoud();
+      hear('Walsh');
+      hear('Plumbing');
+      await nameSettles();
+      expect(nameField()).toHaveValue('Walsh Plumbing');
+      expect(screen.getAllByRole('button', { pressed: true })).toEqual([mic()]);
+      expect(transcript()).toHaveTextContent("I've got Walsh Plumbing.");
+      hear('plumbing');
+      hear('216 555');
+      expect(transcript()).toHaveTextContent(NOT_A_US_CELL);
+      hear('0142');
+      expect(screen.getByLabelText('Your cell')).toHaveValue('(216) 555-0142');
+    });
+
+    it('names that sound like commands or questions are names', async () => {
+      await startOutLoud();
+      hear('Go Ahead Plumbing');
+      await nameSettles();
+      expect(nameField()).toHaveValue('Go Ahead Plumbing');
+      hear('change the name');
+      // Not on the check yet: the name step's own words only.
+      expect(nameField()).toHaveValue('Go Ahead Plumbing');
+      cleanup();
+      await startOutLoud();
+      hear('Come Again Cleaning');
+      await nameSettles();
+      expect(nameField()).toHaveValue('Come Again Cleaning');
+      cleanup();
+      await startOutLoud();
+      hear('Spell It Right Roofing');
+      await nameSettles();
+      expect(nameField()).toHaveValue('Spell It Right Roofing');
+      expect(transcript()).toHaveTextContent("I've got Spell It Right Roofing.");
+    });
+
+    it('corrections: "no, it\'s …" over the read-back fixes the name; "no, change the number" on the check changes it', async () => {
+      await startOutLoud();
+      hear('Welsh Plumbing');
+      await nameSettles();
+      hear("No, it's Walsh Plumbing");
+      expect(nameField()).toHaveValue('Walsh Plumbing');
+      expect(screen.getAllByRole('button', { pressed: true })).toEqual([mic()]);
+      hear('plumbing');
+      hear('216 555 0142');
+      hear('no, change the number');
+      expect(transcript()).toHaveTextContent("What's your cell number, with the area code?");
     });
 
     it('a refused microphone says so and leaves the form to type', async () => {
@@ -404,6 +528,9 @@ describe('AnswerAsScreen', () => {
       await flush();
       expect(mic()).not.toBeInTheDocument();
       expect(transcript()).toHaveTextContent("I can't hear you on this device, so type your answers below.");
+      await flush();
+      // Said aloud too, not only shown.
+      expect(said()).toContain("I can't hear you on this device, so type your answers below.");
     });
 
     it('coming back with the microphone on after the API refused the cell: the reason is said, then the cell is asked for', async () => {
@@ -434,7 +561,7 @@ describe('AnswerAsScreen', () => {
         <Held>
           <AnswerAsScreen
             onSubmit={onSubmit}
-            initial={{ packId: 'plumbing', businessName: 'Walsh Plumbing', phone: '(216) 555-0142' }}
+            initial={{ packId: 'plumbing', businessName: 'Walsh Plumbing', phone: '2165550142' }}
             cellProblem={REFUSED}
           />
         </Held>,
@@ -446,7 +573,8 @@ describe('AnswerAsScreen', () => {
       expect(transcript()).toHaveTextContent(`${REFUSED} What's your cell number, with the area code?`);
       expect(said()).toContain(REFUSED);
       open();
-      hear('216-555-0142');
+      // The same refused number, said in another shape, is still refused.
+      hear('two one six five five five zero one four two');
       expect(transcript()).toHaveTextContent(`${REFUSED} What's your cell number, with the area code?`);
       hear('216 555 0199');
       expect(transcript()).toHaveTextContent('Walsh Plumbing, plumbing, and your cell is 2 1 6, 5 5 5, 0 1 9 9.');

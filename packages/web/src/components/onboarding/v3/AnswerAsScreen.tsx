@@ -2,9 +2,10 @@ import { useContext, useEffect, useMemo, useRef, useState, type FormEvent } from
 import { Mic } from 'lucide-react';
 import type { CreateOnboardingDraftBody } from '@ai-service-os/shared';
 import { RivetVoiceContext, useRivetTurnListener } from '../../../hooks/useRivetVoice';
-import type { ScreenCommand, Utterance, UtteranceScreen } from '../../../lib/onboarding-utterance';
+import { interpretUtterance, type ScreenCommand, type Utterance, type UtteranceScreen } from '../../../lib/onboarding-utterance';
 import { Button } from '../../ui';
 import { cn } from '../../ui/utils';
+import { spokenWords } from '../../../lib/option-matcher';
 import { isUsCellNumber } from './cell-number';
 import {
   ASK_CELL,
@@ -13,6 +14,7 @@ import {
   ASK_TRADE,
   CELL_NONE,
   NAME_MISS,
+  NAME_SETTLE_MS,
   TRADE_MISS,
   TRADES,
   askFor,
@@ -46,20 +48,41 @@ export interface AnswerAsScreenProps {
   cellProblem?: string | null;
 }
 
+/** The 10 national digits ("1 (216) 555-0142" -> "2165550142"), or the digits as typed when not a US shape. */
+function nationalDigits(cell: string): string {
+  const digits = cell.replace(/\D/g, '');
+  return digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
+}
+
 const CELL_WHY = 'I ring this number for emergencies, and your area code sets your prices. 10 digits with the area code.';
 const CELL_NOT_US = "That doesn't look like a US cell number. Include the area code, 10 digits.";
 
 const SPELL: ScreenCommand = { id: 'spell', phrases: ['spell it', 'let me spell it', 'spell the name'] };
 const TYPE: ScreenCommand = { id: 'type', phrases: ['type it', "I'll type it", 'let me type it'] };
-/** Send the form (or, before it is complete, ask for what is missing). Never a bare "yes", which a correction can start with. */
+/** On the check: send the form. Never a bare "yes", which a correction can start with. */
 const SHOW: ScreenCommand = { id: 'show', phrases: ['show me my shop', 'looks good', 'sounds good', 'go ahead'] };
+/**
+ * Before the check only the button's own words send (or ask for what is missing): a business called
+ * "Go Ahead Plumbing" is a name, not a command.
+ */
+const SHOW_EARLY: ScreenCommand = { id: 'show', phrases: ['show me my shop'] };
 const CHANGE: readonly ScreenCommand[] = [
   { id: 'change_name', phrases: ['change the name', 'change the business name'] },
   { id: 'change_trade', phrases: ['change the trade'] },
   { id: 'change_cell', phrases: ['change the number', 'change the cell', 'change my cell', 'change my number'] },
 ];
 /** Boosted for the transcription on this screen: the trades as Rivet names them. */
-const INTRO_KEYTERMS = ['plumbing', 'HVAC', 'electrical', 'something else'];
+const INTRO_KEYTERMS = TRADES.map((t) => t.spoken);
+/** The words said are exactly one of the screen's command phrases, nothing more. */
+function saidOnly(transcript: string, screen: UtteranceScreen): boolean {
+  const said = spokenWords(transcript).join(' ');
+  return (screen.commands ?? []).some((c) => c.phrases.some((p) => spokenWords(p).join(' ') === said));
+}
+
+/** A correction word that opens an answer ("no, …", "wait, …"). */
+const CORRECTION = /^\s*(no|nope|wait|actually|sorry)\b[\s,.!]*/i;
+/** A correction that names the business again ("no, it's Walsh Plumbing"). */
+const NAME_AGAIN = /\b(it'?s|it is|its called|it's called|the name is|we're|we are|called)\b/i;
 const QUIET_LINE = "Take your time. Tap the mic when you're ready.";
 const CANNOT_HEAR = "I can't hear you on this device, so type your answers below.";
 const TYPE_IT = 'Go ahead and type it.';
@@ -96,7 +119,9 @@ export function AnswerAsScreen({ onSubmit, initial, cellProblem = null }: Answer
   const typedCell = cell.trim();
   const cellOk = isUsCellNumber(typedCell);
   // The reason belongs to the cell that was refused, not to the field: another number clears it.
-  const refusedFor = (value: string) => (refusal !== null && value === refusal.cell ? refusal.reason : null);
+  // Compared as a number, so "(216) 555-0142" said out loud is the same refused cell as "2165550142" typed.
+  const refusedFor = (value: string) =>
+    refusal !== null && nationalDigits(value) === nationalDigits(refusal.cell) ? refusal.reason : null;
   const refused = refusedFor(typedCell);
   const cellProblemShown = refused ?? (typedCell !== '' && !cellOk ? CELL_NOT_US : null);
   const canSubmit = name.length > 0 && packId !== null && cellOk && refused === null;
@@ -117,6 +142,9 @@ export function AnswerAsScreen({ onSubmit, initial, cellProblem = null }: Answer
     voice?.input === 'on' ? nextIntroStep({ name, packId, cellOk: cellOk && refused === null }) : null,
   );
   const [rivetSaid, setRivetSaid] = useState('');
+  const [typing, setTyping] = useState(false);
+  const [tappingTrade, setTappingTrade] = useState(false);
+  const focusedValue = useRef('');
   const lastLines = useRef<string[]>([]);
   const [resumedAfterQuiet, setResumedAfterQuiet] = useState(false);
   // Sent: stop listening, so "show me my shop" heard twice sends once.
@@ -150,10 +178,11 @@ export function AnswerAsScreen({ onSubmit, initial, cellProblem = null }: Answer
 
   const listenFor = useMemo<UtteranceScreen>(
     () => ({
-      help: ['repeat'],
+      // "Come Again Cleaning" is a name: on the name, "say that again" is not listened for.
+      help: step === 'name' || step === 'spell' ? [] : ['repeat'],
       freeAnswer: true,
       keyterms: INTRO_KEYTERMS,
-      commands: step === 'confirm' ? [SHOW, SPELL, ...CHANGE, TYPE] : [SHOW, SPELL, TYPE],
+      commands: step === 'confirm' ? [SHOW, SPELL, ...CHANGE, TYPE] : [SHOW_EARLY, SPELL, TYPE],
     }),
     [step],
   );
@@ -169,17 +198,55 @@ export function AnswerAsScreen({ onSubmit, initial, cellProblem = null }: Answer
     say([heard, ...askFor(next, now)]);
   };
 
+  // The name so far: every piece heard until the owner has been quiet for NAME_SETTLE_MS.
+  const nameParts = useRef<string[]>([]);
+  const nameTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The form as it stands, for the name's read-back when its timer fires.
+  const latest = useRef({ name, packId, cell: typedCell });
+  latest.current = { name, packId, cell: typedCell };
+  const moveOnRef = useRef(moveOn);
+  moveOnRef.current = moveOn;
+  const dropName = () => {
+    if (nameTimer.current) clearTimeout(nameTimer.current);
+    nameTimer.current = null;
+    nameParts.current = [];
+  };
+  const settleName = () => {
+    if (nameTimer.current) clearTimeout(nameTimer.current);
+    nameTimer.current = setTimeout(() => {
+      nameTimer.current = null;
+      const heardName = spokenBusinessName(nameParts.current.join(' '));
+      nameParts.current = [];
+      if (heardName !== null) moveOnRef.current(nameHeard(heardName), { ...latest.current, name: heardName });
+    }, NAME_SETTLE_MS);
+  };
+  useEffect(() => () => dropName(), []);
+  // Digits of a cell said in pieces ("216 555 …" then "0142"), kept until they make a whole number.
+  const cellSoFar = useRef('');
+
   const answer = (text: string) => {
     const now = { name, packId, cell: typedCell };
     if (step === 'name' || step === 'spell') {
-      const heardName = spokenBusinessName(text);
+      const heardName = spokenBusinessName([...nameParts.current, text].join(' '));
       if (heardName === null) {
         say([step === 'spell' ? `I didn't catch that. ${ASK_SPELL}` : NAME_MISS]);
         return;
       }
+      // Shown at once; read back once the owner has finished.
+      nameParts.current.push(text);
       setBusinessName(heardName);
-      moveOn(nameHeard(heardName), { ...now, name: heardName });
+      settleName();
     } else if (step === 'trade') {
+      // "No, it's Walsh Plumbing", said over the read-back: a correction of the name, not a trade.
+      const correction = CORRECTION.exec(text);
+      if (correction && NAME_AGAIN.test(text)) {
+        const fixed = spokenBusinessName(text.slice(correction[0].length));
+        if (fixed !== null) {
+          setBusinessName(fixed);
+          moveOn(nameHeard(fixed), { ...now, name: fixed });
+          return;
+        }
+      }
       const match = matchTrade(text);
       if (match.kind === 'trade') {
         setPackId(match.packId);
@@ -188,7 +255,13 @@ export function AnswerAsScreen({ onSubmit, initial, cellProblem = null }: Answer
         say([match.kind === 'ambiguous' ? tradeAmbiguous(match.packIds) : TRADE_MISS]);
       }
     } else if (step === 'cell') {
-      const heardCell = parseSpokenCell(text);
+      let heardCell = parseSpokenCell(text);
+      if (heardCell.kind !== 'cell' && cellSoFar.current !== '') {
+        const joined = parseSpokenCell(`${cellSoFar.current} ${text}`);
+        if (joined.kind === 'cell') heardCell = joined;
+      }
+      // Too few digits for a cell may be the first half of one: the next answer can finish it.
+      cellSoFar.current = heardCell.kind === 'not_us' && /^\d{1,9}$/.test(heardCell.digits) ? heardCell.digits : '';
       if (heardCell.kind === 'cell') {
         setCell(heardCell.display);
         const why = refusedFor(heardCell.display);
@@ -202,20 +275,33 @@ export function AnswerAsScreen({ onSubmit, initial, cellProblem = null }: Answer
         say([CELL_NONE]);
       }
     } else if (step === 'confirm') {
+      // "No, change the name" / "wait, change the number": the command after the correction word.
+      const correction = CORRECTION.exec(text);
+      if (correction) {
+        const rest = interpretUtterance(text.slice(correction[0].length), listenFor);
+        if (rest.kind === 'command') {
+          command(rest.command);
+          return;
+        }
+      }
       say([confirmMiss(text)]);
     }
   };
 
   const command = (id: string) => {
+    dropName();
     if (id === 'spell') {
       setStep('spell');
       say([ASK_SPELL]);
     } else if (id === 'type') {
-      // The owner's hands take over: stop listening and put them on the field Rivet was asking for.
-      if (listen.listening) listen.toggle();
+      // The owner's hands take over: put them on the field Rivet was asking for (a field in use pauses listening).
       voice?.stop();
       setRivetSaid(TYPE_IT);
-      if (step === 'trade') tradeGroup.current?.querySelector('button')?.focus();
+      if (step === 'trade') {
+        // Chips are buttons, not a text field: hold the listening until one is tapped.
+        setTappingTrade(true);
+        tradeGroup.current?.querySelector('button')?.focus();
+      }
       else if (step === 'cell') cellField.current?.focus();
       else nameField.current?.focus();
     } else if (id === 'show') {
@@ -240,14 +326,26 @@ export function AnswerAsScreen({ onSubmit, initial, cellProblem = null }: Answer
   const listen = useRivetTurnListener(voice, {
     turn: 'answer_as',
     screen: listenFor,
-    enabled: step !== null && !sent,
+    // Not while the owner's hands are on a field: what they then say is never taken as another field's answer.
+    enabled: step !== null && !sent && !typing && !tappingTrade,
     onResult: (said: Utterance) => {
       if (sentRef.current || step === null) return;
+      // While the name is being given, a command must be all that was said: "Spell It Right Roofing" is a name.
+      if (said.kind === 'command' && (step === 'name' || step === 'spell') && !saidOnly(said.transcript, listenFor)) {
+        answer(said.transcript);
+        return;
+      }
       if (said.kind === 'help') say(lastLines.current);
       else if (said.kind === 'command') command(said.command);
       else if (said.kind === 'free') answer(said.text);
     },
   });
+  // Still talking: the read-back waits.
+  useEffect(() => {
+    if (listen.partial && nameTimer.current) settleName();
+    // settleName only restarts the timer.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [listen.partial]);
 
   const startOutLoud = () => {
     if (!voice) return;
@@ -258,25 +356,60 @@ export function AnswerAsScreen({ onSubmit, initial, cellProblem = null }: Answer
     setStep(first);
     say(askFor(first, { name, packId, cell: typedCell }));
   };
+  /** What Rivet should ask now, from the form as it stands (the owner may have typed or tapped since). */
+  const current = () => nextIntroStep({ name, packId, cellOk: cellOk && refused === null });
   const tapMic = () => {
     if (step === null) {
       startOutLoud();
       return;
     }
-    if (listen.quiet && !resumedAfterQuiet) {
-      setResumedAfterQuiet(true);
-      say(lastLines.current);
+    setTappingTrade(false);
+    if (!listen.listening) {
+      // Listening again: ask what is missing now, not the question from before the owner typed.
+      const next = step === 'spell' && name === '' ? 'spell' : current();
+      if (next !== step) {
+        setStep(next);
+        say(askFor(next, { name, packId, cell: typedCell }));
+      } else if (listen.quiet && !resumedAfterQuiet) say(lastLines.current);
+      if (listen.quiet) setResumedAfterQuiet(true);
     }
     listen.toggle();
   };
 
+  // A field the owner is typing in pauses listening; leaving it with a new value moves Rivet on.
+  const focusField = (value: string) => {
+    // A name still being heard is the owner's to finish by hand now: no read-back fires under their fingers,
+    // and leaving the field moves Rivet on even if they changed nothing.
+    const pendingName = nameTimer.current !== null;
+    dropName();
+    focusedValue.current = pendingName ? '' : value;
+    setTyping(true);
+  };
+  const leaveField = (value: string) => {
+    setTyping(false);
+    if (step === null || value.trim() === focusedValue.current.trim()) return;
+    const next = current();
+    setStep(next);
+    say(askFor(next, { name, packId, cell: typedCell }));
+  };
+
   const pickTrade = (id: TradePackId) => {
     setPackId(id);
-    // Out loud, a tapped chip answers the trade question just as saying it would.
-    if (step === 'trade') moveOn(tradeHeard(id), { name, packId: id, cell: typedCell });
+    setTappingTrade(false);
+    // Out loud, a tapped chip answers the trade question just as saying it would, and on the check is read back.
+    if (step === 'trade' || step === 'confirm') moveOn(tradeHeard(id), { name, packId: id, cell: typedCell });
   };
 
   const cannotHear = step !== null && !listen.available;
+  // Said aloud as well as shown: an owner answering out loud may not be looking at the screen.
+  const toldCannotHear = useRef(false);
+  useEffect(() => {
+    if (!cannotHear || toldCannotHear.current) return;
+    toldCannotHear.current = true;
+    say([CANNOT_HEAR]);
+    // say() speaks and records the line; it runs once, when listening is ruled out.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cannotHear]);
   const showsQuiet = listen.quiet && !resumedAfterQuiet;
   const transcriptLine = listen.partial
     ? listen.partial
@@ -349,6 +482,8 @@ export function AnswerAsScreen({ onSubmit, initial, cellProblem = null }: Answer
             ref={nameField}
             value={businessName}
             onChange={(e) => setBusinessName(e.target.value)}
+            onFocus={(e) => focusField(e.target.value)}
+            onBlur={(e) => leaveField(e.target.value)}
             className={cn(FIELD, asking('name'))}
           />
         </div>
@@ -393,6 +528,8 @@ export function AnswerAsScreen({ onSubmit, initial, cellProblem = null }: Answer
             ref={cellField}
             value={cell}
             onChange={(e) => setCell(e.target.value)}
+            onFocus={(e) => focusField(e.target.value)}
+            onBlur={(e) => leaveField(e.target.value)}
             aria-required="true"
             aria-invalid={cellProblemShown !== null}
             aria-describedby="v3-cell-hint"
