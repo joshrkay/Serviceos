@@ -79,7 +79,8 @@ describe('VoiceSessionStore', () => {
         return input as never;
       });
       const markReplyAudio = vi.fn(async () => 1);
-      return { repo: { recordTurn, markReplyAudio }, recordTurn };
+      const redactCardNumberTurns = vi.fn(async () => 0);
+      return { repo: { recordTurn, markReplyAudio, redactCardNumberTurns }, recordTurn };
     }
 
     it('persists each appended turn keyed by tenant + callSid + sessionId with the append-time index', async () => {
@@ -199,7 +200,8 @@ describe('VoiceSessionStore', () => {
         order.push('markReplyAudio');
         return opts.markResult ?? 1;
       });
-      return { repo: { recordTurn, markReplyAudio }, recordTurn, markReplyAudio, order };
+      const redactCardNumberTurns = vi.fn(async () => 0);
+      return { repo: { recordTurn, markReplyAudio, redactCardNumberTurns }, recordTurn, markReplyAudio, order };
     }
 
     it('stamps the timing carried on a CALLER append only, computing endpointDelayMs', async () => {
@@ -382,7 +384,9 @@ describe('VoiceSessionStore', () => {
     it('markReplyAudio stamps by the row id recordTurn returned, not the (possibly renumbered) index', async () => {
       const recordTurn = vi.fn(async (input: unknown) => ({ ...(input as object), id: 'row-uuid-1' }) as never);
       const markReplyAudio = vi.fn(async (_input: unknown) => 1);
-      const store = newStore({ callTranscriptTurnRepo: { recordTurn, markReplyAudio } });
+      const store = newStore({
+        callTranscriptTurnRepo: { recordTurn, markReplyAudio, redactCardNumberTurns: vi.fn(async () => 0) },
+      });
       const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
       appendKeyed(store, session.id, 'k0');
 
@@ -592,6 +596,230 @@ describe('VoiceSessionStore', () => {
       store.delete(session.id);
       expect(map.size).toBe(0);
       await settle();
+    });
+  });
+
+  // ── PRIV-3: a card number split across caller turns ───────────────────────
+
+  describe('a card number split across caller turns (PRIV-3)', () => {
+    const CALL_SID = 'CA00000000000000000000000000000009';
+    const MARKER = '[card number]';
+    const AGENT_ON_CARD = "Sorry, I can't take card numbers over the phone.";
+    const settle = () =>
+      new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+
+    function splitRepo() {
+      const recordTurn = vi.fn(async (input: { turnIndex: number }) => ({ id: `row-${input.turnIndex}` }) as never);
+      const markReplyAudio = vi.fn(async () => 1);
+      const redactCardNumberTurns = vi.fn(async (input: { turns: ReadonlyArray<unknown> }) => input.turns.length);
+      return { repo: { recordTurn, markReplyAudio, redactCardNumberTurns }, recordTurn, redactCardNumberTurns };
+    }
+
+    it('rewrites all three caller turns when the third completes a card, in memory at once and in one repository call', async () => {
+      const { repo, recordTurn, redactCardNumberTurns } = splitRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+
+      store.appendTranscript(session.id, { speaker: 'agent', text: 'how can I help' });
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'my card is 4111 1111' });
+      store.appendTranscript(session.id, { speaker: 'agent', text: 'go on' });
+      store.appendTranscript(session.id, { speaker: 'caller', text: '1111' });
+      store.appendTranscript(session.id, { speaker: 'agent', text: 'and the rest?' });
+      store.appendTranscript(session.id, { speaker: 'caller', text: '1111 thanks' });
+
+      // Synchronously: the next prompt built from the transcript never sees it.
+      expect(session.transcript).toEqual([
+        'agent: how can I help',
+        `caller: my card is ${MARKER}`,
+        'agent: go on',
+        `caller: ${MARKER}`,
+        'agent: and the rest?',
+        `caller: ${MARKER} thanks`,
+      ]);
+
+      await session.cardRedactionWrites;
+      // The completing turn's row is inserted already rewritten.
+      expect(recordTurn.mock.calls.at(-1)![0]).toMatchObject({ turnIndex: 5, text: `${MARKER} thanks` });
+      expect(redactCardNumberTurns).toHaveBeenCalledTimes(1);
+      expect(redactCardNumberTurns).toHaveBeenCalledWith({
+        tenantId: 'tenant-a',
+        callSid: CALL_SID,
+        sessionId: session.id,
+        actorId: 'voice-session-store',
+        turns: [
+          { id: 'row-1', turnIndex: 1, text: `my card is ${MARKER}` },
+          { id: 'row-3', turnIndex: 3, text: MARKER },
+          { id: 'row-5', turnIndex: 5, text: `${MARKER} thanks` },
+        ],
+      });
+    });
+
+    it('waits for the earlier rows to be inserted before rewriting them', async () => {
+      const inserts: Array<() => void> = [];
+      const recordTurn = vi.fn(
+        (input: { turnIndex: number }) =>
+          new Promise((resolve) => {
+            inserts.push(() => resolve({ id: `row-${input.turnIndex}` }));
+          }) as never,
+      );
+      const redactCardNumberTurns = vi.fn(async () => 2);
+      const store = newStore({
+        callTranscriptTurnRepo: { recordTurn, markReplyAudio: vi.fn(async () => 1), redactCardNumberTurns },
+      });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(session.id, { speaker: 'caller', text: '4111 1111' });
+      store.appendTranscript(session.id, { speaker: 'caller', text: '1111 1111' });
+      await settle();
+      expect(redactCardNumberTurns).not.toHaveBeenCalled();
+      for (const insert of inserts) insert();
+      await session.cardRedactionWrites;
+      expect(redactCardNumberTurns).toHaveBeenCalledWith(
+        expect.objectContaining({
+          turns: [
+            { id: 'row-0', turnIndex: 0, text: MARKER },
+            { id: 'row-1', turnIndex: 1, text: MARKER },
+          ],
+        }),
+      );
+    });
+
+    it('never lets an agent turn join the window, and never rewrites one', async () => {
+      const { repo, redactCardNumberTurns } = splitRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      // With the agent's read-back joined this would be 4111 1111 1111 1111 1111.
+      store.appendTranscript(session.id, { speaker: 'caller', text: '4111 1111' });
+      store.appendTranscript(session.id, { speaker: 'agent', text: '1111 1111' });
+      store.appendTranscript(session.id, { speaker: 'caller', text: '1111' });
+      await session.cardRedactionWrites;
+      expect(session.transcript).toEqual(['caller: 4111 1111', 'agent: 1111 1111', 'caller: 1111']);
+      expect(redactCardNumberTurns).not.toHaveBeenCalled();
+
+      // Caller turns on either side of an agent turn still join; the agent line stays.
+      const other = store.create('tenant-a', 'telephony', { callSid: 'CA00000000000000000000000000000010' });
+      store.appendTranscript(other.id, { speaker: 'caller', text: '4111 1111' });
+      store.appendTranscript(other.id, { speaker: 'agent', text: 'go on, 1234' });
+      store.appendTranscript(other.id, { speaker: 'caller', text: '1111 1111' });
+      expect(other.transcript).toEqual([`caller: ${MARKER}`, 'agent: go on, 1234', `caller: ${MARKER}`]);
+    });
+
+    it('does not join a caller turn said more than a minute earlier', async () => {
+      const { repo, redactCardNumberTurns } = splitRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(session.id, { speaker: 'caller', text: '4111 1111', ts: 1_000 });
+      store.appendTranscript(session.id, { speaker: 'caller', text: '1111 1111', ts: 62_000 });
+      await session.cardRedactionWrites;
+      expect(session.transcript).toEqual(['caller: 4111 1111', 'caller: 1111 1111']);
+      expect(redactCardNumberTurns).not.toHaveBeenCalled();
+    });
+
+    it('looks back over five caller turns, no further', async () => {
+      const { repo } = splitRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      // The longest card (19 digits, Visa 4000 0000 0000 0000 006) read in its
+      // 4-4-4-4-3 groups is five turns (a group per turn: the agent's line
+      // before them mentions the card).
+      const five = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(five.id, { speaker: 'agent', text: AGENT_ON_CARD });
+      for (const text of ['4000', '0000', '0000', '0000', '006']) {
+        store.appendTranscript(five.id, { speaker: 'caller', text });
+      }
+      expect(five.transcript).toEqual([`agent: ${AGENT_ON_CARD}`, ...Array(5).fill(`caller: ${MARKER}`)]);
+
+      // A card over six turns: its leading 4 has left the window (and no card
+      // read in its groups takes six turns).
+      const six = store.create('tenant-a', 'telephony', { callSid: 'CA00000000000000000000000000000011' });
+      const spoken = ['4', '1', '1', '1', '1111 1111', '1111'];
+      for (const text of spoken) store.appendTranscript(six.id, { speaker: 'caller', text });
+      expect(six.transcript).toEqual(spoken.map((t) => `caller: ${t}`));
+
+      // Nor is a split no card is read in (1-3-4-4-4) stitched within five.
+      const odd = store.create('tenant-a', 'telephony', { callSid: 'CA00000000000000000000000000000013' });
+      const oddSplit = ['4', '111', '1111', '1111', '1111'];
+      for (const text of oddSplit) store.appendTranscript(odd.id, { speaker: 'caller', text });
+      expect(odd.transcript).toEqual(oddSplit.map((t) => `caller: ${t}`));
+    });
+
+    // Gate codes, last-four answers and years given one per turn read exactly
+    // like a card read group by group; only a mention of the card tells them
+    // apart, and the agent's lines around the window are read for it.
+    it("stitches a group of four per caller turn only where the card is mentioned, the agent's lines included", async () => {
+      const { repo, redactCardNumberTurns } = splitRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const groups = ['4111', '1111', '1111', '1111'];
+      const codes = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(codes.id, { speaker: 'agent', text: "I'll text you a payment link. What is the gate code?" });
+      for (const text of groups) store.appendTranscript(codes.id, { speaker: 'caller', text });
+      await codes.cardRedactionWrites;
+      expect(codes.transcript.filter((line) => line.includes(MARKER))).toEqual([]);
+      expect(redactCardNumberTurns).not.toHaveBeenCalled();
+
+      const card = store.create('tenant-a', 'telephony', { callSid: 'CA00000000000000000000000000000014' });
+      store.appendTranscript(card.id, { speaker: 'caller', text: groups[0] });
+      store.appendTranscript(card.id, { speaker: 'agent', text: AGENT_ON_CARD });
+      for (const text of groups.slice(1)) store.appendTranscript(card.id, { speaker: 'caller', text });
+      expect(card.transcript).toEqual([
+        `caller: ${MARKER}`,
+        `agent: ${AGENT_ON_CARD}`,
+        ...Array(3).fill(`caller: ${MARKER}`),
+      ]);
+      await card.cardRedactionWrites;
+      expect(redactCardNumberTurns).toHaveBeenCalledTimes(1);
+    });
+
+    it("never touches another session's turns", () => {
+      const { repo } = splitRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const a = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      const b = store.create('tenant-a', 'telephony', { callSid: 'CA00000000000000000000000000000012' });
+      store.appendTranscript(b.id, { speaker: 'caller', text: '4111 1111' });
+      store.appendTranscript(a.id, { speaker: 'caller', text: '4111 1111' });
+      store.appendTranscript(a.id, { speaker: 'caller', text: '1111 1111' });
+      expect(a.transcript).toEqual([`caller: ${MARKER}`, `caller: ${MARKER}`]);
+      expect(b.transcript).toEqual(['caller: 4111 1111']);
+    });
+
+    it('rewrites an in-app session in memory (its running transcript is persisted from it) with no turn-row write', async () => {
+      const { repo, redactCardNumberTurns } = splitRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'inapp');
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'cuatro uno uno uno, uno uno uno uno' });
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'uno uno uno uno, uno uno uno uno' });
+      await session.cardRedactionWrites;
+      expect(session.transcript).toEqual([`caller: ${MARKER}`, `caller: ${MARKER}`]);
+      expect(redactCardNumberTurns).not.toHaveBeenCalled();
+    });
+
+    it('a failing rewrite never throws into the call path and is logged', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const { repo, redactCardNumberTurns } = splitRepo();
+        redactCardNumberTurns.mockRejectedValueOnce(new Error('db down'));
+        const store = newStore({ callTranscriptTurnRepo: repo });
+        const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+        store.appendTranscript(session.id, { speaker: 'caller', text: '4111 1111' });
+        expect(() => store.appendTranscript(session.id, { speaker: 'caller', text: '1111 1111' })).not.toThrow();
+        await session.cardRedactionWrites;
+        expect(errorSpy).toHaveBeenCalledWith(
+          'voice-session-store: card-number rewrite of stored turns failed',
+          expect.objectContaining({ turnIndexes: [0, 1], error: 'db down' }),
+        );
+        // The memory side stands regardless.
+        expect(session.transcript).toEqual([`caller: ${MARKER}`, `caller: ${MARKER}`]);
+        // The rewrite that did not land is kept for the recording hook to
+        // write before the call is ingested (rows by id, already redacted).
+        expect(session.unwrittenCardRedactions).toEqual([
+          [
+            { id: 'row-0', turnIndex: 0, text: MARKER },
+            { id: 'row-1', turnIndex: 1, text: MARKER },
+          ],
+        ]);
+      } finally {
+        errorSpy.mockRestore();
+      }
     });
   });
 });

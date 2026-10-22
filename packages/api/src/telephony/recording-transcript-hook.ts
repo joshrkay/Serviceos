@@ -28,19 +28,28 @@
  *      was recited; `callerTranscriptText` replaced the digits), flag the
  *      recording `pci_detected` so the retention sweep deletes its audio
  *      promptly. Runs whether or not the ingestion worker is registered.
+ *   6. PRIV-3 — before any of that, the stored rows are cleared of a card
+ *      number the caller split across turns. The live rewrite of those rows
+ *      is fire-and-forget, so one that failed or has not landed yet would
+ *      leave the fragments for ingestion, where knowledge_chunks' per-chunk
+ *      scrub cannot see a card spread over several "caller:" lines. The
+ *      session's in-flight rewrites are awaited and the ones that did not
+ *      land are written (`writeUnwrittenCardRedactions`), then the rows are
+ *      read again in the live window (`redactSplitCardNumbers`).
  *
  * Failure-soft throughout — the recording is already on disk by the time
  * this runs, and the router 200s Twilio regardless.
  */
-import type { VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
+import type { VoiceSession, VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
 import { createAuditEvent, type AuditRepository } from '../audit/audit';
 import type { Logger } from '../logging/logger';
 import type { Queue } from '../queues/queue';
-import { containsCardNumber } from '../ai/privacy/pan-redact';
+import { containsCardNumber, redactCardNumbersInCallTurns } from '../ai/privacy/pan-redact';
 import { flagCardNumberRecording } from '../voice/card-number-recording';
 import type { VoiceRepository } from '../voice/voice-service';
 import {
   parseTranscriptLine,
+  type CallTranscriptTurn,
   type CallTranscriptTurnRepository,
 } from '../voice/call-transcript-turn';
 import type {
@@ -51,7 +60,10 @@ import type { RecordingPersistedEvent } from './recording-webhook';
 
 export interface RecordingTranscriptHookDeps {
   store: Pick<VoiceSessionStore, 'findByCallSidIncludingEnded'>;
-  callTranscriptTurnRepo: Pick<CallTranscriptTurnRepository, 'attachRecording' | 'listByCallSid'>;
+  callTranscriptTurnRepo: Pick<
+    CallTranscriptTurnRepository,
+    'attachRecording' | 'listByCallSid' | 'redactCardNumberTurns'
+  >;
   /** PRIV-3 — flags a recording whose transcript carries a card number. */
   voiceRepo: Pick<VoiceRepository, 'markCardNumberDetected'>;
   auditRepo: Pick<AuditRepository, 'create'>;
@@ -61,6 +73,106 @@ export interface RecordingTranscriptHookDeps {
 }
 
 export const TRANSCRIPT_UNRECOVERABLE_EVENT = 'voice.transcript_unrecoverable';
+
+const CARD_REWRITE_FAILED = 'recording-transcript-hook: card-number rewrite of stored turns failed';
+
+/**
+ * PRIV-3 — the session's cross-turn card rewrites of its stored rows that
+ * did not land. The completing turn was stored already rewritten, so the
+ * fragments left in the earlier rows ("my card is 4111 1111", "1111") no
+ * longer read as a card: no re-read of the rows can find them, only the
+ * session knows what they must say. Its in-flight rewrites are awaited first
+ * (they land, or fail and join the list), then each unwritten one is written
+ * in its audited transaction. Returns row id → text for every row they name,
+ * landed or not, so the ingested text is the redacted one either way; a
+ * failed write is logged (indexes only, never text) and kept.
+ */
+async function writeUnwrittenCardRedactions(
+  deps: Pick<RecordingTranscriptHookDeps, 'callTranscriptTurnRepo' | 'logger'>,
+  ids: { tenantId: string; callSid: string; voiceRecordingId: string },
+  session: VoiceSession,
+): Promise<Map<string, string>> {
+  await session.cardRedactionWrites;
+  const texts = new Map<string, string>();
+  for (const turns of session.unwrittenCardRedactions.splice(0)) {
+    for (const turn of turns) if (turn.id) texts.set(turn.id, turn.text);
+    try {
+      await deps.callTranscriptTurnRepo.redactCardNumberTurns({
+        tenantId: ids.tenantId,
+        callSid: ids.callSid,
+        sessionId: session.id,
+        actorId: 'recording_webhook',
+        turns,
+      });
+    } catch (err) {
+      session.unwrittenCardRedactions.push(turns);
+      deps.logger.error(CARD_REWRITE_FAILED, {
+        callSid: ids.callSid,
+        voiceRecordingId: ids.voiceRecordingId,
+        sessionId: session.id,
+        turnIndexes: turns.map((t) => t.turnIndex),
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return texts;
+}
+
+/**
+ * PRIV-3 — a card number a caller split across turns whose every part is
+ * still digits in this recording's stored rows (no live rewrite ever saw it:
+ * rows from a process without the stitching). Each session leg's caller rows
+ * are read again exactly as the live path reads them
+ * (`redactCardNumbersInCallTurns`: the same window, by the time each row
+ * was stored, with the agent's rows around it as context; agent rows are
+ * never rewritten), and every row that held part of a card is rewritten in one
+ * audited transaction per leg (`redactCardNumberTurns`). Returns the rows as
+ * they now read; a failed write is logged (indexes only, never text) and the
+ * rewritten text is still what is ingested.
+ */
+async function redactSplitCardNumbers(
+  deps: Pick<RecordingTranscriptHookDeps, 'callTranscriptTurnRepo' | 'logger'>,
+  ids: { tenantId: string; callSid: string; voiceRecordingId: string },
+  rows: CallTranscriptTurn[],
+): Promise<CallTranscriptTurn[]> {
+  const legs = new Map<string, CallTranscriptTurn[]>();
+  for (const row of rows) {
+    if (!row.sessionId) continue;
+    legs.set(row.sessionId, [...(legs.get(row.sessionId) ?? []), row]);
+  }
+  const rewritten = new Map<string, string>();
+  for (const [sessionId, legRows] of legs) {
+    const texts = redactCardNumbersInCallTurns(
+      legRows.map((row) => ({ speaker: row.speaker, text: row.text, at: row.startedAt.getTime() })),
+    );
+    if (!texts) continue;
+    const turns = legRows.flatMap((row, k) =>
+      texts[k] === row.text ? [] : [{ id: row.id, turnIndex: row.turnIndex, text: texts[k] }],
+    );
+    for (const turn of turns) rewritten.set(turn.id, turn.text);
+    try {
+      await deps.callTranscriptTurnRepo.redactCardNumberTurns({
+        tenantId: ids.tenantId,
+        callSid: ids.callSid,
+        sessionId,
+        actorId: 'recording_webhook',
+        turns,
+      });
+    } catch (err) {
+      deps.logger.error(CARD_REWRITE_FAILED, {
+        callSid: ids.callSid,
+        voiceRecordingId: ids.voiceRecordingId,
+        sessionId,
+        turnIndexes: turns.map((t) => t.turnIndex),
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  return rows.map((row) => {
+    const text = rewritten.get(row.id);
+    return text === undefined ? row : { ...row, text };
+  });
+}
 
 export function createRecordingTranscriptHook(
   deps: RecordingTranscriptHookDeps,
@@ -90,6 +202,15 @@ export function createRecordingTranscriptHook(
       session = undefined;
     }
 
+    // PRIV-3 — the session's card rewrites of its rows that did not land.
+    const unwritten = session
+      ? await writeUnwrittenCardRedactions(
+          { callTranscriptTurnRepo, logger },
+          { tenantId, callSid, voiceRecordingId },
+          session,
+        )
+      : new Map<string, string>();
+
     let persistedForCall: Awaited<ReturnType<CallTranscriptTurnRepository['listByCallSid']>> = [];
     try {
       await callTranscriptTurnRepo.attachRecording(tenantId, callSid, voiceRecordingId);
@@ -101,7 +222,13 @@ export function createRecordingTranscriptHook(
         error: err instanceof Error ? err.message : String(err),
       });
     }
-    const persisted = persistedForCall.filter((t) => t.voiceRecordingId === voiceRecordingId);
+    const persisted = await redactSplitCardNumbers(
+      { callTranscriptTurnRepo, logger },
+      { tenantId, callSid, voiceRecordingId },
+      persistedForCall
+        .filter((t) => t.voiceRecordingId === voiceRecordingId)
+        .map((t) => (unwritten.has(t.id) ? { ...t, text: unwritten.get(t.id)! } : t)),
+    );
 
     // Source of the ingestion payload. The persisted rows carry the
     // renumbered indices the worker upserts onto, so they win when they are

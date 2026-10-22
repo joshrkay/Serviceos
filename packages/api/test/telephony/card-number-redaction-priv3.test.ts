@@ -25,6 +25,8 @@ import {
 } from '../../src/ai/gateway/gateway';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { createVoiceTurnProcessor } from '../../src/ai/voice-turn/create-voice-turn-processor';
+import { createVulnerabilityTriageHook } from '../../src/ai/agents/customer-calling/vulnerability-triage-hook';
+import { gradeVulnerability } from '../../src/ai/agents/customer-calling/vulnerability-grader';
 
 const TENANT = 'tenant-pan';
 // The card's digits, run together or spaced. Not a bare '4111': a random
@@ -33,7 +35,15 @@ const CARD_DIGITS = /4111\D?1111/;
 const SPOKEN = 'can I just pay now, my card is 4111 1111 1111 1111 expires 09/27';
 const STORED = 'can I just pay now, my card is [card number] expires 09/27';
 
-function harness() {
+/**
+ * `classifierReply` — what the provider answers every request with.
+ * `vulnerabilityTriage` — wire the per-turn vulnerability grade through the
+ * same gateway, as app.ts does: the one provider request on the Gather path
+ * that carries the call's earlier turns (`priorTurns`), not just this one.
+ */
+function harness(
+  opts: { classifierReply?: string; vulnerabilityTriage?: boolean } = {},
+) {
   const providerRequests: LLMRequest[] = [];
   const provider: LLMProvider = {
     name: 'stub',
@@ -41,7 +51,7 @@ function harness() {
     complete: async (req: LLMRequest): Promise<LLMResponse> => {
       providerRequests.push(req);
       return {
-        content: '{"intentType":"unknown","confidence":0,"reasoning":"x"}',
+        content: opts.classifierReply ?? '{"intentType":"unknown","confidence":0,"reasoning":"x"}',
         model: 'gpt-4o-mini',
         provider: 'openai',
         tokenUsage: { input: 1, output: 1, total: 2 },
@@ -51,17 +61,39 @@ function harness() {
   };
   const gateway = new LLMGateway({ defaultProvider: 'stub' }, new Map([['stub', provider]]));
   const recordTurn = vi.fn(async () => undefined);
+  const redactCardNumberTurns = vi.fn(async (input: { turns: unknown[] }) => input.turns.length);
   const store = new VoiceSessionStore({
     startInterval: false,
-    callTranscriptTurnRepo: { recordTurn } as never,
+    callTranscriptTurnRepo: { recordTurn, redactCardNumberTurns } as never,
   });
+  const vulnerabilityTriageHook = opts.vulnerabilityTriage
+    ? createVulnerabilityTriageHook({
+        isEnabledForTenant: async () => true,
+        grade: (input, budget) =>
+          gradeVulnerability(input, {
+            llm: {
+              complete: async ({ prompt }: { prompt: string }) => {
+                const res = await gateway.complete({
+                  taskType: 'grade_vulnerability',
+                  tenantId: input.tenantId,
+                  messages: [{ role: 'user', content: prompt }],
+                });
+                return { text: res.content, tokenUsage: res.tokenUsage, model: res.model };
+              },
+            },
+            ...budget,
+          }),
+        triageEvents: { record: vi.fn(async () => ({}) as never), listBySession: vi.fn(async () => []) },
+      })
+    : undefined;
   const adapter = new TwilioGatherAdapter({
     store,
     gateway,
     businessName: 'Acme Plumbing',
     publicBaseUrl: 'https://example.com',
+    ...(vulnerabilityTriageHook ? { vulnerabilityTriageHook } : {}),
   });
-  return { adapter, store, recordTurn, providerRequests };
+  return { adapter, store, recordTurn, redactCardNumberTurns, providerRequests };
 }
 
 async function startCall(h: ReturnType<typeof harness>, callSid: string) {
@@ -143,6 +175,69 @@ describe('PRIV-3 — a recited card number on a live call', () => {
     for (const req of h.providerRequests) {
       expect(JSON.stringify(req.messages)).not.toContain('cuatro uno uno uno');
     }
+  });
+});
+
+// A caller who pauses mid-number: each Gather turn alone is under 13 digits.
+describe('PRIV-3 follow-up — a card number split across Gather turns', () => {
+  it('rewrites every caller turn that held part of it, in the session transcript and the stored rows', async () => {
+    // A confident booking keeps the call classifying turn after turn (an
+    // "unknown" would hand off before the card is complete).
+    const h = harness({
+      classifierReply: '{"intentType":"create_appointment","confidence":0.95,"reasoning":"x","extractedEntities":{}}',
+      vulnerabilityTriage: true,
+    });
+    const callSid = 'CA-pan-split-gather';
+    const session = await startCall(h, callSid);
+    let requestsBeforeCompletingTurn = 0;
+    for (const speechResult of ['my card is 4111 1111', '1111', '1111 thanks']) {
+      requestsBeforeCompletingTurn = h.providerRequests.length;
+      await h.adapter.handleGather({ sessionId: session.id, callSid, speechResult, confidence: 0.95, tenantId: TENANT });
+      await settle();
+    }
+    await session.cardRedactionWrites;
+
+    // The completing turn's vulnerability grade carries the call's earlier
+    // turns as context: by the time it is sent they are the marker too, so
+    // no request after the card is complete holds a fragment of it.
+    const afterCompletingTurn = h.providerRequests.slice(requestsBeforeCompletingTurn);
+    expect(afterCompletingTurn.map((req) => req.taskType)).toEqual(
+      expect.arrayContaining(['grade_vulnerability', 'classify_intent']),
+    );
+    const grade = afterCompletingTurn.find((req) => req.taskType === 'grade_vulnerability')!;
+    expect(JSON.stringify(grade.messages)).toContain('[card number]');
+    for (const req of afterCompletingTurn) {
+      const sent = JSON.stringify(req.messages);
+      expect(sent).not.toMatch(CARD_DIGITS);
+      expect(sent).not.toMatch(/\b1111\b/);
+    }
+
+    const callerLines = session.transcript.filter((line) => line.startsWith('caller: '));
+    expect(callerLines).toEqual([
+      'caller: my card is [card number]',
+      'caller: [card number]',
+      'caller: [card number] thanks',
+    ]);
+    // Agent lines are never part of the window and are left as spoken.
+    expect(session.transcript.filter((line) => line.startsWith('agent: ') && line.includes('[card number]'))).toEqual(
+      [],
+    );
+    expect(JSON.stringify(session.transcript)).not.toMatch(CARD_DIGITS);
+
+    expect(h.redactCardNumberTurns).toHaveBeenCalledTimes(1);
+    const [rewrite] = h.redactCardNumberTurns.mock.calls[0] as unknown as [
+      { callSid: string; sessionId: string; turns: Array<{ turnIndex: number; text: string }> },
+    ];
+    expect(rewrite.callSid).toBe(callSid);
+    expect(rewrite.sessionId).toBe(session.id);
+    expect(rewrite.turns.map((t) => t.text)).toEqual(['my card is [card number]', '[card number]', '[card number] thanks']);
+    expect(rewrite.turns.map((t) => session.transcript[t.turnIndex])).toEqual(callerLines);
+    // The completing turn's own row was inserted already rewritten.
+    const storedCallerTurns = h.recordTurn.mock.calls
+      .map((c) => (c as unknown as [{ speaker: string; text: string }])[0])
+      .filter((t) => t.speaker === 'caller')
+      .map((t) => t.text);
+    expect(storedCallerTurns.at(-1)).toBe('[card number] thanks');
   });
 });
 

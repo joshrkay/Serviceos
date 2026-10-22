@@ -155,6 +155,29 @@ export interface MarkReplyAudioInput {
   replyUnackedReason?: ReplyUnackedReason;
 }
 
+/**
+ * PRIV-3 — the audit event written with every cross-turn card-number rewrite
+ * (entity: the voice session). Its metadata carries turn indexes and counts,
+ * never text.
+ */
+export const CARD_NUMBER_SPLIT_REDACTED_EVENT = 'voice.transcript_card_number_redacted';
+
+/**
+ * PRIV-3 — a card number a caller split across turns: the new text of each
+ * of the session's CALLER turns that held part of it (its part replaced by
+ * the marker). A row is addressed by primary key when `recordTurn` resolved
+ * one (stable across `attachRecording`'s renumbering), else by the mid-call
+ * key on a row no recording has claimed yet.
+ */
+export interface RedactCardNumberTurnsInput {
+  tenantId: string;
+  callSid: string;
+  sessionId: string;
+  /** Who rewrote them, for the audit row: the live store, or the recording hook. */
+  actorId: string;
+  turns: ReadonlyArray<{ id?: string; turnIndex: number; text: string }>;
+}
+
 export interface CallTranscriptTurnRepository {
   /**
    * Insert or update a turn. Conflicts on the row's key —
@@ -189,6 +212,15 @@ export interface CallTranscriptTurnRepository {
    * are never re-pointed. Returns the number of rows attached.
    */
   attachRecording(tenantId: string, callSid: string, voiceRecordingId: string): Promise<number>;
+
+  /**
+   * PRIV-3 — rewrite the text of the caller turns that held a card number
+   * split across turns, all of them in ONE transaction together with one
+   * {@link CARD_NUMBER_SPLIT_REDACTED_EVENT} audit row, so the stored call
+   * never keeps part of the card. Only this session's caller rows are
+   * touched. Returns the number of rows rewritten.
+   */
+  redactCardNumberTurns(input: RedactCardNumberTurnsInput): Promise<number>;
 }
 
 export function validateRecordTurnInput(input: RecordTurnInput): void {
@@ -230,6 +262,22 @@ export function validateMarkReplyAudioInput(input: MarkReplyAudioInput): void {
     throw new Error(
       `call_transcript_turns: unknown replyUnackedReason ${String(input.replyUnackedReason)}`,
     );
+  }
+}
+
+export function validateRedactCardNumberTurnsInput(input: RedactCardNumberTurnsInput): void {
+  if (!input.tenantId) throw new Error('call_transcript_turns: tenantId is required');
+  if (!input.callSid || !input.sessionId || !input.actorId) {
+    throw new Error('call_transcript_turns: redactCardNumberTurns needs callSid, sessionId and actorId');
+  }
+  if (input.turns.length === 0) {
+    throw new Error('call_transcript_turns: redactCardNumberTurns needs at least one turn');
+  }
+  for (const turn of input.turns) {
+    if (!Number.isInteger(turn.turnIndex) || turn.turnIndex < 0) {
+      throw new Error('call_transcript_turns: turnIndex must be a non-negative integer');
+    }
+    if (turn.text.length === 0) throw new Error('call_transcript_turns: text must be non-empty');
   }
 }
 
@@ -393,5 +441,26 @@ export class InMemoryCallTranscriptTurnRepository implements CallTranscriptTurnR
       row.voiceRecordingId = voiceRecordingId;
     });
     return pending.length;
+  }
+
+  async redactCardNumberTurns(input: RedactCardNumberTurnsInput): Promise<number> {
+    validateRedactCardNumberTurnsInput(input);
+    let rewritten = 0;
+    for (const turn of input.turns) {
+      const row = this.rows.find(
+        (r) =>
+          r.tenantId === input.tenantId &&
+          r.callSid === input.callSid &&
+          r.sessionId === input.sessionId &&
+          r.speaker === 'caller' &&
+          (turn.id !== undefined
+            ? r.id === turn.id
+            : r.turnIndex === turn.turnIndex && r.voiceRecordingId === undefined),
+      );
+      if (!row) continue;
+      row.text = turn.text;
+      rewritten++;
+    }
+    return rewritten;
   }
 }

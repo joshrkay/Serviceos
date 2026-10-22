@@ -1415,7 +1415,10 @@ export class InAppVoiceAdapter {
       throw new Error(`voice session already ended: ${sessionId}`);
     }
 
-    session.transcript.push(`caller: ${text}`);
+    // PRIV-3 — through the store, which also catches a card number split
+    // across this and the previous caller turns (the running transcript
+    // persisted below is then written already rewritten).
+    this.deps.store.appendTranscript(session.id, { speaker: 'caller', text, ts: Date.now() });
     // VOX-02: sticky language detection from the caller's own words.
     // Voice-parity — only switch to Spanish when the tenant opted into 'es'
     // (session.supportedLanguages). When the stack is unresolved (undefined),

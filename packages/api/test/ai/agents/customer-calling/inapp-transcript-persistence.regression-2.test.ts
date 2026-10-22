@@ -81,4 +81,49 @@ describe('in-app transcript persistence', () => {
       expect.arrayContaining([expect.stringContaining('what does my afternoon look like')]),
     );
   });
+
+  // PRIV-3 — each turn alone is under 13 digits, so only the store's
+  // cross-turn window sees the card; the in-app caller line must go through it.
+  it('PRIV-3: a card split across two turns leaves the marker in both lines and in the persisted transcript', async () => {
+    const gateway = {
+      complete: vi.fn(async () => ({
+        content: JSON.stringify({ intentType: 'unknown', confidence: 0.2 }),
+        model: 'mock',
+        provider: 'mock',
+        tokenUsage: { input: 1, output: 1, total: 2 },
+        latencyMs: 1,
+      })),
+    } as unknown as LLMGateway;
+    const voiceSessionRepo = new InMemoryVoiceSessionRepository();
+    const updateTranscript = vi.spyOn(voiceSessionRepo, 'updateTranscript');
+    const adapter = new InAppVoiceAdapter({
+      store,
+      gateway,
+      proposalRepo: new InMemoryProposalRepository(),
+      auditRepo: new InMemoryAuditRepository(),
+      onCallRepo: new InMemoryOnCallRepository(),
+      voiceSessionRepo,
+    });
+
+    const { sessionId } = await adapter.startSession('tenant-x', 'user-x');
+    await adapter.handleInput(sessionId, 'charge my card 4111 1111');
+    await adapter.handleInput(sessionId, '1111 1111 please');
+    await new Promise((r) => {
+      setTimeout(r, 0);
+    });
+
+    const session = store.peek(sessionId)!;
+    expect(session.transcript.filter((line) => line.startsWith('caller: '))).toEqual([
+      'caller: charge my card [card number]',
+      'caller: [card number] please',
+    ]);
+    const persisted = updateTranscript.mock.calls.at(-1)![2];
+    expect(persisted.filter((line) => line.startsWith('caller: '))).toEqual([
+      'caller: charge my card [card number]',
+      'caller: [card number] please',
+    ]);
+    expect(JSON.stringify(persisted)).not.toContain('1111');
+    const row = await voiceSessionRepo.findById('tenant-x', sessionId);
+    expect(JSON.stringify(row?.transcript)).not.toContain('1111');
+  });
 });

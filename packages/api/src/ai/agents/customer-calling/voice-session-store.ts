@@ -32,10 +32,17 @@ import type { CallOutcome } from '../../../voice/voice-service';
 import type {
   CallTranscriptTurnRepository,
   CallTurnTransport,
+  RedactCardNumberTurnsInput,
   ReplyUnackedReason,
 } from '../../../voice/call-transcript-turn';
 import { voiceReplyStampLostTotal } from '../../../monitoring/metrics';
 import type { ResolvedApprover } from '../../../proposals/approver-identity';
+import {
+  agentLinesAround,
+  CARD_NUMBER_PLACEHOLDER,
+  cardSplitWindow,
+  redactCardNumbersAcrossTurns,
+} from '../../privacy/pan-redact';
 import type {
   EscalationStartedEvent,
   EscalationSummaryBuiltEvent,
@@ -65,6 +72,21 @@ const DEFAULT_SWEEP_INTERVAL_MS = 60 * 1000;
  * behind the per-session lock, so a handful covers every reply still in flight.
  */
 const RETAINED_CALLER_TURNS = 4;
+
+/** How an agent line starts in {@link VoiceSession.transcript} (`appendTranscript`). */
+const AGENT_LINE = 'agent: ';
+
+/** One entry of {@link VoiceSession.recentCallerTurns}. */
+interface RecentCallerTurn {
+  /** Its index in the session transcript (and its mid-call row key). */
+  turnIndex: number;
+  /** The text stored for it; rewritten in place when a split card is found. */
+  text: string;
+  /** Epoch ms it was said (the entry's `ts`, else append time). */
+  at: number;
+  /** Its `recordTurn` promise (the row id; undefined when not persisted). */
+  row?: Promise<string | undefined>;
+}
 
 /** Fold retained stamps into one, the first stamp for a field winning (as the repository's COALESCE does). */
 function mergeReplyStamps(stamps: ReplyAudioStampFields[]): ReplyAudioStampFields {
@@ -517,6 +539,27 @@ export interface VoiceSession {
    */
   pendingReplyStamps: Map<string, ReplyAudioStampFields[]>;
   /**
+   * PRIV-3 — the window a card number split across caller turns is looked
+   * for in: the last few non-empty caller turns (`cardSplitWindow`),
+   * oldest first. See `appendTranscript`.
+   */
+  recentCallerTurns: RecentCallerTurn[];
+  /**
+   * PRIV-3 — tail of this session's cross-turn card-number rewrites of the
+   * stored rows, chained so they land in the order they were made (a later
+   * rewrite of a row starts from the earlier one's text). Never rejects.
+   */
+  cardRedactionWrites: Promise<void>;
+  /**
+   * PRIV-3 — cross-turn rewrites of the stored rows that did not land (each
+   * one rewrite's rows, by id, with their already-redacted text). The
+   * completing turn's row was stored rewritten, so the fragments left in the
+   * earlier rows no longer read as a card: nothing but this list can say what
+   * they must become. The recording transcript hook writes them before the
+   * call is ingested.
+   */
+  unwrittenCardRedactions: Array<RedactCardNumberTurnsInput['turns']>;
+  /**
    * P11-002 — resolved per-tenant TTS voice override for the session
    * language (settings.ttsVoiceEn/Es). When set, the `<Say voice>` uses
    * it instead of the default Polly voice for `language`. undefined =
@@ -690,7 +733,10 @@ export interface VoiceSessionStoreOptions {
 }
 
 /** The slice of the repository the store writes through. */
-type CallTranscriptTurnRepoPort = Pick<CallTranscriptTurnRepository, 'recordTurn' | 'markReplyAudio'>;
+type CallTranscriptTurnRepoPort = Pick<
+  CallTranscriptTurnRepository,
+  'recordTurn' | 'markReplyAudio' | 'redactCardNumberTurns'
+>;
 
 export class VoiceSessionStore {
   private readonly sessions = new Map<string, VoiceSession>();
@@ -856,6 +902,9 @@ export class VoiceSessionStore {
       pendingTurnPersist: new Map(),
       pendingReplyStamps: new Map(),
       replyTimings: [],
+      recentCallerTurns: [],
+      cardRedactionWrites: Promise.resolve(),
+      unwrittenCardRedactions: [],
       transcript: [],
       proposalIds: [],
       ended: false,
@@ -1002,14 +1051,120 @@ export class VoiceSessionStore {
    * transcript position at append time — the same index the recording hook
    * derives when it has to fall back to this in-memory array. Fire-and-forget:
    * a failing write is logged and never reaches the call path.
+   *
+   * PRIV-3 — a caller who pauses mid-card leaves turns that each hold fewer
+   * than 13 digits, which the per-turn scrub (`callerTranscriptText`) cannot
+   * see. Every caller turn is therefore also read together with the caller
+   * turns just before it (`cardSplitWindow`: five turns, one minute); when a
+   * Luhn-valid card spans them, each
+   * contributing span becomes the marker: in the in-memory transcript at once
+   * (so no later prompt, proposal or summary built from it carries the card),
+   * in the new turn's row as it is inserted, and in the earlier rows by one
+   * transaction chained behind their inserts.
    */
   appendTranscript(sessionId: string, entry: TranscriptEntry): void {
     const session = this.sessions.get(sessionId);
     if (!session) return;
     const turnIndex = session.transcript.length;
-    session.transcript.push(`${entry.speaker}: ${entry.text}`);
+    const split = entry.speaker === 'caller' ? this.redactCardSplitAcrossTurns(session, turnIndex, entry) : null;
+    const line = split ? { ...entry, text: split.text } : entry;
+    session.transcript.push(`${line.speaker}: ${line.text}`);
     session.lastActivityAt = new Date();
-    this.persistTurn(session, turnIndex, entry);
+    this.persistTurn(session, turnIndex, line);
+    const tracked = session.recentCallerTurns[session.recentCallerTurns.length - 1];
+    if (line.speaker === 'caller' && tracked?.turnIndex === turnIndex) {
+      tracked.row = session.pendingTurnPersist.get(turnIndex);
+    }
+    if (split) this.persistCardRedaction(session, split.rewritten);
+  }
+
+  /**
+   * PRIV-3 — slide the caller-turn window forward to the new turn and look
+   * for a card number spanning it. On a hit the earlier turns' lines are
+   * rewritten in memory here; returns the new turn's text and every turn
+   * whose stored text changed (the new one included), else null.
+   */
+  private redactCardSplitAcrossTurns(
+    session: VoiceSession,
+    turnIndex: number,
+    entry: TranscriptEntry,
+  ): { text: string; rewritten: RecentCallerTurn[] } | null {
+    const at = entry.ts ?? Date.now();
+    const earlier = cardSplitWindow(session.recentCallerTurns, at);
+    // An empty utterance holds no digits and is never persisted.
+    if (entry.text.trim().length === 0) {
+      session.recentCallerTurns = earlier;
+      return null;
+    }
+    const current: RecentCallerTurn = { turnIndex, text: entry.text, at };
+    session.recentCallerTurns = [...earlier, current];
+    if (earlier.length === 0) return null;
+    // The agent's lines around the window: a card read group by group, one
+    // per turn, must be mentioned in them or in the caller's turns.
+    const agentLines = agentLinesAround(
+      session.transcript.map((line) =>
+        line.startsWith(AGENT_LINE) ? { speaker: 'agent', text: line.slice(AGENT_LINE.length) } : { speaker: 'caller', text: '' },
+      ),
+      session.recentCallerTurns[0].turnIndex,
+      turnIndex,
+    );
+    const texts = redactCardNumbersAcrossTurns(
+      session.recentCallerTurns.map((t) => t.text),
+      CARD_NUMBER_PLACEHOLDER,
+      { agentLines },
+    );
+    if (!texts) return null;
+    const rewritten: RecentCallerTurn[] = [];
+    session.recentCallerTurns.forEach((turn, k) => {
+      if (texts[k] === turn.text) return;
+      turn.text = texts[k];
+      rewritten.push(turn);
+      if (turn !== current) session.transcript[turn.turnIndex] = `caller: ${turn.text}`;
+    });
+    return rewritten.length > 0 ? { text: current.text, rewritten } : null;
+  }
+
+  /**
+   * PRIV-3 — the stored half of a cross-turn rewrite: one repository
+   * transaction for every contributing row, chained behind those rows'
+   * inserts (and behind any earlier rewrite of this session). Fire-and-forget
+   * like `persistTurn`: a failure is logged, kept on the session for the
+   * recording hook to write (`unwrittenCardRedactions`), and never reaches the
+   * call path.
+   */
+  private persistCardRedaction(session: VoiceSession, rewritten: RecentCallerTurn[]): void {
+    const repo = this.callTranscriptTurnRepo;
+    const { callSid } = session;
+    if (!repo || !callSid) return; // in-app: the running transcript is rewritten from memory
+    const turns = rewritten.map((t) => ({ turnIndex: t.turnIndex, text: t.text.trim(), row: t.row }));
+    session.cardRedactionWrites = session.cardRedactionWrites
+      .then(() => Promise.all(turns.map((t) => t.row ?? Promise.resolve(undefined))))
+      .then(async (ids) => {
+        const rows = turns.map((t, k) => ({
+          turnIndex: t.turnIndex,
+          text: t.text,
+          ...(ids[k] ? { id: ids[k] } : {}),
+        }));
+        try {
+          await repo.redactCardNumberTurns({
+            tenantId: session.tenantId,
+            callSid,
+            sessionId: session.id,
+            actorId: 'voice-session-store',
+            turns: rows,
+          });
+        } catch (err) {
+          session.unwrittenCardRedactions.push(rows);
+          // eslint-disable-next-line no-console
+          console.error('voice-session-store: card-number rewrite of stored turns failed', {
+            tenantId: session.tenantId,
+            sessionId: session.id,
+            callSid,
+            turnIndexes: turns.map((t) => t.turnIndex),
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      });
   }
 
   private persistTurn(session: VoiceSession, turnIndex: number, entry: TranscriptEntry): void {
@@ -1215,6 +1370,7 @@ export class VoiceSessionStore {
     this.locks.delete(sessionId);
     session.pendingTurnPersist.clear();
     session.pendingReplyStamps.clear();
+    session.recentCallerTurns = [];
     this.sessions.delete(sessionId);
   }
 

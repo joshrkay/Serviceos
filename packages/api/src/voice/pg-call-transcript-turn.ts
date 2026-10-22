@@ -1,16 +1,20 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
+import { createAuditEvent } from '../audit/audit';
 import {
+  CARD_NUMBER_SPLIT_REDACTED_EVENT,
   CallTranscriptTurn,
   CallTranscriptTurnRepository,
   CallTurnSpeaker,
   CallTurnTransport,
   MarkReplyAudioInput,
   RecordTurnInput,
+  RedactCardNumberTurnsInput,
   ReplyUnackedReason,
   sortTurnsAcrossLegs,
   validateMarkReplyAudioInput,
   validateRecordTurnInput,
+  validateRedactCardNumberTurnsInput,
 } from './call-transcript-turn';
 
 interface CallTranscriptTurnRow {
@@ -251,6 +255,70 @@ export class PgCallTranscriptTurnRepository
         [tenantId, ids, indices, voiceRecordingId],
       );
       return attached.rowCount ?? 0;
+    });
+  }
+
+  /**
+   * PRIV-3 — one transaction: every contributing caller row rewritten, then
+   * the audit row, so either the whole card leaves the stored call or none of
+   * the rewrite lands (the in-memory transcript is already rewritten either
+   * way, and the recording hook later flags the recording from it). Each row
+   * is matched on this session's call key and `speaker = 'caller'` as well as
+   * its id, so a stale id can never rewrite another session's or an agent's
+   * row; without an id, only a row no recording has claimed (its mid-call
+   * index is still the append-time one).
+   */
+  async redactCardNumberTurns(input: RedactCardNumberTurnsInput): Promise<number> {
+    validateRedactCardNumberTurnsInput(input);
+    const { tenantId, callSid, sessionId } = input;
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const rewritten: number[] = [];
+      for (const turn of input.turns) {
+        const result =
+          turn.id !== undefined
+            ? await client.query(
+                `UPDATE call_transcript_turns SET text = $5
+                  WHERE tenant_id = $1 AND call_sid = $2 AND session_id = $3
+                    AND speaker = 'caller' AND id = $4`,
+                [tenantId, callSid, sessionId, turn.id, turn.text],
+              )
+            : await client.query(
+                `UPDATE call_transcript_turns SET text = $5
+                  WHERE tenant_id = $1 AND call_sid = $2 AND session_id = $3
+                    AND speaker = 'caller' AND turn_index = $4 AND voice_recording_id IS NULL`,
+                [tenantId, callSid, sessionId, turn.turnIndex, turn.text],
+              );
+        if ((result.rowCount ?? 0) > 0) rewritten.push(turn.turnIndex);
+      }
+      if (rewritten.length === 0) return 0;
+      const event = createAuditEvent({
+        tenantId,
+        actorId: input.actorId,
+        actorRole: 'system',
+        eventType: CARD_NUMBER_SPLIT_REDACTED_EVENT,
+        entityType: 'voice_session',
+        entityId: sessionId,
+        metadata: { callSid, turnIndexes: rewritten, rows: rewritten.length },
+      });
+      await client.query(
+        `INSERT INTO audit_events
+           (id, tenant_id, actor_id, actor_role, event_type, entity_type,
+            entity_id, correlation_id, metadata, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)`,
+        [
+          event.id,
+          event.tenantId,
+          event.actorId,
+          event.actorRole,
+          event.eventType,
+          event.entityType,
+          event.entityId,
+          event.correlationId ?? null,
+          JSON.stringify(event.metadata ?? {}),
+          event.createdAt,
+        ],
+      );
+      return rewritten.length;
     });
   }
 }

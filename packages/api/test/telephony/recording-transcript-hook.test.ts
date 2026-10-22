@@ -18,7 +18,10 @@ import {
   InMemoryCallTranscriptTurnRepository,
 } from '../../src/voice/call-transcript-turn';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
-import type { VoiceSession } from '../../src/ai/agents/customer-calling/voice-session-store';
+import {
+  VoiceSessionStore,
+  type VoiceSession,
+} from '../../src/ai/agents/customer-calling/voice-session-store';
 import type { RecordingPersistedEvent } from '../../src/telephony/recording-webhook';
 import { createLogger } from '../../src/logging/logger';
 
@@ -45,6 +48,8 @@ function fakeSession(opts: {
     transcript: [...opts.transcript],
     ended: opts.ended ?? true,
     createdAt: new Date(Date.now() - 45_000),
+    cardRedactionWrites: Promise.resolve(),
+    unwrittenCardRedactions: [],
     terminalOutcome: opts.outcome,
     machine: { currentContext: { currentIntent: opts.intent } },
   } as unknown as VoiceSession;
@@ -436,5 +441,262 @@ describe('createRecordingTranscriptHook (U8)', () => {
     // ... and the ingestion enqueue still ran.
     expect(send).toHaveBeenCalledTimes(1);
     errorLog.mockRestore();
+  });
+
+  // PRIV-3 — a card split across caller turns is rewritten in memory at once,
+  // but the rewrite of the stored rows is fire-and-forget. The completing turn
+  // is stored already rewritten, so once that rewrite fails the rows left
+  // ("my card is 4111 1111", "1111") no longer hold a card any re-read could
+  // find: only the session knows what they must say. Ingested as they are,
+  // the fragments reach knowledge_chunks, whose per-chunk scrub cannot see a
+  // card spread over several "caller:" lines.
+  describe('PRIV-3: a card split across caller turns whose stored rewrite never landed', () => {
+    const MARKER = '[card number]';
+
+    function payloadTurns(send: ReturnType<typeof harness>['send']) {
+      const [type, payload] = send.mock.calls[0] as unknown as [
+        string,
+        { turns: Array<{ speaker: string; text: string }> },
+      ];
+      expect(type).toBe('transcript_ingestion');
+      return payload.turns;
+    }
+
+    /** A live call through the real store whose rows' rewrite fails. */
+    async function liveCallWithFailedRewrite(repo: InMemoryCallTranscriptTurnRepository) {
+      const store = new VoiceSessionStore({ startInterval: false, callTranscriptTurnRepo: repo });
+      const session = store.create(TENANT, 'telephony', { callSid: CALL_SID });
+      const live = vi.spyOn(repo, 'redactCardNumberTurns').mockRejectedValueOnce(new Error('db down'));
+      const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      for (const [speaker, text] of [
+        ['agent', 'how can I help'],
+        ['caller', 'my card is 4111 1111'],
+        ['agent', 'go on'],
+        ['caller', '1111'],
+        ['agent', 'and the rest?'],
+        ['caller', '1111 thanks'],
+      ] as const) {
+        store.appendTranscript(session.id, { speaker, text });
+      }
+      await session.cardRedactionWrites;
+      consoleError.mockRestore();
+      live.mockClear();
+      // The live rewrite failed: the rows still hold the fragments.
+      expect((await repo.listByCallSid(TENANT, CALL_SID)).map((r) => r.text)).toEqual([
+        'how can I help',
+        'my card is 4111 1111',
+        'go on',
+        '1111',
+        'and the rest?',
+        `${MARKER} thanks`,
+      ]);
+      return { store, session, live };
+    }
+
+    it('writes the rewrite that did not land, in one audited repository call, before the call is ingested', async () => {
+      const repo = new InMemoryCallTranscriptTurnRepository();
+      const { store, session, live } = await liveCallWithFailedRewrite(repo);
+      const auditRepo = new InMemoryAuditRepository();
+      const send = vi.fn(async () => 'msg-1');
+      const markCardNumberDetected = vi.fn(async () => undefined);
+      const hook = createRecordingTranscriptHook({
+        store,
+        callTranscriptTurnRepo: repo,
+        voiceRepo: { markCardNumberDetected },
+        auditRepo,
+        queue: { send },
+        logger,
+      });
+
+      await hook(event());
+
+      const rows = await repo.listByRecording(TENANT, RECORDING_1);
+      expect(rows.map((r) => r.text)).toEqual([
+        'how can I help',
+        `my card is ${MARKER}`,
+        'go on',
+        MARKER,
+        'and the rest?',
+        `${MARKER} thanks`,
+      ]);
+      expect(live).toHaveBeenCalledTimes(1);
+      expect(live).toHaveBeenCalledWith(
+        expect.objectContaining({ tenantId: TENANT, callSid: CALL_SID, sessionId: session.id, actorId: 'recording_webhook' }),
+      );
+      expect(session.unwrittenCardRedactions).toEqual([]);
+      expect(payloadTurns(send).filter((t) => t.speaker === 'caller').map((t) => t.text)).toEqual([
+        `my card is ${MARKER}`,
+        MARKER,
+        `${MARKER} thanks`,
+      ]);
+      expect(JSON.stringify(payloadTurns(send))).not.toMatch(/4111|\b1111\b/);
+      expect(markCardNumberDetected).toHaveBeenCalledWith(TENANT, RECORDING_1);
+    });
+
+    it('still ingests the redacted text when that write fails again, and logs indexes, never text', async () => {
+      const repo = new InMemoryCallTranscriptTurnRepository();
+      const { store, session, live } = await liveCallWithFailedRewrite(repo);
+      live.mockRejectedValueOnce(new Error('db still down'));
+      const send = vi.fn(async () => 'msg-1');
+      const markCardNumberDetected = vi.fn(async () => undefined);
+      const hook = createRecordingTranscriptHook({
+        store,
+        callTranscriptTurnRepo: repo,
+        voiceRepo: { markCardNumberDetected },
+        auditRepo: new InMemoryAuditRepository(),
+        queue: { send },
+        logger,
+      });
+      const errorLog = vi.spyOn(logger, 'error');
+      try {
+        await expect(hook(event())).resolves.toBeUndefined();
+
+        expect(errorLog).toHaveBeenCalledWith(
+          'recording-transcript-hook: card-number rewrite of stored turns failed',
+          expect.objectContaining({
+            callSid: CALL_SID,
+            voiceRecordingId: RECORDING_1,
+            turnIndexes: [1, 3, 5],
+            error: 'db still down',
+          }),
+        );
+        expect(JSON.stringify(errorLog.mock.calls)).not.toMatch(/4111|\b1111\b|my card/);
+        expect(JSON.stringify(payloadTurns(send))).not.toMatch(/4111|\b1111\b/);
+        expect(payloadTurns(send).filter((t) => t.speaker === 'caller').map((t) => t.text)).toEqual([
+          `my card is ${MARKER}`,
+          MARKER,
+          `${MARKER} thanks`,
+        ]);
+        expect(markCardNumberDetected).toHaveBeenCalledWith(TENANT, RECORDING_1);
+        // Kept for any later attempt.
+        expect(session.unwrittenCardRedactions).toHaveLength(1);
+      } finally {
+        errorLog.mockRestore();
+      }
+    });
+
+    it('reads the stored caller turns again: a split card no live rewrite ever saw is rewritten too', async () => {
+      // Rows from a process that never stitched them (no session here).
+      const { hook, repo, send } = harness();
+      await seedLeg(repo, SESSION_1, [
+        ['agent', 'how can I help'],
+        ['caller', 'my card is 4111 1111'],
+        ['agent', 'go on'],
+        ['caller', '1111'],
+        ['agent', 'and the rest?'],
+        ['caller', '1111 thanks'],
+      ]);
+      const rewrite = vi.spyOn(repo, 'redactCardNumberTurns');
+
+      await hook(event());
+
+      const rows = await repo.listByRecording(TENANT, RECORDING_1);
+      expect(rows.filter((r) => r.speaker === 'caller').map((r) => r.text)).toEqual([
+        `my card is ${MARKER}`,
+        MARKER,
+        `${MARKER} thanks`,
+      ]);
+      expect(rewrite).toHaveBeenCalledWith({
+        tenantId: TENANT,
+        callSid: CALL_SID,
+        sessionId: SESSION_1,
+        actorId: 'recording_webhook',
+        turns: [
+          { id: rows[1].id, turnIndex: 1, text: `my card is ${MARKER}` },
+          { id: rows[3].id, turnIndex: 3, text: MARKER },
+          { id: rows[5].id, turnIndex: 5, text: `${MARKER} thanks` },
+        ],
+      });
+      expect(JSON.stringify(payloadTurns(send))).not.toMatch(/4111|\b1111\b/);
+    });
+
+    it('reads each session leg on its own, as the live window does, and never stitches turns a minute apart', async () => {
+      const { hook, repo, send } = harness();
+      const t0 = Date.now() - 300_000;
+      const seed = (sessionId: string, turnIndex: number, text: string, atMs: number) =>
+        repo.recordTurn({
+          tenantId: TENANT,
+          callSid: CALL_SID,
+          sessionId,
+          turnIndex,
+          speaker: 'caller',
+          text,
+          startedAt: new Date(atMs),
+        });
+      // Leg 1 ends on the first half; leg 2 (a restart) opens on the second.
+      await seed(SESSION_1, 0, '4111 1111', t0);
+      await seed(SESSION_2, 0, '1111 1111', t0 + 5_000);
+      await seed(SESSION_2, 1, 'and my zip, 4111 1111', t0 + 10_000);
+      // Said more than a minute after the turn before it.
+      await seed(SESSION_2, 2, '1111 1111', t0 + 75_000);
+      const rewrite = vi.spyOn(repo, 'redactCardNumberTurns');
+
+      await hook(event());
+
+      expect(rewrite).not.toHaveBeenCalled();
+      expect(payloadTurns(send).map((t) => t.text)).toEqual([
+        '4111 1111',
+        '1111 1111',
+        'and my zip, 4111 1111',
+        '1111 1111',
+      ]);
+    });
+
+    // A group of four per caller turn is a card only where it is mentioned;
+    // the re-read sees the agent's rows around the caller's, as the live path
+    // sees its lines, and never rewrites them.
+    it("reads the agent's stored rows for a mention of the card, and leaves them as stored", async () => {
+      const { hook, repo, send } = harness();
+      await seedLeg(repo, SESSION_1, [
+        ['caller', '4111'],
+        ['agent', "Sorry, I can't take card numbers over the phone, 1111."],
+        ['caller', '1111'],
+        ['caller', '1111'],
+        ['caller', '1111'],
+      ]);
+      await seedLeg(repo, SESSION_2, [
+        ['agent', 'What is the gate code?'],
+        ['caller', '4111'],
+        ['caller', '1111'],
+        ['caller', '1111'],
+        ['caller', '1111'],
+      ]);
+      const rewrite = vi.spyOn(repo, 'redactCardNumberTurns');
+
+      await hook(event());
+
+      expect(rewrite).toHaveBeenCalledTimes(1);
+      expect(rewrite).toHaveBeenCalledWith(expect.objectContaining({ sessionId: SESSION_1 }));
+      const rows = await repo.listByRecording(TENANT, RECORDING_1);
+      expect(rows.filter((r) => r.sessionId === SESSION_1).map((r) => r.text)).toEqual([
+        MARKER,
+        "Sorry, I can't take card numbers over the phone, 1111.",
+        MARKER,
+        MARKER,
+        MARKER,
+      ]);
+      expect(rows.filter((r) => r.sessionId === SESSION_2).map((r) => r.text)).toEqual([
+        'What is the gate code?',
+        '4111',
+        '1111',
+        '1111',
+        '1111',
+      ]);
+      expect(payloadTurns(send).filter((t) => t.speaker === 'caller').map((t) => t.text).slice(0, 4)).toEqual(
+        Array(4).fill(MARKER),
+      );
+    });
+
+    it('leaves a call whose rows were already rewritten live as it is', async () => {
+      const { hook, repo } = harness();
+      await seedLeg(repo, SESSION_1, [
+        ['caller', `my card is ${MARKER}`],
+        ['caller', MARKER],
+        ['caller', `${MARKER} thanks`],
+      ]);
+      const rewrite = vi.spyOn(repo, 'redactCardNumberTurns');
+      await hook(event());
+      expect(rewrite).not.toHaveBeenCalled();
+    });
   });
 });

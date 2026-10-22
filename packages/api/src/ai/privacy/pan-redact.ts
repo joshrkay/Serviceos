@@ -15,7 +15,11 @@
  *     snapshot + trace export), and the cache-hit snapshot,
  *   - `redactTextForExport` (trace export, all roles),
  *   - `scrubPii` (knowledge-chunk corpus) and the recording transcription
- *     worker's `sanitizeTranscript`.
+ *     worker's `sanitizeTranscript`,
+ *   - and, for a card split across turns, `VoiceSessionStore.appendTranscript`
+ *     over the session's last few caller turns (`redactCardNumbersAcrossTurns`),
+ *     read again over the stored rows by the recording transcript hook
+ *     (`redactCardNumbersInCallTurns`).
  *
  * Detection: runs of 13–19 digits, optionally grouped by spaces, dashes,
  * commas or periods (how STT punctuates paused groups), that pass the Luhn
@@ -112,27 +116,92 @@ const FILLER_WORDS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Most punctuation and fillers allowed between two groups of a spoken run.
- * Enough for ", uh, " or "… and"; a longer stretch is a different sentence.
+ * Most punctuation and fillers allowed between two groups of a spoken run
+ * (or across a turn boundary). Enough for ", uh, " or "1111..." then
+ * ", 1111"; a longer stretch is a different sentence.
  */
-const MAX_JOINER_MARKS = 3;
+const MAX_JOINER_MARKS = 4;
 const MAX_JOINER_FILLERS = 2;
 
 /**
- * Words that say a card is what is being read out ("my card is", "the Visa",
- * "mi tarjeta", "can I pay"). A list of years read out falls into groups of
- * four as a card does, so a card with two year-like groups is caught only
- * where the card is mentioned (`maxYearShapedGroups`).
+ * A short acknowledgement a caller may open the turn that reads on with,
+ * answering the agent's "go on" ("okay, 1111 1111", "vale, …").
  */
-const CARD_CUE = new RegExp(
-  String.raw`(?<![\p{L}\p{M}])(?:cards?|visa|master\s?card|amex|american\s+express|discover|credit|debit|cvv|cvc` +
-    String.raw`|tarjetas?|cr[ée]dito|d[ée]bito|pay|paying|payment|pago|pagar)(?![\p{L}\p{M}])`,
+const ACKNOWLEDGEMENTS = [
+  'okay',
+  'ok',
+  'so',
+  'alright',
+  'right',
+  'yes',
+  'yeah',
+  'then',
+  'sorry',
+  'mm-hmm',
+  'mhm',
+  'uh-huh',
+  'vale',
+  'bueno',
+  'sí',
+  // "sí" as STT often writes it.
+  'si',
+  'entonces',
+  'luego',
+];
+
+/** Spaces and the punctuation STT writes at a pause. */
+const BREAK = String.raw`[\s,.;:!?…–—-]`;
+
+/**
+ * How a caller may open the turn that reads on (`redactCardNumbersAcrossTurns`
+ * only): up to two fillers or acknowledgements, then optionally which group
+ * comes next ("the next four are", "and the last four digits are", "los
+ * últimos cuatro son"; captured), whose count is not one of the card's
+ * digits. Inside a turn these words end a run as they always did.
+ */
+const CONTINUATION_LEAD_IN = new RegExp(
+  String.raw`^${BREAK}*(?:(?:${[...ACKNOWLEDGEMENTS, ...FILLER_WORDS].join('|')})${BREAK}+){0,2}` +
+    String.raw`(?:((?:the\s+)?(?:next|last|final|other|remaining)\s+(?:one|two|three|four|five|six|[1-6])` +
+    String.raw`(?:\s+(?:digits?|numbers?))?(?:\s+(?:are|is))?` +
+    String.raw`|(?:(?:los|las)\s+)?(?:siguientes|próximos|proximos|últimos|ultimos|otros)\s+(?:uno|dos|tres|cuatro|cinco|seis|[1-6])` +
+    String.raw`(?:\s+(?:dígitos|digitos|números|numeros))?(?:\s+(?:son|es))?)${BREAK}+)?`,
   'iu',
 );
 
-/** True when `text` mentions a card or paying (the marker of a card already scrubbed does not count). */
-function hasCardCue(text: string, placeholder: string): boolean {
-  return CARD_CUE.test(text.split(placeholder).join(' ').split(CARD_NUMBER_PLACEHOLDER).join(' '));
+/**
+ * A count phrase that reads on from digits already given ("the next four
+ * are", "los siguientes cuatro"): the caller is reading out one long number
+ * group by group, which counts as a mention of the card. "The last four" is
+ * not: it is also how a caller answers "what are the last four of your
+ * account?".
+ */
+const READS_ON = /(?<![\p{L}\p{M}])(?:next|other|remaining|siguientes|próximos|proximos|otros)(?![\p{L}\p{M}])/iu;
+
+/**
+ * Words that say a card is what is being read out ("my card is", "the Visa",
+ * "mi tarjeta"). Bare groups of four said one per turn read exactly like gate
+ * codes, last-four answers or years given one after another, so a card
+ * stitched from such turns must be mentioned in them or by the agent around
+ * them (`redactCardNumbersAcrossTurns`).
+ */
+const CARD_WORDS = String.raw`cards?|visa|master\s?card|amex|american\s+express|discover|credit|debit|cvv|cvc|tarjetas?|cr[ée]dito|d[ée]bito`;
+/**
+ * A caller saying they want to pay ("can I pay now", "quiero pagar") is about
+ * to read a card too. The agent is not: it talks about payment links and
+ * payment due at the visit while it collects gate codes and years.
+ */
+const PAYMENT_WORDS = String.raw`pay|paying|payment|pago|pagar`;
+const CARD_CUE = new RegExp(String.raw`(?<![\p{L}\p{M}])(?:${CARD_WORDS})(?![\p{L}\p{M}])`, 'iu');
+const CALLER_CARD_CUE = new RegExp(String.raw`(?<![\p{L}\p{M}])(?:${CARD_WORDS}|${PAYMENT_WORDS})(?![\p{L}\p{M}])`, 'iu');
+
+/**
+ * True when the caller's `text` mentions a card or paying (`agent`: when the
+ * agent's text mentions a card). The marker of a card already scrubbed does
+ * not count.
+ */
+function hasCardCue(text: string, placeholder: string, agent = false): boolean {
+  const words = text.split(placeholder).join(' ').split(CARD_NUMBER_PLACEHOLDER).join(' ');
+  return (agent ? CARD_CUE : CALLER_CARD_CUE).test(words);
 }
 
 /**
@@ -179,18 +248,24 @@ type TokenKind =
   /** Other punctuation STT writes at a pause: `– — … ; : ! ?`. */
   | 'pause'
   | 'filler'
+  /** What a continuation turn opens with before reading on (`CONTINUATION_LEAD_IN`). */
+  | 'lead'
+  /** The boundary between two caller turns (`redactCardNumbersAcrossTurns`). */
+  | 'turn'
   /** Anything else: it ends a run. */
   | 'other';
 
 interface Token {
   kind: TokenKind;
+  /** Which text (turn) the token is in; offsets are within that text. */
+  seg: number;
   start: number;
   end: number;
   /** The digits a `num` or `spoken` token stands for. */
   digits: string;
 }
 
-function tokenize(text: string): Token[] {
+function tokenize(text: string, seg = 0): Token[] {
   const raw: Array<Token & { repeat?: number }> = [];
   for (const m of text.matchAll(TOKEN)) {
     const start = m.index ?? 0;
@@ -223,7 +298,7 @@ function tokenize(text: string): Token[] {
     } else if (PAUSE_CHARS.has(m[0])) {
       kind = 'pause';
     }
-    raw.push({ kind, start, end, digits, repeat });
+    raw.push({ kind, seg, start, end, digits, repeat });
   }
   // A repeat word counts only with the digit word it repeats ("double check"
   // is two ordinary words).
@@ -234,6 +309,7 @@ function tokenize(text: string): Token[] {
     if (t.repeat !== undefined && raw[i + 1]?.kind === 'space' && target?.kind === 'spoken') {
       tokens.push({
         kind: 'spoken',
+        seg,
         start: t.start,
         end: target.end,
         digits: target.digits.repeat(t.repeat),
@@ -241,7 +317,7 @@ function tokenize(text: string): Token[] {
       i += 2;
       continue;
     }
-    tokens.push({ kind: t.kind, start: t.start, end: t.end, digits: t.digits });
+    tokens.push({ kind: t.kind, seg, start: t.start, end: t.end, digits: t.digits });
   }
   return tokens;
 }
@@ -251,7 +327,14 @@ function isDigitToken(t: Token | undefined): t is Token {
 }
 
 function isJoinerToken(t: Token): boolean {
-  return t.kind === 'space' || t.kind === 'mark' || t.kind === 'pause' || t.kind === 'filler';
+  return (
+    t.kind === 'space' ||
+    t.kind === 'mark' ||
+    t.kind === 'pause' ||
+    t.kind === 'filler' ||
+    t.kind === 'lead' ||
+    t.kind === 'turn'
+  );
 }
 
 /**
@@ -259,10 +342,15 @@ function isJoinerToken(t: Token): boolean {
  * spaces, or one comma, period or dash with optional spaces around it
  * ("4111, 1111" from Twilio Gather, "5555 - 5555"). A spoken group on either
  * side also allows the fillers and pause punctuation a caller's speech
- * carries ("four one one one, uh, one one one one").
+ * carries ("four one one one, uh, one one one one"). A turn boundary is the
+ * pause itself, so beside it the punctuation STT writes at either side ("4111
+ * 1111..." then "1111"), fillers ("4111 1111" then "um, 1111 1111") and what
+ * the next turn opens with ("okay, 1111", "the next four are 1111") are
+ * allowed between written groups too.
  */
 function joinsGroups(left: Token, joiner: Token[], right: Token): boolean {
-  if (left.kind === 'num' && right.kind === 'num') {
+  const spokenSide = left.kind === 'spoken' || right.kind === 'spoken';
+  if (!spokenSide && !joiner.some((t) => t.kind === 'turn')) {
     const shape = joiner.map((t) => t.kind).join(' ');
     return (
       shape === 'space' ||
@@ -276,7 +364,7 @@ function joinsGroups(left: Token, joiner: Token[], right: Token): boolean {
   let fillers = 0;
   for (const t of joiner) {
     if (t.kind === 'mark' || t.kind === 'pause') marks++;
-    else if (t.kind === 'filler') fillers++;
+    else if (t.kind === 'filler' || t.kind === 'lead') fillers++;
   }
   return marks <= MAX_JOINER_MARKS && fillers <= MAX_JOINER_FILLERS;
 }
@@ -288,17 +376,18 @@ interface DigitUnit {
 }
 
 /**
- * One spoken or written group of a run: its digits and its digit tokens (one
- * for a written group, one per digit word for a spoken one).
+ * One spoken or written group of a run: its digits, its turn and its digit
+ * tokens (one for a written group, one per digit word for a spoken one).
  */
 interface DigitGroup {
   digits: string;
+  seg: number;
   units: DigitUnit[];
   /** Written digits (one `num` token). */
   written: boolean;
   /**
    * Written, and joined to the written group before it by a written
-   * separator: the two are one run to the digit-only search.
+   * separator inside one turn: the two are one run to the digit-only search.
    */
   writtenJoin: boolean;
 }
@@ -309,15 +398,20 @@ interface WindowPart {
   units: readonly DigitUnit[];
 }
 
-/** What a window is checked against beyond its digits: whether the card is mentioned around it (`hasCardCue`). */
+/**
+ * What a window is checked against beyond its digits: the turns of the run
+ * that are themselves a phone number, and whether the card is mentioned
+ * around it (`hasCardCue`).
+ */
 interface SearchContext {
+  phoneTurns: ReadonlySet<number>;
   cardCue: boolean;
 }
 
 /**
  * Every payment card in PCI scope (Visa, Mastercard, Amex, Discover, JCB,
  * Diners, UnionPay) starts with 2–6. Required of every window that is not
- * written digits alone (`cardShaped`).
+ * written digits inside one turn (`cardShaped`).
  */
 const PAYMENT_CARD_FIRST_DIGIT = /^[2-6]/;
 
@@ -395,23 +489,55 @@ function groupedLikeACard(parts: readonly WindowPart[], chunks: readonly string[
 
 /**
  * The rules a window must keep, beyond the Luhn check and its length, unless
- * it is written digits alone (those keep exactly the digit-only scrubber's
- * rules). Any window with digit words in it must start like a payment card
- * (2–6) and hold no more
+ * it is written digits inside one turn (those keep exactly the digit-only
+ * scrubber's rules). Any window with digit words in it, or stitched from
+ * several turns, must start like a payment card (2–6) and hold no more
  * year-shaped groups of four than a card does (`maxYearShapedGroups`). Digit
  * words said as one unbroken run must be a length cards are issued in
  * (`issuedAtLength`). Words and written digits mixed must be read in a
  * card's groups (`groupedLikeACard`).
+ *
+ * A window stitched from several turns must also take in no turn that is
+ * itself a phone number, and fall into its turns the way a card read aloud
+ * does (`readLikeACard`). Callers answer an intake flow with bare numbers in
+ * a row (a zip, a year, a house number, a callback number), and those joined
+ * pass the Luhn check one time in ten; a caller reading a card pauses between
+ * its groups instead. Where every turn gives four digits or fewer (a card
+ * read group by group, or gate codes, last-four answers and years one per
+ * turn, which nothing in the digits tells apart), the card must also be
+ * mentioned around it (`SearchContext.cardCue`).
  */
 function cardShaped(parts: readonly WindowPart[], run: string, ctx: SearchContext): boolean {
+  const segs: number[] = [];
+  const turnDigits: number[] = [];
+  for (const { group, units } of parts) {
+    const n = units.reduce((sum, u) => sum + u.digits.length, 0);
+    if (segs[segs.length - 1] === group.seg) turnDigits[turnDigits.length - 1] += n;
+    else {
+      segs.push(group.seg);
+      turnDigits.push(n);
+    }
+  }
   const spoken = parts.some((p) => !p.group.written);
-  if (!spoken) return true;
+  if (!spoken && segs.length === 1) return true;
   if (!PAYMENT_CARD_FIRST_DIGIT.test(run)) return false;
   if (parts.length === 1 && spoken && !issuedAtLength(run)) return false;
   const { chunks, aligned } = windowChunks(parts);
   const mixed = spoken && parts.some((p) => p.group.written);
   if (mixed && !groupedLikeACard(parts, chunks, aligned)) return false;
-  return chunks.filter((c) => YEAR_SHAPED.test(c)).length <= maxYearShapedGroups(ctx.cardCue);
+  if (chunks.filter((c) => YEAR_SHAPED.test(c)).length > maxYearShapedGroups(ctx.cardCue)) return false;
+  if (segs.length === 1) return true;
+  // One group of four (or fewer) per turn; the last turn of a card that ends
+  // on three may hold its last four and its last three together.
+  const groupPerTurn = turnDigits.every((n, k) => n <= 4 || (k === turnDigits.length - 1 && n === 7 && endsOnThree(run)));
+  return (
+    // Never from the middle of a written number ("(236) 987-2420", then the
+    // next turns).
+    !parts[0].group.writtenJoin &&
+    !segs.some((seg) => ctx.phoneTurns.has(seg)) &&
+    readLikeACard(turnDigits, run) &&
+    (ctx.cardCue || !groupPerTurn)
+  );
 }
 
 /** A card number found: the token range it covers (digit tokens at both ends). */
@@ -477,6 +603,38 @@ function spokenPhoneGroupsAt(groups: string[], i: number): number {
   if (phone > 0) return phone;
   const shape = PHONE_SHAPES_IN_PAIRS.find((lengths) => lengths.every((n, k) => groups[i + k]?.length === n));
   return shape?.length ?? 0;
+}
+
+/**
+ * How a card read aloud over several turns falls into them, as the digits
+ * each turn gives it: whole groups of four in every turn (4-4-4-4, two halves
+ * of eight, 4-12), the last turn either whole fours or the final partial
+ * group (1–3 digits: a 13-digit card's last digit, a 19-digit card's last
+ * three, alone or after its fourth group, "1111 123"); or an Amex in its 4-6-5
+ * groups, or a Diners Club International in its 4-6-4 (only a card that
+ * starts like one: 34 or 37, and 36). An Amex read in fours ends on a group of
+ * three as a 19-digit card does (`endsOnThree`). Intake answers in a row are
+ * not read like that: a zip is five digits, a phone ten, a price "$1,250", so
+ * a zip in 20000–69999 or a house number starting 2–6 can no longer be
+ * stitched into a "card" just because the joined digits pass the Luhn check.
+ */
+const AMEX_TURN_SPLITS: ReadonlySet<string> = new Set(['4,6,5', '10,5', '4,11']);
+const DINERS_TURN_SPLITS: ReadonlySet<string> = new Set(['4,6,4', '10,4', '4,10']);
+
+function readLikeACard(turnDigits: readonly number[], run: string): boolean {
+  const split = turnDigits.join(',');
+  if (AMEX_TURN_SPLITS.has(split)) return /^3[47]/.test(run);
+  if (DINERS_TURN_SPLITS.has(split)) return run.startsWith('36');
+  const last = turnDigits[turnDigits.length - 1];
+  return (
+    turnDigits.slice(0, -1).every((n) => n % 4 === 0) &&
+    (last % 4 === 0 || last <= 3 || (endsOnThree(run) && last % 4 === 3))
+  );
+}
+
+/** Read in fours, a 19-digit card and an Amex end on a group of three. */
+function endsOnThree(run: string): boolean {
+  return run.length === MAX_PAN_DIGITS || (run.length === 15 && /^3[47]/.test(run));
 }
 
 /** The token range of groups `first`..`last`. */
@@ -564,12 +722,18 @@ function runCards(groups: DigitGroup[], cardCue: boolean): CardHit[] {
 }
 
 /**
- * The card numbers inside a stretch of a run that holds digit words: the
- * leftmost-longest Luhn-valid window of whole groups that keeps `cardShaped`,
- * never starting on a phone number (`spokenPhoneGroupsAt`).
+ * The card numbers inside a stretch of a run that holds digit words, or
+ * spans turns: the leftmost-longest Luhn-valid window of whole groups that
+ * keeps `cardShaped`, never starting on a phone number
+ * (`spokenPhoneGroupsAt`).
  */
 function cardWindows(groups: DigitGroup[], cardCue: boolean): CardHit[] {
-  const ctx: SearchContext = { cardCue };
+  const phoneTurns = new Set<number>();
+  for (const seg of new Set(groups.map((g) => g.seg))) {
+    const own = groups.filter((g) => g.seg === seg).map((g) => g.digits);
+    if (spokenPhoneGroupsAt(own, 0) === own.length) phoneTurns.add(seg);
+  }
+  const ctx: SearchContext = { phoneTurns, cardCue };
   const whole = (from: number, to: number): WindowPart[] =>
     groups.slice(from, to + 1).map((group) => ({ group, units: group.units }));
   return wholeGroupCards(groups.map((g) => g.digits), spokenPhoneGroupsAt, (from, to, run) =>
@@ -595,6 +759,7 @@ function findCardHits(tokens: Token[], cardCue: boolean): CardHit[] {
     const groups: DigitGroup[] = [
       {
         digits: first.digits,
+        seg: first.seg,
         units: [{ digits: first.digits, token: i }],
         written: first.kind === 'num',
         writtenJoin: false,
@@ -619,9 +784,10 @@ function findCardHits(tokens: Token[], cardCue: boolean): CardHit[] {
         const written = right.kind === 'num';
         groups.push({
           digits: right.digits,
+          seg: right.seg,
           units: [unit],
           written,
-          writtenJoin: written && tokens[last].kind === 'num',
+          writtenJoin: written && tokens[last].kind === 'num' && !joiner.some((t) => t.kind === 'turn'),
         });
       }
       last = next;
@@ -663,6 +829,179 @@ export function redactCardNumbers(
     pos = end;
   }
   return out + tagged.slice(pos);
+}
+
+/**
+ * What a cross-turn search may read around the caller's turns without ever
+ * stitching or rewriting it.
+ */
+export interface CardSplitContext {
+  /**
+   * What the agent said around the turns: its last line before the first of
+   * them and every line between them ({@link agentLinesAround}). Read only
+   * for a mention of the card itself (not of paying: the agent talks about
+   * payment links while it takes gate codes and years).
+   */
+  agentLines?: readonly string[];
+}
+
+/**
+ * A card number a caller split across turns: pausing mid-number leaves
+ * several turns that each hold fewer than 13 digits, so the per-turn scrub
+ * finds nothing. `turns` are one session's CALLER turns in the order they
+ * were said (never agent turns); they are read as one stream with a pause
+ * (a group boundary) between turns, and every Luhn-valid card found has the
+ * span each turn contributed to it replaced with the marker, so a card split
+ * over three turns leaves the marker in all three. A card stitched from
+ * several turns must also look like one read aloud: it starts with 2–6, no
+ * turn is a phone number, it falls into its turns in a card's groups
+ * (`readLikeACard`), it holds at most one year-shaped group, and where every
+ * turn gives four digits or fewer the card is mentioned in the turns, by the
+ * agent around them (`context`), or by a turn that reads on ("the next four
+ * are …", `READS_ON`). Bare intake answers in a row are left alone.
+ * A card wholly inside one turn, and Deepgram's card tag, are replaced too,
+ * so a stored row written before the scrubber comes out clean.
+ *
+ * Returns the turns rewritten (same length and order), or null when nothing
+ * changed. The caller bounds the window ({@link cardSplitWindow}: the live
+ * path in `VoiceSessionStore`, the recording boundary through
+ * {@link redactCardNumbersInCallTurns}).
+ */
+export function redactCardNumbersAcrossTurns(
+  turns: readonly string[],
+  placeholder: string = CARD_NUMBER_PLACEHOLDER,
+  context: CardSplitContext = {},
+): string[] | null {
+  const tagged = turns.map((text) => text.replace(DEEPGRAM_CARD_TAG, placeholder));
+  const tokens: Token[] = [];
+  let readsOn = false;
+  for (const [seg, text] of tagged.entries()) {
+    if (seg === 0) {
+      tokens.push(...tokenize(text, seg));
+      continue;
+    }
+    tokens.push({ kind: 'turn', seg, start: 0, end: 0, digits: '' });
+    // What the turn opens with before reading on is one joiner token.
+    const leadIn = CONTINUATION_LEAD_IN.exec(text);
+    const lead = leadIn?.[0] ?? '';
+    const turnTokens = tokenize(text, seg);
+    if (!/\p{L}/u.test(lead)) {
+      tokens.push(...turnTokens);
+      continue;
+    }
+    if (leadIn?.[1] !== undefined && READS_ON.test(leadIn[1])) readsOn = true;
+    tokens.push({ kind: 'lead', seg, start: 0, end: lead.length, digits: '' });
+    tokens.push(...turnTokens.filter((t) => t.start >= lead.length));
+  }
+  const cardCue =
+    readsOn ||
+    tagged.some((text) => hasCardCue(text, placeholder)) ||
+    (context.agentLines ?? []).some((text) => hasCardCue(text, placeholder, true));
+  // Per turn, the spans to replace: for each card, from the first to the last
+  // of its digit tokens that sit in that turn.
+  const spans: Array<Array<{ start: number; end: number }>> = tagged.map(() => []);
+  for (const hit of findCardHits(tokens, cardCue)) {
+    const inHit = new Map<number, { start: number; end: number }>();
+    for (let k = hit.from; k <= hit.to; k++) {
+      const t = tokens[k];
+      if (!isDigitToken(t)) continue;
+      const span = inHit.get(t.seg);
+      if (span) span.end = t.end;
+      else inHit.set(t.seg, { start: t.start, end: t.end });
+    }
+    for (const [seg, span] of inHit) spans[seg].push(span);
+  }
+  const rewritten = tagged.map((text, seg) => {
+    let out = '';
+    let pos = 0;
+    for (const { start, end } of spans[seg]) {
+      out += text.slice(pos, start) + placeholder;
+      pos = end;
+    }
+    return out + text.slice(pos);
+  });
+  return rewritten.some((text, i) => text !== turns[i]) ? rewritten : null;
+}
+
+/**
+ * The window a card split across caller turns is read in: each caller turn
+ * together with the caller turns just before it, up to
+ * {@link CARD_SPLIT_WINDOW_TURNS} in all, said within
+ * {@link CARD_SPLIT_WINDOW_MS} of it. Agent turns never join.
+ *
+ * Why five turns and a minute: the longest card (19 digits) read in its
+ * natural groups (4-4-4-4-3) is five utterances, a 16-digit card with a pause
+ * after every group four, an Amex three; a caller reading a card group by
+ * group, the agent saying "go on" in between, is done well inside a minute.
+ * Digits further apart are other numbers said at other points of the call (a
+ * callback number early, a zip later), and stitching them in would only add
+ * false Luhn hits. The bound also keeps the work per turn constant.
+ */
+const CARD_SPLIT_WINDOW_TURNS = 5;
+const CARD_SPLIT_WINDOW_MS = 60_000;
+
+/** The earlier caller turns (oldest first) a caller turn said at `at` is read together with. */
+export function cardSplitWindow<T extends { at: number }>(earlier: readonly T[], at: number): T[] {
+  return earlier.filter((t) => at - t.at <= CARD_SPLIT_WINDOW_MS).slice(-(CARD_SPLIT_WINDOW_TURNS - 1));
+}
+
+/** One line of a call leg, in the order it was said. */
+interface CallLine {
+  speaker: 'caller' | 'agent';
+  text: string;
+}
+
+/**
+ * What the agent said around a caller-turn window ({@link CardSplitContext}):
+ * its last line before the window's first caller turn (`first`, an index into
+ * `lines`) and every agent line from there up to `current` (exclusive).
+ */
+export function agentLinesAround(lines: readonly CallLine[], first: number, current: number): string[] {
+  let from = first - 1;
+  while (from > 0 && lines[from].speaker !== 'agent') from--;
+  return lines
+    .slice(Math.max(from, 0), current)
+    .filter((line) => line.speaker === 'agent')
+    .map((line) => line.text);
+}
+
+/**
+ * A whole leg's turns (oldest first, both speakers, with the epoch ms each
+ * was said), its caller turns read again exactly as the live path read them
+ * as they were said: each caller turn in its {@link cardSplitWindow}, with the
+ * earlier turns' text as already rewritten and the agent's lines around them
+ * ({@link agentLinesAround}). The recording boundary runs this over the
+ * stored rows, so a card whose live rewrite of those rows failed (or had not
+ * landed yet) still leaves them before ingestion. Agent turns are never
+ * rewritten. Returns the turns rewritten (same length and order), or null
+ * when nothing changed.
+ */
+export function redactCardNumbersInCallTurns(turns: ReadonlyArray<CallLine & { at: number }>): string[] | null {
+  const texts = turns.map((t) => t.text);
+  let window: Array<{ k: number; at: number }> = [];
+  let changed = false;
+  turns.forEach(({ speaker, text, at }, k) => {
+    if (speaker !== 'caller') return;
+    const earlier = cardSplitWindow(window, at);
+    // An empty utterance holds no digits and never joins the window.
+    if (text.trim().length === 0) {
+      window = earlier;
+      return;
+    }
+    window = [...earlier, { k, at }];
+    if (earlier.length === 0) return;
+    const rewritten = redactCardNumbersAcrossTurns(
+      window.map((t) => texts[t.k]),
+      CARD_NUMBER_PLACEHOLDER,
+      { agentLines: agentLinesAround(turns, window[0].k, k) },
+    );
+    rewritten?.forEach((next, j) => {
+      if (next === texts[window[j].k]) return;
+      texts[window[j].k] = next;
+      changed = true;
+    });
+  });
+  return changed ? texts : null;
 }
 
 /** True when already-scrubbed text carries the card-number marker. */
