@@ -324,6 +324,8 @@ export default defineConfig<DevAuthFixtures>({
               'google-business-picker-mobile.spec.ts',
               // #1763 (D-044) — home "Get found online" card at 320px.
               'get-found-online-card-mobile.spec.ts',
+              // #1764 (D-044) — Google profile walkthrough (no-location state) at 320px.
+              'google-profile-walkthrough-mobile.spec.ts',
             ],
             testIgnore: [],
             dependencies: ['devauth-setup'],
