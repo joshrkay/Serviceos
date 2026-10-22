@@ -17,7 +17,7 @@ import { getVapiClient, type VapiClient } from '../integrations/vapi/client';
 import { isTwilioDeploymentEnv } from '../integrations/credentials';
 import { isTwilioTestNumber } from '../telephony/phone-policy';
 import { usStateFromAddress } from '../telephony/address-state';
-import { buildAssistantConfig } from '../integrations/vapi/assistant-config';
+import { buildAssistantConfig, vapiNoticeLanguage } from '../integrations/vapi/assistant-config';
 import { isBillingLiveStatus } from '../billing/tenant-billing-state';
 import { changeTenantNumber } from './change-twilio-number';
 import { PROVISIONING_FAILURE_MESSAGES } from '../onboarding/provisioning-failure';
@@ -613,10 +613,12 @@ export function createProvisionTwilioWorker(deps: {
               voice_id: string | null;
               services_offered: string[] | null;
               vapi_assistant_id: string | null;
+              default_language: string | null;
             }>(
               pool,
               tenantId,
-              `SELECT business_name, voice_greeting, voice_id, services_offered, vapi_assistant_id
+              `SELECT business_name, voice_greeting, voice_id, services_offered, vapi_assistant_id,
+                      default_language
                  FROM tenant_settings WHERE tenant_id = $1`,
               [tenantId],
             );
@@ -635,6 +637,7 @@ export function createProvisionTwilioWorker(deps: {
                 services: cfg.services_offered ?? [],
                 serverUrl: `${baseUrl}/webhooks/vapi/${tenantId}`,
                 serverUrlSecret: vapiWebhookSecret,
+                language: vapiNoticeLanguage(cfg.default_language),
               });
               const { assistantId } = await vapi.createAssistant(assistantConfig);
               const { phoneNumberId: vapiPhoneNumberId } = await vapi.linkPhoneNumber({

@@ -6,6 +6,7 @@ import {
   resolveVoicePreset,
   autoGenerateGreeting,
   vapiFirstMessage,
+  vapiNoticeLanguage,
 } from '../integrations/vapi/assistant-config';
 
 /**
@@ -51,8 +52,9 @@ export async function saveVoiceConfig(
     business_name: string | null;
     services_offered: string[] | null;
     vapi_assistant_id: string | null;
+    default_language: string | null;
   }>(
-    `SELECT business_name, services_offered, vapi_assistant_id
+    `SELECT business_name, services_offered, vapi_assistant_id, default_language
        FROM tenant_settings WHERE tenant_id = $1`,
     [input.tenantId],
   );
@@ -73,7 +75,11 @@ export async function saveVoiceConfig(
   if (deps.vapiClient && settings?.vapi_assistant_id) {
     try {
       await deps.vapiClient.updateAssistant(settings.vapi_assistant_id, {
-        firstMessage: vapiFirstMessage(greeting, settings.business_name ?? ''),
+        firstMessage: vapiFirstMessage(
+          greeting,
+          settings.business_name ?? '',
+          vapiNoticeLanguage(settings.default_language),
+        ),
         voiceId: preset.elevenLabsVoiceId,
       });
       assistantUpdated = true;

@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { saveVoiceConfig } from '../../src/voice/voice-config';
 import { resolveVoicePreset } from '../../src/integrations/vapi/assistant-config';
 
-function makePool(settings: { business_name?: string | null; services_offered?: string[] | null; vapi_assistant_id?: string | null }) {
+function makePool(settings: { business_name?: string | null; services_offered?: string[] | null; vapi_assistant_id?: string | null; default_language?: string | null }) {
   const updates: Array<{ sql: string; params: unknown[] }> = [];
   const pool = {
     query: vi.fn(async (sql: string, params: unknown[] = []) => {
@@ -11,6 +11,7 @@ function makePool(settings: { business_name?: string | null; services_offered?: 
           business_name: settings.business_name ?? 'Acme HVAC',
           services_offered: settings.services_offered ?? [],
           vapi_assistant_id: settings.vapi_assistant_id ?? null,
+          default_language: settings.default_language ?? 'en',
         }] };
       }
       if (/UPDATE tenant_settings/i.test(sql)) {
@@ -54,6 +55,16 @@ describe('saveVoiceConfig', () => {
     expect(updates[0].params).toEqual(['rachel', 'Hi, Acme here!', 't1']);
     expect(vapiClient.updateAssistant).toHaveBeenCalledWith('asst_1', {
       firstMessage: "Hi, Acme here! Just so you know, I'm a virtual assistant, not a live person.",
+      voiceId: resolveVoicePreset('rachel').elevenLabsVoiceId,
+    });
+  });
+
+  it("pushes the Spanish notice for a Spanish tenant", async () => {
+    const { pool } = makePool({ vapi_assistant_id: 'asst_1', default_language: 'es' });
+    const vapiClient = { createAssistant: vi.fn(), updateAssistant: vi.fn(async () => undefined), linkPhoneNumber: vi.fn(), deletePhoneNumber: vi.fn() };
+    await saveVoiceConfig({ pool, auditRepo, vapiClient }, { tenantId: 't1', actorId: 'u1', voiceId: 'rachel', greeting: 'Gracias por llamar.' });
+    expect(vapiClient.updateAssistant).toHaveBeenCalledWith('asst_1', {
+      firstMessage: 'Gracias por llamar. Para que lo sepa, soy un asistente virtual, no una persona real.',
       voiceId: resolveVoicePreset('rachel').elevenLabsVoiceId,
     });
   });

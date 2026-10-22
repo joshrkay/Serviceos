@@ -557,8 +557,11 @@ export function buildTelephonyGreeting(
 
   // Branch 1 — the tenant's own opening line, verbatim, then the notices. No
   // CTA append; not localized (the tenant authored it in their own language).
-  if (persona?.greeting) {
-    return `${persona.greeting.trim()} ${notices}`.trim();
+  // A whitespace-only greeting falls through to the default opener, so the
+  // caller still hears the business name before the notices.
+  const customGreeting = persona?.greeting?.trim();
+  if (customGreeting) {
+    return `${customGreeting} ${notices}`;
   }
 
   // Branch 2 / 3 — assemble a localized default greeting, then ensure it

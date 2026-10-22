@@ -2267,6 +2267,12 @@ describe('buildTelephonyGreeting', () => {
     expect(result).not.toContain(TTS_COPY.how_can_i_help.en);
   });
 
+  it('a whitespace-only custom greeting falls back to the default opener, so the business name is still said', () => {
+    const result = buildTelephonyGreeting('Joes HVAC', 'This call may be recorded for quality.', { greeting: '   ' });
+    expect(result.startsWith('Thank you for calling Joes HVAC.')).toBe(true);
+    expect(result).toContain("Just so you know, I'm a virtual assistant, not a live person.");
+  });
+
   it('appends default CTA only when no persona is set', () => {
     const result = buildTelephonyGreeting(
       'Joes HVAC',

@@ -7,6 +7,7 @@
  * persisted onto the tenant's Vapi assistant and mirrored to tenant_settings.
  */
 import { buildAiDisclosureText } from '../../ai/skills/disclose-ai-identity';
+import type { Language } from '../../ai/i18n/i18n';
 
 export interface VoicePreset {
   /** Stable key stored in tenant_settings.voice_id. */
@@ -57,10 +58,20 @@ export function autoGenerateGreeting(businessName: string, services: string[] = 
  * the notice rides on `firstMessage` instead, mirroring that function's
  * custom-greeting branch: the tenant's words first, then the notice. The
  * stored `voice_greeting` stays notice-free, because the phone path appends
- * its own.
+ * its own. `language` is the tenant's `default_language`, so a Spanish
+ * tenant's callers hear the Spanish notice.
  */
-export function vapiFirstMessage(greeting: string, businessName: string): string {
-  return `${greeting.trim()} ${buildAiDisclosureText({ businessName })}`;
+export function vapiFirstMessage(
+  greeting: string,
+  businessName: string,
+  language: Language = 'en',
+): string {
+  return `${greeting.trim()} ${buildAiDisclosureText({ businessName, language })}`.trim();
+}
+
+/** Narrow a `tenant_settings.default_language` value to a supported language. */
+export function vapiNoticeLanguage(defaultLanguage: string | null | undefined): Language {
+  return defaultLanguage === 'es' ? 'es' : 'en';
 }
 
 export interface VapiAssistantConfig {
@@ -85,6 +96,8 @@ export function buildAssistantConfig(input: {
   services?: string[];
   serverUrl?: string;
   serverUrlSecret?: string;
+  /** Tenant default language; picks the virtual-assistant notice's language. */
+  language?: Language;
 }): VapiAssistantConfig {
   const preset = resolveVoicePreset(input.voicePresetId);
   const firstMessage =
@@ -93,7 +106,7 @@ export function buildAssistantConfig(input: {
       : autoGenerateGreeting(input.businessName, input.services ?? []);
   return {
     name: `${(input.businessName || 'ServiceOS').trim()} AI Receptionist`,
-    firstMessage: vapiFirstMessage(firstMessage, input.businessName),
+    firstMessage: vapiFirstMessage(firstMessage, input.businessName, input.language),
     voiceId: preset.elevenLabsVoiceId,
     ...(input.serverUrl ? { serverUrl: input.serverUrl } : {}),
     ...(input.serverUrlSecret ? { serverUrlSecret: input.serverUrlSecret } : {}),

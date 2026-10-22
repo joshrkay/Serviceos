@@ -56,6 +56,11 @@ describe('buildAssistantConfig', () => {
     expect(cfg.firstMessage).toBe("Yo, Acme here. Just so you know, I'm a virtual assistant, not a live person.");
   });
 
+  it("a Spanish tenant's first message carries the Spanish notice", () => {
+    const cfg = buildAssistantConfig({ businessName: 'Plomería Sol', greeting: 'Gracias por llamar.', language: 'es' });
+    expect(cfg.firstMessage).toBe('Gracias por llamar. Para que lo sepa, soy un asistente virtual, no una persona real.');
+  });
+
   it('threads the server webhook url + secret when provided', () => {
     const cfg = buildAssistantConfig({ businessName: 'Acme', serverUrl: 'https://x/webhooks/vapi/t1', serverUrlSecret: 's3cr3t' });
     expect(cfg.serverUrl).toBe('https://x/webhooks/vapi/t1');
