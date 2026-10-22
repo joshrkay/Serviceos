@@ -241,7 +241,12 @@ describe('Postgres integration — B1: SMS replies approve as the sender’s rea
     expect(await reply('Y', BACKUP_PHONE)).toMatchObject({ handled: true, reason: 'approve_failed' });
 
     expect((await row(proposal.id)).status).toBe('ready_for_review');
-    expect(sent).toEqual([{ to: BACKUP_PHONE, body: expect.stringMatching(/can.t approve/i) }]);
+    expect(sent).toEqual([
+      {
+        to: BACKUP_PHONE,
+        body: 'You can’t approve, reject or change work by text, so nothing changed. Ask the owner to handle it.',
+      },
+    ]);
     const { rows } = await pool.query(
       `SELECT count(*)::int AS n FROM audit_events WHERE tenant_id = $1 AND event_type = 'proposal.sms_reply_role_cannot_approve'`,
       [tenant.tenantId],

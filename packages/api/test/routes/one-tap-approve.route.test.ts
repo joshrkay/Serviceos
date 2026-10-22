@@ -589,11 +589,84 @@ describe('B4 — one-tap approval runs the approval-time reference checks', () =
 
     expect(res.status).toBe(409);
     expect(res.text).toContain('Needs a closer look');
+    expect(res.text).toContain('something on it needs fixing first');
     expect(res.text).not.toContain('Approved');
     expect((await proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
     const types = (await auditRepo.findByEntity(TENANT, 'proposal', proposal.id)).map((e) => e.eventType);
     expect(types).not.toContain('proposal.approved');
     expect(types).not.toContain('proposal.one_tap_approved');
+  });
+});
+
+// B1 follow-up — a linked step (e.g. "send the estimate") whose earlier step
+// has not run yet is held by approveProposal's linked-step gate. The 409 page
+// said "something on it needs fixing", which is not what the owner has to do:
+// each linked-step hold says its own next step.
+describe('B4 follow-up — one-tap on a linked step says what to do about the earlier step', () => {
+  async function linkedStep(parentType: 'draft_estimate' | 'draft_invoice', parentStatus: 'ready_for_review' | 'approved' | 'rejected') {
+    const proposalRepo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const chainId = '33333333-3333-4333-8333-333333333333';
+    const kind = parentType === 'draft_invoice' ? 'invoiceId' : 'estimateId';
+    const parent = createProposal({
+      tenantId: TENANT,
+      proposalType: parentType,
+      payload: { customerId: '44444444-4444-4444-8444-444444444444', lineItems: [] },
+      summary: 'Estimate for Mrs Lee',
+      createdBy: 'voice',
+    });
+    applyChainMetadata(parent, { chainId, chainIndex: 0, chainLength: 2, dependsOnChainIndices: [], chainRefs: [] });
+    const child = createProposal({
+      tenantId: TENANT,
+      proposalType: parentType === 'draft_invoice' ? 'send_invoice' : 'send_estimate',
+      payload: { channel: 'sms' },
+      summary: 'Send it to Mrs Lee',
+      createdBy: 'voice',
+    });
+    applyChainMetadata(child, {
+      chainId,
+      chainIndex: 1,
+      chainLength: 2,
+      dependsOnChainIndices: [0],
+      chainRefs: [{ payloadPath: kind, parentChainIndex: 0, entityKind: kind }],
+    });
+    await proposalRepo.create({ ...parent, status: parentStatus });
+    await proposalRepo.create({ ...child, status: 'ready_for_review' });
+    const app = express();
+    app.use(
+      '/public/proposals',
+      createOneTapApproveRouter({ proposalRepo, auditRepo, secret: SECRET, consumeNonce: createInMemoryNonceStore() }),
+    );
+    // The voice fallback mints the only non-capture links, with `confirm`.
+    const { token } = createOneTapApproveToken({ proposalId: child.id, tenantId: TENANT, secret: SECRET, confirm: true });
+    const res = await request(app).post('/public/proposals/one-tap-approve').type('form').send({ token });
+    return { res, status: (await proposalRepo.findById(TENANT, child.id))?.status };
+  }
+
+  it('earlier step not approved yet: approve that one first', async () => {
+    const { res, status } = await linkedStep('draft_estimate', 'ready_for_review');
+    expect(res.status).toBe(409);
+    expect(res.text).toContain('Approve the earlier step first');
+    expect(res.text).toContain('This one depends on an earlier step that hasn’t run yet. Approve that one first');
+    expect(res.text).not.toContain('needs fixing');
+    expect(status).toBe('ready_for_review');
+  });
+
+  it('a send linked to an invoice that will be a draft: issue the invoice first', async () => {
+    const { res, status } = await linkedStep('draft_invoice', 'approved');
+    expect(res.status).toBe(409);
+    expect(res.text).toContain('Issue the invoice first');
+    expect(res.text).not.toContain('needs fixing');
+    expect(status).toBe('ready_for_review');
+  });
+
+  it('earlier step did not run: nothing for this one to act on', async () => {
+    const { res, status } = await linkedStep('draft_estimate', 'rejected');
+    expect(res.status).toBe(409);
+    expect(res.text).toContain('The earlier step this one depends on didn’t run');
+    expect(res.text).not.toContain('needs fixing');
+    expect(res.text).not.toContain('Approve the earlier step first');
+    expect(status).toBe('ready_for_review');
   });
 });
 

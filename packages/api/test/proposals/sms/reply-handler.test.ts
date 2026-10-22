@@ -236,7 +236,9 @@ describe('handleProposalSmsReply — approve', () => {
     expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe(
       'ready_for_review',
     );
-    expect(h.sent[0].body).toContain("Can't approve yet");
+    expect(h.sent[0].body).toBe(
+      "Can't approve yet — it's missing required info. Open your review queue to finish it.",
+    );
   });
 
   it('Y on a chain head approves capture members and reports linked-action counts', async () => {
@@ -1445,7 +1447,9 @@ describe('B4 — SMS approvals run the approval-time reference checks', () => {
     expect(result).toMatchObject({ handled: true, reason: 'approve_blocked' });
     expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
     expect(h.sent).toHaveLength(1);
-    expect(h.sent[0].body).toContain("Can't approve yet");
+    // B4 follow-up — nothing is missing: the job is another customer's. The
+    // reply says something needs fixing and where, not "missing required info".
+    expect(h.sent[0].body).toBe("Can't approve yet — something on it needs fixing first. Open it in the app to fix it.");
     expect(h.sent[0].body).not.toContain('Approved');
     expect(h.auditRepo.getAll().map((e) => e.eventType)).not.toContain('proposal.approved');
   });

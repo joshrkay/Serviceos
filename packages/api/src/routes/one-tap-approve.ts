@@ -27,6 +27,7 @@ import {
   approveChainSet,
   formatChainSetApprovalMessage,
   summarizeChainSetResult,
+  type LinkedStepHoldReason,
 } from '../proposals/actions';
 import { actionClassForProposalType, type ProposalRepository } from '../proposals/proposal';
 import type { ProposalSmsEventRepository } from '../proposals/sms/sms-event';
@@ -109,6 +110,26 @@ function page(title: string, body: string): string {
 h1{font-size:1.4rem}p{color:#555}</style></head>
 <body><h1>${title}</h1><p>${body}</p></body></html>`;
 }
+
+/**
+ * B4 follow-up — the page for a linked step held for its earlier step
+ * (approveProposal's linked-step gate, `details.linkedStepReason`): what to do
+ * about that earlier step, not a generic "something needs fixing".
+ */
+const LINKED_STEP_PAGES: Readonly<Record<LinkedStepHoldReason, { title: string; body: string }>> = {
+  approve_parent_first: {
+    title: 'Approve the earlier step first',
+    body: 'This one depends on an earlier step that hasn’t run yet. Approve that one first — this one unlocks once it has run. It’s waiting in your review queue.',
+  },
+  issue_invoice_first: {
+    title: 'Issue the invoice first',
+    body: 'The invoice this sends will be a draft. Once it exists, issue it, then approve this one from your review queue.',
+  },
+  parent_did_not_run: {
+    title: 'Nothing to act on',
+    body: 'The earlier step this one depends on didn’t run, so there’s nothing for it to act on. It’s still in your review queue.',
+  },
+};
 
 /** Minimal HTML-attribute/text escaping for values echoed into pages. */
 function escapeHtml(value: string): string {
@@ -514,6 +535,16 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
               'You can’t approve this one — the owner needs to. It’s still waiting in the review queue.',
             ),
           );
+        return;
+      }
+      // B4 follow-up — a linked step held for its earlier step: say what to
+      // do about that step, not that this one "needs fixing".
+      const linkedStepPage =
+        err instanceof ValidationError
+          ? LINKED_STEP_PAGES[err.details?.linkedStepReason as LinkedStepHoldReason]
+          : undefined;
+      if (linkedStepPage) {
+        res.status(409).type('html').send(page(linkedStepPage.title, linkedStepPage.body));
         return;
       }
       // B4 — still waiting, but something on it has to be fixed first (an

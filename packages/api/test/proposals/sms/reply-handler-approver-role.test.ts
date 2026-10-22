@@ -310,7 +310,10 @@ describe('B1 — a backup whose role cannot approve is refused outright', () => 
       expect(after.status).toBe('ready_for_review');
       expect(after.payload).toEqual(proposal.payload);
       expect(h.sent).toHaveLength(1);
-      expect(h.sent[0].body).toMatch(/can.t approve/i);
+      // B4 follow-up — one reply for Y, ALL, N and EDIT, so it names all three.
+      expect(h.sent[0].body).toBe(
+        'You can’t approve, reject or change work by text, so nothing changed. Ask the owner to handle it.',
+      );
       expect(h.sent[0].body).not.toMatch(/proposal|dashboard|AI\b|agent|verify/i);
       const types = h.auditRepo.getAll().map((e) => e.eventType);
       expect(types).toContain('proposal.sms_reply_role_cannot_approve');

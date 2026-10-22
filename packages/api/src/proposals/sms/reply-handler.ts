@@ -44,7 +44,7 @@ import type {
   FallbackHandler,
 } from '../../sms/inbound-dispatch';
 import type { Proposal, ProposalRepository } from '../proposal';
-import { actionClassForProposalType } from '../proposal';
+import { actionClassForProposalType, missingFieldsFor } from '../proposal';
 import type { ApprovalReferenceCheck } from '../approval-reference-checks';
 import {
   approveChainSet,
@@ -144,9 +144,13 @@ async function resolveSmsApprover(
   return approver ? { actorId: approver.userId ?? SMS_REPLY_ACTOR_ID, role: approver.role } : null;
 }
 
-/** B1 — a recognised approver whose role cannot approve (e.g. a technician backup). */
+/**
+ * B1 — a recognised approver whose role cannot approve (e.g. a technician
+ * backup). The one reply to their Y, APPROVE ALL, N and EDIT alike, so it
+ * names all three.
+ */
 const ROLE_CANNOT_APPROVE_REPLY =
-  'You can’t approve work by text, so nothing changed. Ask the owner to handle it.';
+  'You can’t approve, reject or change work by text, so nothing changed. Ask the owner to handle it.';
 
 /** B1 — an approval the sender's role does not reach (a settings change, for a dispatcher). */
 const NEEDS_OWNER_REPLY =
@@ -437,14 +441,23 @@ async function handleApprove(
     approvedSummary = result.approved[0]?.summary ?? proposal.summary;
   } catch (err) {
     if (err instanceof ValidationError) {
-      // Missing required fields — truthful, with the next step.
+      // B4 follow-up — a card with no unfilled field was held by the
+      // approval-time reference checks (e.g. its job belongs to another
+      // customer): nothing is missing, something on it needs fixing — which
+      // a text cannot do. Otherwise: missing required fields. Truthful, with
+      // the next step, either way.
+      const heldByReferenceCheck =
+        Array.isArray(err.details?.missingFields) && missingFieldsFor(proposal).length === 0;
       await audit(deps, ctx, 'proposal.sms_approve_blocked', proposal.id, {
         error: err.message,
+        ...(heldByReferenceCheck ? { heldBy: 'reference_check' } : {}),
       });
       await reply(
         deps,
         ctx.fromE164,
-        `Can't approve yet — it's missing required info. Open your review queue to finish it.`,
+        heldByReferenceCheck
+          ? `Can't approve yet — something on it needs fixing first. Open it in the app to fix it.`
+          : `Can't approve yet — it's missing required info. Open your review queue to finish it.`,
       );
       return { handled: true, handler: HANDLER_NAME, reason: 'approve_blocked' };
     }
