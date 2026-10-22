@@ -132,14 +132,16 @@ export interface ResolveEntityDeps {
 // the server's message), so they stay short and plain: never "proposal" or
 // the other words owner copy must not use. See ownerFacingPickError.
 const PICK_NOT_SAVED = 'This was already handled, so that choice was not saved.';
+const PICK_CHANGED = 'This changed while you were choosing. Please try again.';
 const PICK_ROW_GONE = 'This is no longer here, so that choice was not saved.';
 const PICK_NOTHING_TO_CHOOSE = 'There is nothing left to choose here.';
 const PICK_NOT_AN_OPTION = 'That choice is not one of the options.';
 const PICK_CANNOT_SAVE = 'That choice could not be saved.';
 const PICK_TRY_AGAIN = 'That could not be finished right now. Please try again.';
 
-/** The ValidationErrors this module words for the owner itself. */
+/** The ValidationErrors and ConflictErrors this module words for the owner itself. */
 const OWN_VALIDATION_COPY: ReadonlySet<string> = new Set([PICK_NOTHING_TO_CHOOSE, PICK_NOT_AN_OPTION]);
+const OWN_CONFLICT_COPY: ReadonlySet<string> = new Set([PICK_NOT_SAVED, PICK_CHANGED]);
 
 /**
  * A3-4 — the resolve-entity route's words for whatever a pick throws, keeping
@@ -147,7 +149,8 @@ const OWN_VALIDATION_COPY: ReadonlySet<string> = new Set([PICK_NOTHING_TO_CHOOSE
  * passes through from shared code is not, and that code's messages serve
  * other callers too, so they are mapped here rather than changed at source:
  *  - any ConflictError, including the repository's assertStatusWrite
- *    ("Cannot transition proposal from ..."), is the plain 409;
+ *    ("Cannot transition proposal from ..."), is the plain 409, unless it is
+ *    one of this module's own;
  *  - NotFoundError ("Proposal not found: <id>") is a plain 404;
  *  - a 429 or 5xx (the re-draft's gateway: "All providers failed ...", "AI
  *    provider rate limit reached ...") is "try again", keeping only a
@@ -158,7 +161,7 @@ const OWN_VALIDATION_COPY: ReadonlySet<string> = new Set([PICK_NOTHING_TO_CHOOSE
 export function ownerFacingPickError(err: unknown): unknown {
   if (!(err instanceof AppError)) return err;
   if (err instanceof ConflictError) {
-    return err.message === PICK_NOT_SAVED ? err : new ConflictError(PICK_NOT_SAVED, err.details);
+    return OWN_CONFLICT_COPY.has(err.message) ? err : new ConflictError(PICK_NOT_SAVED, err.details);
   }
   if (err instanceof NotFoundError) return new AppError(err.code, PICK_ROW_GONE, err.statusCode);
   if (err.statusCode === 429 || err.statusCode >= 500) {
@@ -177,12 +180,25 @@ export function ownerFacingPickError(err: unknown): unknown {
 }
 
 /**
- * The refusal for a pick that lost to a change someone else committed: the
- * row left review (approved, rejected, ...), or moved on under the pick (A3-1).
- * A 409 in the same plain words wherever it is detected.
+ * The refusal for a pick that lost to a change someone else committed and
+ * cannot be retried: the row left review (approved, rejected, ...), or another
+ * pick answered the question first (A3-1). A 409 in the same plain words
+ * wherever it is detected.
  */
 function pickNotSaved(status: ProposalStatus): ConflictError {
   return new ConflictError(PICK_NOT_SAVED, { status });
+}
+
+/**
+ * The refusal for a pick whose question is still open but whose row changed
+ * under it in a way the pick cannot build on (A3-1): the re-draft was made
+ * from the row as it was, or the choice now takes another path. A retry reads
+ * the row as it is now and goes through, so the owner is told to try again
+ * rather than that it was already handled (the change may be their own, from
+ * another tab).
+ */
+function pickRaced(status: ProposalStatus): ConflictError {
+  return new ConflictError(PICK_CHANGED, { status });
 }
 
 /**
@@ -555,10 +571,11 @@ function readPickAgain(row: Proposal, candidateId: string): PickRead {
  * is the same as rebuilding it whenever the row changed: an edit or a
  * resolve-line that committed in the gap is kept, and the pick lands on top.
  *
- * Unsafe to rebuild, refused with the 409: the row left review
- * (lockOpenForPick), the choice no longer fits it (another pick moved it on),
- * or it now takes a different path. Returns undefined when the locked row
- * shows this exact pick already landed (a double tap): no write, no audit.
+ * Unsafe to rebuild, refused with a 409: the row left review
+ * (lockOpenForPick) or the choice no longer fits it (another pick moved it
+ * on), both "already handled"; or it now takes a different path, "try again".
+ * Returns undefined when the locked row shows this exact pick already landed
+ * (a double tap): no write, no audit.
  */
 async function lockPickForPatch(
   deps: ResolveEntityDeps,
@@ -570,7 +587,7 @@ async function lockPickForPatch(
   const row = await lockOpenForPick(deps, tenantId, proposalId);
   const pick = readPickAgain(row, candidateId);
   if (pick.kind === 'already_applied') return undefined;
-  if (pathFor(pick, deps).kind !== expected) throw pickNotSaved(row.status);
+  if (pathFor(pick, deps).kind !== expected) throw pickRaced(row.status);
   return { row, pick };
 }
 
@@ -915,11 +932,13 @@ async function redraftResolvedProposal(
   // status write or audit row never leaves a re-drafted payload behind.
   const landed = await deps.transactionRunner.run(tenantId, async () => {
     // A3-1 — the draft came from `read`, across the LLM call. If the row
-    // moved since, the draft is stale: never write it over the change.
+    // moved since, the draft is stale: never write it over the change. When
+    // another pick answered the question, readPickAgain refuses it as already
+    // handled; when the question is still open, a retry goes through.
     const row = await lockOpenForPick(deps, tenantId, proposalId);
     if (changedSinceRead(read, row)) {
       if (readPickAgain(row, candidateId).kind === 'already_applied') return false;
-      throw pickNotSaved(row.status);
+      throw pickRaced(row.status);
     }
 
     await deps.proposalRepo.update(tenantId, proposalId, {

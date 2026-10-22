@@ -607,8 +607,9 @@ describe('A1 — resolve-entity holds no connection across its LLM call and comm
     const { response, after } = await pickRacingAnEdit(seeded.id);
 
     expect(response.status).toBe(409);
+    // The question is still open, so the owner is told to try again.
     expect(((await response.json()) as { message: string }).message).toBe(
-      'This was already handled, so that choice was not saved.',
+      'This changed while you were choosing. Please try again.',
     );
     const row = await proposalRow(seeded.id);
     expect(row.proposal_type).toBe('voice_clarification');

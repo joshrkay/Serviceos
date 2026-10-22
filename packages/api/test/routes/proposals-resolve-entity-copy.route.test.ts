@@ -161,6 +161,35 @@ describe('A3-4 — resolve-entity owner copy', () => {
     expectOwnerCopy(res, 409, 'This was already handled, so that choice was not saved.');
   });
 
+  it('an edit landing during the re-draft: 409 that says to try again, and a retry saves the choice', async () => {
+    const seeded = await proposalRepo.create(clarification());
+    // The owner edits the card (another tab) while the re-draft runs.
+    let editsLeft = 1;
+    const editDuringTheDraft: TaskHandler = {
+      taskType: 'draft_invoice',
+      handle: async (ctx) => {
+        if (editsLeft-- > 0) {
+          const row = await proposalRepo.findById(TENANT, seeded.id);
+          await proposalRepo.update(TENANT, seeded.id, {
+            payload: { ...row!.payload, transcript: 'invoice Bob for the water heater and the filter' },
+          });
+        }
+        return drafting.handle(ctx);
+      },
+    };
+    const a = app(editDuringTheDraft);
+
+    const raced = await pick(a, seeded.id);
+
+    expectOwnerCopy(raced, 409, 'This changed while you were choosing. Please try again.');
+    expect((await proposalRepo.findById(TENANT, seeded.id))!.proposalType).toBe('voice_clarification');
+
+    const retried = await pick(a, seeded.id);
+
+    expect(retried.status).toBe(200);
+    expect(retried.body.proposalType).toBe('draft_invoice');
+  });
+
   it.each([
     [
       'the provider is down',
@@ -214,6 +243,7 @@ describe('A3-4 — ownerFacingPickError', () => {
       new ValidationError('There is nothing left to choose here.'),
       new ForbiddenError(),
       new ConflictError('This was already handled, so that choice was not saved.', { status: 'approved' }),
+      new ConflictError('This changed while you were choosing. Please try again.', { status: 'draft' }),
     ]) {
       expect(ownerFacingPickError(err)).toBe(err);
     }

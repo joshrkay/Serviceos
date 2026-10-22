@@ -1636,6 +1636,29 @@ describe('A1 — resolveProposalEntity commits each path in one short transactio
       expect(aliasCapture.capture).not.toHaveBeenCalled();
     });
 
+    it('annotate-only: a change that makes the choice take another path is refused with "try again"; nothing is written', async () => {
+      await repo.create(clarification());
+      // Another reference to settle lands on the card after the read, so the
+      // locked row would advance to it rather than annotate.
+      afterTheRead(async () => {
+        const row = await InMemoryProposalRepository.prototype.findById.call(repo, TENANT_UUID, PROPOSAL);
+        await InMemoryProposalRepository.prototype.update.call(repo, TENANT_UUID, PROPOSAL, {
+          sourceContext: { ...row!.sourceContext, ...PENDING_JOB },
+        });
+      });
+      const aliasCapture = capture();
+
+      const err = await resolve({ entityAliasCandidateCapture: aliasCapture }).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(ConflictError);
+      expect((err as Error).message).toBe('This changed while you were choosing. Please try again.');
+      expect(events).toEqual([`BEGIN ${TENANT_UUID}`, 'findByIdsForUpdate (in tx)', 'ROLLBACK']);
+      const row = await repo.findById(TENANT_UUID, PROPOSAL);
+      expect((row!.payload as Record<string, unknown>).customerId).toBeUndefined();
+      expect(await resolvedAuditCount()).toBe(0);
+      expect(aliasCapture.capture).not.toHaveBeenCalled();
+    });
+
     it('annotate-only: the same pick landing first (a double tap) is a no-op success, not a second write', async () => {
       await repo.create(clarification());
       anotherPickLands(CUST_B);
@@ -1688,7 +1711,8 @@ describe('A1 — resolveProposalEntity commits each path in one short transactio
       }).catch((e: unknown) => e);
 
       expect(err).toBeInstanceOf(ConflictError);
-      expect((err as Error).message).toBe('This was already handled, so that choice was not saved.');
+      // The question is still open, so a retry works: say so, not "handled".
+      expect((err as Error).message).toBe('This changed while you were choosing. Please try again.');
       expect(events).toEqual(['LLM (no tx)', `BEGIN ${TENANT_UUID}`, 'findByIdsForUpdate (in tx)', 'ROLLBACK']);
       const row = await repo.findById(TENANT_UUID, PROPOSAL);
       expect(row!.proposalType).toBe('voice_clarification');
@@ -1708,6 +1732,8 @@ describe('A1 — resolveProposalEntity commits each path in one short transactio
       const err = await resolve({ redraftHandlerFactory: () => draftingHandler() }).catch((e: unknown) => e);
 
       expect(err).toBeInstanceOf(ConflictError);
+      // The other pick answered the question: nothing is left to retry.
+      expect((err as Error).message).toBe('This was already handled, so that choice was not saved.');
       expect(events).toEqual(['LLM (no tx)', `BEGIN ${TENANT_UUID}`, 'findByIdsForUpdate (in tx)', 'ROLLBACK']);
       const row = await repo.findById(TENANT_UUID, PROPOSAL);
       expect((row!.sourceContext as Record<string, unknown>).resolvedEntity).toMatchObject({ id: CUST_A });
