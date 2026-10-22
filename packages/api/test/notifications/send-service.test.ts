@@ -789,6 +789,49 @@ describe("SendService — the owner's own text wording (D-045)", () => {
     expect(body).toMatch(/^Hi Sarah Johnson! Acme HVAC quote EST-1042: \$875\.00\nGood for 30 days\nhttps:\/\/app\.example\.com\/e\/[\w-]+$/);
   });
 
+  it('reads the wording once, before any channel goes out (channels share the request connection)', async () => {
+    const { j } = await seedJob();
+    const est = makeEstimate(j.id);
+    await h.estimate.create(est);
+    const events: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const sendEmail = vi.spyOn(h.delivery, 'sendEmail');
+    sendEmail.mockImplementation(async () => {
+      events.push('email');
+      return { provider: 'mem', providerMessageId: 'e-1', channel: 'email' } as never;
+    });
+    const ordered = new SendService(
+      withOutbound({
+        delivery: h.delivery,
+        estimateRepo: h.estimate,
+        invoiceRepo: h.invoice,
+        jobRepo: h.job,
+        customerRepo: h.customer,
+        settingsRepo: h.settings,
+        dispatchRepo: h.dispatch,
+        publicBaseUrl: 'https://app.example.com',
+        ensureInvoicePayLink: async () => undefined,
+        wording: {
+          textFor: async (args) => {
+            events.push('wording:start');
+            await gate;
+            events.push('wording:end');
+            return args.builtIn();
+          },
+        },
+      }),
+    );
+
+    const sending = ordered.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'both' });
+    await new Promise((r) => setTimeout(r, 10));
+    expect(events).toEqual(['wording:start']);
+    release();
+    await sending;
+
+    expect(events.slice(0, 3)).toEqual(['wording:start', 'wording:end', 'email']);
+  });
+
   it('the email is untouched by the text wording', async () => {
     const { j } = await seedJob();
     const est = makeEstimate(j.id);
