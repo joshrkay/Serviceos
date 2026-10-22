@@ -205,6 +205,9 @@ describe('Postgres integration — drip campaigns (migrations 336/337/350)', () 
     await seedAgreement(past, { endsOn: daysAhead(-5) });
     const cancelled = await seedCustomer('Cancelled');
     await seedAgreement(cancelled, { status: 'cancelled' });
+    // Active but not started yet (a short term beginning next week): not up for renewal.
+    const notStarted = await seedCustomer('NotStartedYet');
+    await seedAgreement(notStarted, { startsOn: daysAhead(7), endsOn: daysAhead(25) });
     const covered = await seedCustomer('AlreadyRenewed');
     await seedAgreement(covered);
     await seedAgreement(covered, { startsOn: daysAhead(21), endsOn: daysAhead(385), createdAt: daysAgo(1) });
@@ -221,7 +224,7 @@ describe('Postgres integration — drip campaigns (migrations 336/337/350)', () 
       sourceDueOn: daysAhead(20),
     });
     const ids = targets.map((t) => t.customerId);
-    for (const skipped of [auto, far, past, cancelled, covered]) expect(ids).not.toContain(skipped);
+    for (const skipped of [auto, far, past, cancelled, notStarted, covered]) expect(ids).not.toContain(skipped);
     expect(ids).toContain(gap);
 
     // The widened CHECKs accept the new kind and exit reason.

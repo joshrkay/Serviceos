@@ -296,6 +296,8 @@ export class PgDripSignals extends PgBaseRepository implements DripSignals {
             WHERE a.tenant_id = $1 AND a.status = 'active' AND a.auto_renew = false
               AND c.is_archived = false
               AND a.ends_on IS NOT NULL
+              -- a term that has not started yet is not up for renewal
+              AND a.starts_on <= ($2::timestamptz)::date
               AND a.ends_on >= ($2::timestamptz)::date
               AND a.ends_on <= ($2::timestamptz + make_interval(days => $3))::date
               AND NOT EXISTS (SELECT 1 FROM service_agreements o
