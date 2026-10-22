@@ -129,6 +129,7 @@ import {
 import { createConversationRouter } from './routes/conversations';
 import { createSettingsRouter } from './routes/settings';
 import { createBrandVoiceRouter } from './tenants/brand/brand-voice-router';
+import { createGetFoundRouter } from './get-found/get-found-router';
 import { listAllTenantIds } from './tenants/list-tenant-ids';
 import { createDncRouter } from './routes/dnc';
 import { createVerticalRouter } from './routes/verticals';
@@ -6311,6 +6312,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     '/api/settings/brand-voice',
     createBrandVoiceRouter(brandVoiceRepo, settingsRepo, auditRepo),
   );
+  // #1750 (D-044) — the Get-found checklist: derived from facts on every read;
+  // the owner's answers (presence path, call routing mode, skips) are audited.
+  if (pool) {
+    app.use('/api/get-found', createGetFoundRouter({ pool, settingsRepo, auditRepo }));
+  }
   // #1564 — owner-only A2P 10DLC texting registration (Settings → Phone).
   // Mounted whenever there is a database; answers 503 without
   // TENANT_ENCRYPTION_KEY because the EIN must be stored encrypted.

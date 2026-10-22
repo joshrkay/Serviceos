@@ -31,6 +31,7 @@ import { InMemoryAuditRepository } from '../../src/audit/audit';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 import type { VapiClient } from '../../src/integrations/vapi/client';
 import { runOrphanedNumberSweep } from '../../src/workers/orphaned-number-sweep';
+import { loadGetFoundFacts } from '../../src/get-found/load-facts';
 import type { OperatorAlert } from '../../src/monitoring/alert-operator';
 
 const KEY = 'a'.repeat(64);
@@ -241,6 +242,39 @@ describe('Postgres integration — change-number cleanup (#1575)', () => {
     expect([...vapi.live]).toEqual(['vpn-1575-3']);
     const line = await request(app).get('/api/onboarding/phone');
     expect(line.body).toMatchObject({ state: 'active', phoneNumber: THIRD_PICK, changeError: null });
+  });
+
+  it('a number change voids the call-routing proof until the new number proves itself (#1750)', async () => {
+    const { tenantId, queue, app } = await activeTenantWithVapi(fakeVapi().client);
+    await pool.query(
+      `UPDATE tenant_settings
+          SET activated_at = now() - interval '1 day', forwarding_verified_at = now() - interval '1 day',
+              forwarding_generation = 2
+        WHERE tenant_id = $1`,
+      [tenantId],
+    );
+    await pool.query(
+      `INSERT INTO voice_sessions (id, tenant_id, channel, state, started_at, ended_at)
+       VALUES (gen_random_uuid(), $1, 'voice_inbound', 'ended', now() - interval '1 day', now() - interval '1 day')`,
+      [tenantId],
+    );
+
+    await request(app).post('/api/onboarding/phone/change').send({ phoneNumber: SECOND_PICK });
+    await drain(queue, pool);
+
+    const after = await loadGetFoundFacts(pool, tenantId);
+    expect(after.forwardingCheckPassedAt).toBeNull();
+    expect(after.firstRealCallReceived).toBe(false);
+    const { rows } = await pool.query(`SELECT forwarding_generation AS g FROM tenant_settings WHERE tenant_id = $1`, [tenantId]);
+    expect(rows[0].g).toBe(3);
+
+    // A call that reaches the NEW number proves it again.
+    await pool.query(
+      `INSERT INTO voice_sessions (id, tenant_id, channel, state, started_at, ended_at)
+       VALUES (gen_random_uuid(), $1, 'voice_inbound', 'ended', now() + interval '1 second', now() + interval '2 seconds')`,
+      [tenantId],
+    );
+    expect((await loadGetFoundFacts(pool, tenantId)).firstRealCallReceived).toBe(true);
   });
 
   function sweepDeps(tenantId: string) {
