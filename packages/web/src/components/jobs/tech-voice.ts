@@ -27,9 +27,21 @@ const STATUS_PATTERNS: Array<[RegExp, TechStatus]> = [
 const NOT_DONE_RE =
   /\b(not|isn'?t|aren'?t|won'?t|haven'?t|hasn'?t|almost|nearly|should be|will be|hope to be|tomorrow|later)\b[^.!?]{0,25}\b(done|finished|complete)/i;
 
+// A negation just before a status phrase cancels it: "not waiting on parts
+// anymore", "we don't need to order anything", "no longer on my way".
+const NEGATED_BEFORE_RE =
+  /\b(?:not|no longer|never|don'?t|doesn'?t|didn'?t|isn'?t|aren'?t|wasn'?t|won'?t|haven'?t|hasn'?t|no need to)\b[^.!?;,]{0,15}$/i;
+
+function negated(text: string, pattern: RegExp): boolean {
+  const global = new RegExp(pattern.source, pattern.flags.includes('g') ? pattern.flags : `${pattern.flags}g`);
+  const matches = [...text.matchAll(global)];
+  return matches.length > 0 && matches.every((m) => NEGATED_BEFORE_RE.test(text.slice(0, m.index)));
+}
+
 export function suggestTechStatus(text: string): TechStatus | undefined {
   for (const [pattern, status] of STATUS_PATTERNS) {
     if (!pattern.test(text)) continue;
+    if (negated(text, pattern)) continue;
     if (status === 'complete' && NOT_DONE_RE.test(text)) continue;
     return status;
   }

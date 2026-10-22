@@ -9,6 +9,9 @@ describe('suggestTechStatus', () => {
     ["all done here, system's cooling", 'complete'],
     ['finished up, replaced the capacitor', 'complete'],
     ["I'm here, starting the job", 'in_progress'],
+    // A negated phrase is skipped, so the next status in the words wins.
+    ['not waiting on parts anymore, all done', 'complete'],
+    ["we don't need to order anything; we're done", 'complete'],
   ])('%j → %s', (text, status) => {
     expect(suggestTechStatus(text)).toBe(status);
   });
@@ -19,6 +22,8 @@ describe('suggestTechStatus', () => {
     'replaced the 45/5 capacitor and a contactor',
     'customer wants a quote for a new condenser',
     'the job will be done after lunch',
+    'no longer waiting for parts',
+    "I'm not on my way yet",
   ])('%j suggests nothing', (text) => {
     expect(suggestTechStatus(text)).toBeUndefined();
   });
