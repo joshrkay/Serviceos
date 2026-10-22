@@ -496,6 +496,12 @@ describe('AnswerAsScreen', () => {
       hear('Come Again Cleaning');
       await nameSettles();
       expect(nameField()).toHaveValue('Come Again Cleaning');
+      cleanup();
+      await startOutLoud();
+      hear('Spell It Right Roofing');
+      await nameSettles();
+      expect(nameField()).toHaveValue('Spell It Right Roofing');
+      expect(transcript()).toHaveTextContent("I've got Spell It Right Roofing.");
     });
 
     it('corrections: "no, it\'s …" over the read-back fixes the name; "no, change the number" on the check changes it', async () => {

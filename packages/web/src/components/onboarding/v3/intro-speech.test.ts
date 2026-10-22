@@ -102,6 +102,7 @@ describe('matchTrade', () => {
     ['septic', 'plumbing'],
     ['mechanical', 'hvac'],
     ['general contractor', 'other'],
+    ['contractor', 'other'],
   ])('a named trade beats a word for other work: %j is %s', (said, packId) => {
     expect(matchTrade(said)).toEqual({ kind: 'trade', packId });
   });
@@ -139,6 +140,7 @@ describe('parseSpokenCell', () => {
     ['+44 20 7946 0958', '+442079460958'],
     ['016-555-0142', '0165550142'],
     ['216-555-0142-99', '216555014299'],
+    ['21655501421234567', '21655501421234567'],
   ])('%j is digits but not a US cell', (said, digits) => {
     expect(parseSpokenCell(said)).toEqual({ kind: 'not_us', digits });
   });

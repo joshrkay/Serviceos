@@ -5,6 +5,7 @@ import { RivetVoiceContext, useRivetTurnListener } from '../../../hooks/useRivet
 import { interpretUtterance, type ScreenCommand, type Utterance, type UtteranceScreen } from '../../../lib/onboarding-utterance';
 import { Button } from '../../ui';
 import { cn } from '../../ui/utils';
+import { spokenWords } from '../../../lib/option-matcher';
 import { isUsCellNumber } from './cell-number';
 import {
   ASK_CELL,
@@ -72,6 +73,12 @@ const CHANGE: readonly ScreenCommand[] = [
 ];
 /** Boosted for the transcription on this screen: the trades as Rivet names them. */
 const INTRO_KEYTERMS = TRADES.map((t) => t.spoken);
+/** The words said are exactly one of the screen's command phrases, nothing more. */
+function saidOnly(transcript: string, screen: UtteranceScreen): boolean {
+  const said = spokenWords(transcript).join(' ');
+  return (screen.commands ?? []).some((c) => c.phrases.some((p) => spokenWords(p).join(' ') === said));
+}
+
 /** A correction word that opens an answer ("no, …", "wait, …"). */
 const CORRECTION = /^\s*(no|nope|wait|actually|sorry)\b[\s,.!]*/i;
 /** A correction that names the business again ("no, it's Walsh Plumbing"). */
@@ -323,6 +330,11 @@ export function AnswerAsScreen({ onSubmit, initial, cellProblem = null }: Answer
     enabled: step !== null && !sent && !typing && !tappingTrade,
     onResult: (said: Utterance) => {
       if (sentRef.current || step === null) return;
+      // While the name is being given, a command must be all that was said: "Spell It Right Roofing" is a name.
+      if (said.kind === 'command' && (step === 'name' || step === 'spell') && !saidOnly(said.transcript, listenFor)) {
+        answer(said.transcript);
+        return;
+      }
       if (said.kind === 'help') say(lastLines.current);
       else if (said.kind === 'command') command(said.command);
       else if (said.kind === 'free') answer(said.text);

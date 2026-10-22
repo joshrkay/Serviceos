@@ -130,7 +130,7 @@ const TRADE_WORDS: ReadonlyArray<[TradePackId, readonly string[]]> = [
       'something else', 'other', 'none of those', 'none of them', 'roofing', 'roofer', 'roofers', 'landscaping', 'landscaper',
       'lawn', 'painting', 'painter', 'painters', 'cleaning', 'cleaner', 'cleaners', 'handyman', 'pest', 'garage door',
       'garage doors', 'appliance', 'appliances', 'locksmith', 'pool', 'pools', 'carpentry', 'carpenter', 'flooring',
-      'remodeling', 'construction', 'general contractor', 'solar', 'gutter', 'gutters', 'window',
+      'remodeling', 'construction', 'contractor', 'general contractor', 'solar', 'gutter', 'gutters', 'window',
       'windows', 'concrete', 'masonry', 'fencing', 'tree', 'trees', 'pressure washing', 'junk', 'moving',
     ],
   ],
@@ -289,10 +289,11 @@ export function parseSpokenCell(transcript: string): SpokenCell {
   }
 
   if (digits === '') return { kind: 'none' };
-  // Two numbers in one breath ("my cell is …, the office is …", or the cell said twice): the first is the cell.
-  if (!plus && digits.length >= 17) {
+  // Two whole numbers in one breath ("my cell is …, the office is …", or the cell said twice): the first is
+  // the cell. Only when both halves are numbers: one long number is never cut down to a cell.
+  if (!plus && digits.length >= 20) {
     const first = digits.startsWith('1') ? digits.slice(0, 11) : digits.slice(0, 10);
-    if (isUsCellNumber(first)) digits = first;
+    if (isUsCellNumber(first) && isUsCellNumber(digits.slice(first.length))) digits = first;
   }
   const typed = `${plus ? '+' : ''}${digits}`;
   if (!isUsCellNumber(typed)) return { kind: 'not_us', digits: typed };
