@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { InMemoryConversationRepository } from '../../src/conversations/conversation-service';
-import { createLsaSpeedToLeadSender } from '../../src/lsa/lsa-speed-to-lead-sender';
+import { createLeadConversationSender } from '../../src/leads/lead-conversation-sender';
 import type { Lead } from '../../src/leads/lead';
 
 const TENANT = 'tenant-1';
@@ -16,7 +16,7 @@ function setup(opts: { dnc?: boolean } = {}) {
     id: 'lead-1', tenantId: TENANT, firstName: 'Jane', lastName: '', primaryPhone: '+15555550123',
     source: 'marketplace', stage: 'new',
   } as Lead;
-  const sender = createLsaSpeedToLeadSender({
+  const sender = createLeadConversationSender({
     reply: {
       conversationRepo,
       customerRepo: { findById: vi.fn().mockResolvedValue(null) },
@@ -31,11 +31,11 @@ function setup(opts: { dnc?: boolean } = {}) {
      
     auditRepo: auditRepo as any,
     getBusinessName: async () => 'Cool Air',
-  });
+  }, { title: 'Google Local Services lead', actorId: 'system:lsa' });
   return { sender, delivery, auditRepo, conversationRepo };
 }
 
-describe('createLsaSpeedToLeadSender (#1738)', () => {
+describe('createLeadConversationSender (#1738)', () => {
   it('sends an SMS reply on the lead conversation', async () => {
     const { sender, delivery } = setup();
     await sender({ tenantId: TENANT, leadId: 'lead-1', toPhone: '+15555550123', body: 'hello' });
@@ -56,5 +56,12 @@ describe('createLsaSpeedToLeadSender (#1738)', () => {
     await sender({ tenantId: TENANT, leadId: 'lead-1', toPhone: '+15555550123', body: 'a' });
     await sender({ tenantId: TENANT, leadId: 'lead-1', toPhone: '+15555550123', body: 'b' });
     expect(await conversationRepo.findByEntity(TENANT, 'lead', 'lead-1')).toHaveLength(1);
+  });
+
+  it('opens the conversation under the caller-supplied title and actor', async () => {
+    const { sender, conversationRepo } = setup();
+    await sender({ tenantId: TENANT, leadId: 'lead-1', toPhone: '+15555550123', body: 'a' });
+    const [conversation] = await conversationRepo.findByEntity(TENANT, 'lead', 'lead-1');
+    expect(conversation).toMatchObject({ title: 'Google Local Services lead', createdBy: 'system:lsa' });
   });
 });

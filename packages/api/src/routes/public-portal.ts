@@ -34,7 +34,9 @@ import { LeadRepository } from '../leads/lead';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { SettingsRepository } from '../settings/settings';
 import { ProposalRepository, createProposal } from '../proposals/proposal';
-import { createLead } from '../leads/lead-service';
+import { captureLead } from '../leads/lead-service';
+import type { NewLeadAutoReply } from '../leads/new-lead-auto-reply';
+import { normalizePhone } from '../shared/phone';
 import {
   findBookableSlots,
   isWithinBusinessHours,
@@ -108,6 +110,8 @@ export interface PublicPortalDeps {
   customerPaymentMethodRepo?: CustomerPaymentMethodRepository;
   stripeConfig?: { apiKey: string };
   connectAccountResolver?: ConnectAccountResolver;
+  /** #1738 — instant reply text for a new service request (owner opt-in). */
+  autoReplyToNewLead?: NewLeadAutoReply;
   /** Test override for the Stripe fetch impl. */
   stripeFetch?: StripeFetch;
   /** Test override for the token middleware (rate limit / clock). */
@@ -128,6 +132,8 @@ const requestServiceSchema = z.object({
    * "anything else?". Both end up concatenated into `notes`.
    */
   summary: z.string().trim().min(1).max(2000),
+  /** #1738 — the request form's unticked "text me about this request" box. */
+  smsConsent: z.boolean().optional(),
 });
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -569,7 +575,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
       // so we drop the prior workaround (`source='web_form' +
       // sourceDetail='Customer Portal'`) in favor of the dedicated enum.
       // The DB CHECK constraint accepts it via migration 068.
-      const lead = await createLead(
+      const { lead, outcome } = await captureLead(
         {
           tenantId,
           firstName: parsed.firstName ?? customer.firstName,
@@ -585,6 +591,21 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         deps.leadRepo,
         deps.auditRepo,
       );
+
+      if (deps.autoReplyToNewLead) {
+        // The customer's stored SMS consent covers the number it was given
+        // for — not a different number typed into this form.
+        const storedConsentApplies =
+          customer.smsConsent === true &&
+          !!customer.primaryPhone &&
+          !!lead.primaryPhone &&
+          normalizePhone(customer.primaryPhone) === normalizePhone(lead.primaryPhone);
+        await deps.autoReplyToNewLead({
+          lead,
+          outcome,
+          smsConsent: parsed.smsConsent === true || storedConsentApplies,
+        });
+      }
 
       res.status(201).json({
         leadId: lead.id,

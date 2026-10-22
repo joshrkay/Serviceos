@@ -3,7 +3,7 @@
  *
  * Submits a `POST /api/public/portal/:token/request-service`. The
  * server creates a lead with `tenantId = req.portal.tenantId` and
- * `source = 'web_form'` / `sourceDetail = 'Customer Portal'`. The
+ * `source = 'customer_portal'`. The
  * UI validates a non-empty summary client-side before posting.
  */
 import { FormEvent, useState } from 'react';
@@ -16,6 +16,8 @@ interface FormState {
   notes: string;
   primaryPhone: string;
   email: string;
+  /** #1738 — starts unticked; a tick lets the instant reply text go out. */
+  smsConsent: boolean;
 }
 
 export function PortalRequestService({ token }: { token: string }) {
@@ -24,6 +26,7 @@ export function PortalRequestService({ token }: { token: string }) {
     notes: '',
     primaryPhone: '',
     email: '',
+    smsConsent: false,
   });
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -47,6 +50,7 @@ export function PortalRequestService({ token }: { token: string }) {
         notes: form.notes.trim() || undefined,
         primaryPhone: form.primaryPhone.trim() || undefined,
         email: form.email.trim() || undefined,
+        smsConsent: form.smsConsent,
       });
       setDone(true);
     } catch (err) {
@@ -125,6 +129,22 @@ export function PortalRequestService({ token }: { token: string }) {
           />
         </div>
       </div>
+
+      <label
+        data-testid="portal-sms-consent"
+        className="flex min-h-11 cursor-pointer items-start gap-3 rounded-lg border border-border px-3 py-2.5"
+      >
+        <input
+          type="checkbox"
+          checked={form.smsConsent}
+          onChange={(e) => update('smsConsent', e.target.checked)}
+          className="mt-0.5 h-5 w-5 shrink-0"
+        />
+        <span className="min-w-0 text-sm text-foreground">
+          Text me about this request.{' '}
+          <span className="text-muted-foreground">Msg &amp; data rates may apply. Reply STOP to opt out.</span>
+        </span>
+      </label>
 
       {error ? <div className="text-sm text-destructive">{error}</div> : null}
 

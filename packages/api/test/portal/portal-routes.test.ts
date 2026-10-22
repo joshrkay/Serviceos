@@ -7,7 +7,7 @@
  *   - Public read endpoints (customer/estimates/invoices/jobs/agreements/appointments)
  *   - Public POST /:token/request-service creates a lead with source='web_form'
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import express, { Request, Response, NextFunction } from 'express';
 import request from 'supertest';
 import { v4 as uuidv4 } from 'uuid';
@@ -59,6 +59,9 @@ async function build(opts: {
   invoiceRepoOverride?: import('../../src/invoices/invoice').InvoiceRepository;
   /** WS6 — when supplied, the portal resolves the tenant timezone from it. */
   tenantTimezone?: string;
+  /** #1738 — instant-reply hook; the customer's stored SMS consent. */
+  autoReplyToNewLead?: import('../../src/leads/new-lead-auto-reply').NewLeadAutoReply;
+  customerSmsConsent?: boolean;
 } = {}): Promise<Harness> {
   const app = express();
   app.use(express.json());
@@ -99,7 +102,7 @@ async function build(opts: {
     email: 'pat@example.com',
     primaryPhone: '+15555550100',
     preferredChannel: 'email',
-    smsConsent: false,
+    smsConsent: opts.customerSmsConsent ?? false,
     isArchived: false,
     createdBy: ACTOR,
     createdAt: new Date(),
@@ -122,6 +125,7 @@ async function build(opts: {
       auditRepo,
       settingsRepo,
       paymentLinkProvider: opts.paymentLinkProvider,
+      ...(opts.autoReplyToNewLead ? { autoReplyToNewLead: opts.autoReplyToNewLead } : {}),
     }),
   );
 
@@ -743,6 +747,38 @@ describe('P10-001 POST /api/public/portal/:token/request-service', () => {
     const leads = h.leadRepo.getAll();
     expect(leads[0].tenantId).toBe(TENANT);
     expect(leads[0].tenantId).not.toBe(evilTenant);
+  });
+});
+
+describe('#1738 portal service request: instant reply consent', () => {
+  async function submit(opts: { customerSmsConsent?: boolean; body: Record<string, unknown> }) {
+    const autoReplyToNewLead = vi.fn(async () => 'sent');
+    const h = await build({ autoReplyToNewLead, customerSmsConsent: opts.customerSmsConsent });
+    const token = await mintToken(h);
+    const res = await request(h.app)
+      .post(`/api/public/portal/${token}/request-service`)
+      .send({ summary: 'Water heater leaking', ...opts.body });
+    expect(res.status).toBe(201);
+    return autoReplyToNewLead.mock.calls[0][0] as { outcome: string; smsConsent: boolean; lead: { id: string } };
+  }
+
+  it('passes a ticked box as consent for a new request', async () => {
+    const call = await submit({ body: { smsConsent: true } });
+    expect(call).toMatchObject({ outcome: 'created', smsConsent: true });
+  });
+
+  it('is no consent when the box is unticked and the customer never agreed to texts', async () => {
+    expect((await submit({ body: {} })).smsConsent).toBe(false);
+  });
+
+  it("counts the customer's stored consent for the number on file", async () => {
+    expect((await submit({ customerSmsConsent: true, body: {} })).smsConsent).toBe(true);
+    expect((await submit({ customerSmsConsent: true, body: { primaryPhone: '(555) 555-0100' } })).smsConsent).toBe(true);
+  });
+
+  it('does not carry stored consent over to a different number typed into the form', async () => {
+    const call = await submit({ customerSmsConsent: true, body: { primaryPhone: '+15555550199' } });
+    expect(call.smsConsent).toBe(false);
   });
 });
 

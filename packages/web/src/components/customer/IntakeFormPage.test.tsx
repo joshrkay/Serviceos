@@ -32,7 +32,7 @@ function setTenantQueryParam(t: string | null): void {
  * click — used by the missing-tenant-id test to clear `?t=` so `submit()`
  * re-reads the URL and throws.
  */
-async function completeWizard(beforeSubmit?: () => void): Promise<void> {
+async function completeWizard(beforeSubmit?: () => void, onContactStep?: () => void): Promise<void> {
   // Step 1 — pick a service.
   fireEvent.click(screen.getByTestId('intake-service-hvac'));
   fireEvent.click(screen.getByTestId('intake-cta'));
@@ -49,6 +49,7 @@ async function completeWizard(beforeSubmit?: () => void): Promise<void> {
   fireEvent.change(screen.getByTestId('intake-field-phone'), {
     target: { value: '(512) 555-0191' },
   });
+  onContactStep?.();
   fireEvent.click(screen.getByTestId('intake-cta'));
   // Step 4 — review, then submit.
   beforeSubmit?.();
@@ -110,9 +111,26 @@ describe('IntakeFormPage', () => {
     expect(payload.attribution).toBeDefined();
     expect(payload.serviceType).toBe('HVAC Services');
     expect(payload.urgency).toBe('Emergency');
+    // #1738 — the text-me box starts unticked: no tick, no consent.
+    expect(payload.smsConsent).toBe(false);
     expect(payload.description).toBe(
       'Service: HVAC Services — Urgency: Emergency — AC stopped blowing cold air yesterday.',
     );
+  });
+
+  it('#1738 — sends smsConsent only when the visitor ticks the text-me box (a ≥44px row)', async () => {
+    render(<IntakeFormPage />);
+    await screen.findByTestId('intake-service-hvac');
+    await completeWizard(undefined, () => {
+      const row = screen.getByTestId('intake-sms-consent');
+      expect(row.className).toContain('min-h-11');
+      const box = screen.getByRole('checkbox', { name: /text me about this request/i });
+      expect(box).not.toBeChecked();
+      fireEvent.click(box);
+    });
+
+    await waitFor(() => expect(submitIntakeLead).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(submitIntakeLead).mock.calls[0][1].smsConsent).toBe(true);
   });
 
   it('renders only the service types returned by the tenant info endpoint', async () => {

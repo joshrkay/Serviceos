@@ -286,4 +286,41 @@ describe('public-intake route', () => {
       expect(res.body.businessPhone).toBeNull();
     });
   });
+
+  describe('#1738 instant reply consent', () => {
+    function appWithAutoReply() {
+      const autoReplyToNewLead = vi.fn(async () => 'sent');
+      const a = express();
+      a.use(express.json());
+      a.use(
+        '/public/intake',
+        createPublicIntakeRouter(leadRepo, tenantRepo, auditRepo, settingsRepo, packRegistry, undefined, autoReplyToNewLead),
+      );
+      return { a, autoReplyToNewLead };
+    }
+    const visitor = { firstName: 'Sandra', primaryPhone: '5125550100' };
+
+    it('passes only an explicit ticked box as consent', async () => {
+      const { a, autoReplyToNewLead } = appWithAutoReply();
+      await request(a).post(`/public/intake/${tenantId}/leads`).send({ ...visitor, smsConsent: true }).expect(201);
+      expect(autoReplyToNewLead.mock.calls[0][0]).toMatchObject({ outcome: 'created', smsConsent: true });
+
+      await request(a).post(`/public/intake/${tenantId}/leads`).send({ firstName: 'Ann', primaryPhone: '5125550111' }).expect(201);
+      expect(autoReplyToNewLead.mock.calls[1][0]).toMatchObject({ smsConsent: false });
+    });
+
+    it('tells the auto-reply a repeat submission is not a new lead', async () => {
+      const { a, autoReplyToNewLead } = appWithAutoReply();
+      await request(a).post(`/public/intake/${tenantId}/leads`).send({ ...visitor, smsConsent: true }).expect(201);
+      await request(a).post(`/public/intake/${tenantId}/leads`).send({ ...visitor, smsConsent: true }).expect(201);
+      expect(autoReplyToNewLead.mock.calls.map((c) => c[0].outcome)).toEqual(['created', 'attached']);
+    });
+
+    it('rejects a non-boolean consent value', async () => {
+      const { a, autoReplyToNewLead } = appWithAutoReply();
+      const res = await request(a).post(`/public/intake/${tenantId}/leads`).send({ ...visitor, smsConsent: 'yes' });
+      expect(res.status).toBeGreaterThanOrEqual(400);
+      expect(autoReplyToNewLead).not.toHaveBeenCalled();
+    });
+  });
 });
