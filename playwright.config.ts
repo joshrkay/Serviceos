@@ -326,6 +326,8 @@ export default defineConfig<DevAuthFixtures>({
               'get-found-online-card-mobile.spec.ts',
               // #1764 (D-044) — Google profile walkthrough (no-location state) at 320px.
               'google-profile-walkthrough-mobile.spec.ts',
+              // #1738 — Settings → Google Local Services leads sheet at 320px.
+              'lsa-leads-mobile.spec.ts',
             ],
             testIgnore: [],
             dependencies: ['devauth-setup'],

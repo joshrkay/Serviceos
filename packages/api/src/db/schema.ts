@@ -8249,6 +8249,59 @@ export const MIGRATIONS = {
     ALTER TABLE review_poll_state
       ADD COLUMN IF NOT EXISTS auth_generation INTEGER NOT NULL DEFAULT 0;
   `,
+
+  // #1738 — Google Local Services Ads lead intake. One row per linked tenant:
+  // the per-tenant webhook secret (AES-GCM, never plaintext) that authenticates
+  // inbound LSA lead deliveries. `enabled` and `auto_respond` default FALSE —
+  // the feature is off until an owner links it and opts in.
+  '342_lsa_integrations': `
+    CREATE TABLE IF NOT EXISTS lsa_integrations (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      enabled BOOLEAN NOT NULL DEFAULT false,
+      auto_respond BOOLEAN NOT NULL DEFAULT false,
+      webhook_secret_enc TEXT NOT NULL,
+      secret_hint TEXT NOT NULL,
+      account_id TEXT,
+      linked_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id)
+    );
+    ALTER TABLE lsa_integrations ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE lsa_integrations FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_lsa_integrations ON lsa_integrations;
+    CREATE POLICY tenant_isolation_lsa_integrations ON lsa_integrations
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // #1738 — one row per LSA lead received. UNIQUE (tenant_id, external_lead_id)
+  // is the durable idempotency key: a replayed delivery cannot create a second
+  // row, and the speed-to-lead text is only sent by the delivery that inserted
+  // it. No PII is stored here — the lead itself lives in `leads`.
+  '343_lsa_leads': `
+    CREATE TABLE IF NOT EXISTS lsa_leads (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      external_lead_id TEXT NOT NULL,
+      lead_id UUID NOT NULL,
+      lead_type TEXT NOT NULL CHECK (lead_type IN ('phone_call', 'message', 'booking')),
+      received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      speed_to_lead_outcome TEXT,
+      disposition TEXT CHECK (disposition IN ('booked', 'not_booked', 'spam')),
+      disposition_reported_at TIMESTAMPTZ,
+      UNIQUE (tenant_id, external_lead_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_lsa_leads_tenant_received
+      ON lsa_leads (tenant_id, received_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_lsa_leads_tenant_lead
+      ON lsa_leads (tenant_id, lead_id);
+    ALTER TABLE lsa_leads ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE lsa_leads FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_lsa_leads ON lsa_leads;
+    CREATE POLICY tenant_isolation_lsa_leads ON lsa_leads
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

@@ -16,6 +16,12 @@ import { loadConfig, resolveMediaStreamsEnabled, validateEnvSchema } from './sha
 import { resolveWebDistDir } from './web-static-path';
 import { registerMarketingRedirects } from './marketing-redirects';
 import { createWebhookRouter } from './webhooks/routes';
+import { createLsaWebhookRouter } from './lsa/lsa-webhook-router';
+import { createLsaIntegrationRouter } from './routes/lsa-integration';
+import { createLsaSpeedToLeadSender } from './lsa/lsa-speed-to-lead-sender';
+import { createLsaDispositionReporter } from './lsa/disposition-reporter';
+import { InMemoryLsaIntegrationRepository } from './lsa/lsa-integration';
+import { PgLsaIntegrationRepository } from './lsa/pg-lsa-integration';
 import { createIntegrationResolver, createVapiSecretResolver } from './webhooks/integration-resolver';
 import { createTelephonyRouter, createDidTenantResolver } from './routes/telephony';
 import { createCallsRouter, createCallBridgeRouter } from './routes/calls';
@@ -710,6 +716,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // here so the HMAC verification in handleVapiCallEvent sees the exact bytes
   // Vapi signed — same treatment as Stripe/Clerk.
   app.use('/webhooks/vapi', express.raw({ type: 'application/json' }));
+
+  // #1738 — Google Local Services Ads lead webhook: HMAC over the exact bytes.
+  app.use('/webhooks/lsa', express.raw({ type: 'application/json' }));
 
   // Twilio posts application/x-www-form-urlencoded — mount the matching parser
   // before global express.json() so /webhooks/twilio/* routes get populated
@@ -5802,6 +5811,46 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   app.use(
     '/api/googlebusiness-integrations',
     createGoogleBusinessIntegrationsRouter(googleBusinessRouterDeps),
+  );
+
+  // #1738 — Google Local Services Ads lead intake. Off until an owner links
+  // it (no row => the webhook 403s); the speed-to-lead text is a further
+  // owner opt-in and always goes through the DNC/consent-gated reply path.
+  const lsaIntegrationRepo = pool
+    ? new PgLsaIntegrationRepository(pool)
+    : new InMemoryLsaIntegrationRepository();
+  app.use(
+    '/webhooks',
+    createLsaWebhookRouter({
+      integrationRepo: lsaIntegrationRepo,
+      leadRepo,
+      auditRepo,
+      webhookRepo: webhookEventRepo,
+      settingsRepo,
+      ...(messageDelivery
+        ? {
+            sendSpeedToLead: createLsaSpeedToLeadSender({
+              reply: { conversationRepo, customerRepo, leadRepo, dncRepo, dispatchRepo, delivery: messageDelivery },
+              conversationRepo,
+              auditRepo,
+              getBusinessName: async (tid) => (await settingsRepo.findByTenant(tid))?.businessName,
+            }),
+          }
+        : {}),
+    }),
+  );
+  app.use(
+    '/api/lsa-integration',
+    createLsaIntegrationRouter({
+      integrationRepo: lsaIntegrationRepo,
+      leadRepo,
+      auditRepo,
+      publicApiUrl: config.publicOrigins.api,
+      canStoreSecrets: !pool || Boolean(process.env.TENANT_ENCRYPTION_KEY),
+      // No-op unless LSA_DISPOSITION_REPORTING_ENABLED=true AND a Google client
+      // is supplied (none yet: OAuth follow-up).
+      dispositionReporter: createLsaDispositionReporter(process.env),
+    }),
   );
 
   // D-044 / #1763 — the owner's "Get found online" home checklist, derived

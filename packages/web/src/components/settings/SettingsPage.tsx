@@ -38,6 +38,7 @@ import { DunningLateFeeSheet } from './DunningLateFeeSheet';
 import { TeamMembersSheet } from './TeamMembersSheet';
 import { CalendarSyncSheet } from './CalendarSyncSheet';
 import { GoogleBusinessSheet } from './GoogleBusinessSheet';
+import { LsaLeadsSheet } from './LsaLeadsSheet';
 import { PaymentMethodsSheet } from './PaymentMethodsSheet';
 import { VerticalPacksSheet } from './VerticalPacksSheet';
 import { CallRoutingSheet } from './CallRoutingSheet';
@@ -610,6 +611,7 @@ export function SettingsPage() {
   const [teamMembersOpen, setTeamMembersOpen] = useState(false);
   const [calendarSyncOpen, setCalendarSyncOpen] = useState(false);
   const [googleBusinessOpen, setGoogleBusinessOpen] = useState(false);
+  const [lsaOpen, setLsaOpen] = useState(false);
   const [paymentMethodsOpen, setPaymentMethodsOpen] = useState(false);
   const [verticalPacksOpen, setVerticalPacksOpen] = useState(false);
   const [callRoutingOpen, setCallRoutingOpen] = useState(false);
@@ -1067,6 +1069,16 @@ export function SettingsPage() {
           description: 'Monitor reviews & draft replies for your approval',
           action: () => setGoogleBusinessOpen(true),
         },
+        ...(me?.role === 'owner'
+          ? [
+              {
+                icon: Megaphone,
+                label: 'Google Local Services leads',
+                description: 'Bring in leads from your Local Services Ads',
+                action: () => setLsaOpen(true),
+              },
+            ]
+          : []),
         {
           icon: Link,
           label: 'QuickBooks',
@@ -1836,6 +1848,7 @@ export function SettingsPage() {
           onReviewUrlChange={(url) => setGoogleReviewUrl(url ?? '')}
         />
       )}
+      {lsaOpen && me?.role === 'owner' && <LsaLeadsSheet onClose={() => setLsaOpen(false)} />}
       {calendarSyncOpen && (
         <CalendarSyncSheet onClose={() => setCalendarSyncOpen(false)} />
       )}
