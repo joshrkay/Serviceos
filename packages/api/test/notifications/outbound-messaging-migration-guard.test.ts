@@ -33,7 +33,6 @@ const NOT_YET_MIGRATED = new Set([
   'monitoring/alert-operator.ts',
   'notifications/customer-message-delivery.ts',
   'notifications/owner-sms-sender.ts',
-  'notifications/send-service.ts',
   'notifications/twilio-customer-message-service.ts',
   'notifications/twilio-delay-notification-service.ts',
   'proposals/auto-approve.ts',

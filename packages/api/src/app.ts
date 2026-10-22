@@ -331,6 +331,7 @@ import {
   PgRecipientSmsVolumeLedger,
 } from './notifications/recipient-sms-volume';
 import { SendService } from './notifications/send-service';
+import { createInvoicePaymentLink } from './invoices/invoice-payment-link';
 import { PublicEstimateService } from './estimates/public-estimate-service';
 import { createPublicEstimatesRouter } from './routes/public-estimates';
 import { PublicInvoiceService } from './invoices/public-invoice-service';
@@ -403,6 +404,8 @@ import { createMaintenanceContractsRouter } from './routes/maintenance-contracts
 import { PgMaintenanceContractRepository } from './maintenance-contracts/pg-maintenance-contract';
 import { InMemoryMaintenanceContractRepository } from './maintenance-contracts/maintenance-contract';
 import { createMessageTemplateRouter } from './messaging/message-template-router';
+import { createCustomerTextWording } from './notifications/customer-text-wording';
+import { createCustomerTextWordingRouter } from './notifications/customer-text-wording-router';
 import {
   InMemoryPortalSessionRepository,
   PortalSessionRepository,
@@ -1080,6 +1083,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     customerPaymentMethodRepo,
     templateRepo,
     messageTemplateRepo,
+    customerTextWordingRepo,
     bundleRepo,
     qualityMetricsRepo,
     voiceRepo,
@@ -1692,19 +1696,38 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       })
     : null;
   const publicBaseUrl = config.publicOrigins.web;
-  const sendService = messageDelivery
+  // D-045 — the owner's own wording for customer texts (Settings → Text wording).
+  const customerTextWording = createCustomerTextWording({
+    repo: customerTextWordingRepo,
+    logger: createLogger({
+      service: 'customer-text-wording',
+      environment: process.env.NODE_ENV || 'development',
+    }),
+  });
+  const sendService = messageDelivery && outboundMessaging
     ? new SendService({
         delivery: messageDelivery,
+        outbound: outboundMessaging,
         estimateRepo,
         invoiceRepo,
         jobRepo,
         customerRepo,
         settingsRepo,
         dispatchRepo,
-        // S5a-1 (U8) — audits `invoice.payment_mode_unavailable` when a
-        // send goes out fail-closed (no pay CTA) because the policy read failed.
+        // S5a-1 (U8) — audits `invoice.payment_mode_unavailable` when the
+        // policy read fails and the send is refused.
         auditRepo,
         publicBaseUrl,
+        wording: customerTextWording,
+        // D-045 — an invoice in pay_link mode is sent only once its pay link exists.
+        ensureInvoicePayLink: (tenantId, invoiceId) =>
+          createInvoicePaymentLink(tenantId, invoiceId, {
+            invoiceRepo,
+            provider: paymentLinkProvider,
+            settingsRepo,
+            connectAccountResolver,
+            auditRepo,
+          }),
       })
     : undefined;
 
@@ -6236,6 +6259,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       }),
     );
   }
+  // D-045 — Settings → Text wording (owner's own wording for customer texts).
+  app.use(
+    '/api/settings/text-wording',
+    createCustomerTextWordingRouter({ repo: customerTextWordingRepo, settingsRepo, auditRepo, publicBaseUrl: config.publicOrigins.web }),
+  );
   app.use('/api/settings/packs', createPackActivationRouter(packActivationRepo, canonicalPackRegistry, auditRepo, settingsRepo));
   app.use('/api/verticals', createVerticalRouter(canonicalPackRegistry));
   app.use('/api/vertical-training-assets', createVerticalTrainingAssetsRouter(trainingAssetService));
@@ -7484,6 +7512,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           customerRepo,
           settingsRepo,
           messaging: outboundMessaging,
+          wording: customerTextWording,
           auditRepo,
           logger: thankYouSmsLogger,
           ...(messageDelivery ? { sendWindow: messageDelivery } : {}),

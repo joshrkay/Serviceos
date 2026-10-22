@@ -1,12 +1,12 @@
 import { useContext, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Mic } from 'lucide-react';
-import type { AssembledOnboardingChoice, OnboardingOptionKey, StagedOnboardingChoice } from '@ai-service-os/shared';
-import { RivetVoiceContext, useRivetLine, useRivetListening } from '../../../hooks/useRivetVoice';
+import { narrateTurn, type AssembledOnboardingChoice, type OnboardingOptionKey, type StagedOnboardingChoice } from '@ai-service-os/shared';
+import { RivetVoiceContext, useRivetNarration, useRivetTurnListener } from '../../../hooks/useRivetVoice';
+import type { UtteranceScreen } from '../../../lib/onboarding-utterance';
 import { Button, OptionCard } from '../../ui';
 import { cn } from '../../ui/utils';
 import { withoutListeningPromise } from './listening-copy';
 import { RivetHeading, SpeakerLine } from './TurnFrame';
-import { spokenLines } from './turns';
 import { TypeInsteadFields } from './TypeInsteadFields';
 import {
   initialTypedValues,
@@ -56,31 +56,38 @@ export function OptionPairTurn({ choice, staged, busy, error, notice, onPick, on
   const [typedErrors, setTypedErrors] = useState<TypedErrors>({});
 
   const voice = useContext(RivetVoiceContext);
-  const lines = useMemo(() => spokenLines(choice), [choice]);
-  useRivetLine(choice.settingKey, choice.question, lines);
+  const lines = useMemo(() => narrateTurn(choice), [choice]);
+  useRivetNarration(choice.settingKey, lines);
   const [heard, setHeard] = useState<{ key: OnboardingOptionKey; text: string } | null>(null);
-  const [missed, setMissed] = useState<{ text: string; count: number } | null>(null);
   const [resumedAfterQuiet, setResumedAfterQuiet] = useState(false);
   // An answer was sent from this turn: stop listening until it fails (the shell moves on when it saves),
   // so the moment between "saved" and the next turn never opens another socket.
-  const [sent, setSent] = useState(false);
+  const [sent, setSentState] = useState(false);
+  // Read synchronously: two finals in one tick ("first… first") arrive before `sent` re-renders.
+  const sentRef = useRef(false);
+  const setSent = (value: boolean) => {
+    sentRef.current = value;
+    setSentState(value);
+  };
   useEffect(() => {
     if (!busy && (error || notice)) setSent(false);
   }, [busy, error, notice]);
-  const listen = useRivetListening(voice, {
+  // The cards only, for now: help phrases arrive with Rivet's longer explanations (build plan PR 3).
+  const listenFor = useMemo<UtteranceScreen>(() => ({ options: choice.options }), [choice.options]);
+  const listen = useRivetTurnListener(voice, {
     turn: choice.settingKey,
-    options: choice.options,
+    screen: listenFor,
     enabled: !busy && !typing && !sent,
-    onMatch: (key, text) => {
-      setSelected(key);
-      setHeard({ key, text });
-      setMissed(null);
+    onResult: (said) => {
+      if (sentRef.current) return;
+      if (said.kind !== 'pick') {
+        setHeard(null);
+        return;
+      }
+      setSelected(said.key);
+      setHeard({ key: said.key, text: said.transcript });
       setSent(true);
-      onPick(key, 'voice');
-    },
-    onNoMatch: (text) => {
-      setHeard(null);
-      setMissed((m) => ({ text, count: (m?.count ?? 0) + 1 }));
+      onPick(said.key, 'voice');
     },
   });
   const supportLine = listen.available ? choice.supportLine : withoutListeningPromise(choice.supportLine);
@@ -89,7 +96,7 @@ export function OptionPairTurn({ choice, staged, busy, error, notice, onPick, on
     setSelected(key);
     if (heard && heard.key !== key) setHeard(null);
     const line = choice.options.find((o) => o.key === key)?.rivetLine;
-    if (voice && line) void voice.speak(line, { turn: choice.settingKey, with: lines });
+    if (voice && line) void voice.speak(line, { turn: choice.settingKey });
   };
 
   // Each turn is a fresh mount, so put focus on Rivet's new question rather than let it fall to the page.
@@ -113,8 +120,8 @@ export function OptionPairTurn({ choice, staged, busy, error, notice, onPick, on
   const showsQuiet = listen.quiet && !resumedAfterQuiet;
   const transcriptLine = listen.partial
     ? listen.partial
-    : missed
-      ? `I heard “${missed.text}”. Tap one, or say first or second.${missed.count >= 2 ? ' For example, say “first”.' : ''}`
+    : listen.missed
+      ? listen.missed.reply
       : showsQuiet
         ? "Take your time. Tap the mic when you're ready."
         : '';

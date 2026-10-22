@@ -242,7 +242,7 @@ export class RecordPaymentExecutionHandler implements ExecutionHandler {
 export interface InvoiceDispatch {
   tenantId: string;
   invoiceId: string;
-  /** #1524 — 'auto': no channel was named; the customer's email, else a text. */
+  /** #1524 / D-045 — 'auto': no channel was named; a text when the customer can be texted, else their email. */
   channel: 'email' | 'sms' | 'auto';
   recipient?: string;
   customMessage?: string;
@@ -294,7 +294,7 @@ function sendChannelFromPayload(
 export interface EstimateDispatch {
   tenantId: string;
   estimateId: string;
-  /** #1524 — 'auto': no channel was named; the customer's email, else a text. */
+  /** #1524 / D-045 — 'auto': no channel was named; a text when the customer can be texted, else their email. */
   channel: 'email' | 'sms' | 'auto';
   recipient?: string;
   customMessage?: string;

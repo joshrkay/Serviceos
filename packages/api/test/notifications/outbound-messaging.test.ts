@@ -9,12 +9,19 @@ import {
 import type { MessageDeliveryProvider, SmsMessage } from '../../src/notifications/delivery-provider';
 import type { ConsentLedgerEventLike } from '../../src/compliance/resolve-outbound-consent';
 import { InMemoryDispatchRepository } from '../../src/notifications/dispatch-repository';
+import { DeliveryError } from '../../src/notifications/notification-errors';
 import {
   createOutboundMessaging,
   type OutboundText,
 } from '../../src/notifications/outbound-messaging';
 
 const TENANT = 'tenant-om-1';
+
+/** The outcome as the sender sees it, without its message record's id (asserted on its own below). */
+function withoutMessageId<T extends { messageId?: string }>(outcome: T): Omit<T, 'messageId'> {
+  const { messageId: _id, ...rest } = outcome;
+  return rest;
+}
 const NOW = new Date('2026-10-22T15:00:00Z');
 
 function makeCustomer(overrides: Partial<Customer> = {}): Customer {
@@ -87,7 +94,7 @@ describe('outbound messaging', () => {
 
     const outcome = await messaging().sendText(toCustomer('transactional'));
 
-    expect(outcome).toEqual({
+    expect(withoutMessageId(outcome)).toEqual({
       status: 'sent',
       delivery: { provider: 'test', providerMessageId: 'm-1', channel: 'sms' },
     });
@@ -127,7 +134,7 @@ describe('outbound messaging', () => {
 
     const outcome = await messaging().sendText(toCustomer('automated_nudge'));
 
-    expect(outcome).toEqual({ status: 'blocked', reason: 'no_consent', permanent: true });
+    expect(withoutMessageId(outcome)).toEqual({ status: 'blocked', reason: 'no_consent', permanent: true });
     expect(sendSms).not.toHaveBeenCalled();
   });
 
@@ -137,7 +144,7 @@ describe('outbound messaging', () => {
 
     const outcome = await messaging().sendText(toCustomer('automated_nudge'));
 
-    expect(outcome).toEqual({ status: 'blocked', reason: 'dnc', permanent: true });
+    expect(withoutMessageId(outcome)).toEqual({ status: 'blocked', reason: 'dnc', permanent: true });
     expect(sendSms).not.toHaveBeenCalled();
   });
 
@@ -151,8 +158,8 @@ describe('outbound messaging', () => {
     ];
     const revokedSinceGrant = await messaging().sendText(toCustomer('marketing'));
 
-    expect(none).toEqual({ status: 'blocked', reason: 'no_marketing_consent', permanent: true });
-    expect(revokedSinceGrant).toEqual({ status: 'blocked', reason: 'no_marketing_consent', permanent: true });
+    expect(withoutMessageId(none)).toEqual({ status: 'blocked', reason: 'no_marketing_consent', permanent: true });
+    expect(withoutMessageId(revokedSinceGrant)).toEqual({ status: 'blocked', reason: 'no_marketing_consent', permanent: true });
     expect(sendSms).not.toHaveBeenCalled();
   });
 
@@ -163,9 +170,9 @@ describe('outbound messaging', () => {
 
     const outcome = await messaging().sendText(toCustomer('transactional'));
 
-    expect(outcome).toEqual({
+    expect(withoutMessageId(outcome)).toEqual({
       status: 'blocked',
-      reason: 'send_failed',
+      reason: 'lookup_failed',
       permanent: false,
       detail: 'connection reset',
     });
@@ -173,13 +180,13 @@ describe('outbound messaging', () => {
   });
 
   it('blocks when the customer is missing or has no number', async () => {
-    expect(await messaging().sendText(toCustomer('transactional'))).toEqual({
+    expect(withoutMessageId(await messaging().sendText(toCustomer('transactional')))).toEqual({
       status: 'blocked',
       reason: 'customer_not_found',
       permanent: true,
     });
     await customerRepo.create(makeCustomer({ primaryPhone: undefined }));
-    expect(await messaging().sendText(toCustomer('transactional'))).toEqual({
+    expect(withoutMessageId(await messaging().sendText(toCustomer('transactional')))).toEqual({
       status: 'blocked',
       reason: 'no_phone',
       permanent: true,
@@ -215,7 +222,7 @@ describe('outbound messaging', () => {
       body: 'Fall special',
     } as unknown as OutboundText);
 
-    expect(outcome).toEqual({ status: 'blocked', reason: 'no_consent', permanent: true });
+    expect(withoutMessageId(outcome)).toEqual({ status: 'blocked', reason: 'no_consent', permanent: true });
     expect(sendSms).not.toHaveBeenCalled();
   });
 
@@ -240,7 +247,7 @@ describe('outbound messaging', () => {
       throw new SmsDeferredError(opens);
     }).sendText(toCustomer('automated_nudge'));
 
-    expect(outcome).toEqual({ status: 'scheduled', at: opens, reason: 'quiet_hours' });
+    expect(withoutMessageId(outcome)).toEqual({ status: 'scheduled', at: opens, reason: 'quiet_hours' });
   });
 
   it('marks a gate revocation permanent and the kill switch retryable', async () => {
@@ -253,8 +260,8 @@ describe('outbound messaging', () => {
       throw new SmsSuppressedError('channel_disabled');
     }).sendText(toCustomer('transactional'));
 
-    expect(revoked).toEqual({ status: 'blocked', reason: 'revoked', permanent: true });
-    expect(switchedOff).toEqual({ status: 'blocked', reason: 'channel_disabled', permanent: false });
+    expect(withoutMessageId(revoked)).toEqual({ status: 'blocked', reason: 'revoked', permanent: true });
+    expect(withoutMessageId(switchedOff)).toEqual({ status: 'blocked', reason: 'channel_disabled', permanent: false });
   });
 
   it('reports an already-sent key as sent before looking up the recipient', async () => {
@@ -274,7 +281,7 @@ describe('outbound messaging', () => {
       logger,
     });
 
-    expect(await outbound.sendText(toCustomer('automated_nudge'))).toEqual({
+    expect(withoutMessageId(await outbound.sendText(toCustomer('automated_nudge')))).toEqual({
       status: 'sent',
       duplicate: 'sent',
     });
@@ -331,7 +338,7 @@ describe('outbound messaging', () => {
 
     const outcome = await outbound.sendText(toCustomer('transactional'));
 
-    expect(outcome).toEqual({
+    expect(withoutMessageId(outcome)).toEqual({
       status: 'sent',
       delivery: { provider: 'test', providerMessageId: 'm-1', channel: 'sms' },
     });
@@ -345,13 +352,23 @@ describe('outbound messaging', () => {
       throw new Error('Twilio 503');
     }).sendText(toCustomer('transactional'));
 
-    expect(outcome).toEqual({
+    expect(withoutMessageId(outcome)).toEqual({
       status: 'blocked',
       reason: 'send_failed',
       permanent: false,
       detail: 'Twilio 503',
     });
     expect(logger.warn).toHaveBeenCalled();
+  });
+
+  it("keeps the provider error's code, so the sender can tell a credentials failure from an outage", async () => {
+    await customerRepo.create(makeCustomer());
+
+    const outcome = await messaging(async () => {
+      throw new DeliveryError('AUTH_FAILED', 'Twilio 401');
+    }).sendText(toCustomer('transactional'));
+
+    expect(outcome).toMatchObject({ status: 'blocked', reason: 'send_failed', errorCode: 'AUTH_FAILED' });
   });
 
   describe('message record', () => {
@@ -377,6 +394,39 @@ describe('outbound messaging', () => {
           purpose: 'transactional',
         },
       ]);
+    });
+
+    it("returns the message record's id with the outcome", async () => {
+      await customerRepo.create(makeCustomer());
+
+      const outcome = await messaging().sendText(toCustomer('transactional'));
+
+      const [row] = await recorded();
+      expect(outcome.messageId).toBe(row.id);
+    });
+
+    it('texts a number the owner typed for this send, still under the customer’s own consent', async () => {
+      await customerRepo.create(makeCustomer({ smsConsent: false }));
+      const typed: OutboundText = {
+        ...toCustomer('automated_nudge'),
+        recipient: { kind: 'customer', customerId: 'cust-1', phone: '+15559990000' },
+      } as OutboundText;
+
+      const nudge = await messaging().sendText(typed);
+      const now = await messaging().sendText({
+        ...typed,
+        purpose: 'transactional',
+        dedupe: { messageKind: 'test_message', recordId: 'job-1-now' },
+      });
+
+      expect(nudge).toMatchObject({ status: 'blocked', reason: 'no_consent' });
+      expect(now.status).toBe('sent');
+      expect(sendSms).toHaveBeenCalledTimes(1);
+      expect(sendSms.mock.calls[0][0]).toMatchObject({
+        to: '+15559990000',
+        consent: { smsConsent: false, customerId: 'cust-1' },
+      });
+      expect((await recorded()).map((r) => r.recipient)).toEqual(['+15559990000', '+15559990000']);
     });
 
     it('records a blocked text with its reason and the number it would have gone to', async () => {
@@ -453,10 +503,26 @@ describe('outbound messaging', () => {
         logger,
       });
 
-      expect(await outbound.sendText(toCustomer('transactional'))).toEqual({ status: 'sent', duplicate: 'sent' });
+      expect(withoutMessageId(await outbound.sendText(toCustomer('transactional')))).toEqual({ status: 'sent', duplicate: 'sent' });
       expect(await recorded()).toMatchObject([
         { status: 'sent', idempotencyKey: 'test_message:job-1', customerId: 'cust-1', jobId: 'job-1', recipient: '' },
       ]);
+
+      // A sender that named the number backfills it, rather than a blank.
+      dispatches = new InMemoryDispatchRepository();
+      await createOutboundMessaging({
+        delivery: { sendSms, sendEmail: vi.fn() } as unknown as MessageDeliveryProvider,
+        customerRepo,
+        dncRepo,
+        consentLedger: { listByPhone: async () => [] },
+        dispatchRepo: dispatches,
+        pool,
+        logger,
+      }).sendText({
+        ...toCustomer('transactional'),
+        recipient: { kind: 'customer', customerId: 'cust-1', phone: '+15559990000' },
+      } as OutboundText);
+      expect(await recorded()).toMatchObject([{ status: 'sent', recipient: '+15559990000' }]);
 
       // A record that did land is never replaced by the backfill.
       dispatches = new InMemoryDispatchRepository();

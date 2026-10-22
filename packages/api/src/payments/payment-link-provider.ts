@@ -134,6 +134,13 @@ export interface PaymentLinkProviderEnv {
   // Legacy alias still read by `StripePaymentLinkProvider` directly.
   STRIPE_API_KEY?: string;
   STRIPE_WEBHOOK_SECRET?: string;
+  /**
+   * `mock` forces the mock provider even when a Stripe key is set, so a
+   * hermetic stack with a synthetic key (e2e/onboarding-v3.config.ts) can
+   * still mint the pay link an invoice send now requires (D-045). Refused in
+   * production-like environments.
+   */
+  PAYMENT_LINK_PROVIDER?: string;
 }
 
 export interface PaymentLinkProviderDeps {
@@ -171,8 +178,13 @@ export function createPaymentLinkProvider(
   deps: PaymentLinkProviderDeps = {},
 ): PaymentLinkProvider {
   const stripeKey = nonEmpty(env.STRIPE_SECRET_KEY) ?? nonEmpty(env.STRIPE_API_KEY);
+  const forceMock = nonEmpty(env.PAYMENT_LINK_PROVIDER) === 'mock';
 
-  if (stripeKey) {
+  if (forceMock && isProductionLike(env.NODE_ENV)) {
+    throw new Error('PAYMENT_LINK_PROVIDER=mock is forbidden in production. Unset it to use the real Stripe provider.');
+  }
+
+  if (stripeKey && !forceMock) {
     return new StripePaymentLinkProvider({
       apiKey: stripeKey,
       webhookSecret: env.STRIPE_WEBHOOK_SECRET ?? '',
