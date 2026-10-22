@@ -1940,10 +1940,12 @@ callers write a proposal's status directly, and the repository checks no transit
 6. **Migration is gradual.** Senders move one file at a time; a guard test lists today's
    direct callers of the raw sender and the list may only shrink.
 7. **Proposal status moves only through the lifecycle.** The repository runs the transition
-   table on every status write (the **status-write gate**). The table now lists the moves
-   the code already made: ready_for_review → draft (supervisor hold), approved → executing
-   (execution claim), executing → approved (chain dependent released), approved → rejected
-   (a caller revoking their own unexecuted booking).
+   table on every status write (the **status-write gate**). Four moves the code already made
+   are allowed there as system-only writes, kept out of the table that approve, reject and
+   undo consult: ready_for_review → draft (supervisor hold), approved → executing (execution
+   claim), executing → approved (chain dependent released), approved → rejected (a caller
+   revoking their own unexecuted booking; the generic reject endpoint still cannot reach an
+   approved proposal).
 8. **Drafting has one entry point and three outcomes.** Every surface drafts through one
    module that returns a proposal, a clarification, or a refusal with a reason, and runs the
    made-up-id scrub that only chat ran before. Owners keep editing drafts before approval in

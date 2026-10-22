@@ -1,4 +1,4 @@
-import { assertStatusWrite } from '../../src/proposals/lifecycle';
+import { assertStatusWrite, canTransition } from '../../src/proposals/lifecycle';
 import {
   createProposal,
   InMemoryProposalRepository,
@@ -40,6 +40,11 @@ describe('proposal status-write gate', () => {
     ['approved', 'rejected'], // E1 caller revocation
   ])('lists the as-built move %s → %s', (from, to) => {
     expect(() => assertStatusWrite(from, to)).not.toThrow();
+  });
+
+  it('keeps system-only moves out of transitionProposal (the reject/approve path)', () => {
+    expect(canTransition('approved', 'rejected')).toBe(false);
+    expect(canTransition('ready_for_review', 'draft')).toBe(false);
   });
 
   it('updateStatus refuses to reopen a terminal proposal and leaves it unchanged', async () => {
