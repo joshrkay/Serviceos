@@ -700,11 +700,126 @@ describe('OptionPairTurn', () => {
       expect(transcript()).toHaveTextContent('I heard “banana”. Tap one, or say first or second.');
       expect(transcript()).not.toHaveTextContent('For example');
       hear('something else');
-      expect(transcript()).toHaveTextContent('I heard “something else”. Tap one, or say first or second. For example, say “first”.');
+      expect(transcript()).toHaveTextContent('I heard “something else”. Tap one, or say first or second. For example, say “first”, or ask “what does that mean?”');
       expect(onPick).not.toHaveBeenCalled();
       expect(screen.getAllByRole('radio').every((r) => r.getAttribute('aria-checked') === 'false')).toBe(true);
       expect(transcript()).toHaveAttribute('role', 'status');
       expect(transcript()).toHaveAttribute('aria-live', 'polite');
+    });
+
+    describe('help, out loud', () => {
+      const booking = () => choiceFor('booking_posture');
+      // Rivet's voice works here, so what he says can be read off the batch requests.
+      let batches: string[][];
+      beforeEach(() => {
+        batches = [];
+        const listening = vi.mocked(fetch).getMockImplementation()!;
+        vi.stubGlobal(
+          'fetch',
+          vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+            if (String(input) !== '/api/voice/tts/batch') return listening(input, init);
+            const { items } = JSON.parse(String(init?.body)) as { items: string[] };
+            batches.push(items);
+            const clips = items.map((text, i) => ({
+              text,
+              clipHash: String(i).padStart(64, '0'),
+              audio: btoa(encodeURIComponent(text)),
+              contentType: 'audio/mpeg',
+              cached: false,
+            }));
+            return Promise.resolve(new Response(JSON.stringify({ clips }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+          }),
+        );
+      });
+      const ttsBodies = () => batches.map((items) => items.join('\n'));
+
+      it('"what does that mean?" is answered in plain words, then asked again, and the turn keeps listening', async () => {
+        const { onPick } = await openTurn('booking_posture');
+        open();
+        hear('what does that mean');
+        expect(transcript()).toHaveTextContent(`${booking().explain} Which one?`);
+        expect(onPick).not.toHaveBeenCalled();
+        expect(screen.getAllByRole('radio').every((r) => r.getAttribute('aria-checked') === 'false')).toBe(true);
+        await flush();
+        expect(ttsBodies().some((b) => b.includes(booking().explain!))).toBe(true);
+        // Still listening: the next answer picks.
+        hear('the second one');
+        expect(onPick).toHaveBeenCalledWith('b', 'voice');
+      });
+
+      it('"give me an example" tells one real call', async () => {
+        await openTurn('booking_posture');
+        open();
+        hear('can you give me an example');
+        expect(transcript()).toHaveTextContent(`${booking().example} Which one?`);
+      });
+
+      it('"what do most shops do?" names the usual pick and why', async () => {
+        await openTurn('booking_posture');
+        open();
+        hear('what do most shops do');
+        expect(transcript()).toHaveTextContent(
+          'Most shops pick the first: Book it on the call. The caller leaves with a time. You get a text and one tap to undo. Nothing gets booked on top of another job. Which one?',
+        );
+      });
+
+      it('"say that again" says the turn again', async () => {
+        const played: string[] = [];
+        vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(function (this: HTMLMediaElement) {
+          played.push(decodeURIComponent(atob(this.src.split(',')[1] ?? '')));
+          return Promise.resolve();
+        });
+        await openTurn('booking_posture');
+        open();
+        await flush();
+        played.length = 0;
+        hear('sorry, say that again');
+        expect(transcript()).toHaveTextContent('Saying it again.');
+        await flush();
+        // The question first, from the clips already fetched for the turn: no second request.
+        expect(played[0]).toBe(narrateTurn(booking())[0]);
+        expect(batches).toHaveLength(1);
+      });
+
+      it('"what does the first one mean" is a question, not a pick', async () => {
+        const { onPick } = await openTurn('booking_posture');
+        open();
+        hear('what does the first one mean');
+        expect(onPick).not.toHaveBeenCalled();
+        expect(transcript()).toHaveTextContent(booking().explain!);
+      });
+
+      it('a miss after a question replaces the answer, and the second miss offers the question', async () => {
+        await openTurn('booking_posture');
+        open();
+        hear('what does that mean');
+        hear('banana');
+        expect(transcript()).toHaveTextContent('I heard “banana”. Tap one, or say first or second.');
+        hear('purple');
+        expect(transcript()).toHaveTextContent('For example, say “first”, or ask “what does that mean?”');
+      });
+
+      it('a tapped card clears the answer', async () => {
+        await openTurn('booking_posture');
+        open();
+        hear('give me an example');
+        fireEvent.click(screen.getByRole('radio', { name: 'Hold it for me' }));
+        expect(transcript()).not.toHaveTextContent(booking().example!);
+      });
+
+      it('a draft from before the explanations still answers, from the cards', async () => {
+        const { explain: _e, example: _x, ...old } = booking();
+        render(
+          <Shell>
+            <OptionPairTurn choice={old} busy={false} error={null} notice={null} editing={false} onPick={vi.fn()} />
+          </Shell>,
+        );
+        fireEvent.click(screen.getByRole('button', { name: 'Make it mine' }));
+        await flush();
+        open();
+        hear('give me an example');
+        expect(transcript()).toHaveTextContent('With the first, callers hear: “I have Tuesday at 2 or Wednesday at 9. Which works for you?”');
+      });
     });
 
     it('after 6 s of quiet says "Take your time" once, stops listening, and never says it twice', async () => {

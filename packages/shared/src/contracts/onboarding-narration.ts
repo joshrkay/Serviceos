@@ -13,6 +13,10 @@
  * are sized from this function rendered at the longest names
  * (packages/api/test/onboarding/choices/registry-tts-caps.test.ts).
  *
+ * `answerHelp` is what Rivet says when the owner asks for help on that turn
+ * ("say that again", "what does that mean?", "give me an example", "what do
+ * most shops do?"), built the same way and held to the same caps.
+ *
  * Pure: no DOM, no network.
  */
 import type { OnboardingOptionKey } from './onboarding-draft.js';
@@ -26,9 +30,17 @@ export interface NarratedOption {
 
 export interface NarratedChoice {
   question: string;
+  supportLine?: string;
+  /** Rivet's answer to "what does that mean?" (absent on drafts assembled before it existed). */
+  explain?: string;
+  /** Rivet's answer to "give me an example" (absent on drafts assembled before it existed). */
+  example?: string;
   options: readonly [NarratedOption, NarratedOption];
   mostShops: OnboardingOptionKey;
 }
+
+/** The help an owner can ask for out loud on a choice turn. */
+export type OnboardingHelpRequest = 'repeat' | 'explain' | 'example' | 'most_shops';
 
 const ORDINAL = ['First', 'Second'] as const;
 
@@ -46,8 +58,38 @@ function optionLine(option: NarratedOption, index: number): string {
   return parts.join(' ');
 }
 
+const WHICH_ONE = 'Which one?';
+
 export function narrateTurn(choice: NarratedChoice): string[] {
   const most = choice.options.findIndex((o) => o.key === choice.mostShops);
-  const closing = most >= 0 ? `Most shops pick the ${most === 0 ? 'first' : 'second'}. Which one?` : 'Which one?';
+  const closing = most >= 0 ? `Most shops pick the ${most === 0 ? 'first' : 'second'}. ${WHICH_ONE}` : WHICH_ONE;
   return [sentence(choice.question), ...choice.options.map(optionLine), closing];
+}
+
+/**
+ * What Rivet says back to a help request on a choice turn, ending on "Which one?" so the
+ * owner is asked again. A draft assembled before the explain/example text existed falls
+ * back to the support line and the cards' own words, so a question is never met with silence.
+ */
+export function answerHelp(choice: NarratedChoice, help: OnboardingHelpRequest): string[] {
+  switch (help) {
+    case 'repeat':
+      return narrateTurn(choice);
+    case 'explain':
+      if (choice.explain?.trim()) return [sentence(choice.explain), WHICH_ONE];
+      return [...(choice.supportLine?.trim() ? [sentence(choice.supportLine)] : []), ...choice.options.map(optionLine), WHICH_ONE];
+    case 'example':
+      if (choice.example?.trim()) return [sentence(choice.example), WHICH_ONE];
+      return [
+        ...choice.options.map((o, i) => `With the ${i === 0 ? 'first' : 'second'}, callers hear: “${o.rivetLine.trim()}”`),
+        WHICH_ONE,
+      ];
+    case 'most_shops': {
+      const most = choice.options.findIndex((o) => o.key === choice.mostShops);
+      const option = choice.options[most];
+      if (!option) return [WHICH_ONE];
+      const why = option.detail ? ` ${sentence(option.detail)}` : '';
+      return [`Most shops pick the ${most === 0 ? 'first' : 'second'}: ${sentence(option.label)}${why}`, WHICH_ONE];
+    }
+  }
 }
