@@ -138,7 +138,9 @@ const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 16;
 // #1790 (merged 2026-10-22 with this contract red): +33 occasional — call forwarding
 // setup/check, hosted tenant site (publish, about, address, domain), drip campaigns,
 // webchat settings/token, LSA integration, voice call-score corrections.
-const OWNER_ONLY_ROUTES = 124;
+// D-044: -4 occasional — #1752's unused /api/get-found checklist removed; the
+// home card (/api/get-found-online) is the one checklist.
+const OWNER_ONLY_ROUTES = 120;
 
 // ── Derivation ──────────────────────────────────────────────────────────────
 
