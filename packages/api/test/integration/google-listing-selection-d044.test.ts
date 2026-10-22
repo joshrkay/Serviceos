@@ -9,7 +9,7 @@
  * a real Postgres under RLS. No Google calls.
  *
  * Also pins review_poll_state.cursor reset on a listing change, and
- * review_poll_state.backoff_reason (migration 330) so the home checklist
+ * review_poll_state.backoff_reason (migration 331) so the home checklist
  * asks for a reconnect only when Google rejected the credentials.
  *
  * #1763 — also pins tenant_settings.get_found_online_dismissed_at (migration

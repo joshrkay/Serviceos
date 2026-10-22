@@ -990,7 +990,7 @@ export function SettingsPage() {
         // D-045 — the owner's own wording for estimate, invoice, portal-link and
         // thank-you texts. Owner-only, like its settings:update save.
         ...(me?.role === 'owner'
-          ? [{ icon: MessageSquareText, label: 'Text wording', description: 'Your own words for the estimate, invoice, portal-link and thank-you texts', action: () => setTextWordingOpen(true) }]
+          ? [{ icon: MessageSquareText, label: 'Text wording', description: 'Your own words, in English and Spanish, for the estimate, invoice, portal-link and thank-you texts', action: () => setTextWordingOpen(true) }]
           : []),
         { icon: Star, label: 'Feedback & reviews', description: 'Average rating, distribution, and recent comments', action: () => navigate('/settings/feedback') },
         { icon: Megaphone, label: 'Email campaigns', description: 'Send promos & announcements to customer segments', action: () => setMarketingOpen(true) },
