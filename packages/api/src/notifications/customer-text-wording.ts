@@ -113,7 +113,7 @@ export function fillOwnerWording(args: {
 export interface SavedWording {
   purpose: WordingPurpose;
   body: string;
-  /** The language it was written in: only customers who read it get it. */
+  /** The language it is written in: only customers who read it get it. */
   language: Language;
   updatedBy: string;
   updatedAt: Date;
@@ -121,7 +121,8 @@ export interface SavedWording {
 
 export interface CustomerTextWordingRepository {
   list(tenantId: string): Promise<SavedWording[]>;
-  find(tenantId: string, purpose: WordingPurpose): Promise<SavedWording | null>;
+  /** One wording per text per language (D-045, "write both"). */
+  find(tenantId: string, purpose: WordingPurpose, language: Language): Promise<SavedWording | null>;
   save(
     tenantId: string,
     purpose: WordingPurpose,
@@ -130,21 +131,21 @@ export interface CustomerTextWordingRepository {
     updatedBy: string,
   ): Promise<SavedWording>;
   /** True when there was a wording to remove. */
-  remove(tenantId: string, purpose: WordingPurpose): Promise<boolean>;
+  remove(tenantId: string, purpose: WordingPurpose, language: Language): Promise<boolean>;
 }
 
 export class InMemoryCustomerTextWordingRepository implements CustomerTextWordingRepository {
   private readonly rows = new Map<string, SavedWording>();
 
   async list(tenantId: string): Promise<SavedWording[]> {
-    return WORDING_PURPOSES.flatMap((p) => {
-      const row = this.rows.get(`${tenantId}:${p}`);
-      return row ? [{ ...row }] : [];
-    });
+    return [...this.rows.entries()]
+      .filter(([key]) => key.startsWith(`${tenantId}:`))
+      .map(([, row]) => ({ ...row }))
+      .sort((a, b) => a.purpose.localeCompare(b.purpose) || a.language.localeCompare(b.language));
   }
 
-  async find(tenantId: string, purpose: WordingPurpose): Promise<SavedWording | null> {
-    const row = this.rows.get(`${tenantId}:${purpose}`);
+  async find(tenantId: string, purpose: WordingPurpose, language: Language): Promise<SavedWording | null> {
+    const row = this.rows.get(`${tenantId}:${purpose}:${language}`);
     return row ? { ...row } : null;
   }
 
@@ -156,12 +157,12 @@ export class InMemoryCustomerTextWordingRepository implements CustomerTextWordin
     updatedBy: string,
   ): Promise<SavedWording> {
     const row: SavedWording = { purpose, body, language, updatedBy, updatedAt: new Date() };
-    this.rows.set(`${tenantId}:${purpose}`, row);
+    this.rows.set(`${tenantId}:${purpose}:${language}`, row);
     return { ...row };
   }
 
-  async remove(tenantId: string, purpose: WordingPurpose): Promise<boolean> {
-    return this.rows.delete(`${tenantId}:${purpose}`);
+  async remove(tenantId: string, purpose: WordingPurpose, language: Language): Promise<boolean> {
+    return this.rows.delete(`${tenantId}:${purpose}:${language}`);
   }
 }
 
@@ -187,19 +188,19 @@ export class PgCustomerTextWordingRepository
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query(
         `SELECT purpose, body, language, updated_by, updated_at FROM customer_text_wording
-          WHERE tenant_id = $1 ORDER BY purpose`,
+          WHERE tenant_id = $1 ORDER BY purpose, language`,
         [tenantId],
       );
       return result.rows.map(rowToWording);
     });
   }
 
-  async find(tenantId: string, purpose: WordingPurpose): Promise<SavedWording | null> {
+  async find(tenantId: string, purpose: WordingPurpose, language: Language): Promise<SavedWording | null> {
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query(
         `SELECT purpose, body, language, updated_by, updated_at FROM customer_text_wording
-          WHERE tenant_id = $1 AND purpose = $2`,
-        [tenantId, purpose],
+          WHERE tenant_id = $1 AND purpose = $2 AND language = $3`,
+        [tenantId, purpose, language],
       );
       return result.rows[0] ? rowToWording(result.rows[0]) : null;
     });
@@ -216,9 +217,8 @@ export class PgCustomerTextWordingRepository
       const result = await client.query(
         `INSERT INTO customer_text_wording (tenant_id, purpose, body, language, updated_by, updated_at)
          VALUES ($1, $2, $3, $4, $5, NOW())
-         ON CONFLICT (tenant_id, purpose)
-           DO UPDATE SET body = EXCLUDED.body, language = EXCLUDED.language,
-                         updated_by = EXCLUDED.updated_by, updated_at = NOW()
+         ON CONFLICT (tenant_id, purpose, language)
+           DO UPDATE SET body = EXCLUDED.body, updated_by = EXCLUDED.updated_by, updated_at = NOW()
          RETURNING purpose, body, language, updated_by, updated_at`,
         [tenantId, purpose, body, language, updatedBy],
       );
@@ -226,11 +226,11 @@ export class PgCustomerTextWordingRepository
     });
   }
 
-  async remove(tenantId: string, purpose: WordingPurpose): Promise<boolean> {
+  async remove(tenantId: string, purpose: WordingPurpose, language: Language): Promise<boolean> {
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query(
-        `DELETE FROM customer_text_wording WHERE tenant_id = $1 AND purpose = $2`,
-        [tenantId, purpose],
+        `DELETE FROM customer_text_wording WHERE tenant_id = $1 AND purpose = $2 AND language = $3`,
+        [tenantId, purpose, language],
       );
       return (result.rowCount ?? 0) > 0;
     });
@@ -239,8 +239,8 @@ export class PgCustomerTextWordingRepository
 
 export interface CustomerTextWording {
   /**
-   * The text to send: the owner's wording when they wrote one for `purpose`
-   * in the language the customer reads, else `builtIn()`.
+   * The text to send: the owner's wording for `purpose` in the language the
+   * customer reads, when they wrote one, else `builtIn()`.
    */
   textFor(args: {
     tenantId: string;
@@ -264,7 +264,9 @@ export function createCustomerTextWording(deps: {
         // A savepoint on a send's own request transaction: a failed read
         // (timeout, table not migrated yet) must leave that transaction
         // usable so the send goes on with our wording.
-        saved = await withRequestSavepoint(() => deps.repo.find(args.tenantId, args.purpose));
+        saved = await withRequestSavepoint(() =>
+          deps.repo.find(args.tenantId, args.purpose, args.customerLanguage),
+        );
       } catch (err) {
         deps.logger.warn('Owner text wording could not be read; sending our wording', {
           tenantId: args.tenantId,
@@ -273,7 +275,7 @@ export function createCustomerTextWording(deps: {
         });
         return args.builtIn();
       }
-      if (!saved || saved.language !== args.customerLanguage) return args.builtIn();
+      if (!saved) return args.builtIn();
       let text: string | null;
       try {
         text = fillOwnerWording({

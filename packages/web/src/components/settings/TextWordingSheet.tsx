@@ -3,16 +3,19 @@
  *
  * The owner writes their own wording for the four texts customers get
  * (estimate, invoice, customer-portal link, thank-you) with `{{fill-ins}}`,
- * sees a preview with sample values, and can reset to ours. Customers who
- * read another language keep getting our wording in their language.
+ * sees a preview with sample values, and can reset to ours, once per
+ * language: each customer gets the wording in the language they read, and
+ * ours where the owner hasn't written that language.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { X, MessageSquareText } from 'lucide-react';
 import { toast } from 'sonner';
 import {
   type TextWordingState,
+  type WordingLanguage,
   type WordingPurpose,
   type WordingText,
+  type WordingVersion,
   fetchTextWording as fetchApi,
   saveTextWording as saveApi,
   resetTextWording as resetApi,
@@ -41,29 +44,32 @@ export function previewWording(body: string, values: Record<string, string>): st
   return body.trim().replace(/\{\{\s*([a-zA-Z0-9_]+)\s*\}\}/g, (full, key: string) => values[key] ?? full);
 }
 
-const LANGUAGE_NAMES: Record<string, string> = { en: 'English', es: 'Spanish' };
+const LANGUAGE_NAMES: Record<WordingLanguage, string> = { en: 'English', es: 'Spanish' };
 
 function WordingCard({
   text,
+  language,
   maxLength,
-  businessLanguage,
+  shown,
   api,
   onSaved,
 }: {
   text: WordingText;
+  language: WordingLanguage;
+  /** Only the picked language shows; the other keeps its unsaved draft. */
+  shown: boolean;
   maxLength: number;
-  businessLanguage: string;
   api: TextWordingSheetApi;
-  onSaved: (purpose: WordingPurpose, saved: WordingText['saved']) => void;
+  onSaved: (purpose: WordingPurpose, language: WordingLanguage, saved: WordingVersion['saved']) => void;
 }) {
-  const [draft, setDraft] = useState(text.saved?.body ?? '');
+  const version = text.byLanguage[language];
+  const [draft, setDraft] = useState(version.saved?.body ?? '');
   const [busy, setBusy] = useState(false);
   const [problems, setProblems] = useState<string[]>([]);
   const area = useRef<HTMLTextAreaElement>(null);
   const { title, when } = TITLES[text.purpose];
-  const id = `wording-${text.purpose}`;
-  const changed =
-    draft.trim() !== (text.saved?.body ?? '') || (!!text.saved && text.saved.language !== businessLanguage);
+  const id = `wording-${text.purpose}-${language}`;
+  const changed = draft.trim() !== (version.saved?.body ?? '');
 
   const insert = (fillIn: string) => {
     const token = `{{${fillIn}}}`;
@@ -81,10 +87,10 @@ function WordingCard({
     setBusy(true);
     setProblems([]);
     try {
-      const saved = await api.save(text.purpose, draft);
+      const saved = await api.save(text.purpose, draft, language);
       setDraft(saved.body);
-      onSaved(text.purpose, saved);
-      toast.success(`${title} saved`);
+      onSaved(text.purpose, language, saved);
+      toast.success(`${title} (${LANGUAGE_NAMES[language]}) saved`);
     } catch (err) {
       const e = err as Error & { problems?: string[] };
       setProblems(e.problems?.length ? e.problems : [e.message || 'The wording could not be saved.']);
@@ -97,10 +103,10 @@ function WordingCard({
     setBusy(true);
     setProblems([]);
     try {
-      await api.reset(text.purpose);
+      await api.reset(text.purpose, language);
       setDraft('');
-      onSaved(text.purpose, null);
-      toast.success(`${title} is back to our wording`);
+      onSaved(text.purpose, language, null);
+      toast.success(`${title} (${LANGUAGE_NAMES[language]}) is back to our wording`);
     } catch (err) {
       setProblems([err instanceof Error && err.message ? err.message : 'The wording could not be reset.']);
     } finally {
@@ -110,11 +116,11 @@ function WordingCard({
 
   // An emptied box saves nothing: what customers get is still the saved
   // wording (or ours) until the owner saves or resets.
-  const withAdded = (body: string) => [previewWording(body, text.sampleValues), ...text.addedLines].join('\n');
-  const preview = draft.trim() ? withAdded(draft) : text.saved ? withAdded(text.saved.body) : text.ours;
+  const withAdded = (body: string) => [previewWording(body, text.sampleValues), ...version.addedLines].join('\n');
+  const preview = draft.trim() ? withAdded(draft) : version.saved ? withAdded(version.saved.body) : version.ours;
 
   return (
-    <section aria-labelledby={`${id}-title`} className="rounded-xl border border-border p-3 space-y-2 min-w-0">
+    <section hidden={!shown} aria-labelledby={`${id}-title`} className="rounded-xl border border-border p-3 space-y-2 min-w-0">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <h3 id={`${id}-title`} className="text-sm font-semibold">
           {title}
@@ -123,20 +129,13 @@ function WordingCard({
           data-testid={`${id}-status`}
           className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] text-slate-600"
         >
-          {text.saved ? 'Your wording' : 'Our wording'}
+          {version.saved ? 'Your wording' : 'Our wording'}
         </span>
       </div>
       <p className="text-xs text-muted-foreground">{when}</p>
-      {text.saved && text.saved.language !== businessLanguage && (
-        <p className="text-xs text-amber-700" data-testid={`${id}-language-note`}>
-          You wrote this in {LANGUAGE_NAMES[text.saved.language] ?? text.saved.language}, so only customers who read{' '}
-          {LANGUAGE_NAMES[text.saved.language] ?? text.saved.language} get it. Save it again to use it for{' '}
-          {LANGUAGE_NAMES[businessLanguage] ?? businessLanguage}.
-        </p>
-      )}
 
       <label htmlFor={id} className="sr-only">
-        {title} wording
+        {title} wording in {LANGUAGE_NAMES[language]}
       </label>
       <textarea
         id={id}
@@ -176,7 +175,7 @@ function WordingCard({
         >
           {preview}
         </p>
-        {!draft.trim() && text.saved && (
+        {!draft.trim() && version.saved && (
           <p className="mt-1 text-xs text-muted-foreground" data-testid={`${id}-cleared-hint`}>
             Your saved wording still goes out. Tap Reset to ours to go back to our wording.
           </p>
@@ -200,7 +199,7 @@ function WordingCard({
         >
           Save
         </button>
-        {text.saved && (
+        {version.saved && (
           <button
             type="button"
             onClick={reset}
@@ -223,12 +222,16 @@ export function TextWordingSheet({
   api?: TextWordingSheetApi;
 }) {
   const [state, setState] = useState<TextWordingState | null>(null);
+  const [language, setLanguage] = useState<WordingLanguage | null>(null);
   const [error, setError] = useState('');
 
   const load = useCallback(async () => {
     setError('');
     try {
-      setState(await api.fetch());
+      const loaded = await api.fetch();
+      setState(loaded);
+      // Opens on the business's own language; a retry keeps the one picked.
+      setLanguage((current) => current ?? loaded.language);
     } catch (err) {
       setError(err instanceof Error && err.message ? err.message : 'The text wording could not be loaded.');
     }
@@ -238,8 +241,18 @@ export function TextWordingSheet({
     void load();
   }, [load]);
 
-  const onSaved = (purpose: WordingPurpose, saved: WordingText['saved']) =>
-    setState((s) => s && { ...s, texts: s.texts.map((t) => (t.purpose === purpose ? { ...t, saved } : t)) });
+  const onSaved = (purpose: WordingPurpose, lang: WordingLanguage, saved: WordingVersion['saved']) =>
+    setState(
+      (s) =>
+        s && {
+          ...s,
+          texts: s.texts.map((t) =>
+            t.purpose === purpose
+              ? { ...t, byLanguage: { ...t.byLanguage, [lang]: { ...t.byLanguage[lang], saved } } }
+              : t,
+          ),
+        },
+    );
 
   return (
     <div
@@ -273,9 +286,27 @@ export function TextWordingSheet({
 
         <div className="space-y-3 px-4 py-4">
           <p className="text-sm text-muted-foreground">
-            Write the texts customers get in your own words. Tap a fill-in to add it. Customers who read another
-            language still get our wording in their language.
+            Write the texts customers get in your own words. Tap a fill-in to add it. Each customer gets the
+            wording in the language they read; where you haven&apos;t written one, they get ours.
           </p>
+          {state && language && (
+            <div role="group" aria-label="Language" className="flex gap-2" data-testid="wording-languages">
+              {state.languages.map((l) => (
+                <button
+                  key={l}
+                  type="button"
+                  aria-pressed={l === language}
+                  onClick={() => setLanguage(l)}
+                  className={`min-h-11 flex-1 rounded-lg border px-3 text-sm ${
+                    l === language ? 'border-primary bg-primary text-primary-foreground' : 'border-border'
+                  }`}
+                >
+                  {LANGUAGE_NAMES[l]}
+                  {l === state.language ? ' (main)' : ''}
+                </button>
+              ))}
+            </div>
+          )}
           {error && (
             <div role="alert" className="space-y-2">
               <p className="text-sm text-destructive">{error}</p>
@@ -289,16 +320,21 @@ export function TextWordingSheet({
             </div>
           )}
           {!state && !error && <p className="text-sm text-muted-foreground">Loading…</p>}
-          {state?.texts.map((t) => (
-            <WordingCard
-              key={t.purpose}
-              text={t}
-              maxLength={state.maxLength}
-              businessLanguage={state.language}
-              api={api}
-              onSaved={onSaved}
-            />
-          ))}
+          {state &&
+            language &&
+            state.languages.flatMap((l) =>
+              state.texts.map((t) => (
+                <WordingCard
+                  key={`${t.purpose}-${l}`}
+                  text={t}
+                  language={l}
+                  shown={l === language}
+                  maxLength={state.maxLength}
+                  api={api}
+                  onSaved={onSaved}
+                />
+              )),
+            )}
         </div>
       </div>
     </div>
