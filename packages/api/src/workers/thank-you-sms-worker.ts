@@ -65,6 +65,7 @@ const SUPPRESSION_AUDIT_REASON: Partial<Record<MessageBlockReason, string>> = {
 };
 import { resolveCustomerLanguage } from '../i18n/resolve-language';
 import { renderThankYouSms } from '../notifications/templates';
+import type { CustomerTextWording } from '../notifications/customer-text-wording';
 import { withSendClaim } from '../notifications/send-claim-ledger';
 
 const HOUR_MS = 60 * 60 * 1000;
@@ -114,6 +115,8 @@ export interface ThankYouSmsWorkerDeps {
    * (the gate still defers each send).
    */
   sendWindow?: Pick<GatedMessageDelivery, 'sendWindowVerdict'>;
+  /** D-045 — the owner's own thank-you wording. Absent means ours. */
+  wording?: CustomerTextWording;
 }
 
 export interface ThankYouSmsSweepResult {
@@ -308,7 +311,16 @@ async function sendOneThankYou(
     customerPreferredLanguage: customer?.preferredLanguage,
     tenantDefaultLanguage: settings?.defaultLanguage,
   });
-  const { body } = renderThankYouSms({ businessName, language });
+  const builtIn = () => renderThankYouSms({ businessName, language }).body;
+  const body = deps.wording
+    ? await deps.wording.textFor({
+        tenantId,
+        purpose: 'thank_you_text',
+        customerLanguage: language,
+        values: { business_name: businessName, customer_name: customer?.displayName },
+        builtIn,
+      })
+    : builtIn();
 
   // Outbound messaging decides the rest: an automated nudge needs the
   // customer's own consent and a number off the DNC list, waits for their
