@@ -804,12 +804,16 @@ export async function rejectProposal(
 
   const transitioned = transitionProposal(proposal, 'rejected', actorId);
 
-  const updated = await proposalRepo.updateStatus(tenantId, proposalId, 'rejected', {
+  // Conditional on the status just read: an approval that commits between the
+  // read and this write must win, not be overwritten by the rejection.
+  const updated = await proposalRepo.updateStatusIf(tenantId, proposalId, [proposal.status], 'rejected', {
     rejectionReason: reason,
     rejectionDetails: details,
   });
   if (!updated) {
-    throw new NotFoundError('Proposal', proposalId);
+    throw new ConflictError('The proposal changed before it could be rejected. Reload it and try again.', {
+      proposalId,
+    });
   }
 
   // D2-1c — audit-log the rejection. Built inline (vs. logProposalEvent)

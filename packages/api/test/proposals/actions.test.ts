@@ -42,6 +42,22 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     return (await repo.findById(tenantId, proposal.id))!;
   }
 
+  it('a rejection that loses a race to an approval leaves the approval standing', async () => {
+    const repo = makeRepo();
+    const proposal = await createReadyProposal(repo);
+    // The reject reads the card while it is still ready_for_review; the
+    // approval commits before the reject writes.
+    const stale = { ...proposal };
+    const racing = Object.create(repo) as InMemoryProposalRepository;
+    racing.findById = async () => stale;
+    await approveProposal(repo, tenantId, proposal.id, actorId, 'owner');
+
+    await expect(
+      rejectProposal(racing, tenantId, proposal.id, actorId, 'owner', 'dismissed'),
+    ).rejects.toThrow(ConflictError);
+    expect((await repo.findById(tenantId, proposal.id))!.status).toBe('approved');
+  });
+
   it('happy path — owner approves proposal', async () => {
     const repo = makeRepo();
     const proposal = await createReadyProposal(repo);
