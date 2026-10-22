@@ -638,6 +638,17 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         }
       }
 
+      // D-044 — a review link written by anyone but the listing flow (which
+      // names both keys) keeps the "app filled this" marker only while the
+      // link still equals it; an owner's own value is never re-claimed.
+      if (updates.googleReviewUrl !== undefined && updates.googleReviewUrlDerived === undefined) {
+        setClauses.push(
+          `google_review_url_derived = CASE WHEN google_review_url_derived IS NOT DISTINCT FROM $${paramIndex}::text THEN google_review_url_derived ELSE NULL END`,
+        );
+        params.push(updates.googleReviewUrl ?? null);
+        paramIndex++;
+      }
+
       if (needsTerminologyMerge) {
         setClauses.push(`terminology_preferences = $${paramIndex}`);
         params.push(terminologyJson ? JSON.stringify(terminologyJson) : null);

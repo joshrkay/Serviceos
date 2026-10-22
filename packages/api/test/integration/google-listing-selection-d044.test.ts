@@ -109,7 +109,7 @@ describe('D-044 Google listing selection (real Postgres)', () => {
     await settingsRepo.upsertIdentityFields(tenantId, { businessName: 'Acme' });
 
     expect(
-      await applyDerivedGoogleReviewUrl(settingsRepo, tenantId, null, 'https://g.page/r/review-999'),
+      await applyDerivedGoogleReviewUrl(settingsRepo, tenantId, 'https://g.page/r/review-999'),
     ).toBe('set');
     const read = async () =>
       (
@@ -132,11 +132,29 @@ describe('D-044 Google listing selection (real Postgres)', () => {
       await applyDerivedGoogleReviewUrl(
         settingsRepo,
         tenantId,
-        'https://g.page/r/review-999',
         'https://g.page/r/review-555',
       ),
     ).toBe('kept');
     expect(await read()).toBe('https://g.page/r/typed');
+  });
+
+  it('an owner edit of the review link clears the app-filled marker unless the link is unchanged', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    const settingsRepo = new PgSettingsRepository(pool);
+    await settingsRepo.upsertIdentityFields(tenantId, { businessName: 'Acme' });
+    await applyDerivedGoogleReviewUrl(settingsRepo, tenantId, 'https://g.page/r/a');
+    const marker = async () =>
+      (
+        await pool.query(`SELECT google_review_url_derived FROM tenant_settings WHERE tenant_id = $1`, [
+          tenantId,
+        ])
+      ).rows[0].google_review_url_derived;
+    await settingsRepo.update(tenantId, { googleReviewUrl: 'https://g.page/r/a', yelpReviewUrl: 'https://yelp.com/x' });
+    expect(await marker()).toBe('https://g.page/r/a');
+    await settingsRepo.update(tenantId, { googleReviewUrl: 'https://g.page/r/b' });
+    expect(await marker()).toBeNull();
+    await settingsRepo.update(tenantId, { googleReviewUrl: 'https://g.page/r/a' });
+    expect(await marker()).toBeNull();
   });
 
   it('the checklist dismissal round-trips through tenant_settings.get_found_online_dismissed_at', async () => {

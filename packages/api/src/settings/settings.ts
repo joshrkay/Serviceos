@@ -1563,6 +1563,15 @@ export class InMemorySettingsRepository implements SettingsRepository {
     for (const key of Object.keys(safeUpdates) as (keyof typeof safeUpdates)[]) {
       if (safeUpdates[key] === undefined) delete safeUpdates[key];
     }
+    // D-044 parity with Pg: an owner's review-link edit drops the
+    // "app filled this" marker unless the link still equals it.
+    if (
+      safeUpdates.googleReviewUrl !== undefined &&
+      safeUpdates.googleReviewUrlDerived === undefined &&
+      s.googleReviewUrlDerived !== (safeUpdates.googleReviewUrl ?? null)
+    ) {
+      safeUpdates.googleReviewUrlDerived = null;
+    }
     // S5a-4 parity with Pg: a payment-mode write always moves updatedAt.
     if (safeUpdates.paymentCollectionMode !== undefined && safeUpdates.updatedAt === undefined) {
       safeUpdates.updatedAt = new Date();

@@ -146,7 +146,6 @@ async function resetReviewCursorIfMoved(
 async function fillReviewUrl(
   deps: GoogleBusinessIntegrationsRouteDeps,
   tenantId: string,
-  previousDerived: string | null,
   derived: string | null,
 ): Promise<{ reviewUrlFilled: boolean; reviewUrlCleared?: boolean; reviewUrlError?: string }> {
   if (!deps.settingsRepo) return { reviewUrlFilled: false };
@@ -154,7 +153,6 @@ async function fillReviewUrl(
     const outcome = await applyDerivedGoogleReviewUrl(
       deps.settingsRepo,
       tenantId,
-      previousDerived,
       derived,
     );
     return {
@@ -287,7 +285,6 @@ export function createGoogleBusinessOAuthCallbackRouter(
           ? await fillReviewUrl(
               deps,
               consumed.tenantId,
-              previous?.reviewUrl ?? null,
               selection?.reviewUrl ?? null,
             )
           : { reviewUrlFilled: false };
@@ -477,7 +474,7 @@ export function createGoogleBusinessIntegrationsRouter(
           // app filled from it (a typed one stays).
           // Link first: once the listing is forgotten a retry no longer
           // sees it gone, so a failed link write must stop here.
-          const reviewUrl = await fillReviewUrl(deps, tenantId, current.reviewUrl, null);
+          const reviewUrl = await fillReviewUrl(deps, tenantId, null);
           if (reviewUrl.reviewUrlError) {
             throw new Error(
               `Your saved Google location is gone, but the old review link could not be removed: ${reviewUrl.reviewUrlError}`,
@@ -535,7 +532,7 @@ export function createGoogleBusinessIntegrationsRouter(
         ) {
           // Link first, for the same reason: after the refresh a retry
           // sees nothing new.
-          const reviewUrl = await fillReviewUrl(deps, tenantId, current.reviewUrl, saved.reviewUrl);
+          const reviewUrl = await fillReviewUrl(deps, tenantId, saved.reviewUrl);
           if (reviewUrl.reviewUrlError) {
             throw new Error(
               `Google updated your location, but the review link could not be: ${reviewUrl.reviewUrlError}`,
@@ -622,7 +619,6 @@ export function createGoogleBusinessIntegrationsRouter(
         const reviewUrl = await fillReviewUrl(
           deps,
           tenantId,
-          previous?.reviewUrl ?? null,
           location.reviewUrl,
         );
         if (deps.auditRepo) {

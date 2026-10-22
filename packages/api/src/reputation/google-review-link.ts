@@ -39,21 +39,19 @@ export function nextGoogleReviewUrl(input: ReviewUrlInputs): ReviewUrlChange {
  * alone (onboarding creates the row).
  *
  * The link the app last filled in is remembered on the settings row
- * (`googleReviewUrlDerived`), so it is still recognised as ours after a
- * disconnect deletes the integration row; `previousDerived` (from the
- * integration) only covers rows written before that column existed.
+ * (`googleReviewUrlDerived`) and is the only proof a link is ours: it
+ * survives a disconnect, and an owner's own edit of the link drops it.
  */
 export async function applyDerivedGoogleReviewUrl(
   settingsRepo: Pick<SettingsRepository, 'findByTenant' | 'update'>,
   tenantId: string,
-  previousDerived: string | null,
   derived: string | null,
 ): Promise<'set' | 'cleared' | 'kept'> {
   const settings = await settingsRepo.findByTenant(tenantId);
   if (!settings) return 'kept';
   const next = nextGoogleReviewUrl({
     current: settings.googleReviewUrl,
-    previousDerived: settings.googleReviewUrlDerived || previousDerived,
+    previousDerived: settings.googleReviewUrlDerived ?? null,
     derived,
   });
   if (next?.kind === 'set') {
