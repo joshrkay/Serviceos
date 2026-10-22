@@ -580,6 +580,33 @@ describe('createTranscriptionWorker — card numbers (PRIV-3)', () => {
       expect(voiceRepo.markCardNumberDetected).toHaveBeenCalledWith('tenant-1', 'rec-1');
     });
 
+    it('keeps a card read as words with the expiry said straight after it out of the prompt and the stored transcript', async () => {
+      // Visa test number 4012 8888 8888 1881, then 04/27 with no pause: one
+      // run of words, longer than any card.
+      const spoken =
+        'My card is four oh one two eight eight eight eight eight eight eight eight one eight eight one oh four two seven, thanks.';
+      const stored = 'My card is [card number] oh four two seven, thanks.';
+      const voiceRepo = makeVoiceRepo();
+      const gateway = correctionGateway(stored);
+      const worker = createTranscriptionWorker(
+        voiceRepo,
+        { transcribe: vi.fn().mockResolvedValue({ transcript: spoken, metadata: {} }) },
+        { gateway, rawTranscriptEncryptionKey: KEY },
+      );
+      await worker.handle(makeMessage(), logger);
+
+      const prompt = gateway.complete.mock.calls[0][0].messages[1].content as string;
+      expect(prompt).toContain(stored);
+      expect(prompt).not.toMatch(/four oh one two|eight eight/);
+
+      const [, , status, update] = (voiceRepo.updateStatus as ReturnType<typeof vi.fn>).mock.calls.at(-1)!;
+      expect(status).toBe('completed');
+      expect(update.transcript).toBe(stored);
+      const retained = update.metadata.raw_transcript_retention as { encryptedBlob: string };
+      expect(decrypt(retained.encryptedBlob, KEY)).toBe(stored);
+      expect(voiceRepo.markCardNumberDetected).toHaveBeenCalledWith('tenant-1', 'rec-1');
+    });
+
     it('leaves a callback number read as words alone and does not flag the recording', async () => {
       const voiceRepo = makeVoiceRepo();
       const spoken = 'Please call me back at six oh two five five five oh one nine nine about the visit.';

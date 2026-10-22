@@ -36,7 +36,8 @@
  * also goes to the correction model) and other STT can write a card read
  * aloud as words, "four one one one …", and a Spanish caller says "cuatro uno
  * uno uno …". Digit words count as digits (English zero/oh/o–nine, Spanish
- * cero–nueve, with "double"/"triple" and "doble"/"triple" repeats), and the
+ * cero–nueve, with "double"/"triple" and "doble"/"triple" repeats; a bare
+ * "o" beside Spanish digit words is Spanish "or" and ends the run), and the
  * fillers said between groups ("and", "dash", "uh", "y", commas) may join
  * them. Digit words separated only by spaces are one spoken group; a comma, a filler or a
  * switch to written digits starts the next, so the Luhn check, the
@@ -53,7 +54,15 @@
  * (`cardShaped`): it starts like a payment card (2–6), holds no more
  * year-shaped groups than a card does, and is read in a card's groups where
  * it mixes words and digits.
-
+ *
+ * Words have no space to lose: written, STT puts one between a card and the
+ * CVV or expiry said after it ("4012888888881881 0427"); read as words with
+ * no pause, they are one spoken group longer than any card. Where the
+ * whole-group search finds nothing, a card may also be cut out of a spoken
+ * group between two words, keeping the CVV or expiry after it (or a stray
+ * "oh" before it); see `cutCardWindows` for the rules that keep long runs of
+ * words that are not a card (a phone number and zip, a tracking number)
+ * untouched.
  *
  * Deepgram's own `redact=pci` replaces a card with `[CREDIT_CARD_N]` on
  * English streams; that tag is mapped to the same marker so a recording is
@@ -69,8 +78,8 @@ const MAX_PAN_DIGITS = 19;
 /** Deepgram's card tag (`redact=pci`), e.g. `[CREDIT_CARD_1]`. */
 const DEEPGRAM_CARD_TAG = /\[CREDIT_CARD(?:_\d+)?\]/g;
 
-/** A digit spoken as a word: English zero/oh/o–nine, Spanish cero–nueve. */
-const DIGIT_WORDS: ReadonlyMap<string, string> = new Map([
+/** A digit spoken as a word in English: zero/oh/o–nine. */
+const ENGLISH_DIGIT_WORDS: ReadonlyMap<string, string> = new Map([
   ['zero', '0'],
   ['oh', '0'],
   ['o', '0'],
@@ -83,6 +92,10 @@ const DIGIT_WORDS: ReadonlyMap<string, string> = new Map([
   ['seven', '7'],
   ['eight', '8'],
   ['nine', '9'],
+]);
+
+/** A digit spoken as a word in Spanish: cero–nueve. */
+const SPANISH_DIGIT_WORDS: ReadonlyMap<string, string> = new Map([
   ['cero', '0'],
   ['uno', '1'],
   ['dos', '2'],
@@ -94,6 +107,8 @@ const DIGIT_WORDS: ReadonlyMap<string, string> = new Map([
   ['ocho', '8'],
   ['nueve', '9'],
 ]);
+
+const DIGIT_WORDS: ReadonlyMap<string, string> = new Map([...ENGLISH_DIGIT_WORDS, ...SPANISH_DIGIT_WORDS]);
 
 /** "double one" is 11, "triple uno" is 111. */
 const REPEAT_WORDS: ReadonlyMap<string, number> = new Map([
@@ -266,13 +281,14 @@ interface Token {
 }
 
 function tokenize(text: string, seg = 0): Token[] {
-  const raw: Array<Token & { repeat?: number }> = [];
+  const raw: Array<Token & { repeat?: number; word?: string }> = [];
   for (const m of text.matchAll(TOKEN)) {
     const start = m.index ?? 0;
     const end = start + m[0].length;
     let kind: TokenKind = 'other';
     let digits = '';
     let repeat: number | undefined;
+    let word: string | undefined;
     if (m[1] !== undefined) {
       if (!isAsciiLetter(text[start - 1]) && !isAsciiLetter(text[end])) {
         kind = 'num';
@@ -280,7 +296,7 @@ function tokenize(text: string, seg = 0): Token[] {
       }
     } else if (m[2] !== undefined) {
       if (!isAsciiDigit(text[start - 1]) && !isAsciiDigit(text[end])) {
-        const word = m[2].toLowerCase();
+        word = m[2].toLowerCase();
         const spoken = DIGIT_WORDS.get(word);
         if (spoken !== undefined) {
           kind = 'spoken';
@@ -298,11 +314,13 @@ function tokenize(text: string, seg = 0): Token[] {
     } else if (PAUSE_CHARS.has(m[0])) {
       kind = 'pause';
     }
-    raw.push({ kind, seg, start, end, digits, repeat });
+    raw.push({ kind, seg, start, end, digits, repeat, word });
   }
   // A repeat word counts only with the digit word it repeats ("double check"
   // is two ordinary words).
   const tokens: Token[] = [];
+  /** The digit word each spoken token reads (for "double one", "one"). */
+  const words: Array<string | undefined> = [];
   for (let i = 0; i < raw.length; i++) {
     const t = raw[i];
     const target = raw[i + 2];
@@ -314,11 +332,27 @@ function tokenize(text: string, seg = 0): Token[] {
         end: target.end,
         digits: target.digits.repeat(t.repeat),
       });
+      words.push(target.word);
       i += 2;
       continue;
     }
     tokens.push({ kind: t.kind, seg, start: t.start, end: t.end, digits: t.digits });
+    words.push(t.kind === 'spoken' ? t.word : undefined);
   }
+  // A bare "o" is "oh" beside English digit words, but Spanish "or" beside
+  // Spanish ones ("… nueve nueve o cuatro ocho …", "… uno o sea"), where it
+  // ends the run instead of joining two numbers with a zero.
+  const besideSpanish = (i: number, step: number): boolean => {
+    let k = i + step;
+    while (k >= 0 && k < tokens.length && isJoinerToken(tokens[k])) k += step;
+    return SPANISH_DIGIT_WORDS.has(words[k] ?? '');
+  };
+  // Decided against the tokens as read, then applied.
+  const notNumbers: number[] = [];
+  words.forEach((word, i) => {
+    if (word === 'o' && (besideSpanish(i, -1) || besideSpanish(i, 1))) notNumbers.push(i);
+  });
+  for (const i of notNumbers) tokens[i] = { ...tokens[i], kind: 'other', digits: '' };
   return tokens;
 }
 
@@ -392,7 +426,7 @@ interface DigitGroup {
   writtenJoin: boolean;
 }
 
-/** The digit tokens a window takes from one group. */
+/** The digit tokens a window takes from one group (all of them, or the part a cut keeps). */
 interface WindowPart {
   group: DigitGroup;
   units: readonly DigitUnit[];
@@ -537,6 +571,53 @@ function cardShaped(parts: readonly WindowPart[], run: string, ctx: SearchContex
     !segs.some((seg) => ctx.phoneTurns.has(seg)) &&
     readLikeACard(turnDigits, run) &&
     (ctx.cardCue || !groupPerTurn)
+  );
+}
+
+/**
+ * A card cut out of a spoken group is a guess at where the card ends inside
+ * words said with no pause, so it takes only the lengths cards are mostly
+ * issued in: 16 (Visa, Mastercard, Discover, JCB) or an Amex's 15, and 19
+ * (Visa, UnionPay) when the cut keeps a code or expiry after the card. Every
+ * other length is one more window that can pass the Luhn check by chance in
+ * a long run of words that is no card (a reference number, two phone numbers
+ * back to back): a 17–19 digit window after one or two stray words is how a
+ * 20-digit pair of phone numbers became a "card".
+ */
+const MIN_CUT_PAN_DIGITS = 15;
+
+function cutLength(digits: number, keepsWhatFollows: boolean): boolean {
+  return digits === 15 || digits === 16 || (keepsWhatFollows && digits === MAX_PAN_DIGITS);
+}
+
+/**
+ * At most this many digits of a spoken group may come before a card cut out
+ * of it: a stray "oh" or "one" said straight before the card. A longer
+ * lead-in is another number, and every start deeper into the run is one more
+ * window that can pass the Luhn check by chance.
+ */
+const MAX_CUT_LEAD_DIGITS = 2;
+
+/** MMYY with a month 01–12. */
+const EXPIRY = /^(?:0[1-9]|1[0-2])\d\d$/;
+
+/** A month, 01–12. */
+const MONTH = /^(?:0[1-9]|1[0-2])$/;
+
+/**
+ * What a caller says straight after a card with no pause: its security code
+ * (three digits, an Amex's four), its expiry (MMYY, or just the month with
+ * the year said after a pause, "oh four, twenty seven"), or a code and an
+ * expiry in either order. A card cut out of a run of words must leave
+ * exactly that after it; any other remainder ("…7936", the rest of a second
+ * phone number) means the words were not a card and its CVV.
+ */
+function followsACard(rest: string, card: string): boolean {
+  const code = (s: string): boolean => s.length === 3 || (s.length === 4 && card.length === 15);
+  const expiry = (s: string): boolean => EXPIRY.test(s);
+  if (code(rest) || expiry(rest) || MONTH.test(rest)) return true;
+  return [3, 4].some(
+    (k) => (code(rest.slice(0, k)) && expiry(rest.slice(k))) || (expiry(rest.slice(0, 4)) && code(rest.slice(4))),
   );
 }
 
@@ -726,6 +807,11 @@ function runCards(groups: DigitGroup[], cardCue: boolean): CardHit[] {
  * spans turns: the leftmost-longest Luhn-valid window of whole groups that
  * keeps `cardShaped`, never starting on a phone number
  * (`spokenPhoneGroupsAt`).
+ *
+ * Read as words, a card and the CVV, expiry or stray digit word said straight
+ * next to it with no pause are one spoken group, so a stretch of the run with
+ * no whole-group card is searched again for a card cut out of a spoken group
+ * (`cutCardWindows`).
  */
 function cardWindows(groups: DigitGroup[], cardCue: boolean): CardHit[] {
   const phoneTurns = new Set<number>();
@@ -736,9 +822,96 @@ function cardWindows(groups: DigitGroup[], cardCue: boolean): CardHit[] {
   const ctx: SearchContext = { phoneTurns, cardCue };
   const whole = (from: number, to: number): WindowPart[] =>
     groups.slice(from, to + 1).map((group) => ({ group, units: group.units }));
-  return wholeGroupCards(groups.map((g) => g.digits), spokenPhoneGroupsAt, (from, to, run) =>
-    cardShaped(whole(from, to), run, ctx),
-  ).map(([first, last]) => groupHit(groups, first, last));
+  const hits: CardHit[] = [];
+  // First group of the stretch no whole-group card has covered yet.
+  let stretch = 0;
+  for (const [first, last] of wholeGroupCards(
+    groups.map((g) => g.digits),
+    spokenPhoneGroupsAt,
+    (from, to, run) => cardShaped(whole(from, to), run, ctx),
+  )) {
+    hits.push(...cutCardWindows(groups, stretch, first, ctx));
+    hits.push(groupHit(groups, first, last));
+    stretch = last + 1;
+  }
+  hits.push(...cutCardWindows(groups, stretch, groups.length, ctx));
+  return hits;
+}
+
+/**
+ * The cards in groups `from`..`to` (exclusive) that only a window cutting a
+ * spoken group between two of its words finds: the whole-group search found
+ * none there. One end of such a window is a group boundary and the other is
+ * inside a spoken group, so it takes the card and leaves the CVV or expiry
+ * run on after it ("four oh one two … one eight eight one oh four two seven"),
+ * or a stray digit word before it ("number one four oh one two …"). Such a
+ * window must be a length cards are cut at (`cutLength`), start at most
+ * `MAX_CUT_LEAD_DIGITS` into its group, leave after it exactly what follows a
+ * card (`followsACard`), pass the Luhn check and keep `cardShaped`. Written
+ * digits are one token per group, so the written path never gets here with
+ * anything to cut.
+ */
+function cutCardWindows(groups: DigitGroup[], from: number, to: number, ctx: SearchContext): CardHit[] {
+  const digits = groups.map((g) => g.digits);
+  const units: Array<DigitUnit & { group: number; lead: number; first: boolean; last: boolean }> = [];
+  for (let g = from; g < to; g++) {
+    let lead = 0;
+    groups[g].units.forEach((u, k, all) => {
+      units.push({ ...u, group: g, lead, first: k === 0, last: k === all.length - 1 });
+      lead += u.digits.length;
+    });
+  }
+  const hits: CardHit[] = [];
+  let p = 0;
+  while (p < units.length) {
+    const start = units[p];
+    if (start.first) {
+      const phone = spokenPhoneGroupsAt(digits, start.group);
+      if (phone > 0) {
+        // Kept verbatim, as in the whole-group search.
+        const next = units.findIndex((u) => u.group >= start.group + phone);
+        if (next < 0) break;
+        p = next;
+        continue;
+      }
+    } else if (start.lead > MAX_CUT_LEAD_DIGITS) {
+      p++;
+      continue;
+    }
+    const windows: Array<{ end: number; digits: string }> = [];
+    let run = '';
+    for (let q = p; q < units.length; q++) {
+      run += units[q].digits;
+      if (run.length > MAX_PAN_DIGITS) break;
+      if (run.length >= MIN_CUT_PAN_DIGITS) windows.push({ end: q, digits: run });
+    }
+    const hit = windows.reverse().find((w) => {
+      const end = units[w.end];
+      // Exactly one end on a group boundary: both is a whole-group window
+      // (already searched), neither is a stretch out of the middle of a run.
+      if (start.first === end.last) return false;
+      if (!cutLength(w.digits.length, !end.last)) return false;
+      if (!end.last) {
+        const rest = groups[end.group].units.slice(groups[end.group].units.findIndex((u) => u.token === end.token) + 1);
+        if (!followsACard(rest.map((u) => u.digits).join(''), w.digits)) return false;
+      }
+      if (!isLuhnValid(w.digits)) return false;
+      const parts: WindowPart[] = [];
+      for (const u of units.slice(p, w.end + 1)) {
+        const part = parts.at(-1);
+        if (part?.group === groups[u.group]) (part.units as DigitUnit[]).push(u);
+        else parts.push({ group: groups[u.group], units: [u] });
+      }
+      return cardShaped(parts, w.digits, ctx);
+    });
+    if (hit) {
+      hits.push({ from: start.token, to: units[hit.end].token });
+      p = hit.end + 1;
+    } else {
+      p++;
+    }
+  }
+  return hits;
 }
 
 /**

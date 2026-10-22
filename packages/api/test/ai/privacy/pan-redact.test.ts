@@ -503,6 +503,113 @@ describe('redactCardNumbers — a card number read out as words', () => {
   });
 });
 
+// Written as digits, STT leaves a space between the card and the CVV or
+// expiry said after it ("4012888888881881 0427"), so they are separate
+// groups. Written as words, every word is space-separated, so with no pause
+// the card and the digits said straight after (or before) it are one run of
+// words, and the card has to be cut out of it. Test card: Visa
+// 4012 8888 8888 1881.
+describe('redactCardNumbers — a card read as words that runs straight into other digit words', () => {
+  const VISA_EN = 'four oh one two eight eight eight eight eight eight eight eight one eight eight one';
+  const VISA_ES = 'cuatro cero uno dos ocho ocho ocho ocho ocho ocho ocho ocho uno ocho ocho uno';
+
+  it('keeps the CVV said straight after the card', () => {
+    expect(redactCardNumbers(`my card is ${VISA_EN} one two three thanks`)).toBe(
+      'my card is [card number] one two three thanks',
+    );
+  });
+
+  it('keeps the expiry said straight after the card, in English and in Spanish', () => {
+    expect(redactCardNumbers(`${VISA_EN} oh four two seven`)).toBe('[card number] oh four two seven');
+    expect(redactCardNumbers(`es ${VISA_ES} cero cuatro dos siete`)).toBe('es [card number] cero cuatro dos siete');
+    // The month runs on; "twenty" ends the run.
+    expect(redactCardNumbers(`${VISA_EN} oh four twenty seven`)).toBe('[card number] oh four twenty seven');
+    // The month runs on, and the year comes after a pause.
+    expect(redactCardNumbers(`${VISA_EN} oh four, twenty seven`)).toBe('[card number] oh four, twenty seven');
+  });
+
+  it("keeps an Amex's four-digit code said straight after it", () => {
+    // Amex test number 3782 822463 10005.
+    expect(
+      redactCardNumbers('three seven eight two eight two two four six three one oh oh oh five one two three four'),
+    ).toBe('[card number] one two three four');
+  });
+
+  it('cuts the card out of its last group when the expiry runs onto a card read in groups', () => {
+    expect(
+      redactCardNumbers(
+        'four oh one two, eight eight eight eight, eight eight eight eight, one eight eight one oh four two seven',
+      ),
+    ).toBe('[card number] oh four two seven');
+  });
+
+  it('keeps a stray digit word said straight before the card', () => {
+    expect(redactCardNumbers(`number one ${VISA_EN}`)).toBe('number one [card number]');
+  });
+
+  it('leaves long runs of digit words that are not a card untouched', () => {
+    for (const text of [
+      // 602555010285006: a phone number and zip. The whole fails the Luhn
+      // check, but its first 13 digits and its last 13 pass. A card cut out
+      // of words must be 15 to 19 digits, as cards issued today are.
+      'call me back at six oh two five five five oh one oh two eight five oh oh six',
+      // 94382844037879583025: its first 16 digits pass the Luhn check, but
+      // no payment card starts with 9.
+      'tracking nine four three eight two eight four four oh three seven eight seven nine five eight three oh two five',
+      // 8113906652830166176: its last 16 digits pass the Luhn check, but a
+      // card is cut from at most two digit words into a run.
+      'my claim number is eight one one three nine oh six six five two eight three oh one six six one seven six',
+    ]) {
+      expect(redactCardNumbers(text)).toBe(text);
+    }
+  });
+
+  // A card is cut out of a run of words only where what is left reads like
+  // what follows a card (a CVV or code, an expiry, both) or a stray digit
+  // word before it. Any other cut is one more window that can pass the Luhn
+  // check by chance: two phone numbers read back to back had one in three cut
+  // into a "card", and each hit purges the call's audio.
+  it('leaves two phone numbers read back to back as words untouched', () => {
+    // 54833042145579777936: its first 19 digits pass the Luhn check; the one
+    // digit left is no CVV or expiry.
+    const text = 'five four eight three three oh four two one four five five seven nine seven seven seven nine three six';
+    expect(redactCardNumbers(text)).toBe(text);
+  });
+
+  it('cuts a card out of a run of words only where the rest reads as a CVV or an expiry', () => {
+    for (const text of [
+      // 1820631810003635817: its last 17 digits pass the Luhn check, after two
+      // stray words; a card cut out of words is 15 (Amex) or 16 digits.
+      'one eight two oh six three one eight one oh oh oh three six three five eight one seven',
+      // A 16-digit window whose last four, "1399", is no month and year.
+      'reference four oh one two eight eight eight eight eight eight eight eight one eight eight one one three nine nine',
+    ]) {
+      expect(redactCardNumbers(text)).toBe(text);
+    }
+    // The same card with an expiry, or a CVV and an expiry, after it.
+    expect(
+      redactCardNumbers('four oh one two eight eight eight eight eight eight eight eight one eight eight one one two two nine'),
+    ).toBe('[card number] one two two nine');
+    expect(
+      redactCardNumbers(
+        'four oh one two eight eight eight eight eight eight eight eight one eight eight one one two three oh four two seven',
+      ),
+    ).toBe('[card number] one two three oh four two seven');
+  });
+
+  it('reads a bare "o" beside Spanish digit words as "or", not zero', () => {
+    // Two callback numbers: read as one 21-digit run, its last 19 digits
+    // would be cut out as a card.
+    const phones =
+      'llámame al seis cero dos cinco cinco cinco cero uno nueve nueve o cuatro ocho cero cinco cinco cinco cero uno cero tres, gracias';
+    expect(redactCardNumbers(phones)).toBe(phones);
+    // "o sea" ("I mean") straight after a card ends the card.
+    expect(redactCardNumbers(`mi tarjeta es ${VISA_ES} o sea la Visa`)).toBe('mi tarjeta es [card number] o sea la Visa');
+    // Beside English digit words it is still "oh".
+    expect(redactCardNumbers('six o one one, o o o nine, nine o one three, nine four two four')).toBe('[card number]');
+  });
+});
+
 // A caller who pauses mid-number leaves several turns, each under 13 digits.
 describe('redactCardNumbersAcrossTurns', () => {
   it('replaces the span each turn contributed to a card split over three turns', () => {
@@ -529,6 +636,16 @@ describe('redactCardNumbersAcrossTurns', () => {
         'uno uno uno uno',
       ]),
     ).toEqual(['mi tarjeta es [card number]', 'y [card number]', '[card number]', '[card number]']);
+  });
+
+  it('cuts the card out of the last turn when the caller runs straight on into the expiry', () => {
+    expect(
+      redactCardNumbersAcrossTurns([
+        'four oh one two, eight eight eight eight',
+        'eight eight eight eight',
+        'one eight eight one oh four two seven',
+      ]),
+    ).toEqual(['[card number]', '[card number]', '[card number] oh four two seven']);
   });
 
   // A caller reading on after a pause often opens the next turn with a filler
