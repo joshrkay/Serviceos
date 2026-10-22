@@ -52,10 +52,16 @@ export type MessageRecipient =
   | { kind: 'owner'; phone: string; alertClass?: SmsAlertClass }
   | { kind: 'reply'; phone: string; customerId?: string };
 
-export interface OutboundText {
+/**
+ * A reply recipient carries only the consent its inbound message gave, which
+ * covers a reply and nothing else, so the type pairs it with that purpose.
+ */
+export type AddressedTo =
+  | { recipient: Extract<MessageRecipient, { kind: 'reply' }>; purpose: 'reply' }
+  | { recipient: Exclude<MessageRecipient, { kind: 'reply' }>; purpose: MessagePurpose };
+
+export type OutboundText = AddressedTo & {
   tenantId: string;
-  recipient: MessageRecipient;
-  purpose: MessagePurpose;
   /**
    * Required dedupe key: the kind of message and the record it is about. The
    * send is claimed under `${messageKind}:${recordId}`, so at most one text
@@ -63,7 +69,7 @@ export interface OutboundText {
    */
   dedupe: { messageKind: string; recordId: string };
   body: string;
-}
+};
 
 export type MessageBlockReason =
   | SmsSuppressionReason
@@ -71,6 +77,11 @@ export type MessageBlockReason =
   | 'no_phone'
   /** A marketing text to a number with no standing marketing grant. */
   | 'no_marketing_consent'
+  /**
+   * Another attempt holds this dedupe key and has not finished. Nothing is
+   * known to have gone out; the holder may still fail, so try again later.
+   */
+  | 'in_flight'
   | 'send_failed';
 
 export type SendOutcome =
@@ -79,11 +90,10 @@ export type SendOutcome =
       /** The provider's receipt; absent when an earlier attempt already sent it. */
       delivery?: DeliveryResult;
       /**
-       * Set when this call did not send because the dedupe key was already
-       * claimed: 'sent' — an earlier attempt sent it; 'in_flight' — another
-       * attempt holds the claim right now and will finish it.
+       * Set when this call did not send because an earlier attempt under the
+       * same dedupe key already did.
        */
-      duplicate?: 'sent' | 'in_flight';
+      duplicate?: 'sent';
     }
   | { status: 'scheduled'; at: Date; reason: 'quiet_hours' }
   | {
@@ -164,7 +174,10 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
     }
 
     if (recipient.kind === 'reply') {
-      // The customer started this thread, which is the consent for a reply.
+      // The customer started this thread, which is the consent for a reply —
+      // and only a reply. The type forbids any other purpose; this holds for
+      // a caller that got past it.
+      if (purpose !== 'reply') return blocked('no_consent');
       return {
         to: recipient.phone,
         body,
@@ -240,7 +253,9 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
         outcome =
           claim.outcome === 'sent'
             ? { status: 'sent', delivery: claim.result }
-            : { status: 'sent', duplicate: claim.priorStatus === 'sent' ? 'sent' : 'in_flight' };
+            : claim.priorStatus === 'sent'
+              ? { status: 'sent', duplicate: 'sent' }
+              : blocked('in_flight');
       }
     } catch (err) {
       // withSendClaim has already released the claim: nothing reached the

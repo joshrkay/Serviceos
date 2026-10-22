@@ -131,6 +131,29 @@ describe('Postgres integration — outbound messaging', () => {
     expect(delivery.sentSms).toHaveLength(1);
   });
 
+  it('a key another attempt still holds is a retryable block, never reported as sent', async () => {
+    const tenant = await createTestTenant(pool);
+    const { customerId } = await seedCustomer(tenant, true);
+    const { messaging, delivery } = build();
+    // Another process claimed this key a moment ago and has not finished.
+    await pool.query(
+      `INSERT INTO send_claims (tenant_id, claim_key, status, claimed_at)
+       VALUES ($1, $2, 'sending', NOW())`,
+      [tenant.tenantId, `om_inflight:${customerId}`],
+    );
+
+    const outcome = await messaging.sendText({
+      tenantId: tenant.tenantId,
+      recipient: { kind: 'customer', customerId },
+      purpose: 'transactional',
+      dedupe: { messageKind: 'om_inflight', recordId: customerId },
+      body: 'Your tech is on the way',
+    });
+
+    expect(outcome).toEqual({ status: 'blocked', reason: 'in_flight', permanent: false });
+    expect(delivery.sentSms).toHaveLength(0);
+  });
+
   it('a provider failure releases the claim so a retry sends', async () => {
     const tenant = await createTestTenant(pool);
     const { customerId } = await seedCustomer(tenant, true);

@@ -352,6 +352,16 @@ async function sendOneThankYou(
     return 'deferred';
   }
   if (outcome.status === 'blocked') {
+    if (outcome.reason === 'in_flight') {
+      // A genuine concurrent attempt owns this job's send and will stamp it; do
+      // nothing here (the winner stamps, so the next sweep won't re-select it;
+      // if it fails instead, it releases the claim and a later sweep sends).
+      deps.logger.info('Thank-you SMS sweep: send in-flight by another attempt, not resending', {
+        tenantId,
+        jobId,
+      });
+      return 'suppressed';
+    }
     if (outcome.permanent) {
       // Terminal: the verdict will not change on the next tick, so stamp the
       // job rather than re-selecting it forever.
@@ -369,15 +379,6 @@ async function sendOneThankYou(
     throw new Error(
       `thank-you SMS not sent: ${outcome.reason}${outcome.detail ? ` (${outcome.detail})` : ''}`,
     );
-  }
-  if (outcome.duplicate === 'in_flight') {
-    // A genuine concurrent attempt owns this job's send and will stamp it; do
-    // nothing here (the winner stamps, so the next sweep won't re-select it).
-    deps.logger.info('Thank-you SMS sweep: send in-flight by another attempt, not resending', {
-      tenantId,
-      jobId,
-    });
-    return 'suppressed';
   }
   if (outcome.duplicate === 'sent') {
     // A prior attempt sent it but did not stamp the job. Reconcile the stamp

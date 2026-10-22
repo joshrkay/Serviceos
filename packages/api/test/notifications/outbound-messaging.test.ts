@@ -197,6 +197,19 @@ describe('outbound messaging', () => {
     expect(sent[0].quietHours).toBeUndefined();
   });
 
+  it('refuses a reply recipient for anything but a reply', async () => {
+    const outcome = await messaging().sendText({
+      tenantId: TENANT,
+      recipient: { kind: 'reply', phone: '+15559876543' },
+      purpose: 'marketing',
+      dedupe: { messageKind: 'promo', recordId: 'inbound-1' },
+      body: 'Fall special',
+    } as unknown as OutboundText);
+
+    expect(outcome).toEqual({ status: 'blocked', reason: 'no_consent', permanent: true });
+    expect(sendSms).not.toHaveBeenCalled();
+  });
+
   it('sends to the owner as owner-class, carrying a life-safety tag', async () => {
     await messaging().sendText({
       tenantId: TENANT,
