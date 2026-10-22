@@ -141,7 +141,16 @@ export async function changeTenantNumber(input: {
       `UPDATE tenant_integrations
        SET provider_data = provider_data || $1::jsonb, updated_at = NOW()
        WHERE tenant_id = $2 AND provider = 'twilio'`,
-      [JSON.stringify({ phoneNumberSid: newSid, phoneE164: changeTo, numberAttached: true }), tenantId],
+      [
+        JSON.stringify({
+          phoneNumberSid: newSid,
+          phoneE164: changeTo,
+          numberAttached: true,
+          // #1750 — the Get found online call item re-proves a changed number.
+          phoneE164ChangedAt: new Date().toISOString(),
+        }),
+        tenantId,
+      ],
     );
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
@@ -167,6 +176,18 @@ export async function changeTenantNumber(input: {
     );
     return;
   }
+
+  // #1750 (D-044) — a forwarding check proved forwarding to the OLD number,
+  // which is about to be released: void it, and advance the line's
+  // generation so a check still in flight cannot stamp the new number.
+  await tenantQuery(
+    pool,
+    tenantId,
+    `UPDATE tenant_settings
+        SET forwarding_verified_at = NULL, forwarding_generation = forwarding_generation + 1, updated_at = NOW()
+      WHERE tenant_id = $1`,
+    [tenantId],
+  );
 
   // The worker stamps business_phone with the line it provisioned; follow the
   // change only when it still points at the old number (never clobber a

@@ -1,5 +1,5 @@
 import type { Pool } from 'pg';
-import type { GetFoundFacts, GetFoundItemId, GoogleProfileState, PresencePath } from './derive-checklist';
+import type { ForwardingMode, GetFoundFacts, GetFoundItemId, GoogleProfileState, PresencePath } from './derive-checklist';
 
 type Queryable = Pick<Pool, 'query'>;
 
@@ -7,12 +7,13 @@ interface FactsRow {
   presence_path: PresencePath | null;
   google_review_url: string | null;
   has_existing_line: boolean;
+  forwarding_mode: ForwardingMode | null;
   forwarding_verified_at: Date | null;
   get_found_skipped_items: GetFoundItemId[] | null;
   google_location_id: string | null;
   twilio_status: string | null;
   twilio_phone: string | null;
-  activated_at: Date | null;
+  first_real_call_received: boolean;
 }
 
 /**
@@ -33,7 +34,15 @@ export async function loadGetFoundFacts(db: Queryable, tenantId: string): Promis
               OR d.choices->'existing_number'->>'option' = 'b'
               OR COALESCE((d.choices->'existing_number'->'override'->'writes'->>'hasExistingBusinessNumber')::boolean, false)
             ) AS has_existing_line,
-            ts.forwarding_verified_at, ts.get_found_skipped_items, ts.activated_at,
+            ts.forwarding_mode, ts.forwarding_verified_at, ts.get_found_skipped_items,
+            -- The first real call (activated_at) proves the number only until
+            -- the number changes; after a change, a call must reach the new one.
+            (ts.activated_at IS NOT NULL AND (
+               tw.provider_data->>'phoneE164ChangedAt' IS NULL
+               OR EXISTS (SELECT 1 FROM voice_sessions vs
+                           WHERE vs.tenant_id = t.id AND vs.channel = 'voice_inbound' AND vs.ended_at IS NOT NULL
+                             AND vs.started_at > (tw.provider_data->>'phoneE164ChangedAt')::timestamptz))
+            ) AS first_real_call_received,
             COALESCE(gb.credentials->'providerData'->>'locationId', gb.credentials->>'locationId') AS google_location_id,
             tw.status AS twilio_status,
             tw.provider_data->>'phoneE164' AS twilio_phone
@@ -54,7 +63,8 @@ export async function loadGetFoundFacts(db: Queryable, tenantId: string): Promis
     hasExistingLine: row?.has_existing_line ?? false,
     forwardingCheckPassedAt: row?.forwarding_verified_at ?? null,
     rivetNumberLive: row?.twilio_status === 'full_readiness' && !!row.twilio_phone,
-    firstRealCallReceived: !!row?.activated_at,
+    forwardingMode: row?.forwarding_mode ?? 'missed_calls',
+    firstRealCallReceived: row?.first_real_call_received ?? false,
     skippedItems: row?.get_found_skipped_items ?? [],
   };
 }

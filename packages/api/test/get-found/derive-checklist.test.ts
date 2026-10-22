@@ -7,6 +7,7 @@ function facts(overrides: Partial<GetFoundFacts> = {}): GetFoundFacts {
     googleProfile: 'none',
     googleReviewUrl: null,
     hasExistingLine: false,
+    forwardingMode: 'missed_calls',
     forwardingCheckPassedAt: null,
     rivetNumberLive: false,
     firstRealCallReceived: false,
@@ -19,7 +20,12 @@ describe('deriveGetFoundChecklist', () => {
   it('shows no items until the owner answers the presence-path question', () => {
     const checklist = deriveGetFoundChecklist(facts());
 
-    expect(checklist).toEqual({ presencePath: null, items: [], allDone: false });
+    expect(checklist).toEqual({
+      presencePath: null,
+      items: [],
+      allDone: false,
+      callRouting: { line: 'none', forwardingMode: 'missed_calls' },
+    });
   });
 
   it.each(['own_website', 'google_only', 'neither'] as const)(
@@ -98,5 +104,16 @@ describe('deriveGetFoundChecklist', () => {
     );
 
     expect(checklist.allDone).toBe(true);
+  });
+
+  it('tells the client which call setup applies: an existing line to forward (and its mode) or none', () => {
+    expect(deriveGetFoundChecklist(facts({ presencePath: 'neither' })).callRouting).toEqual({
+      line: 'none',
+      forwardingMode: 'missed_calls',
+    });
+    expect(
+      deriveGetFoundChecklist(facts({ presencePath: 'neither', hasExistingLine: true, forwardingMode: 'all_calls' }))
+        .callRouting,
+    ).toEqual({ line: 'existing', forwardingMode: 'all_calls' });
   });
 });

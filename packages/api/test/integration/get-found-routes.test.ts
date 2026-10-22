@@ -66,7 +66,12 @@ describe('Get-found routes (real Postgres)', () => {
     const res = await request(app).get('/api/get-found');
 
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ presencePath: null, items: [], allDone: false });
+    expect(res.body).toEqual({
+      presencePath: null,
+      items: [],
+      allDone: false,
+      callRouting: { line: 'none', forwardingMode: 'missed_calls' },
+    });
   });
 
   it('PUT /presence-path stores the answer, audits it, and returns the re-derived checklist', async () => {

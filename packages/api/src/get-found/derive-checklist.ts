@@ -25,6 +25,8 @@ export interface GetFoundFacts {
    * onboarding before any forwarding is set up.
    */
   hasExistingLine: boolean;
+  /** `tenant_settings.forwarding_mode`; NULL reads as the default. */
+  forwardingMode: ForwardingMode;
   /**
    * The last passing forwarding check on that line (`forwarding_verified_at`,
    * migration 318) — point-in-time, voided by a line or mode change.
@@ -62,6 +64,12 @@ export interface GetFoundChecklist {
   presencePath: PresencePath | null;
   items: GetFoundItem[];
   allDone: boolean;
+  /**
+   * Which call setup applies, so a client can show the right step for a
+   * pending call item: forward an existing line (in this mode), or nothing
+   * to forward (the Rivet number is the business number).
+   */
+  callRouting: { line: 'existing' | 'none'; forwardingMode: ForwardingMode };
 }
 
 /**
@@ -75,8 +83,9 @@ function isCallRoutingDone(f: GetFoundFacts): boolean {
 }
 
 export function deriveGetFoundChecklist(f: GetFoundFacts): GetFoundChecklist {
+  const callRouting = { line: f.hasExistingLine ? ('existing' as const) : ('none' as const), forwardingMode: f.forwardingMode };
   if (f.presencePath === null) {
-    return { presencePath: null, items: [], allDone: false };
+    return { presencePath: null, items: [], allDone: false, callRouting };
   }
   const done: Record<GetFoundItemId, boolean> = {
     google_profile: f.googleProfile === 'verified',
@@ -95,5 +104,5 @@ export function deriveGetFoundChecklist(f: GetFoundFacts): GetFoundChecklist {
     return { id, status: 'pending' };
   });
   const allDone = items.every((item) => item.status === 'done' || item.status === 'skipped');
-  return { presencePath: f.presencePath, items, allDone };
+  return { presencePath: f.presencePath, items, allDone, callRouting };
 }
