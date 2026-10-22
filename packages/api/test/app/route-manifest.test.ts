@@ -207,6 +207,9 @@ describe('createApp route manifest', () => {
     '/api/telephony',
     '/api/telephony',
     '/api/calls',
+    // Deliberate (#1737): the embeddable web chat widget runs on a tenant's own
+    // site with no session. Gated by embed token + allowed origins + tenant flag.
+    '/api/public/webchat',
   ];
 
   it('mounts only the known allowlist of /api routers ahead of requireAuth', () => {

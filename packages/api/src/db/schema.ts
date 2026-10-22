@@ -8325,6 +8325,42 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
+  // #1737 — per-tenant web chat widget settings (webchat/webchat-config.ts).
+  // No row means the widget is off. embed_token is a public id, not a secret.
+  '340_webchat_config': `
+    CREATE TABLE IF NOT EXISTS webchat_config (
+      tenant_id UUID PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+      enabled BOOLEAN NOT NULL DEFAULT FALSE,
+      embed_token TEXT NOT NULL,
+      allowed_origins TEXT[] NOT NULL DEFAULT '{}',
+      daily_turn_cap INTEGER NOT NULL DEFAULT 200 CHECK (daily_turn_cap BETWEEN 1 AND 5000),
+      daily_cost_cap_cents INTEGER NOT NULL DEFAULT 500 CHECK (daily_cost_cap_cents BETWEEN 1 AND 20000),
+      killed_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE webchat_config ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE webchat_config FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_webchat_config ON webchat_config;
+    CREATE POLICY tenant_isolation_webchat_config ON webchat_config
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+  // #1737 — per-tenant per-UTC-day web chat usage; the daily turn and cost caps
+  // are enforced against this row (webchat/webchat-usage.ts). Cost is integer cents.
+  '341_webchat_usage_daily': `
+    CREATE TABLE IF NOT EXISTS webchat_usage_daily (
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      day DATE NOT NULL,
+      turns INTEGER NOT NULL DEFAULT 0,
+      cost_cents INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (tenant_id, day)
+    );
+    ALTER TABLE webchat_usage_daily ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE webchat_usage_daily FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_webchat_usage_daily ON webchat_usage_daily;
+    CREATE POLICY tenant_isolation_webchat_usage_daily ON webchat_usage_daily
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
   // #1738 — Google Local Services Ads lead intake. One row per linked tenant:
   // the per-tenant webhook secret (AES-GCM, never plaintext) that authenticates
   // inbound LSA lead deliveries. `enabled` and `auto_respond` default FALSE —

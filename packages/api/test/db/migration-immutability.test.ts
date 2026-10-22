@@ -639,6 +639,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // #1735 — outbound drip campaigns (sequences + enrollments, then the step log).
   ['336_drip_campaigns', '1fe4cc16ff49abe22ff155e2dafcdcd2dbaba4738be80da6fa3e0ed1b2b1b0fe'],
   ['337_drip_step_events', '057b5b4a518bf9d808c6de88105796b966b11b812ff2de170e00ddce85081fa7'],
+  ['340_webchat_config', '5548e267e2d1c0702755ec671dbd1d85d50da4666e79e48eb5bec26a9a75696e'],
+  ['341_webchat_usage_daily', '5f6bd3060cdf445b80e622cfbb9737ce2503b63143d71be36a7840889728bb2f'],
   ['342_lsa_integrations', '516ec1d299c0f53b81e5a37994d5610f144902fec44740cc4ccbecd7cc4ea6ea'],
   ['343_lsa_leads', '9d80fb938d2a14f160d186a73f49a98992f63b8f2e4edd52c4d0e4c0ad1c31ab'],
 ];

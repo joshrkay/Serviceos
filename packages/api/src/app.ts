@@ -409,6 +409,13 @@ import {
   createGoogleBusinessOAuthCallbackRouter,
 } from './routes/googlebusiness-integrations';
 import { createGetFoundOnlineRouter } from './routes/get-found-online';
+import { createPublicWebchatRouter } from './routes/public-webchat';
+import { createWebchatSettingsRouter } from './routes/webchat-settings';
+import { createVoiceTurnProcessor, type VoiceTurnProcessor } from './ai/voice-turn';
+import { createWebchatService, WEBCHAT_FLAG } from './webchat/webchat-service';
+import { createTurnstileVerifier } from './webchat/webchat-guard';
+import { InMemoryWebchatConfigRepository, PgWebchatConfigRepository } from './webchat/webchat-config';
+import { InMemoryWebchatUsageRepository, PgWebchatUsageRepository } from './webchat/webchat-usage';
 import {
   InMemoryGetFoundOnlineDismissalRepository,
   PgGetFoundOnlineDismissalRepository,
@@ -5313,6 +5320,74 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     }) as any;
   }
 
+  // #1737 — embeddable web chat (Avoca parity). Public and unauthenticated, so
+  // mounted BEFORE the global /api auth below, with the D-044 controls: tenant
+  // flag `webchat_widget` + owner toggle (both off by default), embed token,
+  // allowed-origin list, bot-check hook, per-IP + per-session limits, per-tenant
+  // daily turn/cost caps, and WEBCHAT_DISABLED as the global kill switch.
+  // Visitor turns run through the same speechTurn pipeline as an inbound call;
+  // nothing the AI drafts executes without the owner approving the proposal.
+  const webchatConfigRepo = pool
+    ? new PgWebchatConfigRepository(pool)
+    : new InMemoryWebchatConfigRepository();
+  const webchatUsageRepo = pool
+    ? new PgWebchatUsageRepository(pool)
+    : new InMemoryWebchatUsageRepository();
+  const webchatGloballyKilled = () => process.env.WEBCHAT_DISABLED === 'true';
+  const webchatIsEnabledForTenant = (tenantId: string) =>
+    isFlagEnabledForTenant(tenantId, WEBCHAT_FLAG);
+  const webchatProcessors = new Map<string, VoiceTurnProcessor>();
+  const webchatService = createWebchatService({
+    configRepo: webchatConfigRepo,
+    usageRepo: webchatUsageRepo,
+    settingsRepo,
+    store: voiceSessionStore,
+    processorFor: (businessName) => {
+      let processor = webchatProcessors.get(businessName);
+      if (!processor) {
+        if (webchatProcessors.size >= 500) webchatProcessors.clear();
+        processor = createVoiceTurnProcessor({
+          store: voiceSessionStore,
+          gateway: llmGateway,
+          ...(pool ? { pool } : {}),
+          auditRepo,
+          proposalRepo,
+          customerRepo,
+          leadRepo,
+          settingsRepo,
+          voiceSessionRepo,
+          systemActorId: 'system:webchat',
+          businessName,
+        });
+        webchatProcessors.set(businessName, processor);
+      }
+      return processor;
+    },
+    auditRepo,
+    leadRepo,
+    voiceSessionRepo,
+    isEnabledForTenant: webchatIsEnabledForTenant,
+    globallyKilled: webchatGloballyKilled,
+    ...(process.env.WEBCHAT_TURNSTILE_SECRET
+      ? { botVerifier: createTurnstileVerifier(process.env.WEBCHAT_TURNSTILE_SECRET) }
+      : {}),
+    bookingUrlFor: (tenantId) => `${config.publicOrigins.web}/book?t=${tenantId}`,
+  });
+  const webchatSweep = setInterval(() => webchatService.sweep(), 5 * 60 * 1000);
+  webchatSweep.unref();
+  app.use(
+    '/api/public/webchat',
+    // Coarse shared-Redis per-IP bucket; the service adds per-IP/session windows.
+    rateLimit({
+      windowMs: 60 * 1000,
+      max: 60,
+      standardHeaders: true,
+      legacyHeaders: false,
+      store: createRateLimitStore(redisUrl, 'public-webchat:'),
+    }),
+    createPublicWebchatRouter({ service: webchatService }),
+  );
+
   // Auth middleware for API routes
   const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';
   app.use('/api', verifyClerkSession(clerkSecret));
@@ -5868,6 +5943,19 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
 
   // D-044 / #1763 — the owner's "Get found online" home checklist, derived
   // from the Google Business connection and the review-link setting.
+  // #1737 — the owner's web chat settings (snippet, allowed sites, caps, toggle).
+  app.use(
+    '/api/webchat',
+    createWebchatSettingsRouter({
+      configRepo: webchatConfigRepo,
+      usageRepo: webchatUsageRepo,
+      auditRepo,
+      apiBaseUrl: config.publicOrigins.api,
+      isEnabledForTenant: webchatIsEnabledForTenant,
+      globallyKilled: webchatGloballyKilled,
+    }),
+  );
+
   app.use(
     '/api/get-found-online',
     createGetFoundOnlineRouter({

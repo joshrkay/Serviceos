@@ -9,6 +9,7 @@ import {
   Calendar, ClipboardList, SlidersHorizontal, Megaphone, ScrollText,
   MessageSquareQuote,
   MessageSquareText,
+  MessageCircle,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { QuickBooksIntegrationSheet } from './QuickBooksIntegrationSheet';
@@ -45,6 +46,7 @@ import { VerticalPacksSheet } from './VerticalPacksSheet';
 import { CallRoutingSheet } from './CallRoutingSheet';
 import { OperatorHoursSheet } from './OperatorHoursSheet';
 import { DncListSheet } from './DncListSheet';
+import { WebChatSheet } from './WebChatSheet';
 import {
   fetchLanguageSettings,
   updateLanguageSettings,
@@ -618,6 +620,7 @@ export function SettingsPage() {
   const [verticalPacksOpen, setVerticalPacksOpen] = useState(false);
   const [callRoutingOpen, setCallRoutingOpen] = useState(false);
   const [dncListOpen, setDncListOpen] = useState(false);
+  const [webChatOpen, setWebChatOpen] = useState(false);
   const [operatorHoursOpen, setOperatorHoursOpen] = useState(false);
   // Calendar sync OAuth return: auto-open the sheet + toast when
   // the user lands back here from Google's OAuth redirect. The
@@ -995,6 +998,10 @@ export function SettingsPage() {
         // thank-you texts. Owner-only, like its settings:update save.
         ...(me?.role === 'owner'
           ? [{ icon: MessageSquareText, label: 'Text wording', description: 'Your own words for the estimate, invoice, portal-link and thank-you texts', action: () => setTextWordingOpen(true) }]
+          : []),
+        // #1737 — embeddable website chat (off by default). Owner-only, like its save.
+        ...(me?.role === 'owner'
+          ? [{ icon: MessageCircle, label: 'Web chat', description: 'Put your AI on your website — snippet, allowed sites, daily limits', action: () => setWebChatOpen(true) }]
           : []),
         { icon: Star, label: 'Feedback & reviews', description: 'Average rating, distribution, and recent comments', action: () => navigate('/settings/feedback') },
         { icon: Megaphone, label: 'Email campaigns', description: 'Send promos & announcements to customer segments', action: () => setMarketingOpen(true) },
@@ -1884,6 +1891,7 @@ export function SettingsPage() {
         open={dncListOpen}
         onOpenChange={setDncListOpen}
       />
+      <WebChatSheet open={webChatOpen} onOpenChange={setWebChatOpen} />
 
       {/* #877 — confirm-gates for the two live-action rows. */}
       <ConfirmDialog
