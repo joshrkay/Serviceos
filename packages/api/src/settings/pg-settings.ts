@@ -192,6 +192,10 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     yelpReviewUrl: (row.yelp_review_url as string | null) ?? undefined,
     // D-044 — migration 331.
     googleReviewUrlDerived: (row.google_review_url_derived as string | null) ?? undefined,
+    // D-044 / #1768 — migration 334.
+    websiteUrl: (row.website_url as string | null) ?? undefined,
+    // D-044 / #1769 — migration 335.
+    siteAboutText: (row.site_about_text as string | null) ?? undefined,
     // P11-002 — language stack. default_language / auto_detect_language
     // are NOT NULL with column defaults, so a pre-migration row still
     // reads 'en' / true.
@@ -475,6 +479,10 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         yelpReviewUrl: 'yelp_review_url',
         // D-044 — migration 331.
         googleReviewUrlDerived: 'google_review_url_derived',
+        // D-044 / #1768 — migration 334.
+        websiteUrl: 'website_url',
+        // D-044 / #1769 — migration 335.
+        siteAboutText: 'site_about_text',
         // P11-002 — language stack.
         defaultLanguage: 'default_language',
         autoDetectLanguage: 'auto_detect_language',

@@ -121,6 +121,8 @@ const THRESHOLDS: Record<string, number> = {
   '11-spanish': 0.9,
   // #1222 — life safety is not a percentage: every E1/E2 hazard script must pass.
   '12-life-safety': 1.0,
+  // #1736 — a call the owner corrected must stay fixed once the case is recorded.
+  '13-owner-corrections': 0.9,
 };
 
 const OVERALL_THRESHOLD = 0.9;

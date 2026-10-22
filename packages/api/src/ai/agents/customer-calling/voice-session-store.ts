@@ -253,6 +253,13 @@ export interface VoiceSession {
   id: string;
   tenantId: string;
   channel: CallingAgentChannel;
+  /**
+   * #1737 — the `voice_sessions.channel` value to persist when it is not the
+   * one `channel` implies. The web chat widget drives the caller-facing
+   * (`telephony`) FSM but must be stored, and kept out of phone-minute
+   * accounting, as `webchat`.
+   */
+  persistChannel?: 'webchat';
   /** Twilio CallSid for telephony sessions; undefined for in-app. */
   callSid?: string;
   /** Bound by the authenticated inbound webhook; never taken from a WS frame. */

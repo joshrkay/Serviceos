@@ -71,8 +71,12 @@ import { resetConfig } from '../../src/shared/config';
  * `shouldRunWorkers`-only interval. It registers in a hermetic boot because
  * its enumerator falls back to the in-memory settings repository; web/voice
  * stay at zero.
+ * 26 → 27 (#1736): the post-call scoring sweep (`SWEEP_LOCK.callScoring`,
+ * `createCallScoringWorker().handle()` every 15 min; a tenant that has not
+ * opted in is a cheap no-op) — one more leader-gated, `shouldRunWorkers`-only
+ * interval; web/voice stay at zero.
  */
-const EXPECTED_WORKER_INTERVALS_HERMETIC = 26;
+const EXPECTED_WORKER_INTERVALS_HERMETIC = 27;
 
 describe('characterization — background interval registration', () => {
   const originalDatabaseUrl = process.env.DATABASE_URL;

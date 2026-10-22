@@ -83,6 +83,13 @@ interface StoredProviderData {
   reviewUrl?: string | null;
   locationTitle?: string | null;
   locationCount?: number;
+  /**
+   * #1771 — the website we last wrote to this location's Google listing, tagged
+   * with the location so a different listing never inherits it. We record our
+   * own write instead of reading Google on every checklist load. Null/absent =
+   * nothing written by us (a reconnect also clears it: it rebuilds providerData).
+   */
+  listingWebsite?: { locationId: string; websiteUri: string } | null;
 }
 
 /** The credentials JSONB shape (writer side + both legacy read fallbacks). */
@@ -251,6 +258,8 @@ export interface GoogleBusinessIntegrationSummary {
   locationTitle: string | null;
   /** Locations discovery saw at connect time; null when unknown. */
   locationCount: number | null;
+  /** #1771 — website last written to THIS location's listing; null if none. */
+  listingWebsiteUri: string | null;
   updatedAt: Date;
 }
 
@@ -327,6 +336,15 @@ export interface GoogleBusinessIntegrationRepository
     locationCount: number,
   ): Promise<GoogleBusinessIntegrationSummary | null>;
   /**
+   * Remember the website we just wrote to the location's Google listing
+   * (#1771). Null when the tenant has no integration row.
+   */
+  recordListingWebsite(
+    tenantId: string,
+    locationId: string,
+    websiteUri: string,
+  ): Promise<GoogleBusinessIntegrationSummary | null>;
+  /**
    * Hard-delete the row. The poll worker treats "no row" as a silent
    * skip (many tenants legitimately have no GBP), so deletion — not a
    * status flip — is what stops per-sweep failure noise after
@@ -358,6 +376,7 @@ const FORGOTTEN_LISTING: StoredProviderData = {
   placeId: null,
   reviewUrl: null,
   locationTitle: null,
+  listingWebsite: null,
 };
 
 function selectionProviderData(
@@ -398,6 +417,10 @@ function summaryFromCredentials(
     locationTitle: listing.locationTitle ?? null,
     locationCount:
       typeof listing.locationCount === 'number' ? listing.locationCount : null,
+    listingWebsiteUri:
+      listing.listingWebsite && listing.listingWebsite.locationId === (locationId ?? null)
+        ? listing.listingWebsite.websiteUri
+        : null,
     updatedAt,
   };
 }
@@ -480,6 +503,14 @@ export class InMemoryGoogleBusinessIntegrationRepository
     locationCount: number,
   ): Promise<GoogleBusinessIntegrationSummary | null> {
     return this.mergeProviderData(tenantId, { locationCount });
+  }
+
+  async recordListingWebsite(
+    tenantId: string,
+    locationId: string,
+    websiteUri: string,
+  ): Promise<GoogleBusinessIntegrationSummary | null> {
+    return this.mergeProviderData(tenantId, { listingWebsite: { locationId, websiteUri } });
   }
 
   async forgetLocation(
@@ -680,6 +711,14 @@ export class PgGoogleBusinessIntegrationRepository
     locationCount: number,
   ): Promise<GoogleBusinessIntegrationSummary | null> {
     return this.mergeProviderData(tenantId, { locationCount });
+  }
+
+  async recordListingWebsite(
+    tenantId: string,
+    locationId: string,
+    websiteUri: string,
+  ): Promise<GoogleBusinessIntegrationSummary | null> {
+    return this.mergeProviderData(tenantId, { listingWebsite: { locationId, websiteUri } });
   }
 
   async forgetLocation(
