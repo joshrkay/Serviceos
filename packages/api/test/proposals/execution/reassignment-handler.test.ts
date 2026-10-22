@@ -286,7 +286,7 @@ describe('P6-012 — Execution for reassignment proposals', () => {
   // Dispatch FR-2 phase 3c — the board's explicit "Book anyway" rides the
   // payload as acceptOverlap: true; the approval then books the clash and
   // marks the assignment row. Nothing else may set it (contract: literal true).
-  it('books the overlapping tech when the payload carries acceptOverlap, marking the assignment', async () => {
+  it('books the overlapping tech when the payload pins that visit as accepted, marking the assignment', async () => {
     const localAssignmentRepo = new InMemoryAssignmentRepository();
     const appt = await createAppointment({
       tenantId, jobId: 'job-1',
@@ -322,8 +322,32 @@ describe('P6-012 — Execution for reassignment proposals', () => {
     );
     expect(refused.success).toBe(false);
 
-    const result = await handlerWithFeasibility.execute(
+    // The flag alone (no pinned visits) accepts nothing.
+    const bareFlag = await handlerWithFeasibility.execute(
       makeProposal({ appointmentId: appt.id, toTechnicianId: techB, acceptOverlap: true }), context,
+    );
+    expect(bareFlag.success).toBe(false);
+
+    // A clash the dispatcher never saw (a visit added after they accepted) still blocks, loudly.
+    const later = await createAppointment({
+      tenantId, jobId: 'job-3',
+      scheduledStart: new Date('2026-05-17T10:45:00Z'),
+      scheduledEnd: new Date('2026-05-17T11:15:00Z'),
+      timezone: 'UTC', createdBy: 'user-1',
+    }, appointmentRepo);
+    await localAssignmentRepo.create({
+      id: 'as-3', tenantId, appointmentId: later.id,
+      technicianId: techB, isPrimary: true, assignedBy: 'user-1', assignedAt: new Date(),
+    });
+    const unseen = await handlerWithFeasibility.execute(
+      makeProposal({ appointmentId: appt.id, toTechnicianId: techB, acceptOverlap: true, acceptedOverlapAppointmentIds: [conflict.id] }), context,
+    );
+    expect(unseen.success).toBe(false);
+    expect(unseen.error).toContain(later.id);
+    await localAssignmentRepo.delete(tenantId, 'as-3');
+
+    const result = await handlerWithFeasibility.execute(
+      makeProposal({ appointmentId: appt.id, toTechnicianId: techB, acceptOverlap: true, acceptedOverlapAppointmentIds: [conflict.id] }), context,
     );
     expect(result.success).toBe(true);
     const rows = await localAssignmentRepo.findByAppointment(tenantId, appt.id);

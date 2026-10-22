@@ -69,6 +69,15 @@ describe('FR-2 phase 3c — acceptOverlap is an explicit opt-in only', () => {
     expect(reassignAppointmentPayloadSchema.safeParse(base).success).toBe(true);
   });
 
+  it('accepts the server-written list of accepted overlapping appointments (uuids only)', () => {
+    expect(reassignAppointmentPayloadSchema.safeParse({
+      ...base, acceptOverlap: true, acceptedOverlapAppointmentIds: ['770e8400-e29b-41d4-a716-446655440002'],
+    }).success).toBe(true);
+    expect(reassignAppointmentPayloadSchema.safeParse({
+      ...base, acceptOverlap: true, acceptedOverlapAppointmentIds: ['not-a-uuid'],
+    }).success).toBe(false);
+  });
+
   it('rejects any value other than true (false, strings, numbers)', () => {
     for (const bad of [false, 'true', 1, null]) {
       expect(reassignAppointmentPayloadSchema.safeParse({ ...base, acceptOverlap: bad }).success).toBe(false);

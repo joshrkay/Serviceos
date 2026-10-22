@@ -148,8 +148,13 @@ export interface CreateAssignmentInput {
   technicianRole: string;
   isPrimary?: boolean;
   assignedBy: string;
-  /** The user explicitly chose to book over an existing overlapping visit. */
-  acceptOverlap?: boolean;
+  /**
+   * FR-2 phase 3c — appointment ids of the overlapping visits the user
+   * explicitly chose to book over. The booking is marked overlap_accepted
+   * only when every overlap found at assign time is in this list; a clash
+   * with a visit the user never saw is still refused (409).
+   */
+  acceptOverlapWith?: readonly string[];
 }
 
 export interface AssignmentRepository {
@@ -257,12 +262,17 @@ export async function assignTechnician(
     const target = await deps.appointmentRepo.findById(input.tenantId, input.appointmentId);
     if (target) {
       const window = { start: target.scheduledStart, end: target.scheduledEnd, excludeAppointmentId: input.appointmentId };
-      if (input.acceptOverlap) {
-        // A booking the user chose over a known overlap is marked only when
-        // the overlap is real, so a stray flag never weakens the DB guard.
-        overlapAccepted =
-          (await findDoubleBookings(input.tenantId, input.technicianId, window, repository, deps.appointmentRepo))
-            .length > 0;
+      if (input.acceptOverlapWith && input.acceptOverlapWith.length > 0) {
+        // Marked only when the overlap is real AND is exactly what the user
+        // accepted, so a stray flag or a calendar that changed since the
+        // user looked never weakens the DB guard.
+        const conflicts = await findDoubleBookings(input.tenantId, input.technicianId, window, repository, deps.appointmentRepo);
+        const accepted = new Set(input.acceptOverlapWith);
+        const unseen = conflicts.find((c) => !c.conflictingEntityId || !accepted.has(c.conflictingEntityId));
+        if (unseen) {
+          throw new ConflictError(`Technician is already booked at this time: ${unseen.message}`);
+        }
+        overlapAccepted = conflicts.length > 0;
       } else {
         await assertNoDoubleBooking(input.tenantId, input.technicianId, window, repository, deps.appointmentRepo);
       }

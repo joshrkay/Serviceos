@@ -47,8 +47,14 @@ export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
     }
 
     let trailingWarnings: FeasibilityIssue[] = [];
-    // FR-2 phase 3c — the dispatcher chose this tech knowing they overlap.
-    const acceptOverlap = payload.acceptOverlap === true;
+    // FR-2 phase 3c — the dispatcher chose this tech knowing they overlap
+    // THESE visits (pinned by the server at creation). A clash with any
+    // other visit that appeared since still blocks, loudly.
+    const acceptedOverlapIds = new Set<string>(
+      payload.acceptOverlap === true && Array.isArray(payload.acceptedOverlapAppointmentIds)
+        ? payload.acceptedOverlapAppointmentIds.filter((id): id is string => typeof id === 'string')
+        : [],
+    );
 
     // Validate appointment exists if repo available
     if (this.appointmentRepo) {
@@ -88,7 +94,7 @@ export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
             },
             this.feasibilityDeps,
           ),
-          acceptOverlap,
+          acceptedOverlapIds,
         );
         if (feasibility.blocking.length > 0) {
           return {
@@ -143,7 +149,7 @@ export class ReassignAppointmentExecutionHandler implements ExecutionHandler {
         technicianRole: 'technician',
         isPrimary: true,
         assignedBy: context.executedBy,
-        ...(acceptOverlap ? { acceptOverlap: true } : {}),
+        ...(acceptedOverlapIds.size > 0 ? { acceptOverlapWith: [...acceptedOverlapIds] } : {}),
       }, this.assignmentRepo, {
         appointmentRepo: this.appointmentRepo,
         auditRepo: this.auditRepo,

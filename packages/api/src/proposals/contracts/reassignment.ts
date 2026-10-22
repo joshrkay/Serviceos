@@ -11,6 +11,12 @@ export const reassignAppointmentPayloadSchema = z.object({
    * the dispatch board's explicit "Book anyway" confirmation, never by AI.
    */
   acceptOverlap: z.literal(true).optional(),
+  /**
+   * Set by the SERVER at creation (never trusted from the client): the
+   * overlapping appointments the dispatcher accepted. Approval downgrades
+   * only these; a clash with any other visit still blocks.
+   */
+  acceptedOverlapAppointmentIds: z.array(z.guid()).optional(),
 });
 
 export type ReassignAppointmentPayload = z.infer<typeof reassignAppointmentPayloadSchema>;

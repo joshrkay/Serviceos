@@ -8294,7 +8294,9 @@ export const MIGRATIONS = {
         END IF;
       END IF;
 
-      -- The legacy trigger (see 301), where it exists, honours the mark too.
+      -- The legacy trigger (see 301), where it exists, must not refuse an
+      -- accepted row. Everything else it did is now covered, race-safely,
+      -- by trg_overlap_accepted_guard below.
       IF EXISTS (
         SELECT 1 FROM pg_trigger t
         JOIN pg_class c ON c.oid = t.tgrelid
@@ -8306,26 +8308,9 @@ export const MIGRATIONS = {
           CREATE OR REPLACE FUNCTION check_no_double_booking()
           RETURNS TRIGGER LANGUAGE plpgsql AS $body$
           BEGIN
-            IF NEW.appointment_status IN ('canceled', 'no_show') OR NEW.overlap_accepted THEN
-              RETURN NEW;
-            END IF;
-            IF NEW.scheduled_start IS NULL OR NEW.scheduled_end IS NULL THEN
-              RETURN NEW;
-            END IF;
-            IF EXISTS (
-              SELECT 1 FROM appointment_assignments aa
-              WHERE aa.tenant_id = NEW.tenant_id
-                AND aa.technician_id = NEW.technician_id
-                AND aa.id <> NEW.id
-                AND aa.appointment_status NOT IN ('canceled', 'no_show')
-                AND NOT aa.overlap_accepted
-                AND tstzrange(aa.scheduled_start, aa.scheduled_end)
-                    && tstzrange(NEW.scheduled_start, NEW.scheduled_end)
-            ) THEN
-              RAISE EXCEPTION 'DOUBLE_BOOKING: technician % already has an active assignment overlapping [%, %]',
-                NEW.technician_id, NEW.scheduled_start, NEW.scheduled_end
-                USING ERRCODE = 'exclusion_violation';
-            END IF;
+            -- Superseded by trg_overlap_accepted_guard (below); kept only so
+            -- a database that still carries the trigger does not run 301's
+            -- body, which would refuse accepted rows.
             RETURN NEW;
           END;
           $body$;
@@ -8333,6 +8318,47 @@ export const MIGRATIONS = {
       END IF;
     END
     $mig332$;
+
+    -- An EXCLUDE constraint is symmetric, so a row outside its WHERE is also
+    -- invisible to every later row: without this guard a plain booking that
+    -- overlapped ONLY an accepted visit would slip past Postgres. This
+    -- trigger is the asymmetric half: an accepted row may overlap anything,
+    -- but an UNaccepted row may overlap nothing active, accepted rows
+    -- included. The per-(tenant, technician) advisory lock serialises
+    -- racing writers for the rest of the transaction, so two dispatchers
+    -- booking the same tech at once cannot both pass the read.
+    CREATE OR REPLACE FUNCTION check_overlap_accepted_guard()
+    RETURNS TRIGGER LANGUAGE plpgsql AS $guard$
+    BEGIN
+      IF NEW.overlap_accepted
+         OR NEW.appointment_status IN ('canceled', 'no_show')
+         OR NEW.scheduled_start IS NULL OR NEW.scheduled_end IS NULL THEN
+        RETURN NEW;
+      END IF;
+      PERFORM pg_advisory_xact_lock(hashtext(NEW.tenant_id::text), hashtext(NEW.technician_id::text));
+      IF EXISTS (
+        SELECT 1 FROM appointment_assignments aa
+        WHERE aa.tenant_id = NEW.tenant_id
+          AND aa.technician_id = NEW.technician_id
+          AND aa.id <> NEW.id
+          AND aa.appointment_status NOT IN ('canceled', 'no_show')
+          AND aa.scheduled_start IS NOT NULL AND aa.scheduled_end IS NOT NULL
+          AND tstzrange(aa.scheduled_start, aa.scheduled_end)
+              && tstzrange(NEW.scheduled_start, NEW.scheduled_end)
+      ) THEN
+        RAISE EXCEPTION 'DOUBLE_BOOKING: technician % already has an active assignment overlapping [%, %]',
+          NEW.technician_id, NEW.scheduled_start, NEW.scheduled_end
+          USING ERRCODE = 'exclusion_violation';
+      END IF;
+      RETURN NEW;
+    END;
+    $guard$;
+
+    DROP TRIGGER IF EXISTS trg_overlap_accepted_guard ON appointment_assignments;
+    CREATE TRIGGER trg_overlap_accepted_guard
+      BEFORE INSERT OR UPDATE OF scheduled_start, scheduled_end, appointment_status, overlap_accepted, technician_id
+      ON appointment_assignments
+      FOR EACH ROW EXECUTE FUNCTION check_overlap_accepted_guard();
 
     -- 131's function plus the reset: a new window drops the acceptance.
     CREATE OR REPLACE FUNCTION sync_appointment_to_assignments()

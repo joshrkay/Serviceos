@@ -180,15 +180,30 @@ describe('createSchedulingProposal — reassign with a dispatcher-accepted overl
     expect(res.kind).toBe('infeasible');
   });
 
-  it('creates the proposal with the flag, keeping acceptOverlap on the payload for approval', async () => {
+  it('creates the proposal with the flag and pins the accepted visits onto the payload for approval', async () => {
     const target = appt('target', '2026-05-21T08:00:00.000Z', '2026-05-21T09:00:00.000Z');
     const busy = appt('busy', '2026-05-21T08:30:00.000Z', '2026-05-21T09:30:00.000Z');
     const { proposalRepo, appointmentRepo, feasibilityDeps } = makeDeps({ target, busy }, { [TECH_B]: ['busy'] });
 
+    const input = reassignInput(target, true);
+    // A client cannot pre-fill the accepted list; the server computes it.
+    (input.payload as Record<string, unknown>).acceptedOverlapAppointmentIds = ['forged'];
+    const res = await createSchedulingProposal(input, proposalRepo, appointmentRepo, feasibilityDeps);
+    expect(res.kind).toBe('created');
+    if (res.kind !== 'created') return;
+    expect(res.proposal.payload).toMatchObject({
+      toTechnicianId: TECH_B, acceptOverlap: true, acceptedOverlapAppointmentIds: ['busy'],
+    });
+  });
+
+  it('drops the flag when the calendar is free: nothing was accepted', async () => {
+    const target = appt('target', '2026-05-21T08:00:00.000Z', '2026-05-21T09:00:00.000Z');
+    const { proposalRepo, appointmentRepo, feasibilityDeps } = makeDeps({ target }, { [TECH_B]: [] });
+
     const res = await createSchedulingProposal(reassignInput(target, true), proposalRepo, appointmentRepo, feasibilityDeps);
     expect(res.kind).toBe('created');
     if (res.kind !== 'created') return;
-    expect(res.proposal.payload).toMatchObject({ toTechnicianId: TECH_B, acceptOverlap: true });
+    expect(res.proposal.payload).toEqual({ appointmentId: 'target', toTechnicianId: TECH_B });
   });
 
   it('the flag does not lift a non-overlap blocker (missing skill)', async () => {

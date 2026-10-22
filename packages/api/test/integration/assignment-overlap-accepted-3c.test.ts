@@ -98,7 +98,7 @@ describe('Postgres integration — dispatcher-accepted overlap (FR-2 phase 3c)',
     );
 
     const accepted = await assignTechnician(
-      { tenantId: tenant.tenantId, appointmentId: clash, technicianId: techId, technicianRole: 'technician', assignedBy: tenant.userId, acceptOverlap: true },
+      { tenantId: tenant.tenantId, appointmentId: clash, technicianId: techId, technicianRole: 'technician', assignedBy: tenant.userId, acceptOverlapWith: [busy] },
       assignmentRepo, { appointmentRepo, auditRepo, actorRole: 'owner' },
     );
     expect(accepted.overlapAccepted).toBe(true);
@@ -117,6 +117,41 @@ describe('Postgres integration — dispatcher-accepted overlap (FR-2 phase 3c)',
       isPrimary: true, assignedBy: tenant.userId, assignedAt: new Date(),
     })).rejects.toBeInstanceOf(ConflictError);
     expect(await overlapAcceptedFlag(otherClash)).toBeNull();
+
+    // An unmarked row overlapping ONLY the accepted visit (60–90 clears
+    // `busy`, clashes with `clash`) is outside the EXCLUDE index's view of
+    // the accepted row; trg_overlap_accepted_guard refuses it anyway.
+    const onlyAccepted = await mkAppt(60, 90);
+    await expect(assignmentRepo.create({
+      id: crypto.randomUUID(), tenantId: tenant.tenantId, appointmentId: onlyAccepted, technicianId: techId,
+      isPrimary: true, assignedBy: tenant.userId, assignedAt: new Date(),
+    })).rejects.toBeInstanceOf(ConflictError);
+    expect(await overlapAcceptedFlag(onlyAccepted)).toBeNull();
+    // ...and the same slot, accepted against the accepted visit, is allowed.
+    const stacked = await assignTechnician(
+      { tenantId: tenant.tenantId, appointmentId: onlyAccepted, technicianId: techId, technicianRole: 'technician', assignedBy: tenant.userId, acceptOverlapWith: [clash] },
+      assignmentRepo, { appointmentRepo, auditRepo, actorRole: 'owner' },
+    );
+    expect(stacked.overlapAccepted).toBe(true);
+  });
+
+  it('two racing unmarked bookings that overlap only an accepted visit are both refused (the guard serialises them)', async () => {
+    const busy = await mkAppt(1200, 1260);
+    const clash = await mkAppt(1230, 1290);
+    await assignTechnician(
+      { tenantId: tenant.tenantId, appointmentId: busy, technicianId: techId, technicianRole: 'technician', assignedBy: tenant.userId },
+      assignmentRepo, { appointmentRepo, actorRole: 'owner' },
+    );
+    await assignTechnician(
+      { tenantId: tenant.tenantId, appointmentId: clash, technicianId: techId, technicianRole: 'technician', assignedBy: tenant.userId, acceptOverlapWith: [busy] },
+      assignmentRepo, { appointmentRepo, actorRole: 'owner' },
+    );
+    const [a, b] = await Promise.all([mkAppt(1260, 1290), mkAppt(1260, 1290)]);
+    const results = await Promise.allSettled([a, b].map((appointmentId) => assignmentRepo.create({
+      id: crypto.randomUUID(), tenantId: tenant.tenantId, appointmentId, technicianId: techId,
+      isPrimary: true, assignedBy: tenant.userId, assignedAt: new Date(),
+    })));
+    expect(results.every((r) => r.status === 'rejected' && r.reason instanceof ConflictError)).toBe(true);
   });
 
   it('rescheduling the accepted visit clears the mark, and moving it back onto a clash is refused', async () => {
@@ -127,7 +162,7 @@ describe('Postgres integration — dispatcher-accepted overlap (FR-2 phase 3c)',
       assignmentRepo, { appointmentRepo, actorRole: 'owner' },
     );
     await assignTechnician(
-      { tenantId: tenant.tenantId, appointmentId: clash, technicianId: techId, technicianRole: 'technician', assignedBy: tenant.userId, acceptOverlap: true },
+      { tenantId: tenant.tenantId, appointmentId: clash, technicianId: techId, technicianRole: 'technician', assignedBy: tenant.userId, acceptOverlapWith: [busy] },
       assignmentRepo, { appointmentRepo, actorRole: 'owner' },
     );
     expect(await overlapAcceptedFlag(clash)).toBe(true);

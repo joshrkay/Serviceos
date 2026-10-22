@@ -288,21 +288,31 @@ function partition(
 }
 
 /**
- * FR-2 phase 3c — when the user explicitly chose to book over a clash, the
- * overlap issues stop blocking and ride along as warnings; every other
- * blocker (skills, hours, time off) still blocks.
+ * Dispatch FR-2 phase 3c — "Allow overlap if select by user". Downgrades the
+ * `overlap` blockers whose conflicting appointment the dispatcher explicitly
+ * accepted to warnings (still reported, so the approver sees the clash). An
+ * overlap with any OTHER visit stays blocking: consent is bound to the
+ * visits the dispatcher reviewed, not to "whatever overlaps at approval
+ * time". Skills, hours and time off are never touched. Pure.
  */
-export function withAcceptedOverlap(result: FeasibilityResult, acceptOverlap: boolean): FeasibilityResult {
-  if (!acceptOverlap) return result;
-  const overlaps = result.blocking.filter((i) => i.check === 'overlap');
-  if (overlaps.length === 0) return result;
-  const blocking = result.blocking.filter((i) => i.check !== 'overlap');
+export function withAcceptedOverlap(result: FeasibilityResult, acceptedAppointmentIds: ReadonlySet<string>): FeasibilityResult {
+  if (acceptedAppointmentIds.size === 0) return result;
+  const isAccepted = (i: FeasibilityIssue) =>
+    i.check === 'overlap' && i.conflictingEntityId !== undefined && acceptedAppointmentIds.has(i.conflictingEntityId);
+  const accepted = result.blocking.filter(isAccepted);
+  if (accepted.length === 0) return result;
+  const blocking = result.blocking.filter((i) => !isAccepted(i));
   return {
     ...result,
     feasible: blocking.length === 0,
     blocking,
-    warnings: [...overlaps.map((i) => ({ ...i, severity: 'warning' as const })), ...result.warnings],
+    warnings: [...accepted.map((i) => ({ ...i, severity: 'warning' as const })), ...result.warnings],
   };
+}
+
+/** The appointment ids behind a result's `overlap` blockers. */
+export function overlappingAppointmentIds(result: FeasibilityResult): string[] {
+  return result.blocking.flatMap((i) => (i.check === 'overlap' && i.conflictingEntityId ? [i.conflictingEntityId] : []));
 }
 
 export async function checkFeasibility(
