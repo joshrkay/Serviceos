@@ -8265,11 +8265,6 @@ export const MIGRATIONS = {
   '332_assignment_overlap_accepted': `
     ALTER TABLE appointment_assignments
       ADD COLUMN IF NOT EXISTS overlap_accepted BOOLEAN NOT NULL DEFAULT false;
-    -- The visits (appointment ids) the dispatcher accepted the overlap with.
-    -- The guard below holds an accepted row to exactly these, so consent
-    -- given for one clash never covers another that appears later.
-    ALTER TABLE appointment_assignments
-      ADD COLUMN IF NOT EXISTS overlap_accepted_with UUID[] NOT NULL DEFAULT '{}';
 
     DO $mig332$
     BEGIN
@@ -8327,6 +8322,106 @@ export const MIGRATIONS = {
     -- An EXCLUDE constraint is symmetric, so a row outside its WHERE is also
     -- invisible to every later row: without this guard a plain booking that
     -- overlapped ONLY an accepted visit would slip past Postgres. This
+    -- trigger is the asymmetric half: an accepted row may overlap anything,
+    -- but an UNaccepted row may overlap nothing active, accepted rows
+    -- included. The per-(tenant, technician) advisory lock serialises
+    -- racing writers for the rest of the transaction, so two dispatchers
+    -- booking the same tech at once cannot both pass the read.
+    CREATE OR REPLACE FUNCTION check_overlap_accepted_guard()
+    RETURNS TRIGGER LANGUAGE plpgsql AS $guard$
+    BEGIN
+      IF NEW.overlap_accepted
+         OR NEW.appointment_status IN ('canceled', 'no_show')
+         OR NEW.scheduled_start IS NULL OR NEW.scheduled_end IS NULL THEN
+        RETURN NEW;
+      END IF;
+      PERFORM pg_advisory_xact_lock(hashtext(NEW.tenant_id::text), hashtext(NEW.technician_id::text));
+      IF EXISTS (
+        SELECT 1 FROM appointment_assignments aa
+        WHERE aa.tenant_id = NEW.tenant_id
+          AND aa.technician_id = NEW.technician_id
+          AND aa.id <> NEW.id
+          AND aa.appointment_status NOT IN ('canceled', 'no_show')
+          AND aa.scheduled_start IS NOT NULL AND aa.scheduled_end IS NOT NULL
+          AND tstzrange(aa.scheduled_start, aa.scheduled_end)
+              && tstzrange(NEW.scheduled_start, NEW.scheduled_end)
+      ) THEN
+        RAISE EXCEPTION 'DOUBLE_BOOKING: technician % already has an active assignment overlapping [%, %]',
+          NEW.technician_id, NEW.scheduled_start, NEW.scheduled_end
+          USING ERRCODE = 'exclusion_violation';
+      END IF;
+      RETURN NEW;
+    END;
+    $guard$;
+
+    DROP TRIGGER IF EXISTS trg_overlap_accepted_guard ON appointment_assignments;
+    CREATE TRIGGER trg_overlap_accepted_guard
+      BEFORE INSERT OR UPDATE OF scheduled_start, scheduled_end, appointment_status, overlap_accepted, technician_id
+      ON appointment_assignments
+      FOR EACH ROW EXECUTE FUNCTION check_overlap_accepted_guard();
+
+    -- 131's function plus the reset: a new window drops the acceptance.
+    CREATE OR REPLACE FUNCTION sync_appointment_to_assignments()
+    RETURNS TRIGGER AS $$
+    BEGIN
+      IF (NEW.scheduled_start IS DISTINCT FROM OLD.scheduled_start
+          OR NEW.scheduled_end IS DISTINCT FROM OLD.scheduled_end
+          OR NEW.status IS DISTINCT FROM OLD.status) THEN
+        UPDATE appointment_assignments
+           SET scheduled_start = NEW.scheduled_start,
+               scheduled_end = NEW.scheduled_end,
+               appointment_status = NEW.status,
+               overlap_accepted = overlap_accepted
+                 AND NEW.scheduled_start IS NOT DISTINCT FROM OLD.scheduled_start
+                 AND NEW.scheduled_end IS NOT DISTINCT FROM OLD.scheduled_end
+         WHERE appointment_id = NEW.id AND tenant_id = NEW.tenant_id;
+      END IF;
+      RETURN NEW;
+    END;
+    $$ LANGUAGE plpgsql;
+  `,
+
+  // 335 — Dispatch FR-2 phase 3c, review round 2: consent is pinned to the
+  // visits it was given for. 332 let an accepted row overlap anything; this
+  // adds overlap_accepted_with, backfills rows 332 already marked, and
+  // re-creates the guard so an accepted row may overlap ONLY those visits
+  // while an unaccepted row may still overlap nothing active. 333 and 334
+  // are taken by other work in flight.
+  '335_assignment_overlap_accepted_with': `
+    -- The visits (appointment ids) the dispatcher accepted the overlap with.
+    ALTER TABLE appointment_assignments
+      ADD COLUMN IF NOT EXISTS overlap_accepted_with UUID[] NOT NULL DEFAULT '{}';
+
+    -- Backfill: a database that ran 332 before this migration holds accepted
+    -- rows with an empty overlap_accepted_with. The guard below would refuse
+    -- the next status change on them, so pin each one to the active visits
+    -- it overlaps today (the ones the dispatcher saw and accepted). A row
+    -- with nothing left to overlap keeps its empty list, which the guard
+    -- treats as "accepted nothing". No-op once filled.
+    UPDATE appointment_assignments a
+       SET overlap_accepted_with = filled.ids
+      FROM (
+        SELECT acc.id, array_agg(DISTINCT other.appointment_id) AS ids
+          FROM appointment_assignments acc
+          JOIN appointment_assignments other
+            ON other.tenant_id = acc.tenant_id
+           AND other.technician_id = acc.technician_id
+           AND other.id <> acc.id
+           AND other.appointment_status NOT IN ('canceled', 'no_show')
+           AND other.scheduled_start IS NOT NULL AND other.scheduled_end IS NOT NULL
+           AND tstzrange(other.scheduled_start, other.scheduled_end)
+               && tstzrange(acc.scheduled_start, acc.scheduled_end)
+         WHERE acc.overlap_accepted
+           AND acc.overlap_accepted_with = '{}'::uuid[]
+           AND acc.appointment_status NOT IN ('canceled', 'no_show')
+           AND acc.scheduled_start IS NOT NULL AND acc.scheduled_end IS NOT NULL
+         GROUP BY acc.id
+      ) filled
+     WHERE a.id = filled.id;
+
+    -- An EXCLUDE constraint is symmetric, so a row outside its WHERE is also
+    -- invisible to every later row: without this guard a plain booking that
+    -- overlapped ONLY an accepted visit would slip past Postgres. This
     -- trigger is the asymmetric, consent-aware half:
     --   * an UNaccepted row may overlap nothing active, accepted rows included;
     --   * an accepted row may overlap only the visits it was accepted with
@@ -8370,7 +8465,8 @@ export const MIGRATIONS = {
       ON appointment_assignments
       FOR EACH ROW EXECUTE FUNCTION check_overlap_accepted_guard();
 
-    -- 131's function plus the reset: a new window drops the acceptance.
+    -- 332's sync plus the array reset: a new window drops the acceptance
+    -- and the visits it named.
     CREATE OR REPLACE FUNCTION sync_appointment_to_assignments()
     RETURNS TRIGGER AS $$
     BEGIN
