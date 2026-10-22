@@ -42,25 +42,25 @@
     "expo-status-bar": "~57.0.1",
     "nativewind": "4.2.7",
     "query-string": "9.5.1",
-    "react": "19.2.3",
-    "react-dom": "19.2.3",
+    "react": "19.3.1",
+    "react-dom": "19.3.1",
     "react-native": "0.86.3",
     "react-native-gesture-handler": "~2.32.0",
-    "react-native-reanimated": "4.5.1",
+    "react-native-reanimated": "4.5.5",
     "react-native-safe-area-context": "~5.7.0",
     "react-native-screens": "~4.26.0",
     "react-native-web": "~0.21.2",
-    "react-native-worklets": "0.10.1",
+    "react-native-worklets": "0.10.4",
     "zod": "^4.6.5"
   },
   "devDependencies": {
     "@babel/core": "^7.25.0",
-    "@types/react": "~19.2.4",
+    "@types/react": "~19.3.0",
     "jest": "^29.7.0",
     "jest-expo": "~57.0.6",
-    "react-test-renderer": "19.2.3",
+    "react-test-renderer": "19.3.1",
     "tailwindcss": "^3.4.17",
     "typescript": "~6.0.3",
-    "vitest": "4.1.11"
+    "vitest": "4.1.12"
   }
 }
