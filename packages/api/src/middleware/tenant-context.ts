@@ -163,15 +163,21 @@ export const tenantContextStore = new AsyncLocalStorage<TenantContext>();
  * bypass in `withTenantTransaction` is restricted to these — NOT keyed off the
  * client-controlled `Accept` header — so a caller can't send
  * `Accept: text/event-stream` to a mutating route to skip the transaction and
- * lose multi-write atomicity (Codex P2). Suffix-anchored so they match whether
- * or not the `/api` mount prefix has been stripped from `req.path`. Adding a
- * new SSE route? add its matcher here; until then it keeps the (safe)
- * transactional path.
+ * lose multi-write atomicity (Codex P2). Adding a new SSE route? add its
+ * matcher here; until then it keeps the (safe) transactional path.
+ *
+ * A3-5 — the same treatment as LLM_LONG_CALL_ROUTES (TI-02, A-R4): anchored at
+ * both ends (the `/api` mount prefix optional, as it is stripped from
+ * req.path) so a nested router sharing the suffix inherits nothing, with one
+ * optional trailing slash and any letter case because that is how Express
+ * routes. Otherwise `/escalations/events/` reached the same stream handler
+ * INSIDE the request transaction and held a pooled connection for the whole
+ * life of the stream.
  */
 const SSE_STREAM_ROUTES: readonly RegExp[] = [
-  /\/escalations\/events$/,
-  /\/dispatch\/board\/events$/,
-  /\/voice\/sessions\/[^/]+\/events$/,
+  /^(?:\/api)?\/escalations\/events\/?$/i,
+  /^(?:\/api)?\/dispatch\/board\/events\/?$/i,
+  /^(?:\/api)?\/voice\/sessions\/[^/]+\/events\/?$/i,
 ];
 
 function isSseStreamRoute(req: { method: string; path: string }): boolean {

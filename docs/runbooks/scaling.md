@@ -107,6 +107,10 @@ PgBouncer config: `pool_mode = transaction`, `max_client_conn` high (e.g. 1000),
   > one optional trailing slash and any letter case (A-R4). Without that,
   > `POST /proposals/:id/resolve-entity/` reached the same handler inside the
   > request transaction, and its runner took a second connection inside it.
+  > The SSE stream bypass (`SSE_STREAM_ROUTES`: `GET /escalations/events`,
+  > `GET /dispatch/board/events`, `GET /voice/sessions/:id/events`) matches
+  > the same way (A3-5); before, `GET /escalations/events/` held a request
+  > transaction and a pooled connection for the whole life of the stream.
 - Direct pool: `DB_DIRECT_MAX_CONNECTIONS` small (default 10) — only lock holders
   + the LISTEN client use it.
 - Postgres ceiling = PgBouncer `default_pool_size` (server side), independent of
