@@ -27,11 +27,12 @@ import {
 } from '../../../src/ai/gateway/breaker';
 import { TenantQuotaRegistry, type QuotaStore } from '../../../src/ai/gateway/tenant-quota';
 import {
+  createDeadlineContext,
   DeadlineExceededError,
   isLocalDeadlineOrAbort,
   MIN_RETRY_BUDGET_MS,
 } from '../../../src/ai/gateway/deadline';
-import { DEFAULT_RETRY } from '../../../src/ai/gateway/retry';
+import { DEFAULT_RETRY, runWithRetry } from '../../../src/ai/gateway/retry';
 import { computeCostMicroCents } from '../../../src/ai/gateway/model-pricing';
 import { InMemoryAiRunRepository } from '../../../src/ai/ai-run';
 import { AppError } from '../../../src/shared/errors';
@@ -208,7 +209,8 @@ describe('GATEWAY-03 — one deadline across failover', () => {
     // The caller hanging up says nothing about the provider's health (FM-01):
     // the breaker counts no failure, whatever reason the caller aborted with.
     // The chain settles on the abort itself; the breaker sees the retry
-    // wrapper's outcome a backoff later, so wait for its verdict.
+    // wrapper's outcome a few microtasks later (no backoff since A3-6), so
+    // wait for its verdict.
     await vi.waitFor(() =>
       expect(releaseReservation.mock.calls.length + onResult.mock.calls.length).toBe(1),
     );
@@ -522,5 +524,116 @@ describe('C-1699-P2 — each provider attempt settles by its own slice deadline'
     // The tenant quota lease was released exactly once, reconciled to the
     // fallback's real usage — never to the abandoned primary's.
     expect(releases).toEqual([[fallbackUsage.input, fallbackUsage.output]]);
+  });
+});
+
+// ── A3-6 — a caller abort is final: no backoff before giving up ──────────
+//
+// runWithRetry classified the abort as retryable (a timeout) and judged the
+// budget by remainingMs(), which ignores the aborted flag - so after a caller
+// hung up it slept one backoff (~100ms) before the loop noticed the abort and
+// stopped. The breaker only sees the retry wrapper's outcome after that
+// sleep, so a half-open probe slot stayed reserved for it and the next caller
+// got BreakerOpenError for nothing.
+describe('A3-6 — an aborted deadline is not retried', () => {
+  it('runWithRetry throws the abort at once: no backoff sleep, no retry attempt', async () => {
+    const deadline = createDeadlineContext(5_000);
+    const sleep = vi.fn(async () => undefined);
+    const onAttempt = vi.fn();
+    const abortError = Object.assign(new Error('Request was aborted.'), { name: 'AbortError' });
+    const op = vi.fn(async () => {
+      deadline.abort(new Error('caller hung up'));
+      throw abortError;
+    });
+
+    try {
+      await expect(
+        runWithRetry(op, { deadline, sleep, onAttempt, rng: () => 0.99 }),
+      ).rejects.toBe(abortError);
+    } finally {
+      deadline.abort();
+    }
+
+    expect(op).toHaveBeenCalledTimes(1);
+    expect(sleep).not.toHaveBeenCalled();
+    expect(onAttempt).not.toHaveBeenCalled();
+  });
+
+  it('a live deadline still retries a transient failure after its backoff', async () => {
+    const deadline = createDeadlineContext(5_000);
+    const sleep = vi.fn(async () => undefined);
+    let calls = 0;
+    const op = async () => {
+      calls += 1;
+      if (calls === 1) throw Object.assign(new Error('upstream 503'), { status: 503 });
+      return 'ok';
+    };
+    try {
+      await expect(runWithRetry(op, { deadline, sleep, rng: () => 0.99 })).resolves.toBe('ok');
+    } finally {
+      deadline.abort();
+    }
+    expect(sleep).toHaveBeenCalledTimes(1);
+  });
+
+  it('on a fake clock: a caller abort returns the half-open probe slot with no time passing', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date', 'hrtime'] });
+    // A backoff that is never 0, so a sleep would always be a real wait.
+    const random = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    try {
+      // One failure opens the cell, a 20ms cooldown, ONE half-open probe.
+      const breakers = new CircuitBreakerRegistry({
+        ...DEFAULT_BREAKER,
+        consecutiveFailureThreshold: 1,
+        cooldownMs: 20,
+        cooldownCapMs: 20,
+        halfOpenProbeCount: 1,
+      });
+      let mode: 'fail' | 'hang' | 'ok' = 'fail';
+      const hanging = new HangingProvider('api.openai.com', () => 0);
+      const primary: LLMProvider = {
+        name: 'api.openai.com',
+        complete: async (req) => {
+          if (mode === 'fail') throw Object.assign(new Error('upstream 500'), { status: 500 });
+          if (mode === 'hang') return hanging.complete(req);
+          return answering('api.openai.com', { input: 1, output: 1, total: 2 }).complete(req);
+        },
+        isAvailable: async () => true,
+      };
+      // The default retry policy: an abort WOULD be retried after a backoff.
+      const resilient = composeResilienceStack(primary, { breakers, quota: new TenantQuotaRegistry() });
+      const cell = breakers.cell({ provider: 'api.openai.com', modelFamily: 'gpt', taskClass: 'classify' });
+      const releaseReservation = vi.spyOn(cell, 'releaseReservation');
+
+      const opening = resilient.complete(request(1_000)).catch(() => undefined);
+      await vi.advanceTimersByTimeAsync(1_500); // the 500s and their backoffs: the cell opens
+      await opening;
+      await vi.advanceTimersByTimeAsync(40); // cooldown -> half-open on the next caller
+
+      mode = 'hang';
+      const controller = new AbortController();
+      const probe = resilient
+        .complete({ ...request(5_000), signal: controller.signal })
+        .catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(hanging.calls).toHaveLength(1); // the probe holds the only slot
+
+      controller.abort(new Error('caller hung up'));
+      // Microtasks only: the clock does not move.
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+
+      expect(await probe).toBeInstanceOf(AppError);
+      expect(releaseReservation).toHaveBeenCalledTimes(1);
+      expect(vi.getTimerCount()).toBe(0); // no backoff sleep pending
+      // The slot is back: the next caller is admitted, not BreakerOpenError'd.
+      mode = 'ok';
+      const res = await resilient.complete(request(1_000)).catch((e: unknown) => e);
+      expect(res).not.toBeInstanceOf(AppError);
+      expect((res as LLMResponse).content).toBe('answer from api.openai.com');
+      expect(hanging.calls).toHaveLength(1); // and the aborted probe was never retried
+    } finally {
+      random.mockRestore();
+      vi.useRealTimers();
+    }
   });
 });
