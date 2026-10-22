@@ -637,6 +637,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // D-044 / #1763 — tenant_settings.get_found_online_dismissed_at, google_review_url_derived; review_poll_state.backoff_reason, auth_generation.
   ['331_get_found_online', 'eb7e83e23154cb56342b21f1b83c90733349f649215af5206885b77bb3a639ca'],
   ['332_assignment_overlap_accepted', 'eb06c6a9b4dc679fa9532a486a8941a19abcceb6e95875e0fb9d930b94eef471'],
+  // #1750 (D-044) — tenant_settings.presence_path, forwarding_mode (NOT VALID CHECKs), get_found_skipped_items.
+  ['334_tenant_settings_get_found', 'a55ccb06da1509baa49df4ff5d76102e8f9ea2115ae2a3f28516b78e7966755c'],
 ];
 
 function hashMigration(value: string): string {

@@ -133,9 +133,9 @@ const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 16;
 // "Pick, don't build" S4: +1 onboarding (PUT /api/onboarding/draft/metro).
 // "Pick, don't build" S4: +2 onboarding (POST /api/onboarding/draft/undo, /reset).
 // D-044 (#1762, #1763): +4 occasional (Google listing picker GET/PUT, get-found-online GET + dismiss).
-const OWNER_ONLY_ROUTES = 85;
 // D-045: +2 occasional (PUT/DELETE /api/settings/text-wording/:purpose — owner's text wording).
-const OWNER_ONLY_ROUTES = 83;
+// D-044 (#1752): +4 occasional (/api/get-found presence-path, forwarding-mode, item skip PUT/DELETE).
+const OWNER_ONLY_ROUTES = 91;
 
 // ── Derivation ──────────────────────────────────────────────────────────────
 
