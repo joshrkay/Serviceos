@@ -4369,15 +4369,19 @@ async function generateAssistantReply(
           ? await findReplaceableDraft(deps, tenantId, conversationId, proposal.proposalType)
           : undefined;
         if (corrected) {
-          const rewritten = await deps.proposalRepo.update(tenantId, corrected.id, {
+          let rewritten = await deps.proposalRepo.update(tenantId, corrected.id, {
             payload: proposal.payload,
             sourceContext: proposal.sourceContext,
             summary: proposal.summary,
             ...(proposal.confidenceScore !== undefined
               ? { confidenceScore: proposal.confidenceScore }
               : {}),
-            status: proposal.status === 'draft' ? 'ready_for_review' : proposal.status,
           });
+          // Status never rides the generic update (the pg repo has no status
+          // column in it); a draft is surfaced for review like a fresh card.
+          if (rewritten?.status === 'draft') {
+            rewritten = (await deps.proposalRepo.updateStatus(tenantId, corrected.id, 'ready_for_review')) ?? rewritten;
+          }
           const card = proposalToUI(rewritten ?? { ...corrected, ...proposal, id: corrected.id }, lastUserText);
           return {
             taskType: `assistant.${handler.taskType}`,

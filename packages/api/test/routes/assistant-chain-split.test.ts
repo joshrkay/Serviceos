@@ -39,6 +39,7 @@ import {
   setSupervisorPresenceLoader,
   _resetSupervisorPresenceCache,
 } from '../../src/ai/supervisor-presence';
+import { markExecuted } from '../helpers/proposal-status';
 
 const TEST_TENANT = '11111111-1111-4111-8111-111111111111';
 const TEST_USER = '22222222-2222-4222-8222-222222222222';
@@ -286,7 +287,7 @@ describe('#1480 item 4 — AST-04 "create an invoice for job X and send it"', ()
     const invoice = await invoiceRepo.create(
       buildInvoice({ tenantId: TEST_TENANT, jobId: JOB_ID, estimateId: undefined, status }),
     );
-    await proposalRepo.updateStatus(TEST_TENANT, invoiceStep.id, 'executed', { resultEntityId: invoice.id });
+    await markExecuted(proposalRepo, TEST_TENANT, invoiceStep.id, { resultEntityId: invoice.id });
     return { send, invoice };
   }
 
@@ -430,8 +431,8 @@ describe('#1480 item 4 — AST-07 customer → estimate → create-and-send invo
         totals: calculateDocumentTotals(estimateLines, 5_000, 860),
       }),
     );
-    await proposalRepo.updateStatus(TEST_TENANT, customerStep.id, 'executed', { resultEntityId: customer.id });
-    await proposalRepo.updateStatus(TEST_TENANT, estimateStep.id, 'executed', { resultEntityId: estimate.id });
+    await markExecuted(proposalRepo, TEST_TENANT, customerStep.id, { resultEntityId: customer.id });
+    await markExecuted(proposalRepo, TEST_TENANT, estimateStep.id, { resultEntityId: estimate.id });
 
     // Step 3: the operator approves the invoice; it executes past its undo window.
     await approveProposal(proposalRepo, TEST_TENANT, invoiceStep.id, TEST_USER, 'owner');
@@ -474,10 +475,10 @@ describe('#1480 item 4 — AST-07 customer → estimate → create-and-send invo
     const JOB = 'abababab-abab-4bab-8bab-abababababab';
     const estimate = await estimateRepo.create(buildEstimate({ tenantId: TEST_TENANT, jobId: JOB }));
     await invoiceRepo.create(buildInvoice({ tenantId: TEST_TENANT, jobId: JOB, estimateId: estimate.id }));
-    await proposalRepo.updateStatus(TEST_TENANT, customerStep.id, 'executed', {
+    await markExecuted(proposalRepo, TEST_TENANT, customerStep.id, {
       resultEntityId: 'cdcdcdcd-cdcd-4dcd-8dcd-cdcdcdcdcdcd',
     });
-    await proposalRepo.updateStatus(TEST_TENANT, estimateStep.id, 'executed', { resultEntityId: estimate.id });
+    await markExecuted(proposalRepo, TEST_TENANT, estimateStep.id, { resultEntityId: estimate.id });
 
     await expect(
       approveProposal(proposalRepo, TEST_TENANT, invoiceStep.id, TEST_USER, 'owner', undefined, undefined, {
