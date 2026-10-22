@@ -6,8 +6,7 @@ import { InMemoryDncRepository } from '../../src/compliance/dnc';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryJobRepository, type Job } from '../../src/jobs/job';
 import { createLogger } from '../../src/logging/logger';
-import type { FeedbackDispatcher } from '../../src/feedback/dispatcher';
-import { MessageDeliveryFeedbackDispatcher } from '../../src/feedback/dispatcher';
+import { createOutboundMessaging } from '../../src/notifications/outbound-messaging';
 import {
   GatedMessageDelivery,
   SmsSuppressedError,
@@ -163,8 +162,8 @@ describe('runThankYouSmsSweep', () => {
   let settingsRepo: InMemorySettingsRepository;
   let dncRepo: InMemoryDncRepository;
   let auditRepo: InMemoryAuditRepository;
-  let dispatcher: FeedbackDispatcher;
-  let send: ReturnType<typeof vi.fn<[{ to: string; body: string }], Promise<void>>>;
+  let delivery: MessageDeliveryProvider;
+  let send: ReturnType<typeof vi.fn>;
 
   beforeEach(async () => {
     jobRepo = new InMemoryJobRepository();
@@ -172,8 +171,8 @@ describe('runThankYouSmsSweep', () => {
     settingsRepo = new InMemorySettingsRepository();
     dncRepo = new InMemoryDncRepository();
     auditRepo = new InMemoryAuditRepository();
-    send = vi.fn(async (_input: { to: string; body: string }) => undefined as void);
-    dispatcher = { send } as unknown as FeedbackDispatcher;
+    send = vi.fn(async (_message: SmsMessage) => ({ provider: 'test', providerMessageId: 'm-1', channel: 'sms' }));
+    delivery = { sendSms: send, sendEmail: vi.fn() } as unknown as MessageDeliveryProvider;
 
     await settingsRepo.create(baseSettings(TENANT, 'Acme Plumbing'));
   });
@@ -196,35 +195,49 @@ describe('runThankYouSmsSweep', () => {
     };
   }
 
-  function deps(rows: Array<{ id: string; tenant_id: string }>, overrides: Partial<ThankYouSmsWorkerDeps> = {}): ThankYouSmsWorkerDeps {
+  /**
+   * The worker's deps, with outbound messaging built the way app.ts builds it:
+   * over `delivery` (a bare `send` mock unless a test passes the real gate) and
+   * the SAME pool the worker sweeps with, so the send claim lands in it.
+   */
+  function deps(
+    rows: Array<{ id: string; tenant_id: string }>,
+    overrides: Partial<ThankYouSmsWorkerDeps> & { delivery?: MessageDeliveryProvider } = {},
+  ): ThankYouSmsWorkerDeps {
+    const { delivery: deliveryOverride, ...rest } = overrides;
+    const pool = rest.pool !== undefined ? rest.pool : fakePool({ rows });
     return {
-      pool: fakePool({ rows }),
+      pool,
       jobRepo,
       customerRepo,
       settingsRepo,
-      dncRepo,
-      dispatcher,
+      messaging: createOutboundMessaging({
+        delivery: deliveryOverride ?? delivery,
+        customerRepo,
+        dncRepo,
+        pool,
+        logger,
+      }),
       auditRepo,
       logger,
       now: () => NOW,
-      ...overrides,
+      ...rest,
     };
   }
 
   it('returns zeroed result with no pool (in-memory dev posture)', async () => {
-    const result = await runThankYouSmsSweep({
-      pool: null,
-      jobRepo,
-      customerRepo,
-      settingsRepo,
-      dncRepo,
-      dispatcher,
-      auditRepo,
-      logger,
-      now: () => NOW,
-    });
+    const result = await runThankYouSmsSweep(deps([], { pool: null }));
     expect(result).toEqual({ tenants: 0, candidates: 0, sent: 0, suppressed: 0, failed: 0, deferred: 0 });
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it('returns zeroed result with no SMS provider, rather than stamping texts that never went out', async () => {
+    const job = makeJob({});
+    await jobRepo.create(job);
+    await customerRepo.create(makeCustomer());
+    const result = await runThankYouSmsSweep(deps([{ id: job.id, tenant_id: TENANT }], { messaging: null }));
+    expect(result).toEqual({ tenants: 0, candidates: 0, sent: 0, suppressed: 0, failed: 0, deferred: 0 });
+    expect((await jobRepo.findById(TENANT, job.id))?.thankYouSmsSentAt).toBeUndefined();
   });
 
   it('sends one SMS for an eligible completed job, stamps the idempotency column, and emits the sent audit event', async () => {
@@ -243,8 +256,10 @@ describe('runThankYouSmsSweep', () => {
       to: '+15551234567',
       body: expect.stringContaining('Acme Plumbing'),
       tenantId: TENANT,
+      recipientClass: 'customer',
       consent: { smsConsent: true, customerId: 'cust-1' },
       quietHours: 'defer',
+      idempotencyKey: `thank_you_sms:${job.id}`,
     });
 
     const stamped = await jobRepo.findById(TENANT, job.id);
@@ -305,7 +320,7 @@ describe('runThankYouSmsSweep', () => {
     ).toMatchObject({ reason: 'on_dnc' });
   });
 
-  it('records a transient failure when dispatcher throws and leaves the stamp null so the next sweep retries', async () => {
+  it('records a transient failure when the provider throws and leaves the stamp null so the next sweep retries', async () => {
     const job = makeJob({});
     await jobRepo.create(job);
     await customerRepo.create(makeCustomer());
@@ -438,7 +453,7 @@ describe('runThankYouSmsSweep', () => {
       expect(stamped?.thankYouSmsSentAt).toEqual(NOW);
     });
 
-    it('a dispatcher throw releases the claim so the very next tick can retry', async () => {
+    it('a provider throw releases the claim so the very next tick can retry', async () => {
       const job = makeJob({});
       await jobRepo.create(job);
       await customerRepo.create(makeCustomer());
@@ -567,10 +582,10 @@ describe('runThankYouSmsSweep', () => {
   /**
    * PR #994, Codex P1 — the production wiring, not a substitute for it.
    *
-   * `app.ts` hands this worker a `MessageDeliveryFeedbackDispatcher` wrapping
-   * the SINGLE `GatedMessageDelivery` object, and the gate tags this send
-   * customer-class. Every other test in this file (and the sweep fan-out
-   * integration test) injects a bare `{ send: vi.fn() }`, so none of them could
+   * `app.ts` hands this worker outbound messaging built over the SINGLE
+   * `GatedMessageDelivery` object (before D-045, a feedback dispatcher wrapping
+   * it), and the send is tagged customer-class. Every other test in this file
+   * (and the sweep fan-out integration test) uses a bare send mock, so none could
    * see that the worker was calling that chain with `{ to, body }` only: the
    * gate then failed closed with `missing_consent_context`, and because
    * `TCPA_CONSENT_ENFORCEMENT` resolves to 'block' in prod/staging when unset,
@@ -583,7 +598,7 @@ describe('runThankYouSmsSweep', () => {
    */
   describe('the production dispatch chain (gated delivery, block mode)', () => {
     function gatedDispatcher(env?: NodeJS.ProcessEnv): {
-      dispatcher: FeedbackDispatcher;
+      delivery: MessageDeliveryProvider;
       sentSms: SmsMessage[];
     } {
       const sentSms: SmsMessage[] = [];
@@ -603,17 +618,17 @@ describe('runThankYouSmsSweep', () => {
         // Kill-switch seam; defaults to process.env when absent.
         ...(env ? { env } : {}),
       });
-      return { dispatcher: new MessageDeliveryFeedbackDispatcher(gate), sentSms };
+      return { delivery: gate, sentSms };
     }
 
     it('a consenting customer is actually sent to through the real gate', async () => {
       const job = makeJob({});
       await jobRepo.create(job);
       await customerRepo.create(makeCustomer());
-      const { dispatcher: gated, sentSms } = gatedDispatcher();
+      const { delivery: gated, sentSms } = gatedDispatcher();
 
       const result = await runThankYouSmsSweep(
-        deps([{ id: job.id, tenant_id: TENANT }], { dispatcher: gated }),
+        deps([{ id: job.id, tenant_id: TENANT }], { delivery: gated }),
       );
 
       expect(result.sent).toBe(1);
@@ -637,14 +652,15 @@ describe('runThankYouSmsSweep', () => {
       // The gate's own verdict, e.g. a revocation that arrived on another
       // channel and sits in the consent ledger this worker does not read. The
       // local smsConsent + DNC guards both passed to get here.
-      const suppressing: FeedbackDispatcher = {
-        send: async () => {
+      const suppressing = {
+        sendEmail: vi.fn(),
+        sendSms: async () => {
           throw new SmsSuppressedError('revoked');
         },
       };
 
       const result = await runThankYouSmsSweep(
-        deps([{ id: job.id, tenant_id: TENANT }], { dispatcher: suppressing }),
+        deps([{ id: job.id, tenant_id: TENANT }], { delivery: suppressing as unknown as MessageDeliveryProvider }),
       );
 
       expect(result.suppressed).toBe(1);
@@ -681,7 +697,7 @@ describe('runThankYouSmsSweep', () => {
       const off = gatedDispatcher({ TELEPHONY_ENABLED: 'false' });
 
       const during = await runThankYouSmsSweep(
-        deps([{ id: job.id, tenant_id: TENANT }], { dispatcher: off.dispatcher }),
+        deps([{ id: job.id, tenant_id: TENANT }], { delivery: off.delivery }),
       );
 
       expect(off.sentSms).toHaveLength(0);
@@ -696,7 +712,7 @@ describe('runThankYouSmsSweep', () => {
       // Telephony restored — the same job is still eligible and now sends.
       const back = gatedDispatcher();
       const after = await runThankYouSmsSweep(
-        deps([{ id: job.id, tenant_id: TENANT }], { dispatcher: back.dispatcher }),
+        deps([{ id: job.id, tenant_id: TENANT }], { delivery: back.delivery }),
       );
       expect(after.sent).toBe(1);
       expect(back.sentSms).toHaveLength(1);
@@ -708,14 +724,15 @@ describe('runThankYouSmsSweep', () => {
       await customerRepo.create(makeCustomer());
       // Only reachable via a wiring regression now that both fields are
       // forwarded; it must surface rather than eat a customer message.
-      const broken: FeedbackDispatcher = {
-        send: async () => {
+      const broken = {
+        sendEmail: vi.fn(),
+        sendSms: async () => {
           throw new SmsSuppressedError('missing_consent_context');
         },
       };
 
       const result = await runThankYouSmsSweep(
-        deps([{ id: job.id, tenant_id: TENANT }], { dispatcher: broken }),
+        deps([{ id: job.id, tenant_id: TENANT }], { delivery: broken as unknown as MessageDeliveryProvider }),
       );
 
       expect(result.failed).toBe(1);
@@ -727,14 +744,14 @@ describe('runThankYouSmsSweep', () => {
 
   /**
    * A thank-you is non-transactional: outside the recipient-local window it is
-   * DEFERRED, never dropped. Through the real dispatcher → gate → resolver
+   * DEFERRED, never dropped. Through outbound messaging → the real gate → resolver
    * chain (tenant zone America/Phoenix, UTC-7, from baseSettings).
    */
   describe('recipient quiet hours', () => {
     const LATE = new Date('2026-10-14T05:30:00Z'); // 22:30 MST, Oct 13
     const MORNING = new Date('2026-10-14T17:00:00Z'); // 10:00 MST, Oct 14
 
-    function windowedDispatcher(now: Date): { dispatcher: FeedbackDispatcher; sentSms: SmsMessage[] } {
+    function windowedDispatcher(now: Date): { delivery: MessageDeliveryProvider; sentSms: SmsMessage[] } {
       const sentSms: SmsMessage[] = [];
       const base: MessageDeliveryProvider = {
         sendSms: async (message) => {
@@ -757,7 +774,7 @@ describe('runThankYouSmsSweep', () => {
         },
         logger: { info: () => undefined },
       });
-      return { dispatcher: new MessageDeliveryFeedbackDispatcher(gate), sentSms };
+      return { delivery: gate, sentSms };
     }
 
     it("skips a closed-window tenant's jobs without per-job work — nothing claimed, sent or stamped", async () => {
@@ -795,7 +812,7 @@ describe('runThankYouSmsSweep', () => {
 
       const late = windowedDispatcher(LATE);
       const night = await runThankYouSmsSweep(
-        deps(rows, { pool, dispatcher: late.dispatcher, now: () => LATE }),
+        deps(rows, { pool, delivery: late.delivery, now: () => LATE }),
       );
 
       expect(late.sentSms).toHaveLength(0);
@@ -807,7 +824,7 @@ describe('runThankYouSmsSweep', () => {
 
       const morning = windowedDispatcher(MORNING);
       const next = await runThankYouSmsSweep(
-        deps(rows, { pool, dispatcher: morning.dispatcher, now: () => MORNING }),
+        deps(rows, { pool, delivery: morning.delivery, now: () => MORNING }),
       );
 
       expect(morning.sentSms).toHaveLength(1);

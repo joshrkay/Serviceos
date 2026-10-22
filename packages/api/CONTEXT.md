@@ -153,7 +153,10 @@ Terms for how the product states what it can prove about itself. The PRD's
 - **Outbound messaging** — the one module every customer or owner text goes
   through. A sender names the recipient and the message purpose; the module
   decides consent, quiet hours, duplicates and channel, and records the
-  outcome. _Avoid_: notification service, SMS sender.
+  outcome. Lives in `src/notifications/outbound-messaging.ts`; files not yet
+  moved onto it are listed in
+  `test/notifications/outbound-messaging-migration-guard.test.ts`.
+  _Avoid_: notification service, SMS sender.
 - **Message purpose** — why a message goes out, which decides when it may:
   *transactional* (invoice, estimate, confirmation) and *reply* (to someone
   who just contacted us) send now; *automated nudge* (thank-you, review
