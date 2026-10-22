@@ -134,6 +134,9 @@ export default defineConfig({
         STRIPE_STARTER_PRICE_ID: '',
         STRIPE_GROWTH_PRICE_ID: '',
         STRIPE_PRICE_ID: '',
+        // The synthetic key would send pay-link requests to Stripe (401), and an invoice send now
+        // needs its pay link made first (D-045), so links come from the dev-only mock provider.
+        PAYMENT_LINK_PROVIDER: 'mock',
         // Scripted transcription (e2e/helpers/fake-deepgram.ts): the token route mints a fixture token, and
         // the key is blanked so a developer's own cannot open a real socket.
         DEEPGRAM_API_KEY: '',

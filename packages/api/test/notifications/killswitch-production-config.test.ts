@@ -278,7 +278,7 @@ describe("production config: TELEPHONY_ENABLED=false + EMAIL_ENABLED=false", () 
       (g) =>
         new SendService({
           delivery: g, estimateRepo, invoiceRepo, jobRepo, customerRepo,
-          settingsRepo, dispatchRepo, publicBaseUrl: "https://app.invalid",
+          settingsRepo, dispatchRepo, publicBaseUrl: "https://app.invalid", ensureInvoicePayLink: async () => undefined,
         } as any)
           .sendEstimate({ tenantId: TENANT, estimateId: estimate.id, channel: "both" } as any)
           .catch((e) => e),
@@ -288,7 +288,7 @@ describe("production config: TELEPHONY_ENABLED=false + EMAIL_ENABLED=false", () 
       (g) =>
         new SendService({
           delivery: g, estimateRepo, invoiceRepo, jobRepo, customerRepo,
-          settingsRepo, dispatchRepo, publicBaseUrl: "https://app.invalid",
+          settingsRepo, dispatchRepo, publicBaseUrl: "https://app.invalid", ensureInvoicePayLink: async () => undefined,
         } as any)
           .sendInvoice({ tenantId: TENANT, invoiceId: invoice.id, channel: "both" } as any)
           .catch((e) => e),

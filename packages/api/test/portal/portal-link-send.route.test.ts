@@ -117,6 +117,7 @@ async function build(opts: {
         settingsRepo,
         dispatchRepo,
         publicBaseUrl: 'https://app.example.com',
+        ensureInvoicePayLink: async () => undefined,
       });
 
   const app = express();

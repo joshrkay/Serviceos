@@ -112,6 +112,7 @@ describe('Postgres integration — #1145 dispatch idempotency key collision', ()
       settingsRepo,
       dispatchRepo,
       publicBaseUrl: 'https://test.example.com',
+      ensureInvoicePayLink: async () => undefined,
     });
   });
 

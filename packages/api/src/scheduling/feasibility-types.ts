@@ -26,6 +26,12 @@ export interface FeasibilityIssue {
 
 export interface TravelTimeSummary {
   fromPrevSeconds: number | null;
+  /**
+   * When the technician's preceding visit (within the ±24h search) ends —
+   * set even when its drive could not be measured, null when there is none.
+   * Lets a caller tell "earlier the same day" from "yesterday evening".
+   */
+  prevEndsAt: Date | null;
   toNextSeconds: number | null;
   estimateSource: 'google' | 'haversine' | 'unknown';
   degraded: boolean;

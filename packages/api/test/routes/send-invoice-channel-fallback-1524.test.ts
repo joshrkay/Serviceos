@@ -172,6 +172,7 @@ async function execute(
     settingsRepo,
     dispatchRepo: new InMemoryDispatchRepository(),
     publicBaseUrl: 'https://app.example.com',
+    ensureInvoicePayLink: async () => undefined,
   });
   const handler = new SendInvoiceExecutionHandler(new SendServiceInvoiceDeliveryProvider(sendService));
   const result = await handler.execute(proposal, { tenantId: TENANT, executedBy: USER });
@@ -207,21 +208,50 @@ describe('#1524 — send_invoice with no channel named, phone-only customer', ()
   });
 });
 
-describe('#1524 — send_invoice with no channel named, email on file', () => {
-  it('approves and the executor emails it (email wins over the phone)', async () => {
-    const w = await world({ email: 'riley@example.com', primaryPhone: PHONE, smsConsent: true });
-    const checks = [sendRecipientReferenceCheck(w)];
+describe('D-045 — send_invoice with no channel named, phone and email on file', () => {
+  async function approved(w: Awaited<ReturnType<typeof world>>, checks: ApprovalReferenceCheck[]) {
     const { proposal } = await draftFromChat(w, checks);
-    const approved = await approveProposal(w.proposalRepo, TENANT, proposal.id, USER, 'owner', undefined, 'ui', {
+    return approveProposal(w.proposalRepo, TENANT, proposal.id, USER, 'owner', undefined, 'ui', {
       referenceChecks: checks,
     });
+  }
 
-    const { result, delivery } = await execute(w, approved);
+  it('a customer who agreed to texts gets a text (text first, superseding #1524 email-first)', async () => {
+    const w = await world({ email: 'riley@example.com', primaryPhone: PHONE, smsConsent: true });
+    const { result, delivery } = await execute(w, await approved(w, [sendRecipientReferenceCheck(w)]));
+
+    expect(result).toMatchObject({ success: true });
+    expect(delivery.sentEmails).toHaveLength(0);
+    expect(delivery.sentSms.map((m) => m.to)).toEqual([PHONE]);
+  });
+
+  it('a customer who has not agreed to texts gets the email', async () => {
+    const w = await world({ email: 'riley@example.com', primaryPhone: PHONE, smsConsent: false });
+    const { result, delivery } = await execute(w, await approved(w, [sendRecipientReferenceCheck(w)]));
 
     expect(result).toMatchObject({ success: true });
     expect(delivery.sentSms).toHaveLength(0);
-    expect(delivery.sentEmails).toHaveLength(1);
-    expect(delivery.sentEmails[0].to).toBe('riley@example.com');
+    expect(delivery.sentEmails.map((m) => m.to)).toEqual(['riley@example.com']);
+  });
+
+  it('a text the gate refuses (do-not-contact) is approved and falls back to the email', async () => {
+    const w = await world({ email: 'riley@example.com', primaryPhone: PHONE, smsConsent: true });
+    const delivery = new InMemoryDeliveryProvider();
+    const dnc = new InMemoryDncRepository();
+    await dnc.addToDnc(TENANT, normalizePhone(PHONE), 'test');
+    const gated = new GatedMessageDelivery({
+      base: delivery,
+      dnc,
+      auditRepo: new InMemoryAuditRepository(),
+      enforcement: 'block',
+    });
+    const checks = [sendRecipientReferenceCheck({ ...w, smsPreflight: gated })];
+
+    const { result } = await execute(w, await approved(w, checks), { delivery, gate: gated });
+
+    expect(result).toMatchObject({ success: true });
+    expect(delivery.sentSms).toHaveLength(0);
+    expect(delivery.sentEmails.map((m) => m.to)).toEqual(['riley@example.com']);
   });
 });
 

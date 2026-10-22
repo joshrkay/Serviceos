@@ -1552,7 +1552,7 @@ const SEND_IT_CLAUSE_RE = /^(send|text|email)\s+(?:it|that|this|them|her|him|the
 /**
  * The channel the operator NAMED for "send it": text → sms, email → email.
  * #1524 — a bare "send" names none (undefined): the send_invoice drafter then
- * writes 'auto' (the customer's email, else a text), never an invented
+ * writes 'auto' (a text when the customer can be texted, else their email), never an invented
  * 'email' a phone-only customer can't receive.
  */
 function sendChannelFor(verb: string, clause: string): 'email' | 'sms' | undefined {

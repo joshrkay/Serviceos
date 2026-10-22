@@ -104,6 +104,7 @@ async function build(role: Role): Promise<Harness> {
     settingsRepo,
     dispatchRepo,
     publicBaseUrl: 'https://app.example.com',
+    ensureInvoicePayLink: async () => undefined,
   });
 
   const app = express();
