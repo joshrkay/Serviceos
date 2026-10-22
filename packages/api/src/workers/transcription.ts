@@ -21,7 +21,7 @@ import { flagCardNumberRecording } from '../voice/card-number-recording';
  * router enqueue is GATED on this phone matching the tenant's approver set
  * (`voicemailRouterEnqueueAllowed` below); absent/unknown callers keep the
  * notify-only behavior. Identity here is transport-level caller-ID — the
- * same trust boundary as `resolveOwnerSession` and the SMS reply transport
+ * same trust boundary as `resolveOwnerLineApprover` and the SMS reply transport
  * — and it gates only WHETHER routing happens, never trust elevation: the
  * recording row keeps source='inbound_call' (untrusted provenance).
  */
@@ -109,7 +109,7 @@ export interface TranscriptionCompletionEvent {
  * owner_phone / backup supervisor mobile — production wires
  * `isApproverPhone` from proposals/approver-identity.ts). FAIL-CLOSED:
  * a lookup error, a missing caller phone, or a non-matching phone all
- * keep the voicemail notify-only (mirrors `resolveOwnerSession`).
+ * keep the voicemail notify-only (mirrors `resolveOwnerLineApprover`).
  */
 export async function voicemailRouterEnqueueAllowed(
   event: Pick<TranscriptionCompletionEvent, 'tenantId' | 'recordingId' | 'voicemail'>,

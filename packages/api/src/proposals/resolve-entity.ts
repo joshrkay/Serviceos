@@ -773,7 +773,12 @@ async function redraftResolvedProposal(args: {
       proposalType: drafted.proposalType,
       payload: drafted.payload,
       summary: drafted.summary,
-      ...(drafted.explanation !== undefined ? { explanation: drafted.explanation } : {}),
+      // B3 — the payload is now the re-draft run's output: link THAT run (none
+      // when it persisted no ai_runs row — never the clarification's), its
+      // confidence factors and its explanation (not the clarification's question).
+      aiRunId: drafted.aiRunId,
+      confidenceFactors: drafted.confidenceFactors,
+      explanation: drafted.explanation,
       ...(drafted.confidenceScore !== undefined ? { confidenceScore: drafted.confidenceScore } : {}),
       sourceContext: nextSourceContext,
       targetEntityId: chosen.id,

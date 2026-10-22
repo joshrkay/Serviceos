@@ -39,6 +39,10 @@ import {
   ExecutionContext,
 } from '../../src/proposals/execution/handlers';
 import { CreateInvoiceExecutionHandler } from '../../src/proposals/execution/invoice-execution-handler';
+import {
+  holdForExecutability,
+  jobReferenceCheck,
+} from '../../src/proposals/approval-reference-checks';
 import { provesExecution } from '../../src/capabilities/proven-bar';
 
 describe(provesExecution('draft_invoice') + 'Postgres integration — voice draft_invoice → approve → execute → persist + audit', () => {
@@ -581,6 +585,144 @@ describe('Postgres integration — B6: customer-only draft_invoice (no jobId) au
       result.resultEntityId,
     ]);
     expect(rows[0].job_id).toBe(existingJobId);
+  });
+});
+
+// B4 — invoices.job_id decides whose bill an invoice is. A draft_invoice that
+// names a real job of THIS tenant but of a DIFFERENT customer than the draft's
+// passed the existence check and billed the other customer's job. The
+// executor must refuse it before any row exists (the DraftEstimate mirror),
+// and the approval-time jobReferenceCheck must refuse the tap first.
+describe('Postgres integration — B4: a draft_invoice naming another customer’s job writes no invoices row', () => {
+  let pool: Pool;
+  let tenant: { tenantId: string; userId: string };
+  let customerId: string;
+  let otherCustomersJobId: string;
+  let registryDeps: Parameters<typeof createExecutionHandlerRegistry>[0];
+  let jobRepo: PgJobRepository;
+
+  async function seedCustomerWithJob(label: string): Promise<{ customerId: string; jobId: string }> {
+    const customerRepo = new PgCustomerRepository(pool);
+    const locationRepo = new PgLocationRepository(pool);
+    const cId = crypto.randomUUID();
+    await customerRepo.create({
+      id: cId,
+      tenantId: tenant.tenantId,
+      firstName: label,
+      lastName: 'Customer',
+      displayName: `${label} Customer`,
+      preferredChannel: 'phone',
+      smsConsent: false,
+      isArchived: false,
+      createdBy: tenant.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const locId = crypto.randomUUID();
+    await locationRepo.create({
+      id: locId,
+      tenantId: tenant.tenantId,
+      customerId: cId,
+      street1: `4 ${label} St`,
+      city: 'Austin',
+      state: 'TX',
+      postalCode: '78701',
+      country: 'USA',
+      isPrimary: true,
+      isArchived: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const jId = crypto.randomUUID();
+    await jobRepo.create({
+      id: jId,
+      tenantId: tenant.tenantId,
+      customerId: cId,
+      locationId: locId,
+      jobNumber: `JOB-B4-${jId.slice(0, 6)}`,
+      summary: `${label} furnace`,
+      status: 'completed',
+      priority: 'normal',
+      createdBy: tenant.userId,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    return { customerId: cId, jobId: jId };
+  }
+
+  beforeAll(async () => {
+    pool = await getSharedTestDb();
+    jobRepo = new PgJobRepository(pool);
+    tenant = await createTestTenant(pool);
+    customerId = (await seedCustomerWithJob('Billed')).customerId;
+    otherCustomersJobId = (await seedCustomerWithJob('Other')).jobId;
+    registryDeps = {
+      invoiceRepo: new PgInvoiceRepository(pool),
+      settingsRepo: new PgSettingsRepository(pool),
+      auditRepo: new PgAuditRepository(pool),
+      jobRepo,
+      locationRepo: new PgLocationRepository(pool),
+      customerRepo: new PgCustomerRepository(pool),
+    };
+  });
+
+  afterAll(async () => {
+    await closeSharedTestDb();
+  });
+
+  function mismatchedDraft(): Proposal {
+    return {
+      ...createProposal({
+        tenantId: tenant.tenantId,
+        proposalType: 'draft_invoice',
+        payload: {
+          customerId,
+          jobId: otherCustomersJobId,
+          lineItems: [buildLineItem('1', 'Furnace repair', 1, 42000, 1, true, 'labor')],
+        },
+        summary: 'Invoice the furnace repair',
+        createdBy: tenant.userId,
+      }),
+      status: 'approved',
+      approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100),
+    };
+  }
+
+  async function invoiceCount(): Promise<number> {
+    const { rows } = await pool.query(`SELECT count(*)::int AS n FROM invoices WHERE tenant_id = $1`, [
+      tenant.tenantId,
+    ]);
+    return rows[0].n;
+  }
+
+  it('the PRODUCTION executor refuses it and no invoices row exists for either customer', async () => {
+    const proposal = mismatchedDraft();
+    const proposalRepo = new InMemoryProposalRepository();
+    await proposalRepo.create(proposal);
+    const executor = new ProposalExecutor(
+      createExecutionHandlerRegistry(registryDeps),
+      proposalRepo,
+      new IdempotencyGuard(new InMemoryProposalExecutionRepository(), proposalRepo),
+      registryDeps!.auditRepo!,
+    );
+
+    const before = await invoiceCount();
+    const { result } = await executor.execute(proposal, {
+      tenantId: tenant.tenantId,
+      executedBy: tenant.userId,
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/belongs to a different customer/i);
+    expect(await invoiceCount()).toBe(before);
+    const { rows } = await pool.query(`SELECT 1 FROM invoices WHERE job_id = $1`, [otherCustomersJobId]);
+    expect(rows).toHaveLength(0);
+  });
+
+  it('the approval-time jobReferenceCheck holds the same draft before any tap can approve it', async () => {
+    const held = await holdForExecutability(tenant.tenantId, mismatchedDraft(), [jobReferenceCheck(jobRepo)]);
+    expect(held.gaps).toEqual(['jobCustomerMismatch']);
+    expect(held.proposal.status).toBe('ready_for_review');
   });
 });
 

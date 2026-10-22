@@ -186,6 +186,17 @@ export class CreateInvoiceExecutionHandler implements ExecutionHandler {
             `link a real job before approving`,
         };
       }
+      // B4 — OWNERSHIP, mirroring DraftEstimateExecutionHandler (OVAS-03): the
+      // job is the invoice's container and decides whose bill it is, so a
+      // real job of a different customer than the draft's must not be billed.
+      if (customerId && existingJob.customerId !== customerId) {
+        return {
+          success: false,
+          error:
+            `Invoice draft names job '${jobId}', which belongs to a different customer than ` +
+            `the draft's — pick that customer's job (or the right customer) before approving`,
+        };
+      }
     }
 
     // #1203 — plan then draft_invoice: never a second, whole-estimate invoice.
