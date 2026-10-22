@@ -105,19 +105,35 @@ function isFailoverEligible(err: unknown): boolean {
 export const DEFAULT_FALLBACK_RESERVE_MS = 2_500;
 
 /**
+ * How late the primary's slice timer may fire while the reserve still fits a
+ * viable fallback attempt. The chain only advances with MIN_RETRY_BUDGET_MS
+ * left, and it measures that AFTER the slice ends — so a reserve of exactly a
+ * viable attempt is skipped by any timer lateness at all.
+ */
+const FALLBACK_RESERVE_TIMER_SLACK_MS = 300;
+
+/**
  * How much of `remainingMs` to hold back for the next provider when a fallback
  * exists: at most a quarter of the budget, at most `reserveCapMs`, and nothing
  * when that would be less than one viable attempt (MIN_RETRY_BUDGET_MS).
  *
+ * A reserve that IS carved is at least a viable attempt plus
+ * FALLBACK_RESERVE_TIMER_SLACK_MS (1s), even above the quarter or the cap: a
+ * busy event loop fires the slice timer late, and a reserve that left no room
+ * for that (a 3.2s budget's quarter, 800ms, absorbed 100ms) wasted the window
+ * on exactly the hang it exists for. Carving needs a budget of at least 2.8s,
+ * so the primary still keeps at least 1.8s.
+ *
  * The reserve only matters when the primary HANGS — a fast primary failure
  * (5xx, refused socket, 429) leaves the fallback everything that is left
- * anyway. A hang is the rare case, so the primary keeps at least three
- * quarters of the caller's budget for the common success path (prod classify:
- * 12s → 9.5s primary, 2.5s fallback). Exported for unit testing.
+ * anyway. A hang is the rare case, so the primary keeps most of the caller's
+ * budget for the common success path (prod classify: 12s → 9.5s primary,
+ * 2.5s fallback). Exported for unit testing.
  */
 export function fallbackReserveFor(remainingMs: number, reserveCapMs: number): number {
   const reserve = Math.floor(Math.min(remainingMs / 4, Math.max(0, reserveCapMs)));
-  return reserve >= MIN_RETRY_BUDGET_MS ? reserve : 0;
+  if (reserve < MIN_RETRY_BUDGET_MS) return 0;
+  return Math.max(reserve, MIN_RETRY_BUDGET_MS + FALLBACK_RESERVE_TIMER_SLACK_MS);
 }
 
 /**

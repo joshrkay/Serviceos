@@ -77,16 +77,33 @@ function stack(primary: LLMProvider, fallbacks: LLMProvider[], fallbackReserveMs
 
 describe('GATEWAY-03 — one deadline across failover', () => {
   it('two hanging providers fail within the single budget, not 2x', async () => {
+    // On a fake clock (timers, hrtime, Date) the deadline math runs exactly:
+    // with real timers a slice timer firing late under suite load ate the
+    // reserve's 100ms of headroom and the fallback was skipped (A-R2).
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date', 'hrtime'] });
+    try {
+      await twoHangingProvidersWithinOneBudget();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  async function twoHangingProvidersWithinOneBudget(): Promise<void> {
     const start = Date.now();
     const elapsed = () => Date.now() - start;
     const primary = new HangingProvider('api.openai.com', elapsed);
     const fallback = new HangingProvider('openrouter.ai', elapsed);
     const budgetMs = 3_200;
 
-    const err = await stack(primary, [fallback])
+    let total = Number.NaN;
+    const settled = stack(primary, [fallback])
       .complete(request(budgetMs))
-      .catch((e: unknown) => e);
-    const total = elapsed();
+      .catch((e: unknown) => {
+        total = elapsed();
+        return e;
+      });
+    await vi.advanceTimersByTimeAsync(budgetMs + 1_000);
+    const err = await settled;
 
     expect(err).toBeInstanceOf(AppError);
     expect((err as AppError).code).toBe('LLM_PROVIDER_UNAVAILABLE');
@@ -105,7 +122,7 @@ describe('GATEWAY-03 — one deadline across failover', () => {
     const fallbackCall = fallback.calls[0];
     expect(fallbackCall.deadlineMs!).toBeLessThanOrEqual(budgetMs - fallbackCall.at + 5);
     expect(fallbackCall.deadlineMs!).toBeGreaterThanOrEqual(MIN_RETRY_BUDGET_MS);
-  });
+  }
 
   it('does not advance to the fallback when less than a viable attempt remains', async () => {
     const start = Date.now();
@@ -237,10 +254,71 @@ describe('GATEWAY-03 — one deadline across failover', () => {
       [4_000, 2_500, 1_000], // standard
       [2_000, 2_500, 0], // a quarter (500ms) is below a viable attempt -> no reserve
       [12_000, 0, 0], // reserve disabled
+      [2_799, 2_500, 0], // still below a viable attempt -> no reserve
+      // A carved reserve is never smaller than a viable attempt plus timer
+      // slack: a quarter of 2.8s / 3.2s (700ms / 800ms) left a late slice
+      // timer room to skip the fallback the reserve was carved for.
+      [2_800, 2_500, 1_000],
+      [3_200, 2_500, 1_000],
+      [12_000, 750, 1_000], // a cap below the floor is raised to it
+      [12_000, 699, 0], // a cap below a viable attempt still disables it
     ])('remaining %ims cap %ims -> reserve %ims', (remaining, cap, expected) => {
       expect(fallbackReserveFor(remaining, cap)).toBe(expected);
     });
+
+    it('a carved reserve always leaves the primary a viable slice', () => {
+      for (let remaining = 0; remaining <= 15_000; remaining += 50) {
+        const reserve = fallbackReserveFor(remaining, 2_500);
+        if (reserve > 0) expect(remaining - reserve).toBeGreaterThanOrEqual(MIN_RETRY_BUDGET_MS);
+      }
+    });
   });
+
+  // A-R2 — the event loop is busy when the primary's slice ends, so its slice
+  // timer fires late and the reserve has shrunk by that much when the chain
+  // decides whether to advance. A reserve carved 50ms (3s budget -> 750ms) or
+  // 100ms (3.2s -> 800ms) above a viable attempt was then below
+  // MIN_RETRY_BUDGET_MS, and the fallback it was carved for never ran.
+  it.each([
+    [3_000, 60],
+    [3_200, 120],
+  ])(
+    'a %ims budget whose primary slice timer fires %ims late still runs the fallback inside the budget',
+    async (budgetMs, lateMs) => {
+      const start = Date.now();
+      const elapsed = () => Date.now() - start;
+      const primary = new HangingProvider('api.openai.com', elapsed);
+      let fallbackCall: { deadlineMs?: number; at: number } | undefined;
+      const fallback = answering('openrouter.ai', { input: 1, output: 1, total: 2 }, (req) => {
+        fallbackCall = { deadlineMs: req.deadlineMs, at: elapsed() };
+      });
+      const sliceMs = budgetMs - fallbackReserveFor(budgetMs, 2_500);
+      // Block the event loop across the moment the slice timer is due.
+      const blocker = setTimeout(() => {
+        const until = Date.now() + lateMs + 10;
+        while (Date.now() < until) {
+          /* busy: the slice timer cannot fire */
+        }
+      }, sliceMs - 10);
+
+      try {
+        const res = await stack(primary, [fallback]).complete(request(budgetMs));
+
+        expect(res.content).toBe('answer from openrouter.ai');
+        expect(res.providerPath).toEqual(['api.openai.com:gpt-4o-mini', 'openrouter.ai:gpt-4o-mini']);
+        expect(primary.calls).toHaveLength(1);
+        // The fallback started late by at least the blocked time, still with
+        // a viable attempt, and the chain stayed inside the one budget.
+        expect(fallbackCall).toBeDefined();
+        expect(fallbackCall!.at).toBeGreaterThanOrEqual(sliceMs + lateMs - 5);
+        expect(fallbackCall!.deadlineMs!).toBeGreaterThanOrEqual(MIN_RETRY_BUDGET_MS);
+        expect(fallbackCall!.deadlineMs!).toBeLessThanOrEqual(budgetMs - fallbackCall!.at + 5);
+        expect(elapsed()).toBeLessThan(budgetMs);
+      } finally {
+        clearTimeout(blocker);
+      }
+    },
+  );
 });
 
 // ── C-1699-P2 — a provider that ignores its abort must not eat the reserve ──
