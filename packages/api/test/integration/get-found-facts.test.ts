@@ -56,7 +56,7 @@ describe('loadGetFoundFacts (integration)', () => {
       presencePath: 'google_only',
       googleProfile: 'verified',
       googleReviewUrl: 'https://g.page/r/acme/review',
-      hasForwardedLine: true,
+      hasExistingLine: true,
       forwardingCheckPassedAt: new Date('2026-10-22T15:00:00Z'),
       rivetNumberLive: true,
       firstRealCallReceived: true,
@@ -67,7 +67,7 @@ describe('loadGetFoundFacts (integration)', () => {
       presencePath: null,
       googleProfile: 'none',
       googleReviewUrl: null,
-      hasForwardedLine: false,
+      hasExistingLine: false,
       forwardingCheckPassedAt: null,
       rivetNumberLive: false,
       firstRealCallReceived: false,
@@ -95,5 +95,16 @@ describe('loadGetFoundFacts (integration)', () => {
     );
 
     expect((await loadGetFoundFacts(pool, tenant.tenantId)).firstRealCallReceived).toBe(false);
+  });
+
+  it("counts an existing business line from onboarding's answer before any forwarding is set up", async () => {
+    const tenant = await createTestTenant(pool);
+    await pool.query(
+      `INSERT INTO onboarding_drafts (tenant_id, pack_id, trade, business_name, assembled, choices)
+       VALUES ($1, 'plumbing', 'plumbing', 'Acme', '{}'::jsonb, $2::jsonb)`,
+      [tenant.tenantId, JSON.stringify({ existing_number: { option: 'b' } })],
+    );
+
+    expect((await loadGetFoundFacts(pool, tenant.tenantId)).hasExistingLine).toBe(true);
   });
 });

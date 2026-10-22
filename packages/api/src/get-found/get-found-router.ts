@@ -11,7 +11,8 @@
  *   PUT    /items/:id/skip   → fold an item into the hidden row (idempotent)
  *   DELETE /items/:id/skip   → bring it back
  *
- * Every write emits an audit event and answers with the re-derived checklist.
+ * Every write that changes something emits an audit event; every write
+ * answers with the re-derived checklist.
  */
 import { Router, Response } from 'express';
 import { z } from 'zod';
@@ -94,17 +95,19 @@ export function createGetFoundRouter(deps: GetFoundRouterDeps): Router {
         const { presencePath } = presencePathSchema.parse(req.body ?? {});
         const { tenantId } = req.auth!;
         await ensureTenantSettings(tenantId, deps.settingsRepo);
+        // Re-saving the same answer matches no row: no write, no audit.
         const { rows } = await db().query<{ previous: string | null }>(
           `UPDATE tenant_settings ts SET presence_path = $2, updated_at = NOW()
              FROM (SELECT presence_path AS previous FROM tenant_settings WHERE tenant_id = $1 FOR UPDATE) old
-            WHERE ts.tenant_id = $1
+            WHERE ts.tenant_id = $1 AND old.previous IS DISTINCT FROM $2
             RETURNING old.previous`,
           [tenantId, presencePath],
         );
-        await auditAndRespond(req, res, 'get_found.presence_path.set', {
-          presencePath,
-          previous: rows[0]?.previous ?? null,
-        });
+        if (rows.length > 0) {
+          await auditAndRespond(req, res, 'get_found.presence_path.set', { presencePath, previous: rows[0].previous });
+        } else {
+          res.json(deriveGetFoundChecklist(await loadGetFoundFacts(db(), tenantId)));
+        }
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);

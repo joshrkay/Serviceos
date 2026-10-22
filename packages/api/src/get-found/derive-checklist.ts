@@ -19,8 +19,12 @@ export interface GetFoundFacts {
   googleProfile: GoogleProfileState;
   /** `tenant_settings.google_review_url` — pasted by hand or filled from Google. */
   googleReviewUrl: string | null;
-  /** The owner forwards an existing business line (`tenant_settings.forwarding_source_number`). */
-  hasForwardedLine: boolean;
+  /**
+   * The owner has an existing business line to forward: a stored
+   * `forwarding_source_number`, or "Yes, I have a business line" in
+   * onboarding before any forwarding is set up.
+   */
+  hasExistingLine: boolean;
   /**
    * The last passing forwarding check on that line (`forwarding_verified_at`,
    * migration 318) — point-in-time, voided by a line or mode change.
@@ -66,7 +70,7 @@ export interface GetFoundChecklist {
  * live and has answered a real call — provisioning alone proves nothing.
  */
 function isCallRoutingDone(f: GetFoundFacts): boolean {
-  if (f.hasForwardedLine) return f.forwardingCheckPassedAt !== null;
+  if (f.hasExistingLine) return f.forwardingCheckPassedAt !== null;
   return f.rivetNumberLive && f.firstRealCallReceived;
 }
 
@@ -80,7 +84,7 @@ export function deriveGetFoundChecklist(f: GetFoundFacts): GetFoundChecklist {
     call_routing: isCallRoutingDone(f),
   };
   const items = GET_FOUND_ITEM_IDS.map((id): GetFoundItem => {
-    if (done[id] && id === 'call_routing' && f.hasForwardedLine && f.forwardingCheckPassedAt) {
+    if (done[id] && id === 'call_routing' && f.hasExistingLine && f.forwardingCheckPassedAt) {
       return { id, status: 'done', checkedAt: f.forwardingCheckPassedAt.toISOString() };
     }
     if (done[id]) return { id, status: 'done' };

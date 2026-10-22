@@ -150,4 +150,14 @@ describe('Get-found routes (real Postgres)', () => {
     expect((await request(app).put('/api/get-found/presence-path').send({ presencePath: 'tiktok' })).status).toBe(400);
     expect(await auditEvents()).toEqual([]);
   });
+
+  it('re-saving the same presence path is a no-op with no audit row', async () => {
+    await request(app).put('/api/get-found/presence-path').send({ presencePath: 'neither' });
+
+    const again = await request(app).put('/api/get-found/presence-path').send({ presencePath: 'neither' });
+
+    expect(again.status).toBe(200);
+    expect(again.body.presencePath).toBe('neither');
+    expect((await auditEvents()).map((e) => e.eventType)).toEqual(['get_found.presence_path.set']);
+  });
 });
