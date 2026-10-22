@@ -5,7 +5,8 @@ version: 2
 #
 # Grouped by risk rather than by package: a single "patch + minor for dev
 # tooling" PR is reviewable, whereas 40 individual PRs get rubber-stamped.
-# Major bumps stay ungrouped and individual — those need real review.
+# Major bumps stay ungrouped and individual — those need real review —
+# except packages that can only move together (stripe-web-major).
 updates:
   - package-ecosystem: npm
     directory: '/'
@@ -15,6 +16,14 @@ updates:
       time: '07:00'
     open-pull-requests-limit: 5
     groups:
+      # Stripe web SDK: react-stripe-js peers one stripe-js major
+      # (7.x -> >=10 <11), so neither major can land alone. Group the two so
+      # a major bump arrives as one installable PR (#1642). Listed first:
+      # Dependabot puts a dependency in the first group that matches.
+      stripe-web-major:
+        applies-to: version-updates
+        patterns: ['@stripe/stripe-js', '@stripe/react-stripe-js']
+        update-types: ['major']
       dev-minor-patch:
         applies-to: version-updates
         dependency-type: development
@@ -28,16 +37,6 @@ updates:
       # bumping the type definitions past the runtime major causes confusing
       # type errors for APIs that are not actually available.
       - dependency-name: '@types/node'
-        update-types: ['version-update:semver-major']
-      # Payments path. 3.x -> 6.x crosses three majors that moved peer
-      # requirements and Elements mounting behaviour; the failure mode is
-      # customers unable to check out. Upgrade deliberately against Stripe's
-      # migration guide with a payment smoke test, not on a weekly cadence.
-      - dependency-name: '@stripe/react-stripe-js'
-        update-types: ['version-update:semver-major']
-      # @stripe/stripe-js majors must move together with react-stripe-js (peer
-      # range) — paired upgrade tracked separately (#1638 closed).
-      - dependency-name: '@stripe/stripe-js'
         update-types: ['version-update:semver-major']
       # ESLint environment table. Majors add and remove environment keys, so a
       # key our eslint.config still references disappearing is a repo-wide lint
