@@ -19,6 +19,7 @@ import {
 } from '../../utils/statusNormalize';
 import { StatusBadge } from '../shared/StatusBadge';
 import { TimeGivenBackCard } from './TimeGivenBackCard';
+import { GetFoundOnlineCard } from './GetFoundOnlineCard';
 import { MoneyLoopHomeCard } from './MoneyLoopHomeCard';
 import { HfcrHeroCard } from './HfcrHeroCard';
 import { VoiceRoiCard } from './VoiceRoiCard';
@@ -494,6 +495,10 @@ export function HomePage() {
         {/* Story 3.1 — the running conversation, surfaced prominently on Home
             (alongside the dashboard, not replacing it). */}
         <HomeConversationPanel />
+
+        {/* D-044 — owner-only web-presence checklist; renders nothing for
+            other roles or once dismissed with every item done. */}
+        <GetFoundOnlineCard />
 
         <HfcrHeroCard />
 

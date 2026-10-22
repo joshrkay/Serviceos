@@ -25,6 +25,7 @@ import { InMemoryOAuthStateRepository } from '../../src/integrations/calendar-in
 import { InMemoryReviewPollStateRepository } from '../../src/reputation/poll-state';
 import { InMemoryReviewRepository } from '../../src/reputation/review';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemorySettingsRepository } from '../../src/settings/settings';
 import { runGoogleReviewsSweep } from '../../src/workers/google-reviews';
 import { createLogger } from '../../src/logging/logger';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
@@ -32,6 +33,13 @@ import type { AuthenticatedRequest } from '../../src/auth/clerk';
 const TENANT = 'tenant-gbp-1';
 const USER = 'user-gbp-1';
 const TEST_KEY = '0'.repeat(64);
+const SELECTION = {
+  accountId: '123',
+  locationId: '999',
+  placeId: 'ChIJplace',
+  reviewUrl: 'https://g.page/r/review-999',
+  locationTitle: 'Acme Plumbing',
+};
 
 const GOOGLE_CONFIG = {
   clientId: 'cid',
@@ -49,8 +57,30 @@ function jsonRes(body: unknown, status = 200): Response {
   } as unknown as Response;
 }
 
-/** Fetch stub covering the whole callback flow: token exchange + v4 discovery. */
-function makeConnectFetch(): ReturnType<typeof vi.fn> {
+type StubLocation = {
+  name: string;
+  title?: string;
+  storefrontAddress?: { addressLines?: string[]; locality?: string };
+  metadata?: { placeId?: string; newReviewUri?: string };
+};
+
+const ONE_LOCATION: StubLocation[] = [
+  {
+    name: 'locations/999',
+    title: 'Acme Plumbing',
+    storefrontAddress: { addressLines: ['1 Main St'], locality: 'Austin' },
+    metadata: { placeId: 'ChIJplace', newReviewUri: 'https://g.page/r/review-999' },
+  },
+];
+
+/**
+ * Fetch stub covering the whole callback flow: token exchange + discovery
+ * (Account Management accounts, Business Information locations). Every
+ * location sits under account 123 unless `byAccount` says otherwise.
+ */
+function makeConnectFetch(
+  byAccount: Record<string, StubLocation[]> = { '123': ONE_LOCATION },
+): ReturnType<typeof vi.fn> {
   return vi.fn(async (input: string | URL | Request): Promise<Response> => {
     const url = String(input);
     if (url.includes('oauth2.googleapis.com/token')) {
@@ -60,11 +90,16 @@ function makeConnectFetch(): ReturnType<typeof vi.fn> {
         expires_in: 3600,
       });
     }
-    if (url.includes('/v4/accounts/123/locations')) {
-      return jsonRes({ locations: [{ name: 'accounts/123/locations/999' }] });
+    const locMatch = url.match(
+      /mybusinessbusinessinformation\.googleapis\.com\/v1\/accounts\/(\w+)\/locations/,
+    );
+    if (locMatch) {
+      return jsonRes({ locations: byAccount[locMatch[1]] ?? [] });
     }
-    if (url.includes('/v4/accounts')) {
-      return jsonRes({ accounts: [{ name: 'accounts/123' }] });
+    if (url.includes('mybusinessaccountmanagement.googleapis.com/v1/accounts')) {
+      return jsonRes({
+        accounts: Object.keys(byAccount).map((id) => ({ name: `accounts/${id}` })),
+      });
     }
     return jsonRes({}, 404);
   });
@@ -79,6 +114,7 @@ function buildApp(opts: {
   role?: NonNullable<AuthenticatedRequest['auth']>['role'];
   auditRepo?: InMemoryAuditRepository;
   pollStateRepo?: InMemoryReviewPollStateRepository;
+  settingsRepo?: InMemorySettingsRepository;
 }) {
   const app = express();
   app.use(express.json());
@@ -101,6 +137,7 @@ function buildApp(opts: {
     appBaseUrl: 'https://app.example.com',
     auditRepo: opts.auditRepo,
     pollStateRepo: opts.pollStateRepo,
+    settingsRepo: opts.settingsRepo,
   };
   // Callback first — in prod it mounts BEFORE the global Clerk auth.
   app.use(
@@ -164,8 +201,7 @@ describe('Google Business integrations routes', () => {
         accessToken: 'AT',
         refreshToken: 'RT',
         accessTokenExpiresAt: new Date(Date.now() + 3600_000),
-        accountId: '123',
-        locationId: '999',
+        selection: SELECTION,
       });
       const app = buildApp({ integrationRepo, stateRepo });
       const res = await request(app).get('/api/googlebusiness-integrations/');
@@ -187,8 +223,7 @@ describe('Google Business integrations routes', () => {
       accessToken: 'AT',
       refreshToken: 'RT',
       accessTokenExpiresAt: new Date(Date.now() + 3600_000),
-      accountId: '123',
-      locationId: '999',
+      selection: SELECTION,
     });
     const pollStateRepo = new InMemoryReviewPollStateRepository();
     // Simulate a broken-credentials backoff so the surface shows it.
@@ -431,8 +466,7 @@ describe('Google Business integrations routes', () => {
       accessToken: 'AT',
       refreshToken: 'RT',
       accessTokenExpiresAt: new Date(Date.now() + 3600_000),
-      accountId: '123',
-      locationId: '999',
+      selection: SELECTION,
     });
     const app = buildApp({ integrationRepo, stateRepo, auditRepo });
     const res = await request(app).delete(
@@ -471,5 +505,230 @@ describe('Google Business integrations routes', () => {
       '/api/googlebusiness-integrations/google',
     );
     expect(res.status).toBe(404);
+  });
+
+  describe('D-044 — choosing the Google listing and filling the review link', () => {
+    const TWO_LOCATIONS: Record<string, StubLocation[]> = {
+      '123': ONE_LOCATION,
+      '456': [
+        {
+          name: 'locations/555',
+          title: 'Acme North',
+          metadata: { placeId: 'ChIJnorth', newReviewUri: 'https://g.page/r/review-555' },
+        },
+      ],
+    };
+
+    async function connect(
+      byAccount: Record<string, StubLocation[]>,
+      extra: { settingsRepo?: InMemorySettingsRepository; auditRepo?: InMemoryAuditRepository } = {},
+    ) {
+      const { id: stateId } = await stateRepo.create({
+        tenantId: TENANT,
+        userId: USER,
+        provider: 'google_business',
+      });
+      const app = buildApp({
+        integrationRepo,
+        stateRepo,
+        authenticate: false,
+        googleConfig: GOOGLE_CONFIG,
+        googleFetch: makeConnectFetch(byAccount) as unknown as typeof fetch,
+        ...extra,
+      });
+      return request(app)
+        .get('/api/googlebusiness-integrations/google/callback')
+        .query({ code: 'auth-xyz', state: stateId });
+    }
+
+    async function settingsWith(googleReviewUrl?: string) {
+      const settingsRepo = new InMemorySettingsRepository();
+      await settingsRepo.upsertIdentityFields(TENANT, { businessName: 'Acme' });
+      if (googleReviewUrl !== undefined) {
+        await settingsRepo.update(TENANT, { googleReviewUrl });
+      }
+      return settingsRepo;
+    }
+
+    it('one location: connects it and fills the empty review link', async () => {
+      const settingsRepo = await settingsWith();
+      const auditRepo = new InMemoryAuditRepository();
+      const res = await connect({ '123': ONE_LOCATION }, { settingsRepo, auditRepo });
+      expect(res.status).toBe(302);
+
+      const status = await request(
+        buildApp({ integrationRepo, stateRepo }),
+      ).get('/api/googlebusiness-integrations/');
+      expect(status.body.data).toMatchObject({
+        locationState: 'connected',
+        locationId: '999',
+        locationTitle: 'Acme Plumbing',
+        placeId: 'ChIJplace',
+        reviewUrl: 'https://g.page/r/review-999',
+      });
+      expect((await settingsRepo.findByTenant(TENANT))?.googleReviewUrl).toBe(
+        'https://g.page/r/review-999',
+      );
+      const summary = await integrationRepo.get(TENANT);
+      const [event] = await auditRepo.findByEntity(TENANT, 'googlebusiness_integration', summary!.id);
+      expect(event.metadata).toMatchObject({ reviewUrlFilled: true, locationCount: 1 });
+    });
+
+    it('one location: a review link the owner typed is kept', async () => {
+      const settingsRepo = await settingsWith('https://g.page/r/typed-by-owner');
+      await connect({ '123': ONE_LOCATION }, { settingsRepo });
+      expect((await settingsRepo.findByTenant(TENANT))?.googleReviewUrl).toBe(
+        'https://g.page/r/typed-by-owner',
+      );
+    });
+
+    it('several locations: nothing is chosen for the owner (needs_pick)', async () => {
+      const settingsRepo = await settingsWith();
+      await connect(TWO_LOCATIONS, { settingsRepo });
+      const status = await request(buildApp({ integrationRepo, stateRepo })).get(
+        '/api/googlebusiness-integrations/',
+      );
+      expect(status.body.data).toMatchObject({ locationState: 'needs_pick', locationId: null });
+      expect((await settingsRepo.findByTenant(TENANT))?.googleReviewUrl ?? null).toBeNull();
+    });
+
+    it('no locations: reports no_location instead of a silent null', async () => {
+      await connect({ '123': [] });
+      const status = await request(buildApp({ integrationRepo, stateRepo })).get(
+        '/api/googlebusiness-integrations/',
+      );
+      expect(status.body.data).toMatchObject({ locationState: 'no_location', locationId: null });
+    });
+
+    it('a reconnect keeps the location the owner already chose', async () => {
+      await connect(TWO_LOCATIONS);
+      await integrationRepo.selectLocation(TENANT, {
+        accountId: '456',
+        locationId: '555',
+        placeId: 'ChIJnorth',
+        reviewUrl: 'https://g.page/r/review-555',
+        locationTitle: 'Acme North',
+      });
+      await connect(TWO_LOCATIONS);
+      const summary = await integrationRepo.get(TENANT);
+      expect(summary).toMatchObject({ accountId: '456', locationId: '555', locationCount: 2 });
+    });
+
+    it('GET /google/locations lists every location across accounts', async () => {
+      await connect(TWO_LOCATIONS);
+      const app = buildApp({
+        integrationRepo,
+        stateRepo,
+        googleConfig: GOOGLE_CONFIG,
+        googleFetch: makeConnectFetch(TWO_LOCATIONS) as unknown as typeof fetch,
+      });
+      const res = await request(app).get('/api/googlebusiness-integrations/google/locations');
+      expect(res.status).toBe(200);
+      expect(res.body.data.map((l: { locationId: string; title: string }) => [l.locationId, l.title])).toEqual([
+        ['999', 'Acme Plumbing'],
+        ['555', 'Acme North'],
+      ]);
+    });
+
+    it('PUT /google/location chooses a location, fills the review link and audits', async () => {
+      await connect(TWO_LOCATIONS);
+      const settingsRepo = await settingsWith();
+      const auditRepo = new InMemoryAuditRepository();
+      const app = buildApp({
+        integrationRepo,
+        stateRepo,
+        googleConfig: GOOGLE_CONFIG,
+        googleFetch: makeConnectFetch(TWO_LOCATIONS) as unknown as typeof fetch,
+        settingsRepo,
+        auditRepo,
+      });
+      const res = await request(app)
+        .put('/api/googlebusiness-integrations/google/location')
+        .send({ accountId: '456', locationId: '555' });
+      expect(res.status).toBe(200);
+      expect(res.body.reviewUrlFilled).toBe(true);
+      expect(res.body.data).toMatchObject({
+        locationState: 'connected',
+        locationId: '555',
+        locationTitle: 'Acme North',
+        reviewUrl: 'https://g.page/r/review-555',
+      });
+      expect((await settingsRepo.findByTenant(TENANT))?.googleReviewUrl).toBe(
+        'https://g.page/r/review-555',
+      );
+      const summary = await integrationRepo.get(TENANT);
+      const events = await auditRepo.findByEntity(TENANT, 'googlebusiness_integration', summary!.id);
+      expect(events.map((e) => e.eventType)).toContain('googlebusiness_integration.location_selected');
+    });
+
+    it('PUT /google/location switching listings replaces the previously derived link', async () => {
+      const settingsRepo = await settingsWith();
+      await connect(TWO_LOCATIONS, { settingsRepo });
+      const app = buildApp({
+        integrationRepo,
+        stateRepo,
+        googleConfig: GOOGLE_CONFIG,
+        googleFetch: makeConnectFetch(TWO_LOCATIONS) as unknown as typeof fetch,
+        settingsRepo,
+      });
+      await request(app)
+        .put('/api/googlebusiness-integrations/google/location')
+        .send({ accountId: '123', locationId: '999' });
+      await request(app)
+        .put('/api/googlebusiness-integrations/google/location')
+        .send({ accountId: '456', locationId: '555' });
+      expect((await settingsRepo.findByTenant(TENANT))?.googleReviewUrl).toBe(
+        'https://g.page/r/review-555',
+      );
+    });
+
+    it('PUT /google/location rejects a location Google does not list for this connection', async () => {
+      await connect(TWO_LOCATIONS);
+      const app = buildApp({
+        integrationRepo,
+        stateRepo,
+        googleConfig: GOOGLE_CONFIG,
+        googleFetch: makeConnectFetch(TWO_LOCATIONS) as unknown as typeof fetch,
+      });
+      const bad = await request(app)
+        .put('/api/googlebusiness-integrations/google/location')
+        .send({ accountId: '123', locationId: '555' });
+      expect(bad.status).toBe(400);
+      const missing = await request(app)
+        .put('/api/googlebusiness-integrations/google/location')
+        .send({ accountId: '123' });
+      expect(missing.status).toBe(400);
+      expect((await integrationRepo.get(TENANT))?.locationId).toBeNull();
+    });
+
+    it('picker endpoints are owner-only and need a connection', async () => {
+      const techApp = buildApp({ integrationRepo, stateRepo, role: 'technician' });
+      expect(
+        (await request(techApp).get('/api/googlebusiness-integrations/google/locations')).status,
+      ).toBe(403);
+      expect(
+        (await request(techApp)
+          .put('/api/googlebusiness-integrations/google/location')
+          .send({ accountId: '1', locationId: '2' })).status,
+      ).toBe(403);
+      const ownerApp = buildApp({ integrationRepo, stateRepo, googleConfig: GOOGLE_CONFIG });
+      expect(
+        (await request(ownerApp).get('/api/googlebusiness-integrations/google/locations')).status,
+      ).toBe(404);
+    });
+
+    it('a revoked connection asks the owner to reconnect', async () => {
+      await connect(TWO_LOCATIONS);
+      const revoked = vi.fn(async () => jsonRes({ error: 'invalid_grant' }, 401));
+      const app = buildApp({
+        integrationRepo,
+        stateRepo,
+        googleConfig: GOOGLE_CONFIG,
+        googleFetch: revoked as unknown as typeof fetch,
+      });
+      const res = await request(app).get('/api/googlebusiness-integrations/google/locations');
+      expect(res.status).toBe(400);
+      expect(JSON.stringify(res.body)).toContain('Reconnect Google Business');
+    });
   });
 });

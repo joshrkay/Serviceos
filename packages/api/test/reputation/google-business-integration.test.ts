@@ -8,7 +8,7 @@
  *     accessTokenEnc:       AES-256-GCM via TENANT_ENCRYPTION_KEY,
  *     refreshTokenEnc:      AES-256-GCM via TENANT_ENCRYPTION_KEY,
  *     accessTokenExpiresAt: ISO timestamp,
- *     providerData: { accountId, locationId },
+ *     providerData: { accountId, locationId, placeId, reviewUrl, locationTitle },
  *   }
  *
  * Also covers the shared refresh-on-401-retry-once wrapper the worker
@@ -30,6 +30,13 @@ import type { CredentialRow } from '../../src/integrations/credentials';
 
 const TEST_KEY = '0'.repeat(64);
 const TENANT = 'tenant-gbp-1';
+const SELECTION = {
+  accountId: '123',
+  locationId: '999',
+  placeId: 'ChIJplace',
+  reviewUrl: 'https://g.page/r/review-999',
+  locationTitle: 'Acme Plumbing',
+};
 
 function jsonRes(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -58,8 +65,7 @@ describe('google-business-integration credential shape', () => {
       accessToken: 'AT-1',
       refreshToken: 'RT-1',
       accessTokenExpiresAt: new Date('2026-08-05T13:00:00Z'),
-      accountId: '123',
-      locationId: '999',
+      selection: SELECTION,
     });
 
     // The repo doubles as a CredentialResolver so tests (and the sweep)
@@ -73,7 +79,7 @@ describe('google-business-integration credential shape', () => {
     expect(decrypt(creds.accessTokenEnc as string, TEST_KEY)).toBe('AT-1');
     expect(decrypt(creds.refreshTokenEnc as string, TEST_KEY)).toBe('RT-1');
     expect(creds.accessTokenExpiresAt).toBe('2026-08-05T13:00:00.000Z');
-    expect(creds.providerData).toEqual({ accountId: '123', locationId: '999' });
+    expect(creds.providerData).toEqual(SELECTION);
   });
 
   it('resolveGoogleBusinessTokens reads the upserted row back (worker read path)', async () => {
@@ -83,8 +89,7 @@ describe('google-business-integration credential shape', () => {
       accessToken: 'AT-1',
       refreshToken: 'RT-1',
       accessTokenExpiresAt: new Date('2026-08-05T13:00:00Z'),
-      accountId: '123',
-      locationId: '999',
+      selection: SELECTION,
     });
     const row = await repo.getCredential(TENANT, GOOGLE_BUSINESS_PROVIDER);
     const tokens = resolveGoogleBusinessTokens(row!, TEST_KEY);
@@ -106,8 +111,7 @@ describe('google-business-integration credential shape', () => {
       accessToken: 'AT-old',
       refreshToken: 'RT-keep',
       accessTokenExpiresAt: new Date('2026-08-05T13:00:00Z'),
-      accountId: '123',
-      locationId: '999',
+      selection: SELECTION,
     });
     await repo.persistRotatedAccessToken(
       TENANT,

@@ -390,6 +390,11 @@ import {
   createGoogleBusinessIntegrationsRouter,
   createGoogleBusinessOAuthCallbackRouter,
 } from './routes/googlebusiness-integrations';
+import { createGetFoundOnlineRouter } from './routes/get-found-online';
+import {
+  InMemoryGetFoundOnlineDismissalRepository,
+  PgGetFoundOnlineDismissalRepository,
+} from './onboarding/get-found-online-dismissal';
 import { MessageDeliveryReviewPrivateMessageSender } from './reputation/private-message-sender-adapter';
 import { SettingsBrandVoiceLoader } from './reputation/settings-brand-voice-loader';
 import { PgCustomerLoader } from './reputation/match-customer';
@@ -3699,6 +3704,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     googleConfig: googleBusinessOAuthConfig,
     appBaseUrl: config.publicOrigins.web,
     auditRepo,
+    // D-044: a chosen location fills the tenant's Google review link.
+    settingsRepo,
     // Surfaces lastSuccessfulPollAt / backoffUntil on GET / so a broken
     // credential (failed refresh) degrades visibly in Settings.
     ...(googleReviewsPollStateRepo
@@ -5772,6 +5779,21 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   app.use(
     '/api/googlebusiness-integrations',
     createGoogleBusinessIntegrationsRouter(googleBusinessRouterDeps),
+  );
+
+  // D-044 / #1763 — the owner's "Get found online" home checklist, derived
+  // from the Google Business connection and the review-link setting.
+  app.use(
+    '/api/get-found-online',
+    createGetFoundOnlineRouter({
+      integrationRepo: googleBusinessIntegrationRepo,
+      ...(googleReviewsPollStateRepo ? { pollStateRepo: googleReviewsPollStateRepo } : {}),
+      settingsRepo,
+      dismissalRepo: pool
+        ? new PgGetFoundOnlineDismissalRepository(pool)
+        : new InMemoryGetFoundOnlineDismissalRepository(),
+      auditRepo,
+    }),
   );
 
   app.use(

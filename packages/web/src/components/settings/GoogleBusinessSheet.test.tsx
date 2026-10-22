@@ -138,4 +138,139 @@ describe('GoogleBusinessSheet', () => {
       screen.getByText('Google Business integration is not configured'),
     ).toBeInTheDocument();
   });
+
+  describe('D-044 — choosing the Google location', () => {
+    const LOCATIONS = [
+      {
+        accountId: '123',
+        locationId: '999',
+        title: 'Acme Plumbing',
+        address: '1 Main St, Austin',
+        placeId: 'ChIJ1',
+        reviewUrl: 'https://g.page/r/review-999',
+      },
+      {
+        accountId: '456',
+        locationId: '555',
+        title: 'Acme North',
+        address: null,
+        placeId: 'ChIJ2',
+        reviewUrl: 'https://g.page/r/review-555',
+      },
+    ];
+
+    it('several locations: loads the picker and a tap saves the location', async () => {
+      apiFetchMock
+        .mockResolvedValueOnce(
+          jsonResponse({
+            data: connectedIntegration({ locationId: null, locationState: 'needs_pick' }),
+          }),
+        )
+        .mockResolvedValueOnce(jsonResponse({ data: LOCATIONS }))
+        .mockResolvedValueOnce(
+          jsonResponse({
+            data: connectedIntegration({
+              accountId: '456',
+              locationId: '555',
+              locationTitle: 'Acme North',
+              reviewUrl: 'https://g.page/r/review-555',
+              locationState: 'connected',
+            }),
+            reviewUrlFilled: true,
+          }),
+        );
+      render(<GoogleBusinessSheet onClose={() => {}} />);
+      await screen.findByTestId('googlebusiness-location-picker');
+      expect(apiFetchMock).toHaveBeenNthCalledWith(
+        2,
+        '/api/googlebusiness-integrations/google/locations',
+      );
+      const options = screen.getAllByTestId('googlebusiness-location-option');
+      expect(options).toHaveLength(2);
+      // Glove-sized, full-width targets (jsdom class contract; the
+      // Playwright spec measures the rendered layout).
+      for (const option of options) {
+        expect(option.className).toContain('min-h-11');
+        expect(option.className).toContain('w-full');
+      }
+
+      fireEvent.click(screen.getByText('Acme North'));
+      await waitFor(() =>
+        expect(apiFetchMock).toHaveBeenNthCalledWith(
+          3,
+          '/api/googlebusiness-integrations/google/location',
+          expect.objectContaining({
+            method: 'PUT',
+            body: JSON.stringify({ accountId: '456', locationId: '555' }),
+          }),
+        ),
+      );
+      await waitFor(() =>
+        expect(screen.queryByTestId('googlebusiness-location-picker')).toBeNull(),
+      );
+      expect(screen.getByText('Business location: Acme North')).toBeInTheDocument();
+      expect(screen.getByTestId('googlebusiness-review-link')).toHaveTextContent(
+        'https://g.page/r/review-555',
+      );
+      expect(toastSuccess).toHaveBeenCalledWith(
+        'Acme North connected. Your Google review link is set.',
+      );
+    });
+
+    it('no Business Profile yet: says so and offers Check again', async () => {
+      apiFetchMock
+        .mockResolvedValueOnce(
+          jsonResponse({
+            data: connectedIntegration({ locationId: null, locationState: 'no_location' }),
+          }),
+        )
+        .mockResolvedValueOnce(jsonResponse({ data: [] }));
+      render(<GoogleBusinessSheet onClose={() => {}} />);
+      await screen.findByTestId('googlebusiness-no-location');
+      const again = screen.getByTestId('googlebusiness-check-again');
+      expect(again.className).toContain('min-h-11');
+      fireEvent.click(again);
+      await screen.findByTestId('googlebusiness-no-locations-found');
+    });
+
+    it('connected: Change location opens the picker with the current one marked', async () => {
+      apiFetchMock
+        .mockResolvedValueOnce(
+          jsonResponse({
+            data: connectedIntegration({
+              locationTitle: 'Acme Plumbing',
+              locationState: 'connected',
+            }),
+          }),
+        )
+        .mockResolvedValueOnce(jsonResponse({ data: LOCATIONS }));
+      render(<GoogleBusinessSheet onClose={() => {}} />);
+      fireEvent.click(await screen.findByTestId('googlebusiness-change-location'));
+      await screen.findByTestId('googlebusiness-location-picker');
+      expect(screen.getByText('Acme Plumbing (current)').closest('button')).toBeDisabled();
+    });
+
+    it('a failed save shows the API reason', async () => {
+      apiFetchMock
+        .mockResolvedValueOnce(
+          jsonResponse({
+            data: connectedIntegration({ locationId: null, locationState: 'needs_pick' }),
+          }),
+        )
+        .mockResolvedValueOnce(jsonResponse({ data: LOCATIONS }))
+        .mockResolvedValueOnce(
+          jsonResponse(
+            { message: 'That location is not on your Google account' },
+            { ok: false, status: 400 },
+          ),
+        );
+      render(<GoogleBusinessSheet onClose={() => {}} />);
+      await screen.findByTestId('googlebusiness-location-picker');
+      fireEvent.click(screen.getByText('Acme Plumbing'));
+      expect(await screen.findByRole('alert')).toHaveTextContent(
+        'That location is not on your Google account',
+      );
+    });
+  });
 });
+

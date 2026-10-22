@@ -8217,6 +8217,13 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_dispatches_tenant_blocked
       ON message_dispatches (tenant_id, sent_at DESC) WHERE status = 'blocked';
   `,
+  // D-044 / #1763 — the owner dismissed the "Get found online" home
+  // checklist once every item was done. The card reappears while any item is
+  // open again, so a reopened item is never hidden by an old dismissal.
+  '330_get_found_online_dismissed': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS get_found_online_dismissed_at TIMESTAMPTZ;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

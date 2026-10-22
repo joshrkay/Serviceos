@@ -632,6 +632,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['328_skill_tags', '7b58a5e30ea28966566996c314b41b155333fe55ce687e8463eabf92ad7261ea'],
   // D-045 — message_dispatches outcome columns (scheduled/blocked) + 3 NOT VALID CHECKs + 3 partial indexes.
   ['329_message_dispatch_outcomes', '928d38a17d9f73b2175b5a0d71557b8fbb15719bec0f0415d007b15731ef3ea4'],
+  // D-044 / #1763 — tenant_settings.get_found_online_dismissed_at (nullable TIMESTAMPTZ).
+  ['330_get_found_online_dismissed', 'cee3114e6b6b026083df3f0e2c72c82a914d46a17b03b4511b4e8556912ed8c4'],
 ];
 
 function hashMigration(value: string): string {
