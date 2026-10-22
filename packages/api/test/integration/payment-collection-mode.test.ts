@@ -39,6 +39,7 @@ import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
 import { PgJobRepository } from '../../src/jobs/pg-job';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
+import { beginRequestTx } from './onboarding-draft-request-tx';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { PgDispatchRepository } from '../../src/notifications/dispatch-repository';
 import { PgEstimateRepository } from '../../src/estimates/pg-estimate';
@@ -498,6 +499,31 @@ describe('Postgres integration — payment_collection_mode at the pay surfaces (
     expect((await linkColumns(payLinkTenant.tenantId, invoice.id)).stripe_payment_link_url).toBe(recovered.url);
     expect(await unavailableRows(payLinkTenant.tenantId, invoice.id)).toHaveLength(2);
   });
+  it('read failure inside a request transaction: the failed read does not abort it, so the audit row commits', async () => {
+    const invoice = await seedOpenInvoice(payLinkTenant, payLinkJobId, 'FAULT-TX');
+    // What withTenantTransaction does for one /api request, on the fault pool:
+    // every repo call in the send reuses this one client.
+    const tx = await beginRequestTx(faultPool, payLinkTenant.tenantId);
+    try {
+      await expect(
+        tx.run(() =>
+          buildSendService(faultSettingsRepo).sendInvoice({
+            tenantId: payLinkTenant.tenantId,
+            invoiceId: invoice.id,
+            channel: 'sms',
+          }),
+        ),
+      ).rejects.toMatchObject({ code: 'PAY_LINK_UNAVAILABLE' });
+      // The route commits on this refusal (res.locals.forceCommit).
+      await tx.commit();
+    } finally {
+      await tx.rollback();
+    }
+    const rows = await unavailableRows(payLinkTenant.tenantId, invoice.id);
+    expect(rows.map((r) => r.surface)).toEqual(['send']);
+    expect(rows[0].error).toContain(FAULT_MESSAGE);
+  });
+
   // ── S5a-3 (U8): migration 322 and the cleanup primitives, by column name ──
 
   /** Raw marker read — `invoices.cleanup_claimed_at` (migration 322). */
