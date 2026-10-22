@@ -417,6 +417,10 @@ import { createTurnstileVerifier } from './webchat/webchat-guard';
 import { InMemoryWebchatConfigRepository, PgWebchatConfigRepository } from './webchat/webchat-config';
 import { InMemoryWebchatUsageRepository, PgWebchatUsageRepository } from './webchat/webchat-usage';
 import {
+  InMemoryCallForwardingRepository,
+  PgCallForwardingRepository,
+} from './onboarding/call-forwarding';
+import {
   InMemoryGetFoundOnlineDismissalRepository,
   PgGetFoundOnlineDismissalRepository,
 } from './onboarding/get-found-online-dismissal';
@@ -5965,6 +5969,15 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       dismissalRepo: pool
         ? new PgGetFoundOnlineDismissalRepository(pool)
         : new InMemoryGetFoundOnlineDismissalRepository(),
+      forwardingRepo: pool
+        ? new PgCallForwardingRepository(pool)
+        : new InMemoryCallForwardingRepository(),
+      ...(pool
+        ? {
+            getRivetNumber: async (tenantId: string) =>
+              (await getTenantTwilioCreds(tenantId, pool)).phoneE164,
+          }
+        : {}),
       auditRepo,
     }),
   );

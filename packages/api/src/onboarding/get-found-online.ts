@@ -6,12 +6,13 @@
  * a Google verification postcard can take weeks.
  *
  * Every item is derived, so a tenant who disconnects Google sees the item
- * reopen instead of a stale tick. Later tickets (website #1768, forwarding
- * #1765/#1766, Google website #1771) add their items here.
+ * reopen instead of a stale tick. Later tickets (website #1768, Google
+ * website #1771) add their items here.
  */
+import type { CallForwardingCarrier, CallForwardingMode } from '@ai-service-os/shared';
 import type { GoogleBusinessLocationState } from '../reputation/google-business-integration';
 
-export type GetFoundOnlineItemId = 'google_listing' | 'review_link';
+export type GetFoundOnlineItemId = 'google_listing' | 'review_link' | 'call_forwarding';
 
 /**
  * done — finished. current — the owner's next step. pending — open, after
@@ -26,12 +27,17 @@ export type GetFoundOnlineItemReason =
   | 'needs_pick'
   | 'no_location'
   | 'polling_paused'
-  | 'missing';
+  | 'missing'
+  // call_forwarding: no carrier picked yet / picked but no passing check yet.
+  | 'not_set_up'
+  | 'not_checked';
 
 export interface GetFoundOnlineItem {
   id: GetFoundOnlineItemId;
   status: GetFoundOnlineItemStatus;
   reason?: GetFoundOnlineItemReason;
+  /** call_forwarding, when done: the date of the last passing check. */
+  checkedAt?: string;
 }
 
 export interface GetFoundOnlineFacts {
@@ -44,6 +50,15 @@ export interface GetFoundOnlineFacts {
   } | null;
   /** tenant_settings.google_review_url. */
   googleReviewUrl: string | null | undefined;
+  /**
+   * The owner's call forwarding (#1765). `checkPassedAt` is wired by the
+   * forwarding check (#1766); until a check passes the item stays open.
+   */
+  callForwarding: {
+    carrier: CallForwardingCarrier;
+    mode: CallForwardingMode;
+    checkPassedAt: Date | null;
+  } | null;
   /** When the owner dismissed the finished checklist; null if never. */
   dismissedAt: Date | null;
 }
@@ -76,19 +91,29 @@ function reviewLink(facts: GetFoundOnlineFacts): Evaluated['result'] {
   return facts.googleReviewUrl?.trim() ? 'done' : { status: 'open', reason: 'missing' };
 }
 
+function callForwarding(facts: GetFoundOnlineFacts): Evaluated['result'] {
+  const forwarding = facts.callForwarding;
+  if (!forwarding) return { status: 'open', reason: 'not_set_up' };
+  return forwarding.checkPassedAt ? 'done' : { status: 'open', reason: 'not_checked' };
+}
+
 export function deriveGetFoundOnlineChecklist(
   facts: GetFoundOnlineFacts,
 ): GetFoundOnlineChecklist {
   const evaluated: Evaluated[] = [
     { id: 'google_listing', result: googleListing(facts) },
     { id: 'review_link', result: reviewLink(facts) },
+    { id: 'call_forwarding', result: callForwarding(facts) },
   ];
 
   // The first open item is the owner's next step; waiting and error items
   // keep their own status so the card can say why.
   let currentAssigned = false;
   const items: GetFoundOnlineItem[] = evaluated.map(({ id, result }) => {
-    if (result === 'done') return { id, status: 'done' };
+    if (result === 'done') {
+      const checkedAt = id === 'call_forwarding' ? facts.callForwarding?.checkPassedAt : null;
+      return { id, status: 'done', ...(checkedAt ? { checkedAt: checkedAt.toISOString() } : {}) };
+    }
     if (result.status === 'open') {
       const status = currentAssigned ? 'pending' : 'current';
       currentAssigned = true;

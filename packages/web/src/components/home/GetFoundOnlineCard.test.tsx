@@ -23,6 +23,7 @@ const OPEN = {
   items: [
     { id: 'google_listing', status: 'current', reason: 'needs_pick' },
     { id: 'review_link', status: 'pending', reason: 'missing' },
+    { id: 'call_forwarding', status: 'pending', reason: 'not_set_up' },
   ],
   allDone: false,
   visible: true,
@@ -32,6 +33,7 @@ const DONE = {
   items: [
     { id: 'google_listing', status: 'done' },
     { id: 'review_link', status: 'done' },
+    { id: 'call_forwarding', status: 'done', checkedAt: '2026-10-20T15:00:00.000Z' },
   ],
   allDone: true,
   visible: true,
@@ -48,6 +50,7 @@ function renderCard() {
       <Routes>
         <Route path="/" element={<GetFoundOnlineCard />} />
         <Route path="/settings" element={<WhereAmI />} />
+        <Route path="/settings/phone" element={<WhereAmI />} />
       </Routes>
     </MemoryRouter>,
   );
@@ -62,7 +65,7 @@ describe('GetFoundOnlineCard', () => {
     AH.fetcher.mockResolvedValueOnce(jsonResponse({ data: OPEN }));
     renderCard();
     await screen.findByTestId('get-found-online-card');
-    expect(screen.getByTestId('get-found-online-progress')).toHaveTextContent('0 of 2 done');
+    expect(screen.getByTestId('get-found-online-progress')).toHaveTextContent('0 of 3 done');
     expect(screen.getByTestId('get-found-online-item-google_listing')).toHaveTextContent(
       'Pick which Google location is yours.',
     );
@@ -81,8 +84,23 @@ describe('GetFoundOnlineCard', () => {
     expect(await screen.findByTestId('location')).toHaveTextContent('/settings?open=review-links');
   });
 
+  it('Calls reach the AI: opens Phone settings, and shows the check date once done', async () => {
+    AH.fetcher.mockResolvedValueOnce(jsonResponse({ data: OPEN }));
+    const { unmount } = renderCard();
+    const item = await screen.findByTestId('get-found-online-item-call_forwarding');
+    expect(item).toHaveTextContent('Calls reach the AI');
+    fireEvent.click(item.querySelector('button')!);
+    expect(await screen.findByTestId('location')).toHaveTextContent('/settings/phone');
+    unmount();
+
+    AH.fetcher.mockResolvedValueOnce(jsonResponse({ data: DONE }));
+    renderCard();
+    const done = await screen.findByTestId('get-found-online-item-call_forwarding');
+    expect(done).toHaveTextContent(/Last checked/);
+  });
+
   it('keeps every tap target at least 44px tall (min-h-11)', async () => {
-    AH.fetcher.mockResolvedValueOnce(jsonResponse({ data: { ...DONE, items: [OPEN.items[0], DONE.items[1]], allDone: false } }));
+    AH.fetcher.mockResolvedValueOnce(jsonResponse({ data: { ...DONE, items: [OPEN.items[0], DONE.items[1], OPEN.items[2]], allDone: false } }));
     renderCard();
     await screen.findByTestId('get-found-online-card');
     for (const button of screen.getAllByRole('button')) {

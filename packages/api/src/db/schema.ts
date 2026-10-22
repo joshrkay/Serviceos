@@ -8249,6 +8249,22 @@ export const MIGRATIONS = {
     ALTER TABLE review_poll_state
       ADD COLUMN IF NOT EXISTS auth_generation INTEGER NOT NULL DEFAULT 0;
   `,
+  // D-044 / #1765 — how the owner forwards their own number to their Rivet
+  // line: carrier and mode (missed calls only, or all calls). NULL carrier
+  // means forwarding was never set up; verified_at is the last passing check
+  // (#1766), cleared whenever the carrier or mode changes. Codes live in
+  // shared call-forwarding.
+  '332_call_forwarding_setup': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS call_forwarding_carrier TEXT
+        CHECK (call_forwarding_carrier IN ('verizon', 'att', 'tmobile', 'other'));
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS call_forwarding_mode TEXT
+        CHECK (call_forwarding_mode IN ('missed', 'all'));
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS call_forwarding_verified_at TIMESTAMPTZ;
+  `,
+
   // #1735 — outbound multi-step drip campaigns (SMS | call | email). A
   // sequence is an ordered list of steps (JSONB, validated by the Zod
   // contract in src/marketing/drip/sequence.ts); an enrollment is one target

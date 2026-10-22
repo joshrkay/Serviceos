@@ -8,7 +8,17 @@ import {
   deriveGetFoundOnlineChecklist,
 } from '../../src/onboarding/get-found-online';
 
-const NOTHING: GetFoundOnlineFacts = { google: null, googleReviewUrl: null, dismissedAt: null };
+const NOTHING: GetFoundOnlineFacts = {
+  google: null,
+  googleReviewUrl: null,
+  callForwarding: null,
+  dismissedAt: null,
+};
+const FORWARDING_PASSED = {
+  carrier: 'verizon' as const,
+  mode: 'missed' as const,
+  checkPassedAt: new Date('2026-10-20T15:00:00Z'),
+};
 const CONNECTED = { locationState: 'connected' as const, pollingPaused: false };
 const REVIEW = 'https://g.page/r/review-999';
 
@@ -23,6 +33,7 @@ describe('deriveGetFoundOnlineChecklist', () => {
     expect(statuses(NOTHING)).toEqual({
       google_listing: ['current', 'not_connected'],
       review_link: ['pending', 'missing'],
+      call_forwarding: ['pending', 'not_set_up'],
     });
     expect(deriveGetFoundOnlineChecklist(NOTHING)).toMatchObject({ allDone: false, visible: true });
   });
@@ -39,6 +50,7 @@ describe('deriveGetFoundOnlineChecklist', () => {
     ).toEqual({
       google_listing: ['waiting', 'no_location'],
       review_link: ['current', 'missing'],
+      call_forwarding: ['pending', 'not_set_up'],
     });
   });
 
@@ -48,6 +60,7 @@ describe('deriveGetFoundOnlineChecklist', () => {
     ).toEqual({
       google_listing: ['error', 'polling_paused'],
       review_link: ['done', undefined],
+      call_forwarding: ['current', 'not_set_up'],
     });
   });
 
@@ -61,7 +74,12 @@ describe('deriveGetFoundOnlineChecklist', () => {
   });
 
   it('everything done: visible until dismissed', () => {
-    const done = { ...NOTHING, google: CONNECTED, googleReviewUrl: REVIEW };
+    const done = {
+      ...NOTHING,
+      google: CONNECTED,
+      googleReviewUrl: REVIEW,
+      callForwarding: FORWARDING_PASSED,
+    };
     expect(deriveGetFoundOnlineChecklist(done)).toMatchObject({ allDone: true, visible: true });
     expect(
       deriveGetFoundOnlineChecklist({ ...done, dismissedAt: new Date('2026-10-22T00:00:00Z') }),
@@ -72,10 +90,27 @@ describe('deriveGetFoundOnlineChecklist', () => {
     const reopened = deriveGetFoundOnlineChecklist({
       google: null,
       googleReviewUrl: REVIEW,
+      callForwarding: FORWARDING_PASSED,
       dismissedAt: new Date('2026-10-22T00:00:00Z'),
     });
     expect(reopened.visible).toBe(true);
     expect(reopened.allDone).toBe(false);
     expect(reopened.items[0]).toEqual({ id: 'google_listing', status: 'current', reason: 'not_connected' });
+  });
+
+  it('call forwarding: set up but never checked stays open until a check passes', () => {
+    const picked = {
+      ...NOTHING,
+      google: CONNECTED,
+      googleReviewUrl: REVIEW,
+      callForwarding: { ...FORWARDING_PASSED, checkPassedAt: null },
+    };
+    expect(statuses(picked)).toMatchObject({ call_forwarding: ['current', 'not_checked'] });
+    const passed = deriveGetFoundOnlineChecklist({ ...NOTHING, callForwarding: FORWARDING_PASSED });
+    expect(passed.items[2]).toEqual({
+      id: 'call_forwarding',
+      status: 'done',
+      checkedAt: '2026-10-20T15:00:00.000Z',
+    });
   });
 });

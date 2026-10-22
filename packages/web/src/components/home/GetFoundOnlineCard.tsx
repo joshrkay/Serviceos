@@ -9,14 +9,23 @@ import { useNavigate } from 'react-router';
 import { CheckCircle2, Circle, Clock, AlertCircle, ChevronRight } from 'lucide-react';
 import { useApiClient } from '../../lib/apiClient';
 
-type ItemId = 'google_listing' | 'review_link';
+type ItemId = 'google_listing' | 'review_link' | 'call_forwarding';
 type ItemStatus = 'done' | 'current' | 'pending' | 'waiting' | 'error';
-type ItemReason = 'not_connected' | 'needs_pick' | 'no_location' | 'polling_paused' | 'missing';
+type ItemReason =
+  | 'not_connected'
+  | 'needs_pick'
+  | 'no_location'
+  | 'polling_paused'
+  | 'missing'
+  | 'not_set_up'
+  | 'not_checked';
 
 interface ChecklistItem {
   id: ItemId;
   status: ItemStatus;
   reason?: ItemReason;
+  /** call_forwarding, when done: ISO time of the last passing check. */
+  checkedAt?: string;
 }
 
 interface Checklist {
@@ -28,11 +37,13 @@ interface Checklist {
 const TITLES: Record<ItemId, string> = {
   google_listing: 'Show up on Google',
   review_link: 'Send happy customers to your Google reviews',
+  call_forwarding: 'Calls reach the AI',
 };
 
 const DONE_DETAIL: Record<ItemId, string> = {
   google_listing: 'Your Google Business Profile is connected.',
   review_link: 'After each job, 4★ and up customers are sent to your review link.',
+  call_forwarding: 'Your business number forwards to Rivet.',
 };
 
 const REASON_DETAIL: Record<ItemReason, string> = {
@@ -41,13 +52,27 @@ const REASON_DETAIL: Record<ItemReason, string> = {
   no_location: 'Waiting on Google to verify your Business Profile.',
   polling_paused: 'Google stopped accepting the connection. Reconnect it.',
   missing: 'Add your Google review link so happy customers can review you.',
+  not_set_up: 'Forward your business number to Rivet so the AI answers your calls.',
+  not_checked: 'Forwarding is set up. Test it to make sure calls reach the AI.',
 };
 
 /** Where the owner finishes each item. */
 const ACTIONS: Record<ItemId, string> = {
   google_listing: '/settings?open=google-business',
   review_link: '/settings?open=review-links',
+  call_forwarding: '/settings/phone',
 };
+
+function doneDetail(item: ChecklistItem): string {
+  if (item.id === 'call_forwarding' && item.checkedAt) {
+    const date = new Date(item.checkedAt).toLocaleDateString(undefined, {
+      month: 'short',
+      day: 'numeric',
+    });
+    return `Your business number forwards to Rivet. Last checked ${date}.`;
+  }
+  return DONE_DETAIL[item.id];
+}
 
 function StatusIcon({ status }: { status: ItemStatus }) {
   switch (status) {
@@ -120,7 +145,7 @@ export function GetFoundOnlineCard() {
       <ul className="mt-2 divide-y divide-border">
         {checklist.items.map((item) => {
           const detail =
-            item.status === 'done' ? DONE_DETAIL[item.id] : REASON_DETAIL[item.reason ?? 'missing'];
+            item.status === 'done' ? doneDetail(item) : REASON_DETAIL[item.reason ?? 'missing'];
           const body = (
             <>
               <StatusIcon status={item.status} />

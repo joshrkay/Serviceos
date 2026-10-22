@@ -109,10 +109,10 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 
 ```json
 {
-  "ownerOnlyRoutes": 85,
+  "ownerOnlyRoutes": 89,
   "daily": 2,
   "onboarding": 16,
-  "occasional": 67,
+  "occasional": 71,
   "ownerRequiredDailyWebActions": 1,
   "ownerRequiredOnboardingWebActions": 16
 }
@@ -153,6 +153,8 @@ daily surface breaks the build and the fix is a reviewed line in this file.
 | `GET /api/googlebusiness-integrations/google/locations` | occasional | D-044: lists the Google listings on the connected account so the owner can pick one. Only needed when the account has several, or to change it. | false | none | |
 | `PUT /api/googlebusiness-integrations/google/location` | occasional | D-044: chooses which Google listing the tenant is (fills the review link from it). A one-time setup choice, owner-gated like the connection itself. | false | none | |
 | `GET /api/get-found-online/` | occasional | D-044: the home "Get found online" checklist. A read of setup progress that no working day forces; dispatchers and techs never see the card. | false | none | |
+| `GET /api/get-found-online/forwarding` | occasional | D-044 / #1765: reads the carrier and mode the owner forwards their number with. Setup read; no working day forces it. | false | none | |
+| `PUT /api/get-found-online/forwarding` | occasional | D-044 / #1765: saves carrier and forwarding mode (missed calls only, or all). One-time setup choice. | false | none | |
 | `POST /api/get-found-online/dismiss` | occasional | D-044: hides the finished checklist. Optional tidy-up, allowed only once every item is done. | false | none | |
 | `POST /api/integrations/quickbooks/connect` | occasional | Connects the tenant's books to a QuickBooks company. Tenant-wide financial integration set up once; owner-gated so a member cannot sync paid invoices/customers into their own Intuit company. | false | none | |
 | `POST /api/integrations/quickbooks/disconnect` | occasional | QuickBooks teardown — never part of a working day. | false | none | |

@@ -637,6 +637,7 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // D-044 / #1763 — tenant_settings.get_found_online_dismissed_at, google_review_url_derived; review_poll_state.backoff_reason, auth_generation.
   ['331_get_found_online', 'eb7e83e23154cb56342b21f1b83c90733349f649215af5206885b77bb3a639ca'],
   // #1735 — outbound drip campaigns (sequences + enrollments, then the step log).
+  ['332_call_forwarding_setup', '6945ad7041594cebcefdf2b4e200e2782ca5b2909463fba99e0f8dfb45716fd9'],
   ['336_drip_campaigns', '1fe4cc16ff49abe22ff155e2dafcdcd2dbaba4738be80da6fa3e0ed1b2b1b0fe'],
   ['337_drip_step_events', '057b5b4a518bf9d808c6de88105796b966b11b812ff2de170e00ddce85081fa7'],
   ['340_webchat_config', '5548e267e2d1c0702755ec671dbd1d85d50da4666e79e48eb5bec26a9a75696e'],
