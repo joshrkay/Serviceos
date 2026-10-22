@@ -34,7 +34,7 @@ import type { Pool } from 'pg';
 import type { CustomerRepository } from '../customers/customer';
 import { normalizePhone, type DncRepository } from '../compliance/dnc';
 import type { Logger } from '../logging/logger';
-import type { DispatchEntityType, DispatchRepository } from './dispatch-repository';
+import { UNKNOWN_PROVIDER, type DispatchEntityType, type DispatchRepository } from './dispatch-repository';
 import type {
   DeliveryResult,
   MessageDeliveryProvider,
@@ -273,7 +273,7 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
       // since, and a retry by a caller that crashed before recording the
       // first send must not record a delivered text as blocked.
       if (deps.pool && (await readSendClaimStatus(deps.pool, text.tenantId, claimKey)) === 'sent') {
-        return { status: 'sent', duplicate: 'sent' };
+        return record(text, '', { status: 'sent', duplicate: 'sent' });
       }
       addressed = await address(text);
     } catch (err) {
@@ -360,14 +360,15 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
 
   /**
    * Records a customer text's outcome as its message record and returns the
-   * outcome unchanged. Not recorded: a text to the owner, a send another
-   * attempt already made (that attempt recorded it), and an 'in_flight' block
-   * (the attempt holding the key records its own outcome). A failed write is
-   * logged; it never turns a delivered text into a failure.
+   * outcome unchanged. Not recorded: a text to the owner, and an 'in_flight'
+   * block (the attempt holding the key records its own outcome). A send an
+   * earlier attempt already made is recorded too: if that attempt's write
+   * failed, this backfills it ("sent", number and provider unknown); if it
+   * landed, the existing sent row stands. A failed write is logged; it never
+   * turns a delivered text into a failure.
    */
   async function record(text: OutboundText, to: string, outcome: SendOutcome): Promise<SendOutcome> {
     if (!text.about) return outcome;
-    if (outcome.status === 'sent' && outcome.duplicate) return outcome;
     if (outcome.status === 'blocked' && outcome.reason === 'in_flight') return outcome;
     const { about } = text;
     try {
@@ -385,7 +386,7 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
           outcome.status === 'sent'
             ? {
                 status: 'sent',
-                provider: outcome.delivery?.provider ?? 'unknown',
+                provider: outcome.delivery?.provider ?? UNKNOWN_PROVIDER,
                 providerMessageId: outcome.delivery?.providerMessageId,
               }
             : outcome.status === 'scheduled'
