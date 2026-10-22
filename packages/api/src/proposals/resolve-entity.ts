@@ -69,7 +69,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { Role, hasPermission } from '../auth/rbac';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
-import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../shared/errors';
+import { AppError, ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../shared/errors';
 import { Proposal, ProposalRepository, missingFieldsFor, type ProposalStatus } from './proposal';
 import { assertValidProposalPayload, validateProposalPayload } from './contracts';
 import type { IntentType } from '../ai/orchestration/intent-classifier';
@@ -128,7 +128,53 @@ export interface ResolveEntityDeps {
   transactionRunner: TenantTransactionRunner;
 }
 
+// A3-4 — owner copy. The route sends these to the owner verbatim (mobile shows
+// the server's message), so they stay short and plain: never "proposal" or
+// the other words owner copy must not use. See ownerFacingPickError.
 const PICK_NOT_SAVED = 'This was already handled, so that choice was not saved.';
+const PICK_ROW_GONE = 'This is no longer here, so that choice was not saved.';
+const PICK_NOTHING_TO_CHOOSE = 'There is nothing left to choose here.';
+const PICK_NOT_AN_OPTION = 'That choice is not one of the options.';
+const PICK_CANNOT_SAVE = 'That choice could not be saved.';
+const PICK_TRY_AGAIN = 'That could not be finished right now. Please try again.';
+
+/** The ValidationErrors this module words for the owner itself. */
+const OWN_VALIDATION_COPY: ReadonlySet<string> = new Set([PICK_NOTHING_TO_CHOOSE, PICK_NOT_AN_OPTION]);
+
+/**
+ * A3-4 — the resolve-entity route's words for whatever a pick throws, keeping
+ * its status and code. The pick's own refusals are already plain; what it
+ * passes through from shared code is not, and that code's messages serve
+ * other callers too, so they are mapped here rather than changed at source:
+ *  - any ConflictError, including the repository's assertStatusWrite
+ *    ("Cannot transition proposal from ..."), is the plain 409;
+ *  - NotFoundError ("Proposal not found: <id>") is a plain 404;
+ *  - a 429 or 5xx (the re-draft's gateway: "All providers failed ...", "AI
+ *    provider rate limit reached ...") is "try again", keeping only a
+ *    retry-after hint from its details (they name the provider);
+ *  - any other ValidationError (a payload contract check) is a plain 400.
+ * Anything that is not an AppError is left alone: it answers a generic 500.
+ */
+export function ownerFacingPickError(err: unknown): unknown {
+  if (!(err instanceof AppError)) return err;
+  if (err instanceof ConflictError) {
+    return err.message === PICK_NOT_SAVED ? err : new ConflictError(PICK_NOT_SAVED, err.details);
+  }
+  if (err instanceof NotFoundError) return new AppError(err.code, PICK_ROW_GONE, err.statusCode);
+  if (err.statusCode === 429 || err.statusCode >= 500) {
+    const retryAfterMs = err.details?.retryAfterMs;
+    return new AppError(
+      err.code,
+      PICK_TRY_AGAIN,
+      err.statusCode,
+      typeof retryAfterMs === 'number' ? { retryAfterMs } : undefined,
+    );
+  }
+  if (err instanceof ValidationError && !OWN_VALIDATION_COPY.has(err.message)) {
+    return new ValidationError(PICK_CANNOT_SAVE);
+  }
+  return err;
+}
 
 /**
  * The refusal for a pick that lost to a change someone else committed: the
@@ -402,7 +448,7 @@ function readPick(proposal: Proposal, candidateId: string): PickRead {
     // already resolved earlier in this proposal's history, the retry is a
     // successful no-op, not an error.
     if (alreadyResolved) return { kind: 'already_applied' };
-    throw new ValidationError('Proposal is not awaiting an entity choice');
+    throw new ValidationError(PICK_NOTHING_TO_CHOOSE);
   }
 
   // Grounding invariant: the choice must be one of the surfaced candidates —
@@ -420,7 +466,7 @@ function readPick(proposal: Proposal, candidateId: string): PickRead {
     // twice: report it applied instead of 400ing a request that already
     // succeeded once.
     if (alreadyResolved) return { kind: 'already_applied' };
-    throw new ValidationError('candidateId is not among this proposal’s candidates');
+    throw new ValidationError(PICK_NOT_AN_OPTION);
   }
 
   // The entity kind tells us which field the resolved id fills. Prefer the

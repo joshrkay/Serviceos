@@ -24,7 +24,7 @@ import {
 } from '../proposals/actions';
 import type { ApprovalReferenceCheck } from '../proposals/approval-reference-checks';
 import { resolveProposalLine } from '../proposals/resolve-line';
-import { resolveProposalEntity } from '../proposals/resolve-entity';
+import { ownerFacingPickError, resolveProposalEntity } from '../proposals/resolve-entity';
 import type { RedraftHandlerFactory } from '../proposals/redraft-handler-factory';
 import type { EntityAliasCandidateCapture } from '../learning/entity-aliases/candidate-service';
 import {
@@ -426,7 +426,10 @@ export function createProposalsRouter(
           ...(entityAliasCandidateCapture ? { entityAliasCandidateCapture } : {}),
           transactionRunner,
         },
-      );
+      ).catch((err: unknown) => {
+        // A3-4 — the owner sees this message verbatim.
+        throw ownerFacingPickError(err);
+      });
       res.json(result);
     })
   );
