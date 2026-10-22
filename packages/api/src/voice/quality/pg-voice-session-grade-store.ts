@@ -57,7 +57,7 @@ const DISCLOSED_SQL = `
  * an empty `'[]'` (caller never spoke) would only burn a sample slot on an
  * `empty_transcript` skip. $1 tenant, $2 ended-since, $3 ended-before.
  */
-const ELIGIBLE_FROM_WHERE_SQL = `
+export const ELIGIBLE_FROM_WHERE_SQL = `
   FROM voice_sessions vs
   JOIN call_usage_events cue
     ON cue.tenant_id = vs.tenant_id AND cue.call_id = vs.id::text AND cue.billable

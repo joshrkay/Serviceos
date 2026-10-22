@@ -136,7 +136,8 @@ const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 16;
 // D-045: +2 occasional (PUT/DELETE /api/settings/text-wording/:purpose — owner's text wording).
 // #1765: +2 occasional (get-found-online forwarding GET/PUT — carrier + mode).
 // #1766: +2 occasional (get-found-online forwarding/check GET/POST — the forwarding test call).
-const OWNER_ONLY_ROUTES = 91;
+// D-044 / #1735 / #1737 / #1738: +22 occasional (tenant-site x9, web chat x3, Local Services x5, follow-up campaigns x6 — owner setup/config and reads).
+const OWNER_ONLY_ROUTES = 120;
 
 // ── Derivation ──────────────────────────────────────────────────────────────
 

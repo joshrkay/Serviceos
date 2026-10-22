@@ -8405,6 +8405,70 @@ export const MIGRATIONS = {
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
+  // #1736 — post-call scoring. One row per scored production call: a 0-100
+  // score from the four-item rubric (booked / price grounded / escalation
+  // handled / follow-up set), the per-item verdicts (items JSONB) and the
+  // flagged moments (flags JSONB). Written by the call-scoring worker, read by
+  // GET /api/voice/scoring (owner-only). tenant_settings.call_scoring_enabled
+  // is the per-tenant OFF-by-default switch the worker honours.
+  '338_voice_call_scores': `
+    CREATE TABLE IF NOT EXISTS voice_call_scores (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      session_id UUID NOT NULL REFERENCES voice_sessions(id) ON DELETE CASCADE,
+      scored_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      score INTEGER NOT NULL CHECK (score BETWEEN 0 AND 100),
+      rubric_version TEXT NOT NULL DEFAULT 'v1',
+      items JSONB NOT NULL,
+      flags JSONB NOT NULL DEFAULT '[]'::jsonb,
+      summary TEXT NOT NULL DEFAULT '',
+      model TEXT NOT NULL,
+      cost_micro_cents BIGINT NOT NULL DEFAULT 0 CHECK (cost_micro_cents >= 0),
+      call_ended_at TIMESTAMPTZ NOT NULL,
+      UNIQUE (tenant_id, session_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_voice_call_scores_tenant_call_ended
+      ON voice_call_scores (tenant_id, call_ended_at DESC);
+    ALTER TABLE voice_call_scores ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE voice_call_scores FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_voice_call_scores ON voice_call_scores;
+    CREATE POLICY tenant_isolation_voice_call_scores ON voice_call_scores
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS call_scoring_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+  `,
+
+  // #1736 — the owner's "correct this call". One correction per call (a second
+  // one replaces the first and re-queues it for export). exported_at /
+  // corpus_script_id are stamped when an operator exports the correction into
+  // ai/voice-quality/corpus as a regression case (PII-redacted).
+  '339_voice_call_corrections': `
+    CREATE TABLE IF NOT EXISTS voice_call_corrections (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      session_id UUID NOT NULL REFERENCES voice_sessions(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL CHECK (kind IN (
+        'should_have_booked', 'should_have_escalated', 'should_not_have_escalated',
+        'wrong_price', 'other'
+      )),
+      turn_index INTEGER CHECK (turn_index IS NULL OR turn_index >= 0),
+      note TEXT NOT NULL DEFAULT '' CHECK (length(note) <= 500),
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      exported_at TIMESTAMPTZ,
+      corpus_script_id TEXT,
+      UNIQUE (tenant_id, session_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_voice_call_corrections_tenant_pending
+      ON voice_call_corrections (tenant_id, created_at) WHERE exported_at IS NULL;
+    ALTER TABLE voice_call_corrections ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE voice_call_corrections FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_voice_call_corrections ON voice_call_corrections;
+    CREATE POLICY tenant_isolation_voice_call_corrections ON voice_call_corrections
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
   // #1737 — per-tenant web chat widget settings (webchat/webchat-config.ts).
   // No row means the widget is off. embed_token is a public id, not a secret.
   '340_webchat_config': `

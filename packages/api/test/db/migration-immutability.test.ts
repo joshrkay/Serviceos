@@ -645,6 +645,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['335_tenant_site_about', 'b3c66b33c14583d1ab4fa21bd92b2653c63dc71dc05fc3c3e53aec89f0ad9169'],
   ['336_drip_campaigns', '1fe4cc16ff49abe22ff155e2dafcdcd2dbaba4738be80da6fa3e0ed1b2b1b0fe'],
   ['337_drip_step_events', '057b5b4a518bf9d808c6de88105796b966b11b812ff2de170e00ddce85081fa7'],
+  // #1736 — voice_call_scores (post-call rubric score + flags, RLS) + tenant_settings.call_scoring_enabled.
+  ['338_voice_call_scores', '702882a409905c228a8c0a194d0d02ede967dccb0326d021f32b86cdba6bd067'],
+  // #1736 — voice_call_corrections (owner's "correct this call", exported to the voice-quality corpus), RLS.
+  ['339_voice_call_corrections', '0f422ab95d29478ba4c9ce2a0f24fd88b92b4b106db100ef87a845722ef00eca'],
   ['340_webchat_config', '5548e267e2d1c0702755ec671dbd1d85d50da4666e79e48eb5bec26a9a75696e'],
   ['341_webchat_usage_daily', '5f6bd3060cdf445b80e622cfbb9737ce2503b63143d71be36a7840889728bb2f'],
   ['342_lsa_integrations', '516ec1d299c0f53b81e5a37994d5610f144902fec44740cc4ccbecd7cc4ea6ea'],

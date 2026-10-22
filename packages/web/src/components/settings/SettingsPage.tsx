@@ -19,6 +19,7 @@ import { apiFetch } from '../../utils/api-fetch';
 import { AiMinutesCard } from './AiMinutesCard';
 import { CallQualityCard } from './CallQualityCard';
 import { WebsiteCard } from './WebsiteCard';
+import { CallReviewCard } from './CallReviewCard';
 import { useMe } from '../../hooks/useMe';
 import { SupervisorBackupSection } from './SupervisorBackupSection';
 import { BusinessProfileSheet } from './BusinessProfileSheet';
@@ -1650,6 +1651,14 @@ export function SettingsPage() {
         {me?.role === 'owner' && (
           <div className="mb-4">
             <CallQualityCard />
+          </div>
+        )}
+
+        {/* #1736 — call review: opt-in per-call scoring, flagged moments and
+            "correct this call". Owner-only API (tenant:manage), same gating. */}
+        {me?.role === 'owner' && (
+          <div className="mb-4">
+            <CallReviewCard />
           </div>
         )}
 

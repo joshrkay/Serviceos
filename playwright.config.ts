@@ -335,6 +335,8 @@ export default defineConfig<DevAuthFixtures>({
               'drip-campaigns-mobile.spec.ts',
               // #1768 (D-044) — hosted tenant site + Settings → Website card at 320px.
               'tenant-site-mobile.spec.ts',
+              // #1736 — Settings → Call review card + "Correct this call" at 320px.
+              'call-review-mobile.spec.ts',
             ],
             testIgnore: [],
             dependencies: ['devauth-setup'],

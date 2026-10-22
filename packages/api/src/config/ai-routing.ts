@@ -159,6 +159,8 @@ export const TASK_TYPES = [
   'voice_quality_judge',
   'voice_quality_perceived_completion',
   'voice_quality_reprompt_judge',
+  // #1736 — post-call rubric scoring of a production call.
+  'voice_call_scoring',
   'review_classify',
   'proposal_sms_edit',
   // ── Standard: moderate generation / customer-facing writing where output
@@ -215,6 +217,7 @@ const DEFAULT_TASK_TIER_MAPPING: Record<TaskType, ModelTier> = {
   voice_quality_judge: 'lightweight',
   voice_quality_perceived_completion: 'lightweight',
   voice_quality_reprompt_judge: 'lightweight',
+  voice_call_scoring: 'lightweight',
   review_classify: 'lightweight',
   proposal_sms_edit: 'lightweight',
   // Standard

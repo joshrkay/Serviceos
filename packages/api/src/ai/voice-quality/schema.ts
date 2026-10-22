@@ -32,6 +32,9 @@ export const VOICE_QUALITY_BUCKETS = [
   // English + Spanish) closes the call on the evacuation script and never
   // books or bridges; E2 hazards still reach the dispatcher.
   '12-life-safety',
+  // #1736 — owner corrections: a real call the owner marked "the AI got this
+  // wrong", exported (PII-redacted) by corpus/correction-case.ts.
+  '13-owner-corrections',
 ] as const;
 
 export const VoiceQualityScriptSchema = z.object({

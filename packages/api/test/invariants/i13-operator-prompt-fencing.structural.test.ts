@@ -230,7 +230,10 @@ export function promptBuildersNamingCallerText(roots: readonly string[]): string
 // 50 → 51 (#1769): ai/tasks/tenant-site-about-task.ts drafts the hosted tenant
 // site's about copy from tenant settings only (business name, services, service
 // area, brand voice) — all owner-entered. No caller text reaches its prompt.
-const PINNED_GATEWAY_SENDER_COUNT = 51;
+// 51 → 52 (#1736): voice/scoring/score-voice-call.ts is the post-call rubric
+// scorer. Its only caller-authored input, the stored call transcript, enters the
+// prompt through buildUntrustedContentSection (classified `fenced` below).
+const PINNED_GATEWAY_SENDER_COUNT = 52;
 
 type Classification =
   | 'fenced'
@@ -272,6 +275,11 @@ const CLASSIFIED: ReadonlyArray<{ file: string; as: Classification; why: string 
     file: 'src/ai/tasks/suggest-reply-task.ts',
     as: 'fenced',
     why: 'Fences the customer message thread (:173) and renders retrieved chunks through the sanctioned renderer (:163).',
+  },
+  {
+    file: 'src/voice/scoring/score-voice-call.ts',
+    as: 'fenced',
+    why: 'Post-call rubric scorer (#1736): the stored call transcript (caller + agent turns) is rendered through buildUntrustedContentSection; the only other prompt text is the tenant catalog and a fixed rubric.',
   },
   {
     file: 'src/workers/transcription.ts',

@@ -233,6 +233,11 @@ import {
   createVoiceQualityGradingWorker,
   VOICE_QUALITY_GRADING_INTERVAL_MS,
 } from './workers/voice-quality-grading-worker';
+import { createCallScoringWorker, CALL_SCORING_INTERVAL_MS } from './workers/call-scoring-worker';
+import { createVoiceCallScorer } from './voice/scoring/score-voice-call';
+import { InMemoryCallScoreStore } from './voice/scoring/call-score-store';
+import { PgCallScoreStore } from './voice/scoring/pg-call-score-store';
+import { createVoiceCallScoringRouter } from './routes/voice-call-scoring';
 import {
   runSloMonitor,
   SLO_MONITOR_INTERVAL_MS,
@@ -2642,6 +2647,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     orphanedNumberSweep: 590031,
     // #1602 — nightly production call-quality grading sampler. DISTINCT key.
     voiceQualityGrading: 590032,
+    // #1736 — post-call scoring sweep (per-tenant opt-in). DISTINCT key.
+    callScoring: 590046,
     // U7 (S6-4) — demo lease reaper (expired leases, stale resets). DISTINCT key.
     demoLeaseReaper: 590033,
     // S5a-6 — daily pay-link reconciliation sweep (collect-on-site tenants
@@ -6697,6 +6704,49 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         voiceQualityInFlight = false;
       });
     }, VOICE_QUALITY_GRADING_INTERVAL_MS));
+  }
+
+  // #1736 — post-call scoring + the owner's "correct this call". OFF per tenant
+  // until the owner flips tenant_settings.call_scoring_enabled; the sweep scores
+  // eligible calls (#1602's consent / billable gates) through the LLM gateway.
+  // Corrections queue for export into the voice-quality corpus (see
+  // ai/voice-quality/corpus/correction-case.ts). In-memory dev: empty stores.
+  const callScoreStore = pool ? new PgCallScoreStore(pool) : new InMemoryCallScoreStore();
+  const callScorer = createVoiceCallScorer({
+    store: callScoreStore,
+    sessions: voiceQualityStore,
+    gateway: llmGateway,
+  });
+  const callScoringLogger = createLogger({
+    service: 'call-scoring',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  const callScoringWorker = createCallScoringWorker({
+    store: callScoreStore,
+    scorer: callScorer,
+    listTenantIds: () => listAllTenantIds(pool),
+    logger: callScoringLogger,
+    auditRepo,
+  });
+  app.use(
+    '/api/voice/scoring',
+    createVoiceCallScoringRouter({ store: callScoreStore, sessions: voiceQualityStore, auditRepo }),
+  );
+  if (shouldRunWorkers) {
+    let callScoringInFlight = false;
+    registerInterval(setInterval(() => {
+      if (callScoringInFlight) return;
+      callScoringInFlight = true;
+      void runAsLeader(SWEEP_LOCK.callScoring, async () => {
+        await callScoringWorker.handle();
+      }).catch((err) => {
+        callScoringLogger.error('call-scoring sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }).finally(() => {
+        callScoringInFlight = false;
+      });
+    }, CALL_SCORING_INTERVAL_MS));
   }
 
   app.use(
