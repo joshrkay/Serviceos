@@ -632,10 +632,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['328_skill_tags', '7b58a5e30ea28966566996c314b41b155333fe55ce687e8463eabf92ad7261ea'],
   // D-045 — message_dispatches outcome columns (scheduled/blocked) + 3 NOT VALID CHECKs + 3 partial indexes.
   ['329_message_dispatch_outcomes', '928d38a17d9f73b2175b5a0d71557b8fbb15719bec0f0415d007b15731ef3ea4'],
-  // D-044 / #1763 — tenant_settings.get_found_online_dismissed_at, google_review_url_derived; review_poll_state.backoff_reason.
-  ['330_get_found_online', '70453e522d8c7f533981b58c2213a607ff4e197ea894293e7cc90a9648f82348'],
   // D-045 — customer_text_wording (owner's own wording per customer text), RLS, inline CHECKs only.
   ['330_customer_text_wording', 'cb3931893bf7d7fdf018c8fb546cd0d0b15fbf8823a4ce1dbfd67e86195df1b7'],
+  // D-044 / #1763 — tenant_settings.get_found_online_dismissed_at, google_review_url_derived; review_poll_state.backoff_reason.
+  ['331_get_found_online', '70453e522d8c7f533981b58c2213a607ff4e197ea894293e7cc90a9648f82348'],
 ];
 
 function hashMigration(value: string): string {
