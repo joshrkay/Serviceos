@@ -4,9 +4,9 @@
  * The row's write + audit are already proven at real Postgres
  * (test/integration/thank-you-sms-worker.test.ts: claim-before-send,
  * NULL-stamp reconciliation, and a real two-sweep race all pass against real
- * `send_claims`). What none of those tests do is wire the dispatcher to the
+ * `send_claims`). What none of those tests do is wire the sender to the
  * REAL production consent gate (`GatedMessageDelivery`, enforcement:
- * 'block') the way `app.ts` actually builds `ThankYouSmsWorkerDeps.dispatcher`
+ * 'block') the way `app.ts` actually builds `ThankYouSmsWorkerDeps.messaging`
  * — every existing test uses a hand-rolled capturing stub. PR #994's fix (see
  * the big comment above `withSendClaim` in thank-you-sms-worker.ts) depends
  * on this worker forwarding `tenantId` + `consent` to the gate correctly;
@@ -14,7 +14,7 @@
  * acceptance wording) has never been exercised with the real gate class.
  *
  * This file re-proves the row's three acceptance clauses with the REAL gate
- * standing in for the dispatcher, at real Postgres, with a second tenant
+ * standing in for the provider, at real Postgres, with a second tenant
  * (T2) whose own send/audit trail is isolated from the first:
  *   1. exactly one send + one `notification.thank_you_sms.sent` audit row
  *      under two concurrent sweeps over the same eligible job;
@@ -46,7 +46,7 @@ import { createLogger } from '../../src/logging/logger';
 import { runThankYouSmsSweep } from '../../src/workers/thank-you-sms-worker';
 import { GatedMessageDelivery } from '../../src/notifications/gated-message-delivery';
 import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
-import { MessageDeliveryFeedbackDispatcher } from '../../src/feedback/dispatcher';
+import { createOutboundMessaging } from '../../src/notifications/outbound-messaging';
 import { PgConsentEventRepository } from '../../src/compliance/consent-events';
 import { normalizePhone } from '../../src/compliance/dnc';
 import { buildStopKeywordHandler } from '../../src/compliance/stop-reply';
@@ -118,7 +118,7 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
     return { tenantId: tenant.tenantId, userId: tenant.userId, customerId, jobId, phone };
   }
 
-  function realGateDispatcher(base: InMemoryDeliveryProvider) {
+  function realGateMessaging(base: InMemoryDeliveryProvider) {
     const gate = new GatedMessageDelivery({
       base,
       dnc: dncRepo,
@@ -129,7 +129,14 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
       // would short-circuit to `channel_disabled`, silently proving nothing.
       env: { ...process.env, TELEPHONY_ENABLED: 'true' },
     });
-    return new MessageDeliveryFeedbackDispatcher(gate);
+    return createOutboundMessaging({
+      delivery: gate,
+      customerRepo,
+      dncRepo,
+      consentLedger: { listByPhone: async () => [] },
+      pool,
+      logger,
+    });
   }
 
   it('two concurrent sweeps over the same eligible job, through the real gate: exactly one send, one audit row — and a neighbour tenant sends+audits independently (T2)', async () => {
@@ -137,15 +144,15 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
     const b = await seedTenantWithJob();
 
     const base = new InMemoryDeliveryProvider();
-    const dispatcher = realGateDispatcher(base);
+    const messaging = realGateMessaging(base);
 
     await Promise.all([
       runThankYouSmsSweep({
-        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+        pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
         now: () => NOW,
       }),
       runThankYouSmsSweep({
-        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+        pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
         now: () => NOW,
       }),
     ]);
@@ -153,7 +160,7 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
     // Exactly one real send per tenant, through the real gate — the gate
     // did not suppress it (the story's "survives the consent gate" clause).
     // This is the send-claim ledger's own at-most-once guarantee (T4-F01),
-    // re-proven here with the REAL gate standing in for the dispatcher.
+    // re-proven here with the REAL gate standing in for the provider.
     expect(base.sentSms.filter((m) => m.to === a.phone)).toHaveLength(1);
     expect(base.sentSms.filter((m) => m.to === b.phone)).toHaveLength(1);
 
@@ -216,10 +223,10 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
     async () => {
       const seed = await seedTenantWithJob();
       const base = new InMemoryDeliveryProvider();
-      const dispatcher = realGateDispatcher(base);
+      const messaging = realGateMessaging(base);
 
       await runThankYouSmsSweep({
-        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+        pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
         now: () => NOW,
       });
       // Honest baseline: the real, single sweep tick sent once and audited
@@ -239,7 +246,7 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
       await pool.query(`UPDATE jobs SET thank_you_sms_sent_at = NULL WHERE id = $1`, [seed.jobId]);
 
       await runThankYouSmsSweep({
-        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+        pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
         now: () => NOW,
       });
 
@@ -260,10 +267,10 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
     );
 
     const base = new InMemoryDeliveryProvider();
-    const dispatcher = realGateDispatcher(base);
+    const messaging = realGateMessaging(base);
 
     await runThankYouSmsSweep({
-      pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+      pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
       now: () => NOW,
     });
 
@@ -346,11 +353,11 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
       const a = await seedTenantWithJob();
       const b = await seedTenantWithJob();
       const base = new InMemoryDeliveryProvider();
-      const dispatcher = realGateDispatcher(base);
+      const messaging = realGateMessaging(base);
       const flaky = auditRepoFailingOnceFor(a.tenantId);
 
       const first = await runThankYouSmsSweep({
-        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo: flaky.repo, logger,
+        pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo: flaky.repo, logger,
         now: () => NOW,
       });
       expect(flaky.failures()).toBe(1);
@@ -363,7 +370,7 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
       expect(await stampOf(a.jobId)).toBeNull();
 
       await runThankYouSmsSweep({
-        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo: flaky.repo, logger,
+        pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo: flaky.repo, logger,
         now: () => NOW,
       });
 
@@ -387,10 +394,10 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
     it('a sweep with NO auditRepo sends and stamps but does not spend the audit claim', async () => {
       const seed = await seedTenantWithJob();
       const base = new InMemoryDeliveryProvider();
-      const dispatcher = realGateDispatcher(base);
+      const messaging = realGateMessaging(base);
 
       await runThankYouSmsSweep({
-        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, logger,
+        pool, jobRepo, customerRepo, settingsRepo, messaging, logger,
         now: () => NOW,
       });
 
@@ -416,10 +423,10 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
         [seed.tenantId, `thank_you_sms_audit:${seed.jobId}`],
       );
       const base = new InMemoryDeliveryProvider();
-      const dispatcher = realGateDispatcher(base);
+      const messaging = realGateMessaging(base);
 
       await runThankYouSmsSweep({
-        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+        pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
         now: () => NOW,
       });
 
@@ -441,7 +448,7 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
       const a = await seedTenantWithJob();
       const b = await seedTenantWithJob();
       const base = new InMemoryDeliveryProvider();
-      const dispatcher = realGateDispatcher(base);
+      const messaging = realGateMessaging(base);
       const flaky = auditRepoFailingOnceFor(a.tenantId);
       const stop = buildStopKeywordHandler({
         dncRepo,
@@ -453,7 +460,7 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
       await stop.handle({ tenantId: b.tenantId, fromE164: b.phone, body: 'STOP', messageSid: `SM${uuidv4()}` });
 
       await runThankYouSmsSweep({
-        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo: flaky.repo, logger,
+        pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo: flaky.repo, logger,
         now: () => NOW,
       });
       expect(flaky.failures()).toBe(1);
@@ -469,7 +476,7 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
       expect(await dncRepo.isOnDnc(a.tenantId, normalizePhone(a.phone))).toBe(true);
 
       await runThankYouSmsSweep({
-        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo: flaky.repo, logger,
+        pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo: flaky.repo, logger,
         now: () => NOW,
       });
 
@@ -491,11 +498,11 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
     it('an SMS already sent is reconciled, never suppressed, when smsConsent is revoked between a failed audit write and the next sweep', async () => {
       const seed = await seedTenantWithJob();
       const base = new InMemoryDeliveryProvider();
-      const dispatcher = realGateDispatcher(base);
+      const messaging = realGateMessaging(base);
       const flaky = auditRepoFailingOnceFor(seed.tenantId);
 
       await runThankYouSmsSweep({
-        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo: flaky.repo, logger,
+        pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo: flaky.repo, logger,
         now: () => NOW,
       });
       expect(flaky.failures()).toBe(1);
@@ -507,7 +514,7 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
       expect(updated?.smsConsent).toBe(false);
 
       await runThankYouSmsSweep({
-        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo: flaky.repo, logger,
+        pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo: flaky.repo, logger,
         now: () => NOW,
       });
 
@@ -526,7 +533,7 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
     it('a stale audit claim whose audit row already committed is completed without writing a second row', async () => {
       const seed = await seedTenantWithJob();
       const base = new InMemoryDeliveryProvider();
-      const dispatcher = realGateDispatcher(base);
+      const messaging = realGateMessaging(base);
       const auditKey = `thank_you_sms_audit:${seed.jobId}`;
       // The real pool, except the audit claim's completion UPDATE fails once
       // (a transient DB error after the audit row committed).
@@ -546,7 +553,7 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
       } as unknown as Pool;
 
       await runThankYouSmsSweep({
-        pool: flakyPool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+        pool: flakyPool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
         now: () => NOW,
       });
       expect(completionFailures).toBe(1);
@@ -564,7 +571,7 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
       );
 
       await runThankYouSmsSweep({
-        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+        pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
         now: () => NOW,
       });
 
