@@ -240,6 +240,29 @@ describe('VoiceBar — live words', () => {
     expect(screen.queryByText('Listening…')).toBeNull();
   });
 
+  it('a cancelled fallback whose microphone is refused late does not reset the retry', async () => {
+    fake.startResult = 'unavailable';
+    let refuseFirst: (e: unknown) => void = () => {};
+    const retryTrack = { stop: vi.fn() };
+    vi.mocked(navigator.mediaDevices.getUserMedia)
+      .mockImplementationOnce(() => new Promise<MediaStream>((_r, reject) => { refuseFirst = reject; }))
+      .mockResolvedValueOnce({ getTracks: () => [retryTrack] } as unknown as MediaStream);
+    renderBar();
+    fireEvent.click(screen.getByTestId('voice-example-hint'));
+    await waitFor(() => expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(1));
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+
+    // Retry: this fallback gets the microphone and is recording.
+    fireEvent.click(screen.getByTestId('voice-example-hint'));
+    await waitFor(() => expect(navigator.mediaDevices.getUserMedia).toHaveBeenCalledTimes(2));
+    await screen.findByText('Listening…');
+
+    await act(async () => refuseFirst(new Error('NotAllowedError')));
+    expect(screen.getByText('Listening…')).toBeTruthy();
+    expect(screen.queryByText(/Microphone permission is required/)).toBeNull();
+    expect(retryTrack.stop).not.toHaveBeenCalled();
+  });
+
   it('falls back to record-then-transcribe when live transcription is unavailable', async () => {
     fake.startResult = 'unavailable';
     renderBar();

@@ -179,6 +179,15 @@ describe('pointsAtPageRecord', () => {
     expect(pointsAtPageRecord('invoice', 'which estimates are on this job?')).toBe(true);
   });
 
+  it('counts a bare pointer on a job, document or visit page, but not a customer page', () => {
+    expect(pointsAtPageRecord('invoice', 'is it paid?')).toBe(true);
+    expect(pointsAtPageRecord('estimate', 'was that sent?')).toBe(true);
+    expect(pointsAtPageRecord('appointment', 'when is it?')).toBe(true);
+    expect(pointsAtPageRecord('job', 'is it done?')).toBe(true);
+    expect(pointsAtPageRecord('invoice', "what's due this week?")).toBe(false);
+    expect(pointsAtPageRecord('customer', 'is it paid?')).toBe(false);
+  });
+
   it('ignores a question that does not point at the page', () => {
     expect(pointsAtPageRecord('job', "what's on today's schedule?")).toBe(false);
     expect(pointsAtPageRecord('invoice', 'which estimates are still open?')).toBe(false);

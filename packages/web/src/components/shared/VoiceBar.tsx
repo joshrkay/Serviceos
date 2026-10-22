@@ -350,6 +350,8 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
       captureModeRef.current = 'batch';
       setPhase('listening');
     } catch {
+      // A cancelled attempt's late rejection must not reset a retry.
+      if (attemptRef.current !== attempt) return;
       setError('Microphone permission is required to record voice messages.');
       setCanRetry(true);
       setPhase('idle');

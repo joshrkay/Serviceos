@@ -208,6 +208,19 @@ describe('chat: the open page answers "this one"', () => {
     expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(0);
   });
 
+  it('asks when a bare "is it paid?" points at an invoice page it cannot open', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildApp(scriptedGateway('lookup_invoices', {}), resolver(notFound), proposalRepo);
+    const res = await chat(app, 'is it paid?', {
+      entityType: 'invoice',
+      entityId: 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee',
+    });
+    expect(res.status).toBe(200);
+    expect(res.body.message.content).toBe(
+      "I couldn't open the invoice you were viewing, so I can't tell which invoice you mean. Which one is it?",
+    );
+  });
+
   it('answers as usual when the words do not point at a page it cannot open', async () => {
     const proposalRepo = new InMemoryProposalRepository();
     const app = buildApp(

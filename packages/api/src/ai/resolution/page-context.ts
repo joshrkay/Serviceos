@@ -406,13 +406,16 @@ const NOUN_BY_TYPE: Record<PageEntityType, string> = {
 /**
  * True when the words point at the record on screen or at what it expands
  * to: "this invoice" on an invoice page, "her" on any page, and "this job" on
- * any page but a customer's (a document page names its job). Pure.
+ * any page but a customer's (a document page names its job). On a job,
+ * document or visit page a bare "is it paid?" points at that record too, as
+ * it does in pageLookupIds, so an unreadable page asks instead of answering
+ * tenant-wide. Pure.
  */
 export function pointsAtPageRecord(entityType: PageEntityType, text: string): boolean {
   return (
     POINTS_AT_PAGE_RECORD_RE[entityType].test(text) ||
     POINTS_AT_CUSTOMER_RE.test(text) ||
-    (entityType !== 'customer' && POINTS_AT_JOB_RE.test(text))
+    (entityType !== 'customer' && (POINTS_AT_JOB_RE.test(text) || BARE_POINTER_RE.test(text)))
   );
 }
 
