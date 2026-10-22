@@ -21,13 +21,19 @@ let previousUri: string | null = null;
 
 /** The real TTS player: base64 mp3 → cache file → expo-audio playback. */
 export const assistantAudioPlayer: AssistantAudioPlayer = {
-  async play(base64: string): Promise<void> {
+  async play(base64: string, shouldPlay?: () => boolean): Promise<void> {
     if (!base64) return;
     const dir = FileSystem.cacheDirectory ?? '';
     const uri = `${dir}assistant-tts-${Date.now()}-${counter++}.mp3`;
     await FileSystem.writeAsStringAsync(uri, base64, {
       encoding: FileSystem.EncodingType.Base64,
     });
+    // A caller whose mic may have opened while the clip was being written drops it here,
+    // before the mode switch below would cut that recording.
+    if (shouldPlay && !shouldPlay()) {
+      void FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {});
+      return;
+    }
     // The recorder leaves the session in `allowsRecording: true`; playback must
     // flip it off (iOS) or the player stays silent behind the record route.
     // #1603 — `shouldPlayInBackground`: a spoken answer finishes with the

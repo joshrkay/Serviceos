@@ -43,6 +43,8 @@ export default defineConfig({
         'src/assistant/expoFetchTransport.ts',
         'src/assistant/nativeAssistantDeps.ts',
         'src/assistant/useAssistantController.ts',
+        // Device wiring for the spoken setup screen; useOnboardingTalk carries the logic.
+        'src/onboarding/useOnboardingTalkController.ts',
         // U12 — native/RN-only offline wiring (adapter + singleton + AppState/
         // Clerk host). The queue + flush LOGIC (queue.ts, flush.ts) is fully
         // unit-tested; these only bind it to the device.
@@ -58,8 +60,6 @@ export default defineConfig({
         'src/calls/callbackStorage.ts',
         'src/theme/tokens.d.ts',
         'app/_layout.tsx',
-        // Thin stub routes (no logic to assert).
-        'app/(onboarding)/**',
         'app/(tabs)/_layout.tsx',
         'app/(tabs)/settings/_layout.tsx',
         'app/(tabs)/settings/brand-voice.tsx',
