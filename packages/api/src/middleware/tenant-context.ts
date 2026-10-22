@@ -208,17 +208,21 @@ const REQUEST_IDLE_TX_TIMEOUT_MS = positiveIntEnv('DB_REQUEST_IDLE_TX_TIMEOUT_MS
  * accepted: multi-write atomicity across a single request is lost on these
  * routes — each proposal/conversation write commits independently, which is
  * already the contract on the voice path.
+ *
+ * TI-02 — every pattern is anchored at both ends (the `/api` mount prefix
+ * optional, as it is stripped from req.path) so no other router can inherit
+ * the bypass by sharing a suffix. A-R4 — and every pattern matches the way
+ * Express routes: one optional trailing slash (routing is not strict) and any
+ * letter case (routing is not case-sensitive). Otherwise `/resolve-entity/`
+ * reached the same handler INSIDE the request transaction, where the
+ * handler's own runner then took a second pooled connection.
  */
 const LLM_LONG_CALL_ROUTES: readonly { method: string; re: RegExp }[] = [
-  { method: 'POST', re: /\/assistant\/chat$/ },
+  { method: 'POST', re: /^(?:\/api)?\/assistant\/chat\/?$/i },
   // #1602 — the owner's call-quality grading trigger: a named call is up to
   // 13 judge calls in-request, and the sampling pass is kicked off detached
   // (outside tenantContextStore) — neither may hold a request transaction.
-  { method: 'POST', re: /\/voice\/quality\/grade$/ },
-  // TI-02 — anchored at both ends (the `/api` mount prefix optional, as it is
-  // stripped from req.path) so no other router can inherit the bypass by
-  // sharing a suffix.
-  //
+  { method: 'POST', re: /^(?:\/api)?\/voice\/quality\/grade\/?$/i },
   // In-app voice: a turn holds classify, drafting, entity resolution and TTS
   // synthesis (seconds each); start speaks a greeting; end kicks off the
   // summary. The entity resolver also takes its OWN pooled connection, so
@@ -226,16 +230,20 @@ const LLM_LONG_CALL_ROUTES: readonly { method: string; re: RegExp }[] = [
   // overlapping turns deadlocked on checkout and 500'd every tenant's /api.
   // Every write the adapter makes is a repo call with an explicit tenantId,
   // the contract the telephony voice path already runs under.
-  { method: 'POST', re: /^(?:\/api)?\/voice\/sessions$/ },
-  { method: 'POST', re: /^(?:\/api)?\/voice\/sessions\/[^/]+\/input$/ },
-  { method: 'DELETE', re: /^(?:\/api)?\/voice\/sessions\/[^/]+$/ },
+  { method: 'POST', re: /^(?:\/api)?\/voice\/sessions\/?$/i },
+  { method: 'POST', re: /^(?:\/api)?\/voice\/sessions\/[^/]+\/input\/?$/i },
+  { method: 'DELETE', re: /^(?:\/api)?\/voice\/sessions\/[^/]+\/?$/i },
   // AI drafts awaited in-request: a suggested reply (reads + one draft call,
   // no writes), an estimate suggestion (one draft proposal row), and an
   // onboarding conversation turn (extractor calls; its writes commit together
   // in the orchestrator's own short transaction).
-  { method: 'POST', re: /^(?:\/api)?\/conversations\/[^/]+\/suggest-reply$/ },
-  { method: 'POST', re: /^(?:\/api)?\/estimates\/suggest$/ },
-  { method: 'POST', re: /^(?:\/api)?\/onboarding\/conversation\/turn$/ },
+  { method: 'POST', re: /^(?:\/api)?\/conversations\/[^/]+\/suggest-reply\/?$/i },
+  { method: 'POST', re: /^(?:\/api)?\/estimates\/suggest\/?$/i },
+  { method: 'POST', re: /^(?:\/api)?\/onboarding\/conversation\/turn\/?$/i },
+  // A1 — the "which Bob?" pick re-runs the original drafting handler (an
+  // invoice/estimate LLM call) before it writes. Its post-LLM writes commit
+  // together in one short tenant transaction of its own (resolve-entity.ts).
+  { method: 'POST', re: /^(?:\/api)?\/proposals\/[^/]+\/resolve-entity\/?$/i },
 ];
 
 function isLlmLongCallRoute(req: { method: string; path: string }): boolean {
