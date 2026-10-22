@@ -5,7 +5,7 @@
  * test numbers (Luhn-valid by construction) and from the audit's probe
  * samples — never recomputed the way the scrubber computes them.
  */
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import {
   agentLinesAround,
   CARD_NUMBER_PLACEHOLDER,
@@ -503,6 +503,136 @@ describe('redactCardNumbers — a card number read out as words', () => {
   });
 });
 
+// More of how a card is read aloud: the hesitations callers make between
+// groups, a line break where a transcript wraps, and digits read in pairs
+// ("forty-one eleven"), as people read a card's groups of four.
+describe('redactCardNumbers — fillers, line breaks and a card read in pairs', () => {
+  it('allows the fillers er, ah, este and pues between groups', () => {
+    expect(
+      redactCardNumbers('four one one one er one one one one ah one one one one, um, one one one one'),
+    ).toBe(MARKER);
+    expect(
+      redactCardNumbers('es cuatro uno uno uno este uno uno uno uno pues uno uno uno uno, eh, uno uno uno uno'),
+    ).toBe(`es ${MARKER}`);
+  });
+
+  it('reads a line break between spoken groups as a pause', () => {
+    expect(redactCardNumbers('my card is four one one one\none one one one\none one one one\r\none one one one\nthanks')).toBe(
+      `my card is ${MARKER}\nthanks`,
+    );
+    // Between written groups only the written separators join, as they always
+    // did (the digit path is unchanged).
+    expect(redactCardNumbers('4111\n1111\n1111\n1111')).toBe('4111\n1111\n1111\n1111');
+  });
+
+  it('reads English tens and teens as their two digits', () => {
+    // Visa 4111 1111 1111 1111.
+    expect(redactCardNumbers('the card is forty-one eleven, eleven eleven, eleven eleven, eleven eleven')).toBe(
+      `the card is ${MARKER}`,
+    );
+    expect(redactCardNumbers('my card is forty one eleven eleven eleven eleven eleven eleven eleven')).toBe(
+      `my card is ${MARKER}`,
+    );
+    // Mastercard 2221 0000 0000 0009: "twenty" and "twenty-one".
+    expect(redactCardNumbers('Mastercard twenty-two twenty-one, oh oh oh oh, oh oh oh oh, oh oh oh nine')).toBe(
+      `Mastercard ${MARKER}`,
+    );
+    // Digit words and pairs mixed in one group.
+    expect(redactCardNumbers('pay with four one eleven, one one one one, eleven eleven, one one eleven')).toBe(
+      `pay with ${MARKER}`,
+    );
+  });
+
+  it('reads Spanish tens and teens as their two digits', () => {
+    // 4111 2016 1111 1115: "cuarenta y uno", "once", "veinte", "dieciséis", "quince".
+    expect(
+      redactCardNumbers('mi tarjeta es cuarenta y uno once, veinte dieciséis, once once, once quince, gracias'),
+    ).toBe(`mi tarjeta es ${MARKER}, gracias`);
+    expect(redactCardNumbers('la tarjeta cuarenta y uno once once once once once once once')).toBe(`la tarjeta ${MARKER}`);
+  });
+
+  // Read in pairs, four house numbers, a run of prices or a list of times can
+  // fall into fours just as a card does, so a card read in pairs is caught
+  // only where the card is mentioned in the same text (across turns: in the
+  // window or by the agent, see redactCardNumbersAcrossTurns).
+  it('reads pairs as a card only where the card is mentioned', () => {
+    for (const text of [
+      'forty-one eleven, eleven eleven, eleven eleven, eleven eleven',
+      'cuarenta y uno once once once once once once once',
+      'we own fifty eighty-nine, forty-nine eighty-one, twelve sixty-one sixty-four seventy-eight Main',
+    ]) {
+      expect(redactCardNumbers(text)).toBe(text);
+    }
+    // Written digits and digit words need no mention, as before.
+    expect(redactCardNumbers('four one one one, one one one one, one one one one, one one one one')).toBe(MARKER);
+  });
+
+  it('leaves amounts, times, quantities and ordinary speech untouched', () => {
+    for (const text of [
+      'it was forty-five dollars, and I can do eleven thirty tomorrow',
+      'we need twenty units and fifteen boxes, maybe sixteen',
+      'I was born in nineteen eighty four and moved here in twenty twenty',
+      'one two three four five six seven eight nine ten eleven twelve',
+      'ages eleven and twelve, and four dogs',
+      'son cuarenta y cinco dólares, a las once y media',
+      'quiero veinte unidades y quince cajas',
+      // English "once" and "quince" are not numbers beside English words.
+      'I called once, four times maybe; the quince jam is twelve ninety nine',
+    ]) {
+      expect(redactCardNumbers(text)).toBe(text);
+    }
+  });
+
+  // Each pair is two digits, and a comma, "and", "y" or "uh" joins spoken
+  // groups, so a list of three to five times, years or prices was a 13–19
+  // digit run that only the Luhn check stood between and a "card": each hit
+  // flags the recording for an audio purge that cannot be undone. A card read
+  // in pairs is read in its groups of four (two pairs each).
+  it('leaves lists of times, years and prices read in pairs untouched', () => {
+    for (const text of [
+      'we have openings at nine thirty, twelve fifteen, four forty-five and five thirty',
+      'I can do ten thirty, eight fifty, uh, twelve forty and one ten, eight twenty',
+      'it was twenty six and thirty four, eighty four seventy-one, fifty-six twenty one, eighty twelve dollars',
+      // Grouped in fours, but they are years.
+      'the systems are from twenty oh five, twenty oh six, twenty oh seven and twenty fourteen',
+      'puedo a las dos cuarenta, diez cuarenta y cinco, uh, tres veinte, uno treinta',
+    ]) {
+      expect(redactCardNumbers(text)).toBe(text);
+    }
+  });
+
+  it('leaves phone numbers read in pairs untouched, with a zip or another phone after them', () => {
+    for (const text of [
+      // A US number read 3-3-2-2, then a zip.
+      'mi teléfono es siete ocho tres, cuatro noventa y ocho, cero cinco, cero nueve, siete uno cinco tres nueve',
+      // Two US numbers read 3-3-2-2.
+      'dos cero uno, dos ochenta y ocho, ochenta y ocho, ochenta y uno, cinco cuatro tres, cinco cincuenta, ochenta, veintiuno',
+      // A Mexican number read in five pairs, then a zip; and two of them.
+      'es el cuarenta, ochenta y cinco, noventa y ocho, diecisiete, sesenta y ocho, nueve uno nueve cuatro ocho',
+      'quince, cincuenta y tres, cuarenta y cinco, setenta y uno, sesenta y tres, veintisiete, treinta y dos, cuarenta, cincuenta y tres, setenta y dos',
+    ]) {
+      expect(redactCardNumbers(text)).toBe(text);
+    }
+  });
+
+  it('never joins a pair to written digits that are not grouped like a card', () => {
+    for (const text of ['it was twenty, 5390111878303211', 'box twelve, 626805 6793 4187']) {
+      expect(redactCardNumbers(text)).toBe(text);
+    }
+    // Nor shortens the written card it is said beside.
+    expect(redactCardNumbers('twenty, 5315 6865 9304 8163')).toBe(`twenty, ${MARKER}`);
+  });
+
+  it('applies the Luhn check and the card lengths to pairs unchanged', () => {
+    // One digit off the Visa: fails the Luhn check.
+    const offByOne = 'forty-one eleven, eleven eleven, eleven eleven, eleven twelve';
+    expect(redactCardNumbers(offByOne)).toBe(offByOne);
+    // Twelve digits: too short for a card.
+    const short = 'forty-one eleven, eleven eleven, eleven eleven';
+    expect(redactCardNumbers(short)).toBe(short);
+  });
+});
+
 // Written as digits, STT leaves a space between the card and the CVV or
 // expiry said after it ("4012888888881881 0427"), so they are separate
 // groups. Written as words, every word is space-separated, so with no pause
@@ -607,6 +737,146 @@ describe('redactCardNumbers — a card read as words that runs straight into oth
     expect(redactCardNumbers(`mi tarjeta es ${VISA_ES} o sea la Visa`)).toBe('mi tarjeta es [card number] o sea la Visa');
     // Beside English digit words it is still "oh".
     expect(redactCardNumbers('six o one one, o o o nine, nine o one three, nine four two four')).toBe('[card number]');
+  });
+});
+
+/**
+ * A seeded simulation of numbers that are not cards read out as words in one
+ * turn or one transcript: lists of years, times, prices and house numbers
+ * read in pairs, phone numbers read in pairs, and long runs of digit words
+ * said with no pause. Each "card" found in them flags the recording for an
+ * audio purge that cannot be undone. Cards read the same ways are still
+ * caught.
+ */
+describe('redactCardNumbers — seeded simulation of numbers read as words', () => {
+  // Each test starts from the same seed, whichever of them run.
+  let random = seededRandom(0x7a1c);
+  beforeEach(() => {
+    random = seededRandom(0x7a1c);
+  });
+  const int = (lo: number, hi: number): number => lo + Math.floor(random() * (hi - lo + 1));
+  const pick = <T,>(xs: readonly T[]): T => xs[Math.floor(random() * xs.length)];
+  const EN = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
+  const OH = ['oh', ...EN.slice(1)];
+  const TEENS = ['ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen'];
+  const TENS = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
+  const ES = ['cero', 'uno', 'dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve'];
+  const ES_PAIRS = ['diez', 'once', 'doce', 'trece', 'catorce', 'quince', 'dieciséis', 'diecisiete', 'dieciocho',
+    'diecinueve', 'veinte', 'veintiuno', 'veintidós', 'veintitrés', 'veinticuatro', 'veinticinco', 'veintiséis',
+    'veintisiete', 'veintiocho', 'veintinueve'];
+  const ES_TENS = ['', '', '', 'treinta', 'cuarenta', 'cincuenta', 'sesenta', 'setenta', 'ochenta', 'noventa'];
+  /** 0–99 as a caller reads it in a pair ("oh five", "forty-one", "eleven"). */
+  const pairEn = (n: number): string =>
+    n < 10 ? `oh ${EN[n]}` : n < 20 ? TEENS[n - 10] : n % 10 ? `${TENS[Math.floor(n / 10)]}${pick(['-', ' '])}${EN[n % 10]}` : TENS[n / 10];
+  const pairEs = (n: number): string =>
+    n < 10 ? `cero ${ES[n]}` : n < 30 ? ES_PAIRS[n - 10] : n % 10 ? `${ES_TENS[Math.floor(n / 10)]} y ${ES[n % 10]}` : ES_TENS[n / 10];
+  /** A number 1–99 as said on its own ("nine", "forty-five"). */
+  const numberEn = (n: number): string => (n < 10 ? EN[n] : pairEn(n));
+  const words = (digits: string, es = false): string => [...digits].map((d) => (es ? ES : OH)[Number(d)]).join(' ');
+  const digits = (n: number): string => String(int(1, 9)) + Array.from({ length: n - 1 }, () => String(int(0, 9))).join('');
+  const list = (item: () => string, count: number, es = false): string =>
+    Array.from({ length: count }, item).reduce((acc, x) =>
+      `${acc}${pick(es ? [', ', ', ', ' y ', ', eh, ', ' '] : [', ', ', ', ' and ', ', uh, ', ' ', '... '])}${x}`,
+    );
+
+  const notCards: Record<string, () => string> = {
+    'years in pairs': () => {
+      const year = (): string => {
+        const y = int(1990, 2026);
+        return y >= 2000 && y < 2010 ? `twenty oh ${EN[y - 2000]}` : `${numberEn(Math.floor(y / 100))} ${numberEn(y % 100)}`;
+      };
+      return `the units were put in ${list(year, int(3, 5))}`;
+    },
+    'times in pairs': () => `I can do ${list(() => `${numberEn(int(1, 12))} ${pairEn(pick([15, 30, 45, 10, 20, 40, 50]))}`, int(3, 5))}`,
+    'prices in pairs': () => `it was ${list(() => numberEn(int(11, 99)), int(5, 8))} dollars`,
+    'house numbers in pairs': () => `we own ${list(() => `${numberEn(int(10, 99))} ${pairEn(int(10, 99))}`, int(3, 4))} Main`,
+    'Spanish times in pairs': () =>
+      `puedo a las ${list(() => `${pick(ES_PAIRS.slice(0, 3).concat(ES.slice(1)))} ${pairEs(pick([15, 30, 45, 20, 40]))}`, int(3, 5), true)}`,
+    'Spanish prices in pairs': () => `cuesta ${list(() => pairEs(int(11, 99)), int(6, 9), true)} dólares`,
+    'US phone in pairs, then a zip': () =>
+      `mi teléfono es ${words(digits(3), true)}, ${ES[int(2, 9)]} ${pairEs(int(10, 99))}, ${pairEs(int(0, 99))}, ${pairEs(int(0, 99))}, ${words(String(int(10000, 99999)), true)}`,
+    'two US phones in pairs': () =>
+      Array.from({ length: 2 }, () => `${words(digits(3), true)}, ${ES[int(2, 9)]} ${pairEs(int(10, 99))}, ${pairEs(int(0, 99))}, ${pairEs(int(0, 99))}`).join(', '),
+    'Mexican phone in pairs, then a zip': () =>
+      `es el ${Array.from({ length: 5 }, () => pairEs(int(10, 99))).join(', ')}, ${words(String(int(10000, 99999)), true)}`,
+    'two Mexican phones in pairs': () =>
+      Array.from({ length: 2 }, () => Array.from({ length: 5 }, () => pairEs(int(10, 99))).join(', ')).join(pick([', ', ' y '])),
+  };
+
+  it('finds no card in lists and phone numbers read in pairs', () => {
+    for (const [kind, say] of Object.entries(notCards)) {
+      const found: string[] = [];
+      for (let n = 0; n < 2000; n++) {
+        const text = say();
+        if (redactCardNumbers(text) !== text) found.push(text);
+      }
+      expect({ kind, found }).toEqual({ kind, found: [] });
+    }
+  });
+
+  it('finds next to no card in long runs of digit words said with no pause', () => {
+    const phone = (): string => `${int(201, 989)}${int(200, 999)}${String(int(0, 9999)).padStart(4, '0')}`;
+    const zip = (): string => String(int(1001, 99950)).padStart(5, '0');
+    const runs: Record<string, () => string> = {
+      'a phone and zip': () => `call me at ${words(phone())} ${words(zip())}`,
+      'a zip and phone': () => words(zip() + phone()),
+      'a phone and house number': () => words(phone() + String(int(100, 9999))),
+      'two phones': () => words(phone() + phone()),
+      'a 15 to 19 digit reference': () => `the claim is ${words(digits(int(15, 19)))}`,
+    };
+    const found: Record<string, number> = {};
+    for (const [kind, say] of Object.entries(runs)) {
+      found[kind] = 0;
+      for (let n = 0; n < 2000; n++) {
+        const text = say();
+        if (redactCardNumbers(text) !== text) found[kind]++;
+      }
+    }
+    // Of 2,000 each. Before: about one in ten of a phone and zip or a house
+    // number, one in three of two phones, one in four of references. What is
+    // left reads exactly like a card: a phone with an Amex-like area code
+    // (34x, 37x) or a zip starting 34 or 37 then a phone reads as an Amex, a
+    // Diners-like one (36x) and a house number as a Diners Club; two phones
+    // whose first sixteen digits pass the Luhn check, followed by a month and
+    // year, read as a card and its expiry; and a reference of 16 or more digits
+    // starting 2–6 that passes the Luhn check reads as a card, as it always
+    // did written.
+    expect(found['a phone and zip']).toBeLessThanOrEqual(2);
+    expect(found['a zip and phone']).toBeLessThanOrEqual(9);
+    expect(found['a phone and house number']).toBeLessThanOrEqual(3);
+    expect(found['two phones']).toBeLessThanOrEqual(16);
+    expect(found['a 15 to 19 digit reference']).toBeLessThanOrEqual(144);
+  });
+
+  it('still catches cards read in pairs where the card is mentioned, and cards with their CVV or expiry run on', () => {
+    const missed: string[] = [];
+    let total = 0;
+    for (let n = 0; n < 1500; n++) {
+      const prefix = pick(['4', '51', '55', '6011', '35', '2221']);
+      const card = withLuhnCheckDigit(prefix + Array.from({ length: 15 - prefix.length }, () => String(int(0, 9))).join(''));
+      const fours = card.match(/.{4}/g)!;
+      const es = random() < 0.4;
+      const pairs = fours.map((g) => [Number(g.slice(0, 2)), Number(g.slice(2))].map(es ? pairEs : pairEn).join(' '));
+      const lead = es ? pick(['mi tarjeta es ', 'la tarjeta, ', 'pago con ']) : pick(['my card is ', 'the Visa is ', 'card number ']);
+      const read = pairs.join(pick(es ? [', ', ' y ', ', eh, '] : [', ', ' ', ', uh, ', ' and ']));
+      const text = `${lead}${read}${pick(['', ', thanks', '.'])}`;
+      total++;
+      const out = redactCardNumbers(text);
+      if (out !== `${lead}${MARKER}${text.slice(lead.length + read.length)}`) missed.push(text);
+      // Read as digit words with no pause, the CVV, an expiry, or both after
+      // it. The whole card is replaced; what is left is the end of what was
+      // said after it (a longer window that also passes the Luhn check takes
+      // the CVV in with the card).
+      const after = pick([digits(3), `${String(int(1, 12)).padStart(2, '0')}${int(25, 35)}`, `${digits(3)}${String(int(1, 12)).padStart(2, '0')}${int(25, 35)}`]);
+      const runOn = `${lead}${words(card, es)} ${words(after, es)}`;
+      total++;
+      const rest = redactCardNumbers(runOn);
+      if (!rest.startsWith(`${lead}${MARKER}`) || !` ${words(after, es)}`.endsWith(rest.slice(lead.length + MARKER.length))) {
+        missed.push(runOn);
+      }
+    }
+    expect(total).toBe(3000);
+    expect(missed).toEqual([]);
   });
 });
 
@@ -1006,23 +1276,32 @@ describe('redactCardNumbersAcrossTurns — seeded intake simulation', () => {
  * The answers that are groups of four themselves, one per turn: years
  * (equipment put in 2005, 2012, 2018), gate and lockbox codes, last-four
  * answers and prices, written or said as words. Joined they are read exactly
- * like a card read group by group: before the year and mention rules 35, 133
- * and 323 of these 5,000-sequence sets were stitched.
+ * like a card read group by group: before the year and mention rules 35, 133,
+ * 323 and 366 of these 5,000-sequence sets were stitched (years said as words
+ * only once tens and teens were read as digits).
  */
 describe('redactCardNumbersAcrossTurns — seeded simulation of four-digit answers', () => {
   const random = seededRandom(2026);
   const int = (lo: number, hi: number): number => lo + Math.floor(random() * (hi - lo + 1));
   const pick = <T,>(xs: readonly T[]): T => xs[Math.floor(random() * xs.length)];
+  const EN = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
+  const TEENS = ['ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen'];
+  const TENS = ['', '', 'twenty', 'thirty', 'forty', 'fifty', 'sixty', 'seventy', 'eighty', 'ninety'];
+  const pair = (n: number): string =>
+    n < 10 ? EN[n] : n < 20 ? TEENS[n - 10] : n % 10 ? `${TENS[Math.floor(n / 10)]}-${EN[n % 10]}` : TENS[n / 10];
   const four = (): string => String(int(0, 9999)).padStart(4, '0');
   const year = (): number => int(2000, 2026);
+  const yearWords = (y: number): string =>
+    y < 2010 ? pick([`twenty oh ${EN[y - 2000]}`, `two thousand ${EN[y - 2000]}`]) : `${pair(Math.floor(y / 100))} ${pair(y % 100)}`;
   const sequences: Record<string, () => string[]> = {
     'equipment years': () => Array.from({ length: int(3, 5) }, () => pick(['', '', 'around ', 'in ', 'it was '])  + `${year()}${pick(['', '.'])}`),
     'three codes and a quantity': () => [four(), four(), pick(['', 'the code is ']) + four(), String(int(1, 12))],
     'four-digit answers': () =>
       Array.from({ length: int(3, 5) }, () => pick([String(year()), four(), `last four ${four()}`, String(int(1000, 9999))])),
+    'equipment years as words': () => Array.from({ length: int(3, 5) }, () => yearWords(year())),
   };
 
-  it('stitches none of 15,000 such sequences', () => {
+  it('stitches none of 20,000 such sequences', () => {
     const stitched: Record<string, string[][]> = {};
     for (const [kind, make] of Object.entries(sequences)) {
       stitched[kind] = [];

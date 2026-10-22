@@ -37,9 +37,12 @@
  * aloud as words, "four one one one …", and a Spanish caller says "cuatro uno
  * uno uno …". Digit words count as digits (English zero/oh/o–nine, Spanish
  * cero–nueve, with "double"/"triple" and "doble"/"triple" repeats; a bare
- * "o" beside Spanish digit words is Spanish "or" and ends the run), and the
- * fillers said between groups ("and", "dash", "uh", "y", commas) may join
- * them. Digit words separated only by spaces are one spoken group; a comma, a filler or a
+ * "o" beside Spanish digit words is Spanish "or" and ends the run), so do
+ * tens and teens read in pairs, each its two digits ("forty-one eleven",
+ * "cuarenta y uno once"; "once" and "quince" only beside Spanish number
+ * words), and the fillers said between groups ("and", "dash", "uh", "er",
+ * "y", "este", "pues", commas, a line break) may join them. Digit words
+ * separated only by spaces are one spoken group; a comma, a filler or a
  * switch to written digits starts the next, so the Luhn check, the
  * phone-shape guard and the whole-group window search apply to a spoken run
  * as to written digits, and the original words are what get replaced. Any
@@ -52,8 +55,10 @@
  * written card never shortens it (`runCards`). Everything read with digit
  * words keeps the rules that make ordinary numbers said aloud no "card"
  * (`cardShaped`): it starts like a payment card (2–6), holds no more
- * year-shaped groups than a card does, and is read in a card's groups where
- * it mixes words and digits.
+ * year-shaped groups than a card does, is read in a card's groups where it
+ * mixes words and digits or holds pairs, and, holding pairs (which lists of
+ * times, years, prices and house numbers do too), has the card mentioned in
+ * the same text.
  *
  * Words have no space to lose: written, STT puts one between a card and the
  * CVV or expiry said after it ("4012888888881881 0427"); read as words with
@@ -110,6 +115,93 @@ const SPANISH_DIGIT_WORDS: ReadonlyMap<string, string> = new Map([
 
 const DIGIT_WORDS: ReadonlyMap<string, string> = new Map([...ENGLISH_DIGIT_WORDS, ...SPANISH_DIGIT_WORDS]);
 
+/**
+ * A card's groups of four are often read in pairs ("forty-one eleven"): a ten
+ * or a teen is its two digits. English tens join the unit after them with a
+ * hyphen or a space ("forty-one", "forty one"); alone they end in 0
+ * ("twenty" is 20).
+ */
+const ENGLISH_PAIR_WORDS: ReadonlyMap<string, string> = new Map([
+  ['ten', '10'],
+  ['eleven', '11'],
+  ['twelve', '12'],
+  ['thirteen', '13'],
+  ['fourteen', '14'],
+  ['fifteen', '15'],
+  ['sixteen', '16'],
+  ['seventeen', '17'],
+  ['eighteen', '18'],
+  ['nineteen', '19'],
+]);
+const ENGLISH_TENS: ReadonlyMap<string, string> = new Map([
+  ['twenty', '2'],
+  ['thirty', '3'],
+  ['forty', '4'],
+  ['fifty', '5'],
+  ['sixty', '6'],
+  ['seventy', '7'],
+  ['eighty', '8'],
+  ['ninety', '9'],
+]);
+
+/**
+ * The same in Spanish: diez–diecinueve and veinte–veintinueve are one word
+ * each (with or without the accent STT may drop); treinta–noventa join the
+ * unit after them with "y" ("cuarenta y uno").
+ */
+const SPANISH_PAIR_WORDS: ReadonlyMap<string, string> = new Map([
+  ['diez', '10'],
+  ['once', '11'],
+  ['doce', '12'],
+  ['trece', '13'],
+  ['catorce', '14'],
+  ['quince', '15'],
+  ['dieciséis', '16'],
+  ['dieciseis', '16'],
+  ['diecisiete', '17'],
+  ['dieciocho', '18'],
+  ['diecinueve', '19'],
+  ['veinte', '20'],
+  ['veintiuno', '21'],
+  ['veintidós', '22'],
+  ['veintidos', '22'],
+  ['veintitrés', '23'],
+  ['veintitres', '23'],
+  ['veinticuatro', '24'],
+  ['veinticinco', '25'],
+  ['veintiséis', '26'],
+  ['veintiseis', '26'],
+  ['veintisiete', '27'],
+  ['veintiocho', '28'],
+  ['veintinueve', '29'],
+]);
+const SPANISH_TENS: ReadonlyMap<string, string> = new Map([
+  ['treinta', '3'],
+  ['cuarenta', '4'],
+  ['cincuenta', '5'],
+  ['sesenta', '6'],
+  ['setenta', '7'],
+  ['ochenta', '8'],
+  ['noventa', '9'],
+]);
+
+/** Every Spanish number word (for the "o" and "once" rules in `tokenize`). */
+const SPANISH_NUMBER_WORDS: ReadonlySet<string> = new Set([
+  ...SPANISH_DIGIT_WORDS.keys(),
+  ...SPANISH_PAIR_WORDS.keys(),
+  ...SPANISH_TENS.keys(),
+]);
+
+/**
+ * Spanish number words that are also English words ("I called once", "quince
+ * jam"): numbers only beside another Spanish number word.
+ */
+const SPANISH_ONLY_BESIDE_SPANISH: ReadonlySet<string> = new Set(['once', 'quince']);
+
+/** A unit digit (1–9) that may follow a ten: "forty-one", "cuarenta y uno". */
+const ENGLISH_UNITS: ReadonlySet<string> = new Set(['one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine']);
+const SPANISH_UNITS: ReadonlySet<string> = new Set(['uno', 'dos', 'tres', 'cuatro', 'cinco', 'seis', 'siete', 'ocho', 'nueve']);
+
 /** "double one" is 11, "triple uno" is 111. */
 const REPEAT_WORDS: ReadonlyMap<string, number> = new Map([
   ['double', 2],
@@ -124,10 +216,14 @@ const FILLER_WORDS: ReadonlySet<string> = new Set([
   'hyphen',
   'uh',
   'um',
+  'er',
+  'ah',
   'y',
   'guion',
   'guión',
   'eh',
+  'este',
+  'pues',
 ]);
 
 /**
@@ -223,7 +319,16 @@ function hasCardCue(text: string, placeholder: string, agent = false): boolean {
  * Cheap pre-check: text with neither a digit nor a digit word cannot hold a
  * card number, so most prose skips the tokenizer.
  */
-const MAY_HOLD_DIGITS = new RegExp(String.raw`\d|\b(?:${[...DIGIT_WORDS.keys()].join('|')})\b`, 'i');
+const MAY_HOLD_DIGITS = new RegExp(
+  String.raw`\d|(?:^|[^\p{L}])(?:${[
+    ...DIGIT_WORDS.keys(),
+    ...ENGLISH_PAIR_WORDS.keys(),
+    ...ENGLISH_TENS.keys(),
+    ...SPANISH_PAIR_WORDS.keys(),
+    ...SPANISH_TENS.keys(),
+  ].join('|')})(?![\p{L}])`,
+  'iu',
+);
 
 /**
  * A run of written digits, a word (letters), a run of spaces or tabs, or one
@@ -247,9 +352,9 @@ function isAsciiDigit(ch: string | undefined): boolean {
   return ch !== undefined && ch >= '0' && ch <= '9';
 }
 
-/** One of `, . -`, and the other punctuation STT writes at a pause. */
+/** One of `, . -`, and the other punctuation STT writes at a pause (a line break included). */
 const MARK_CHARS: ReadonlySet<string> = new Set([',', '.', '-']);
-const PAUSE_CHARS: ReadonlySet<string> = new Set(['–', '—', '…', ';', ':', '!', '?']);
+const PAUSE_CHARS: ReadonlySet<string> = new Set(['–', '—', '…', ';', ':', '!', '?', '\r', '\n']);
 
 type TokenKind =
   /** Written digits not touching an ASCII letter. */
@@ -278,10 +383,12 @@ interface Token {
   end: number;
   /** The digits a `num` or `spoken` token stands for. */
   digits: string;
+  /** A `spoken` ten or teen, read as its two digits. */
+  pair?: boolean;
 }
 
 function tokenize(text: string, seg = 0): Token[] {
-  const raw: Array<Token & { repeat?: number; word?: string }> = [];
+  const raw: Array<Token & { repeat?: number; word?: string; tens?: 'en' | 'es' }> = [];
   for (const m of text.matchAll(TOKEN)) {
     const start = m.index ?? 0;
     const end = start + m[0].length;
@@ -289,6 +396,8 @@ function tokenize(text: string, seg = 0): Token[] {
     let digits = '';
     let repeat: number | undefined;
     let word: string | undefined;
+    let tens: 'en' | 'es' | undefined;
+    let pair = false;
     if (m[1] !== undefined) {
       if (!isAsciiLetter(text[start - 1]) && !isAsciiLetter(text[end])) {
         kind = 'num';
@@ -297,10 +406,17 @@ function tokenize(text: string, seg = 0): Token[] {
     } else if (m[2] !== undefined) {
       if (!isAsciiDigit(text[start - 1]) && !isAsciiDigit(text[end])) {
         word = m[2].toLowerCase();
-        const spoken = DIGIT_WORDS.get(word);
+        const spoken = DIGIT_WORDS.get(word) ?? ENGLISH_PAIR_WORDS.get(word) ?? SPANISH_PAIR_WORDS.get(word);
+        const ten = ENGLISH_TENS.get(word) ?? SPANISH_TENS.get(word);
         if (spoken !== undefined) {
           kind = 'spoken';
           digits = spoken;
+          pair = spoken.length === 2;
+        } else if (ten !== undefined) {
+          kind = 'spoken';
+          digits = `${ten}0`;
+          pair = true;
+          tens = ENGLISH_TENS.has(word) ? 'en' : 'es';
         } else if (FILLER_WORDS.has(word)) {
           kind = 'filler';
         } else {
@@ -312,18 +428,34 @@ function tokenize(text: string, seg = 0): Token[] {
     } else if (MARK_CHARS.has(m[0])) {
       kind = 'mark';
     } else if (PAUSE_CHARS.has(m[0])) {
+      // A line break between groups is a pause too (a transcript that wraps).
       kind = 'pause';
     }
-    raw.push({ kind, seg, start, end, digits, repeat, word });
+    raw.push({ kind, seg, start, end, digits, pair, repeat, word, tens });
   }
   // A repeat word counts only with the digit word it repeats ("double check"
   // is two ordinary words).
   const tokens: Token[] = [];
-  /** The digit word each spoken token reads (for "double one", "one"). */
+  /** The number word each spoken token reads (for "double one", "one"; for "forty-one", "forty"). */
   const words: Array<string | undefined> = [];
   for (let i = 0; i < raw.length; i++) {
     const t = raw[i];
     const target = raw[i + 2];
+    // A ten and the unit after it are one pair: "forty-one", "forty one",
+    // "cuarenta y uno".
+    const unit =
+      t.tens === 'en' && (raw[i + 1]?.kind === 'space' || text[raw[i + 1]?.start ?? -1] === '-')
+        ? (target?.word !== undefined && ENGLISH_UNITS.has(target.word) ? 2 : 0)
+        : t.tens === 'es' && raw[i + 1]?.kind === 'space' && raw[i + 2]?.word === 'y' && raw[i + 3]?.kind === 'space'
+          ? (raw[i + 4]?.word !== undefined && SPANISH_UNITS.has(raw[i + 4].word!) ? 4 : 0)
+          : 0;
+    if (unit > 0) {
+      const last = raw[i + unit];
+      tokens.push({ kind: 'spoken', seg, start: t.start, end: last.end, digits: t.digits[0] + last.digits, pair: true });
+      words.push(t.word);
+      i += unit;
+      continue;
+    }
     if (t.repeat !== undefined && raw[i + 1]?.kind === 'space' && target?.kind === 'spoken') {
       tokens.push({
         kind: 'spoken',
@@ -331,28 +463,32 @@ function tokenize(text: string, seg = 0): Token[] {
         start: t.start,
         end: target.end,
         digits: target.digits.repeat(t.repeat),
+        pair: target.pair,
       });
       words.push(target.word);
       i += 2;
       continue;
     }
-    tokens.push({ kind: t.kind, seg, start: t.start, end: t.end, digits: t.digits });
+    tokens.push({ kind: t.kind, seg, start: t.start, end: t.end, digits: t.digits, pair: t.pair });
     words.push(t.kind === 'spoken' ? t.word : undefined);
   }
   // A bare "o" is "oh" beside English digit words, but Spanish "or" beside
   // Spanish ones ("… nueve nueve o cuatro ocho …", "… uno o sea"), where it
-  // ends the run instead of joining two numbers with a zero.
+  // ends the run instead of joining two numbers with a zero. "once" and
+  // "quince" are English words too, and numbers only beside Spanish ones.
   const besideSpanish = (i: number, step: number): boolean => {
     let k = i + step;
     while (k >= 0 && k < tokens.length && isJoinerToken(tokens[k])) k += step;
-    return SPANISH_DIGIT_WORDS.has(words[k] ?? '');
+    return SPANISH_NUMBER_WORDS.has(words[k] ?? '');
   };
   // Decided against the tokens as read, then applied.
   const notNumbers: number[] = [];
   words.forEach((word, i) => {
-    if (word === 'o' && (besideSpanish(i, -1) || besideSpanish(i, 1))) notNumbers.push(i);
+    if (word !== 'o' && !SPANISH_ONLY_BESIDE_SPANISH.has(word ?? '')) return;
+    const spanish = besideSpanish(i, -1) || besideSpanish(i, 1);
+    if (word === 'o' ? spanish : !spanish) notNumbers.push(i);
   });
-  for (const i of notNumbers) tokens[i] = { ...tokens[i], kind: 'other', digits: '' };
+  for (const i of notNumbers) tokens[i] = { ...tokens[i], kind: 'other', digits: '', pair: false };
   return tokens;
 }
 
@@ -403,10 +539,15 @@ function joinsGroups(left: Token, joiner: Token[], right: Token): boolean {
   return marks <= MAX_JOINER_MARKS && fillers <= MAX_JOINER_FILLERS;
 }
 
-/** One digit token of a run (a written number, or one digit word) and its index in the token stream. */
+/**
+ * One digit token of a run (a written number, a digit word, or a ten or teen
+ * read as a pair) and its index in the token stream.
+ */
 interface DigitUnit {
   digits: string;
   token: number;
+  /** A ten or a teen, read as its two digits ("forty-one", "once"). */
+  pair: boolean;
 }
 
 /**
@@ -462,7 +603,7 @@ function issuedAtLength(digits: string): boolean {
   return digits.length >= 16;
 }
 
-/** 1900–2039: a year said in a list of them ("two oh one eight", "2006"). */
+/** 1900–2039: a year said in a list of them ("twenty eighteen", "2006"). */
 const YEAR_SHAPED = /^(?:19\d\d|20[0-3]\d)$/;
 
 /**
@@ -478,9 +619,8 @@ function maxYearShapedGroups(cardCue: boolean): number {
 
 /**
  * The window's digits in the groups a card is read in: written digits as
- * written, and spoken groups split into fours where a word ends (a repeat
- * that straddles the end of a four, "one double one", makes the window not
- * `aligned`).
+ * written, and spoken groups split into fours where a word ends (a pair that
+ * straddles the end of a four makes the window not `aligned`).
  */
 function windowChunks(parts: readonly WindowPart[]): { chunks: string[]; aligned: boolean } {
   const chunks: string[] = [];
@@ -524,12 +664,14 @@ function groupedLikeACard(parts: readonly WindowPart[], chunks: readonly string[
 /**
  * The rules a window must keep, beyond the Luhn check and its length, unless
  * it is written digits inside one turn (those keep exactly the digit-only
- * scrubber's rules). Any window with digit words in it, or stitched from
- * several turns, must start like a payment card (2–6) and hold no more
+ * scrubber's rules). Any window with digit words or pairs in it, or stitched
+ * from several turns, must start like a payment card (2–6) and hold no more
  * year-shaped groups of four than a card does (`maxYearShapedGroups`). Digit
  * words said as one unbroken run must be a length cards are issued in
- * (`issuedAtLength`). Words and written digits mixed must be read in a
- * card's groups (`groupedLikeACard`).
+ * (`issuedAtLength`). Words and written digits mixed, or pairs, must be read
+ * in a card's groups (`groupedLikeACard`), and a window with pairs in it must
+ * have the card mentioned around it (`SearchContext.cardCue`): a list of
+ * times, years, prices or house numbers is said in pairs too.
  *
  * A window stitched from several turns must also take in no turn that is
  * itself a phone number, and fall into its turns the way a card read aloud
@@ -557,8 +699,12 @@ function cardShaped(parts: readonly WindowPart[], run: string, ctx: SearchContex
   if (!PAYMENT_CARD_FIRST_DIGIT.test(run)) return false;
   if (parts.length === 1 && spoken && !issuedAtLength(run)) return false;
   const { chunks, aligned } = windowChunks(parts);
+  const pairs = parts.some((p) => p.units.some((u) => u.pair));
   const mixed = spoken && parts.some((p) => p.group.written);
-  if (mixed && !groupedLikeACard(parts, chunks, aligned)) return false;
+  if ((pairs || mixed) && !groupedLikeACard(parts, chunks, aligned)) return false;
+  // Read in pairs, four house numbers or a run of prices fall into fours
+  // just as a card does; only a mention of the card tells them apart.
+  if (pairs && !ctx.cardCue) return false;
   if (chunks.filter((c) => YEAR_SHAPED.test(c)).length > maxYearShapedGroups(ctx.cardCue)) return false;
   if (segs.length === 1) return true;
   // One group of four (or fewer) per turn; the last turn of a card that ends
@@ -669,7 +815,7 @@ function phoneGroupsAt(groups: string[], i: number): number {
 
 /**
  * A phone number read with its last digits in pairs ("siete ocho tres,
- * cuatro nueve ocho, cero cinco, cero nueve"): 3-3-2-2, 3-1-2-2-2, or a
+ * cuatro noventa y ocho, cero cinco, cero nueve"): 3-3-2-2, 3-1-2-2-2, or a
  * Mexican number's five pairs. Searched for only where digit words are read
  * (`cardWindows`); the written path keeps `phoneGroupsAt` as it always had.
  */
@@ -933,7 +1079,7 @@ function findCardHits(tokens: Token[], cardCue: boolean): CardHit[] {
       {
         digits: first.digits,
         seg: first.seg,
-        units: [{ digits: first.digits, token: i }],
+        units: [{ digits: first.digits, token: i, pair: first.pair === true }],
         written: first.kind === 'num',
         writtenJoin: false,
       },
@@ -949,7 +1095,7 @@ function findCardHits(tokens: Token[], cardCue: boolean): CardHit[] {
       const group = groups[groups.length - 1];
       const sameSpokenGroup =
         tokens[last].kind === 'spoken' && right.kind === 'spoken' && joiner.every((t) => t.kind === 'space');
-      const unit = { digits: right.digits, token: next };
+      const unit = { digits: right.digits, token: next, pair: right.pair === true };
       if (sameSpokenGroup) {
         group.digits += right.digits;
         group.units.push(unit);

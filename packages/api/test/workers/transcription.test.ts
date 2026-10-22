@@ -607,6 +607,49 @@ describe('createTranscriptionWorker — card numbers (PRIV-3)', () => {
       expect(voiceRepo.markCardNumberDetected).toHaveBeenCalledWith('tenant-1', 'rec-1');
     });
 
+    it('keeps a card read in pairs, over line breaks and fillers, out of the prompt, the stored transcript and the raw copy', async () => {
+      // Visa 4111 1111 1111 1111 read as "forty-one eleven", wrapped by the transcript.
+      const spoken =
+        'Hi, this is Ana.\nMy card is forty-one eleven,\neleven eleven, er, eleven eleven,\neleven eleven. Thanks.';
+      const stored = 'Hi, this is Ana.\nMy card is [card number]. Thanks.';
+      const voiceRepo = makeVoiceRepo();
+      const gateway = correctionGateway(stored);
+      const worker = createTranscriptionWorker(
+        voiceRepo,
+        { transcribe: vi.fn().mockResolvedValue({ transcript: spoken, metadata: {} }) },
+        { gateway, rawTranscriptEncryptionKey: KEY },
+      );
+      await worker.handle(makeMessage(), logger);
+
+      const prompt = gateway.complete.mock.calls[0][0].messages[1].content as string;
+      expect(prompt).toContain('My card is [card number]. Thanks.');
+      expect(prompt).not.toMatch(/forty-one|eleven/);
+      const [, , status, update] = (voiceRepo.updateStatus as ReturnType<typeof vi.fn>).mock.calls.at(-1)!;
+      expect(status).toBe('completed');
+      expect(update.transcript).toBe(stored);
+      const retained = update.metadata.raw_transcript_retention as { encryptedBlob: string };
+      expect(decrypt(retained.encryptedBlob, KEY)).toBe(stored);
+      expect(voiceRepo.markCardNumberDetected).toHaveBeenCalledWith('tenant-1', 'rec-1');
+    });
+
+    it('leaves amounts and times read as tens and teens alone and does not flag the recording', async () => {
+      const voiceRepo = makeVoiceRepo();
+      const spoken = 'Can you come at eleven thirty? Last time it was forty-five dollars for twenty minutes.';
+      const worker = createTranscriptionWorker(
+        voiceRepo,
+        { transcribe: vi.fn().mockResolvedValue({ transcript: spoken, metadata: {} }) },
+        {},
+      );
+      await worker.handle(makeMessage(), logger);
+      expect(voiceRepo.updateStatus).toHaveBeenCalledWith(
+        'tenant-1',
+        'rec-1',
+        'completed',
+        expect.objectContaining({ transcript: spoken }),
+      );
+      expect(voiceRepo.markCardNumberDetected).not.toHaveBeenCalled();
+    });
+
     it('leaves a callback number read as words alone and does not flag the recording', async () => {
       const voiceRepo = makeVoiceRepo();
       const spoken = 'Please call me back at six oh two five five five oh one nine nine about the visit.';
