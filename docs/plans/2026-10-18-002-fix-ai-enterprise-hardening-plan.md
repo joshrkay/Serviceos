@@ -96,6 +96,30 @@ The audit found 12 high, 16 medium and 6 low issues across those areas, all inde
   - The batch merged second renumbers before merge. Its migration is pre-deploy, so this is allowed.
     Update the immutability snapshot in that same commit.
   - Every migration must be idempotent (`IF NOT EXISTS`).
+- **Two design rules for every unit.** Review has found gaps of these two kinds four times in U7 and
+  U8, most recently the phase-2 erase and the cap enable. Check every step against both before
+  writing it:
+  - **Every multi-step operation that crosses a commit boundary or an external call is a durable,
+    resumable job with checkpoints and idempotent steps.** A process can exit between any two steps.
+    So:
+    - The operation's state lives in a row, with a checkpoint per step.
+    - A sweep that runs at boot and on an interval resumes every started-but-unfinished job.
+    - A lease lets only one worker run a job at a time.
+    - Every step is safe to repeat, and recognises work an earlier run already did.
+    - Retries are bounded, and the job ends in an explicit terminal state that someone sees.
+    - Every wait has a deadline, and a run that crashes counts as an attempt. No job stays
+      unfinished without an alert.
+    - Re-opening a closed job takes the same row lock as the close, so neither can miss the other.
+    - Code that runs "after the commit" in the same process is never the only way a job finishes.
+  - **Every change to a limit is serialized with the consumers of that limit under the same lock.**
+    A limit is anything a consumer checks before it acts: a ceiling, a fence, a tombstone. So:
+    - The write that changes the limit takes the lock the consumers take.
+    - Inside that transaction it counts the consumers' committed and in-flight work.
+    - Each consumer reads the limit only after it holds the lock, never from a value read earlier.
+      That includes the clock: a time or a month it acts on is read after the lock, never taken
+      from the transaction's start.
+    - Either the consumer commits first and the change counts it, or the change commits first and
+      the consumer sees it. No third order exists.
 
 ## Scope Boundaries
 
@@ -887,6 +911,20 @@ flowchart LR
 - **Goal:** an owner can erase one customer's personal data and AI artifacts, short of purging the
   whole tenant.
 - **Dependencies:** U4 (the Twilio deleter seam and the `ai_runs` purge), plus owner decision 1 below.
+- **Design rules:** both rules under Key Technical Decisions apply. In this unit:
+  - **Durable, resumable jobs:** the erasure job that runs phase 2, the S3 re-delete, the Langfuse
+    second delete, each outbound send's write-ahead row, the owner's candidate confirmations, and
+    the `erase_incomplete` alert.
+  - **Limits serialized with their consumers:** the tombstone and every fenced writer, under the
+    erasure lock, which covers every key the tombstone holds. The job's close and every late
+    target that re-opens it, under the job row's lock. The historical `ai_runs` scan reads no
+    retention setting at all, so a window changed mid-erase can't narrow it.
+- **Patterns to follow:**
+  - `packages/api/src/integrations/twilio/a2p-10dlc/registration.ts:21-24` and
+    `packages/api/src/workers/a2p-10dlc-registration.ts` (a provider workflow that checkpoints every
+    created resource and resumes after a crash)
+  - `packages/api/src/proposals/pg-proposal.ts:644-655` (a guarded claim) and `:657` (stale claims
+    retried, then failed after a retry limit)
 - **Approach**, recommended defaults pending that decision:
   - The endpoint is `POST /api/customers/:id/erase`:
     - owner-only and audited
@@ -896,8 +934,148 @@ flowchart LR
       change and its audit insert, so a tombstone written inside the same transaction would stay
       invisible while in-flight writers pass their checks. The erase therefore runs in two phases:
       1. A short audited transaction commits the tombstone (and an `erase_started` audit event).
-      2. Separate audited transactions then run the scrub, the external cleanup, the drain and the
-         final re-scan, and record `erase_completed` or `erase_incomplete`.
+      2. A durable erasure job then runs the scrub, the external cleanup, the drain and the final
+         re-scan, each step in its own short audited transaction, and records `erase_completed` or
+         `erase_incomplete`.
+    - **Phase 2 is a durable, resumable job, not code that runs after the request.** A process can
+      exit after phase 1 commits. The tombstone would then keep fencing the subject while nothing
+      finished the erase, and the customer would stay partly erased indefinitely. So:
+      - **One job row per erase, written by phase 1.** Phase 1 inserts a `customer_erasure_jobs` row
+        in the same transaction as the tombstone and `erase_started`, so a tombstone never exists
+        without a job. The table has `tenant_id` and RLS like every tenant table. It has a unique
+        index on `(tenant_id, customer_id)`, so a second erase request returns the existing job
+        instead of starting another.
+      - **Phase 1 also records every target the later steps need, because phase 2 destroys the
+        links to them.** In the same transaction it writes one `customer_erasure_steps` row per
+        store, keyed `(job_id, step)`, each with its targets:
+        - the owned-entity, session, call and correlation ids it also writes into the tombstone
+        - the external ids: the Stripe Customer id, the QuickBooks customer id, the Twilio Call,
+          Message and Recording SIDs, the S3 keys, the calendar event ids and the Langfuse trace
+          keys
+        A step takes its targets from its own row, never by re-walking links. A crash after the
+        scrub has severed an invoice's customer link, or blanked `stripe_customer_id`, would
+        otherwise leave the resumed step with nothing to find.
+      - **A late target re-opens the job under the job row's lock, so a close can't miss it.** A
+        target found later is added to its step in the transaction that finds it. Examples: a SID
+        linked by the status callback, a key from a late upload, a recording a fenced webhook
+        registers, the owner's confirmation of a candidate. Touching the job row only "if it had
+        closed" isn't enough. Under `READ COMMITTED` the worker closing the job and the handler
+        adding the target each miss the other's uncommitted write. The job can then close
+        `completed` while one of its steps is pending again, and a sweep that claims only
+        non-terminal jobs never runs that step. So:
+        - Every target add, candidate confirmation and re-open also runs one unconditional
+          `UPDATE` on the job row in its transaction. It sets `generation = generation + 1` and
+          `next_attempt_at` to now, and puts `state` back to `pending` when it was terminal. That
+          takes the job row's lock.
+        - The close is guarded on `generation = $read_generation`, the value the worker read
+          before it checked the steps, and on no step being non-terminal. Either the close sees the
+          new target, or the re-open sees the closed job and re-opens it. A close that matches no
+          row re-reads the steps and carries on.
+        - The sweep also claims any job that has a non-terminal step, whatever the job's state.
+        - The close writes `erase_completed` or `erase_incomplete` once per close generation. A
+          re-opened job that closes again records its new outcome.
+      - **The raw identifiers outlive the `customers` scrub, encrypted, until the last step that
+        needs them.** The historical `ai_runs` content scan, the identifier-linked leads and inbound
+        messages, and the final re-scan all match by name, phone and email. The tombstone keeps only
+        keyed hashes, and the `customers` scrub removes the originals, so a resumed scan would have
+        nothing to match. So:
+        - Phase 1 stores them on the job row, encrypted with `encrypt` (`integrations/crypto.ts:15`).
+        - Only those steps read them.
+        - The transaction that marks the last of those steps `done` deletes them. An
+          `erase_incomplete` job keeps them only while one of those steps still has to run, and
+          never past their maximum retention (below). The result says so.
+      - **Each step is a checkpoint, and so is each target inside it.** A step moves `pending →
+        running → done`, or ends `incomplete` or `provider_retained`. Each target records its own
+        outcome and an idempotency key, `erase:<job id>:<step>:<target id>`, written before the
+        provider call. On resume:
+        - A delete whose target is already gone counts as done: a 404, or Stripe returning the
+          customer as `deleted`. A Stripe Customer or Twilio Call that an earlier run deleted is
+          recognised as done, not reported as a failure.
+        - A provider write that isn't a delete sends that key wherever the provider accepts one, and
+          writes the same value every time. The anonymized QuickBooks `DisplayName` is always the
+          same `Erased customer <short id>`.
+        - A local scrub commits its writes and its checkpoint in one transaction. A batched scan,
+          such as the historical `ai_runs` scan, checkpoints its cursor with each batch. Candidate
+          rows are unique on `(job_id, store, row id)`, so a re-run never lists one twice.
+        - Provider calls run between transactions, never inside one (`workers/tenant-query.ts:11-12`).
+      - **One worker per job, by lease.** A worker claims a job with one guarded update. It sets
+        `lease_owner`, `lease_expires_at` and a new `lease_epoch`, and matches only a job that has
+        no live lease and either isn't terminal or has a non-terminal step.
+        - Every checkpoint write is guarded on that `lease_epoch`, including the one each target
+          makes before its provider call. A worker whose lease lapsed, for example after a long
+          pause, matches no row on its next write and stops before its next provider call.
+        - A call that a stale worker already had in flight repeats harmlessly, by the rules above.
+        - The lease outlasts the longest single provider call, and the worker renews it between
+          targets.
+      - **A wait is a checkpoint, not a sleep.** A step that has to wait records when to look again
+        (`next_attempt_at`), releases its lease and returns. Examples: a call still in progress, an
+        upload URL not yet expired, a drain window, an ambiguous send not yet linked. No worker holds
+        a lease, a connection or a lock across a wait.
+      - **Every wait has a deadline, so no job waits forever.** A wait with no bound can keep a job
+        running, with no alert, while the job row holds the raw identifiers. An SMS whose client
+        timed out before Twilio accepted it never gets a status callback, so "not yet linked" would
+        otherwise repeat every few minutes indefinitely. So:
+        - Each wait records a `wait_deadline` when it first starts, taken from the bound of what it
+          waits on: the Twilio status-callback window, the call `timeLimit` maximum, the upload
+          URL's expiry plus clock skew, or the writer's declared drain window. A re-check never
+          moves it.
+        - Past its deadline, a wait takes its fallback or counts as a failure. An ambiguous send
+          still not linked falls back to the strict content match below, and zero matches after the
+          callback window is recorded as reconciled-absent. A call still in progress past the
+          `timeLimit` maximum counts as a failure.
+      - **A sweep resumes every started-but-unfinished erase** (the async worker pattern, P0-009):
+        - Phase 1 enqueues an `erasure_job` message with `sendOn` inside its own transaction
+          (`queues/pg-queue.ts:108`), so the work starts at once. The message only wakes a worker.
+          The job row is the record, and the queue's retry limit and dead-letter queue never end an
+          erase.
+        - A leader-gated sweep (`runAsLeader` with a new `SWEEP_LOCK` key, `app.ts:2588`, `:2674`)
+          runs once at boot and then every minute. It claims every job that has no live lease, whose
+          `next_attempt_at` has passed, and that either isn't terminal or has a non-terminal step.
+        - Like U4's purge, it selects due jobs across tenants, then runs each step under that
+          tenant's context.
+      - **Retries are bounded, and the end state is explicit.**
+        - **A crash counts as an attempt.** A failure counted only after a caught error never counts
+          a step that kills the process, such as an out-of-memory on a large `ai_runs` batch or a
+          `SIGKILL` during a deploy. The sweep would re-claim it after every lease expiry, forever.
+          So the start checkpoint increments the step's `attempts` before the work runs. A run that
+          ends in a wait checkpoint gives that attempt back in the same write. A caught error and a
+          crash each count, and a wait doesn't.
+        - A step that fails retries with capped exponential backoff.
+        - After a fixed number of failures, the step ends `incomplete` with its last error.
+        - Once every step is `done`, `provider_retained` or `incomplete`, one guarded transition
+          closes the job (guarded on its generation, above). It ends `completed` with
+          `erase_completed` when no step is `incomplete`, and `erase_incomplete` with that audit
+          event otherwise.
+        - The audit event is written in that transition's transaction, so a resumed job never writes
+          it twice for the same close generation.
+        - The transition to `erase_incomplete` also marks an operator alert due on the job row, for
+          that close generation. The sweep sends it through `alertOperator` and then stamps it sent,
+          so a crash right after the commit still alerts, and a job that re-opens and closes
+          incomplete again alerts again.
+        - **A job-age alarm.** The sweep marks the same kind of alert due, through the same outbox,
+          for any job still not terminal a fixed number of hours after phase 1. That number is
+          longer than the longest wait deadline plus the retry budget, so it fires only on a job
+          that the rules above failed to end.
+        - The owner sees which stores are incomplete, and why.
+        - **An `erase_incomplete` job is retried automatically.** The sweep re-opens its incomplete
+          steps on a fixed schedule, for example daily, by the same re-open as a late target.
+          Sending `POST /api/customers/:id/erase` again is the owner's immediate retry. Either one
+          resets the incomplete steps' failure counts, and steps already `done` stay done.
+        - **The encrypted identifiers have a maximum retention**, for example 30 days after phase 1.
+          When it passes, the sweep deletes them, even from an unfinished job. The steps that still
+          needed them end `incomplete` for good, since no retry can run them without their inputs.
+          The job state and an audit event tell the owner which stores those were.
+        - The owner's confirmation of a candidate adds a step to the same job. It isn't run inline.
+      - **The tombstone fences whatever state the job is in.** Writers check the tombstone, never the
+        job, and the tombstone is never lifted. So a slow, stuck or `erase_incomplete` job never
+        weakens the fence.
+        - Phase 2 holds no erasure lock across steps. Each step's transaction is short, so a long
+          erase blocks no writer.
+        - The fence refuses only writes that would put subject data back, so retained financial
+          records keep updating however long the job takes.
+      - **The endpoint returns the job, not the result.** It responds `202` with the job id once
+        phase 1 commits. The owner reads progress, each store's outcome and the candidate list from
+        `GET /api/customers/:id/erase`. Every "erase result" in this unit means that job state.
   - **U7 starts with a data inventory, before any erase code.** Review keeps turning up one more
     store that holds customer data: service locations, custom-field values, converted leads, callback
     tasks, an external trace sink. That shows the scope has to be discovered systematically, not
@@ -939,8 +1117,10 @@ flowchart LR
           such as a dialed transfer or the on-call page.
         - It selects them only by the Call SIDs we keep linked to the subject:
           `voice_sessions.call_sid`, and the outbound call results we store.
-        - A call still in progress can't be deleted. The erase waits for it to complete, and until
-          then the Twilio calls store is `incomplete`.
+        - A call still in progress can't be deleted. The erase waits for it to complete, up to the
+          call `timeLimit` maximum, and until then the Twilio calls store is `incomplete`.
+        - A Call is deleted only after the Twilio recordings step has asked Twilio for that Call's
+          recordings (see "A writer the fence refuses can still leave a copy" below).
         - A 404 counts as done, and a re-check after the delete must come back clean.
       - **Twilio messages.** `notifications/twilio-delivery-provider.ts:238-268` posts the recipient
         and the body to Twilio's Messages resource, and we keep the returned message SIDs. The
@@ -975,6 +1155,12 @@ flowchart LR
           subject are dropped before transport
         - deletes again after the drain window
         - reports success only once that second delete and its re-check come back clean
+      - **The second delete waits by time, not on the drain.** The drain reaches only the process
+        running the erase, and only while it lives. The gateway exports from every process, and a
+        resumed job can't drain a queue that belonged to an earlier one. So the second delete is a
+        job step with a `not_before`: the phase-1 commit time plus the SDK's longest send time,
+        retries included. By then every process's event for the subject has either been sent, so
+        the second delete removes it, or been dropped at the send boundary.
       - If any external delete fails, the erase result reports that store as incomplete, the owner
         sees it, and `alertOperator` fires.
       - It never claims success it hasn't confirmed.
@@ -1033,6 +1219,19 @@ flowchart LR
       - It takes the subject's erasure lock in shared mode, checks the tombstone, and records a
         write-ahead claim, all in one transaction.
       - It runs the write, or the provider call, only after a guarded claim flip (see below).
+      - **The lock covers every key the tombstone holds, not only the customer id.** Many writers
+        can name the subject only by the key they carry, such as `invoice_line_items.invoice_id` or
+        a transcript turn's session id. A lock on the customer id alone doesn't serialize them with
+        phase 1. So:
+        - The erasure lock is keyed like the tombstone probe, by `(tenant_id, key)`, hashed onto a
+          fixed number of lock stripes per tenant, so phase 1 takes a bounded number of locks.
+        - Phase 1 collects the subject's keys and takes the stripe of each in exclusive mode, with
+          `pg_try_advisory_xact_lock`. Then it collects again under the locks, and locks any key
+          that appeared in between. If any stripe is busy, it rolls back and retries after a short
+          backoff. Phase 1 therefore never waits while it holds a stripe, so it can't deadlock with
+          a writer waiting on it.
+        - Every writer and every trigger takes the stripe of each key it checks, in shared mode.
+          An unrelated key that shares a stripe only makes its writer wait out a short phase 1.
       Every writer that can persist or export the subject's data goes through it. That includes:
       - AI content: the `ai_runs` completion, the trace export, the transcript append, the summary
         and the knowledge-chunk ingest
@@ -1067,8 +1266,8 @@ flowchart LR
       the encrypted raw copy in `metadata.raw_transcript_retention` with it. So:
       - Every table that the erase-coverage manifest classifies `scrub` or `anonymize` gets a
         `BEFORE INSERT OR UPDATE` trigger.
-      - The trigger takes the subject's erasure lock in shared mode, so it serializes with phase 1
-        like every other writer.
+      - The trigger takes the shared stripe lock of each subject key it checks, so it serializes
+        with phase 1 like every other writer.
       - It checks the row's subject keys against the tombstone. The manifest maps those keys for
         each table: `customer_id`, session id, call SID or correlation id, or, for a transitively
         linked table, the owned-entity link column, such as `invoice_line_items.invoice_id`.
@@ -1118,7 +1317,8 @@ flowchart LR
           `erasure_storage_cleanup` row with the bucket, the key and `not_before`. `not_before` is
           the issued URL's expiry plus clock skew. This happens whether or not the upload went
           through.
-        - A worker processes those rows after `not_before`: it deletes each key again.
+        - The erasure job's S3 step processes those rows after `not_before`: it deletes each key
+          again. Each row carries the job id, and the step is `done` only when every row is.
         - Then a HEAD request confirms each key is gone, and only then is the cleanup row marked
           done.
         - Until every cleanup row for the erase is done, the S3 store is `incomplete`. The result
@@ -1129,6 +1329,47 @@ flowchart LR
       - Test: an upload URL is issued, the erase runs, and the client PUTs the bytes afterwards,
         before the URL expires. The re-delete removes the object, and the erase reports success
         only after the HEAD check.
+    - **A writer the fence refuses can still leave a copy, and so can one in flight at phase 1.**
+      Targets come from the phase-1 snapshot of stored SIDs and keys, the status callbacks and the
+      upload cleanup rows. Some writers create the external copy before any row records it:
+      - The recording and voicemail webhooks fetch the bytes from Twilio and PUT them to S3 before
+        they insert `voice_recordings` (`telephony/recording-webhook.ts:391-407`,
+        `telephony/voicemail-status-route.ts:533-556`). They delete Twilio's copy only after that
+        row commits (`recording-webhook.ts:454`).
+      - The image post-process worker writes `thumbnailKeyFor(key)` before it records the
+        thumbnail key (`workers/image-post-process-worker.ts:147-156`).
+      - Customer MMS intake runs `putObject` before `fileRepo.create`
+        (`sms/customer-mms/customer-mms-intake.ts:162-163`).
+      For example, a call ends, and the owner erases the customer ten seconds later. Phase 1
+      records the Call SID, but no Recording SID exists locally yet. The recording callback then
+      arrives, the fence refuses it, the handler returns `500`, and Twilio gives up after its
+      retries. The Twilio calls step deletes the Call, but the Recording with the customer's audio
+      stays at Twilio, its SID recorded nowhere, and the job completes. So:
+      - **A refusal still registers the external copies.** When the fence refuses a recording or
+        voicemail callback, the handler adds the `RecordingSid`, and the deterministic S3 key from
+        `buildRecordingStorageKey` or `buildVoicemailStorageKey`, as late targets on the job whose
+        tombstone matched. That re-opens the job (see "A late target re-opens the job" above). The
+        handler then returns `200`, since the job now owns the cleanup.
+      - **The Twilio recordings step asks Twilio, not only our rows.** For every subject Call SID it
+        lists the Call's recordings at Twilio (`Recordings?CallSid=`) and deletes each one. It runs
+        with a `not_before` of the call's completion plus the recording-callback window, and before
+        the Twilio calls step deletes the Call.
+      - **Every fenced storage write records its key on its write-ahead claim.** That covers
+        `putObject` as well as `generateUploadUrl`, and the structural test lists both among the
+        provider write methods.
+        - The S3 step takes as targets every subject claim's bucket and key, plus
+          `thumbnailKeyFor` of every subject key.
+        - It waits for `sending` claims to reach a terminal state, up to their deadline (see
+          "Every wait has a deadline" above). Then it deletes each key again and confirms with a
+          HEAD request.
+      - These writers join the drain list below.
+      - Tests:
+        - A recording callback arrives after phase 1. The handler returns `200`, and the job
+          deletes that Recording at Twilio and its S3 key.
+        - A webhook is paused between its S3 PUT and its row insert when the erase starts. Its
+          insert is refused, and the S3 step still deletes the object.
+        - A post-process job is paused before its thumbnail put when the erase starts. Once it
+          resumes, the S3 step still deletes the thumbnail, and the HEAD check comes back clean.
     - **A recipient match fences only the subject's own work, by provenance, not by time.** A
       household can share a phone or an email, so a recipient hash alone can't say whose send it
       is, and neither can creation time. So:
@@ -1145,17 +1386,43 @@ flowchart LR
         indefinitely without a decision.
       - A send from a source created after the erase is a new contact, and the normal consent and
         do-not-contact rules govern it.
-    - **Each writer drains for its own worst case.** The erase waits out each fenced writer's own
-      worst-case duration, not just the gateway deadline:
+    - **Each writer drains for its own worst case, taken from the `externalSinks` registry.** The
+      erase waits out each fenced writer's own worst-case duration, not just the gateway deadline.
+      A closed list here left out Stripe, Wisetack and Google Calendar. So each subject-data entry
+      in the registry declares its worst-case duration and its reconciliation read, and the
+      structural test fails on an entry that is missing either. For example:
       - the gateway: the maximum gateway deadline
       - the QuickBooks client: its retrying 20-second requests, times its retry count
       - messaging and email: the provider client timeout
-      Then it re-scans until the result comes back clean.
-    - **An ambiguous business-integration create is reconciled, not assumed absent.** The
-      QuickBooks create already carries a stable request id (`customer-<id>`, `sync-service.ts:288`).
-      When a create's outcome is unknown, the erase looks that customer up in QuickBooks and
-      anonymizes it if it exists. Stripe works the same way, through the customer's metadata. Until
-      that lookup succeeds, the store is `incomplete`.
+      - Stripe, Wisetack and Google Calendar: their bounded request timeout, times their retries
+      - the recording and voicemail webhooks, the image post-process worker and customer MMS
+        intake: their provider fetch plus their S3 write
+      Each wait is a job checkpoint with a `next_attempt_at` and a deadline. Then it re-scans,
+      within the job's bounded retries, until the result comes back clean.
+    - **An ambiguous business-integration create is reconciled with a strongly consistent read,
+      not assumed absent.** Each write-ahead claim stores the idempotency key or request id it
+      sent, and the account it sent it on.
+      - The QuickBooks create already carries a stable request id (`customer-<id>`,
+        `sync-service.ts:288`). When a create's outcome is unknown, the erase looks that customer up
+        in QuickBooks and anonymizes it if it exists.
+      - **Stripe Search can't prove a customer absent.** Stripe documents Search as not for
+        read-after-write: its index usually lags by under a minute, and longer during incidents. A
+        lookup seconds after a lost `customers.create` (`payments/stripe-saved-card.ts:96-105`)
+        could find nothing while the customer exists, with a card attached by
+        `setup_intent.succeeded`. So:
+        - The Stripe step lists customers instead (`GET /v1/customers`, which is consistent), on the
+          claim's account. It lists those created between the claim's `attempt_started_at` and the
+          end of Stripe's declared worst case, widened by clock skew, and keeps those whose
+          `metadata.customer_id` and `metadata.tenant_id` match. It deletes every one it keeps.
+        - The list needs no raw identifier, so the erase never sends the erased name or email to
+          Stripe again.
+        - Search runs only as an extra pass, after a `not_before` past its indexing delay. Its
+          empty result never counts as proof that the customer is absent.
+      - Wisetack and Google Calendar read back by the id we sent: the financing application id,
+        and the deterministic calendar event id.
+      - Until that read succeeds, the store is `incomplete`.
+      - Test: against a mocked Stripe whose Search lags by 60 seconds, a create whose response was
+        lost is still found by the list read and deleted.
     - Tests:
       - A gateway call is in flight when the erase starts. It completes afterwards, and its output
         is never persisted or exported.
@@ -1186,12 +1453,14 @@ flowchart LR
         `claimed`. The row holds the recipient, the sending number or address, the `customer_id`
         and a hash of the body.
       - It writes that row in one transaction that first takes the subject's erasure lock in
-        shared mode. The lock is a `pg_advisory_xact_lock_shared` on the tenant plus the customer
-        id. A send with no customer id locks the tenant plus its normalized recipient instead.
+        shared mode. The lock is a `pg_advisory_xact_lock_shared` on the stripe of the customer
+        id. A send with no customer id locks the stripe of its normalized recipient's keyed hash
+        instead.
       - In the same transaction it checks the tombstone, and it refuses the send when the
         tombstone matches.
-      - The erase's phase 1 takes those locks in exclusive mode, for the customer id and every
-        normalized phone and email of the subject. It writes the tombstone under them.
+      - The erase's phase 1 takes the stripe of every key it writes into the tombstone in
+        exclusive mode, as described above, the customer id and every normalized phone and email of
+        the subject among them. It writes the tombstone under them.
       - In the same transaction, phase 1 moves every `claimed` row for the subject to `fenced`.
       - Either a sender's row commits before the tombstone, and the erase sees it, or the sender
         sees the tombstone. No order lets both miss.
@@ -1239,16 +1508,22 @@ flowchart LR
       - exactly one Twilio message matches
       - no other write-ahead row, for any customer in the tenant, has the same From, To and body
         hash in an overlapping window
-      Anything else goes onto the owner-confirmed candidate list.
+      Anything else goes onto the owner-confirmed candidate list. The fallback runs once the
+      status-callback window's deadline has passed. Zero matches then counts as Twilio never having
+      accepted the message, and the row is recorded reconciled-absent.
     - **The erase never reports success while a linked row is open.** It waits until every row
       linked to the subject is terminal:
       - `sent`, with its SID deleted
       - `failed`
       - `ambiguous` and reconciled
-      A row stuck in `sending`, for example after a crash, or one that can't be reconciled, leaves
-      the Twilio messages store `incomplete` and fires `alertOperator`. A retry job re-runs the
-      reconciliation, and the erase stays incomplete until every row clears or the owner closes
-      it from the candidate list.
+      - **A send that crashed mid-call gets a resume path too.** A sender that dies after the
+        `claimed → sending` flip leaves a row nobody will finish. The job's Twilio messages step
+        moves any subject row still `sending` past its provider timeout to `ambiguous`, with a
+        guarded transition, and reconciles it like any other ambiguous row. A late result from the
+        original sender still lands: `ambiguous → sent` with the SID is allowed.
+      - A row that still can't be reconciled after the step's retries leaves the Twilio messages
+        store `incomplete`, which ends the job `erase_incomplete` with its one alert. The erase stays
+        incomplete until every row clears or the owner closes it from the candidate list.
   - **Scrub:**
     - the `customers` row and `customer_contacts`
     - `customer_custom_field_values`: the arbitrary `value` column (`schema.ts:4733-4741`) can hold
@@ -1268,9 +1543,11 @@ flowchart LR
         classifier, summary and other voice-path gateway calls carry it too, and close any gap.
       - **Historical rows.** Rows written before that linkage have random correlation ids, so match
         them by content instead. Use a tenant-scoped, batched scan of `input_snapshot` /
-        `output_snapshot` text for the subject's normalized phone numbers, email and full name. The
-        scan is bounded by the tenant's retention window, because U4's purge has already scrubbed
-        anything older.
+        `output_snapshot` text for the subject's normalized phone numbers, email and full name. U4's
+        purge has already scrubbed anything older than the window it last applied, so the scan
+        starts from the tenant's oldest remaining `ai_runs` row, not from the current retention
+        setting. A window shortened since the last purge would otherwise hide rows the purge hasn't
+        reached yet.
       - **The scan also matches the subject's ids.** A drafting prompt can carry only the resolved
         customer id and non-identifying job details. For example, `estimate-task.ts` serializes
         `context.existingEntities`, including the verified `customerId`, into the user message, and
@@ -1326,7 +1603,7 @@ flowchart LR
     - a failure at any provider marks that store `incomplete` and alerts
   - erase versus in-flight outbound SMS, against real Postgres and a mocked Twilio Messages API:
     - **Paused between check and claim.** A sender is paused after it takes the shared lock, and
-      the erase starts. The erase blocks on the lock. Once the sender's row commits, the erase sees
+      the erase starts. The erase waits for the lock. Once the sender's row commits, the erase sees
       it and fences or drains it. A sender that reaches the lock after the tombstone sees it and
       makes no provider call.
     - **Fenced before the flip.** A sender is paused after its row commits but before the
@@ -1341,7 +1618,9 @@ flowchart LR
       not auto-matched. The same goes for a row that conflicts with another customer's row
       (household reminders). Neither message is deleted, the row is candidate-listed, and the
       erase is `incomplete`.
-    - **Never resolved.** A row stuck in `sending` keeps the erase `incomplete` and alerts.
+    - **Sender died mid-call.** A sender dies after the `claimed → sending` flip. After the
+      provider timeout the job moves the row to `ambiguous` and reconciles it. A row that still
+      can't be reconciled ends the job `erase_incomplete`, with one alert.
   - after an erase, the exporter still sends unrelated traces, so the drain did not shut it down
   - a drain failure marks Langfuse `incomplete`
   - with phase 1 committed, an in-flight writer in another connection sees the tombstone and drops
@@ -1354,11 +1633,60 @@ flowchart LR
   - an audit event is written
   - a non-owner gets 403
   - another tenant's data is untouched
+  - **the erasure job survives a crash**, against real Postgres and the mocked providers:
+    - **Restart right after phase 1.** The process is killed once phase 1 commits, before any
+      phase-2 step runs. On boot the sweep claims the job and finishes it. Every store is erased,
+      `erase_completed` is written once, and writers stay fenced throughout.
+    - **Crash after each later checkpoint.** For each step in turn, the process is killed once just
+      after the step's checkpoint commits, and once between a provider delete and its checkpoint.
+      On resume, no checkpointed target is sent a second delete. A repeated delete that returns 404,
+      for the Stripe Customer or a Twilio Call, is recorded `done`, not as a failure. The job
+      completes.
+    - **Resume after the links are gone.** The process is killed after the scrub has severed the
+      invoice links and blanked the `customers` row. The resumed Stripe, QuickBooks,
+      `invoice_line_items` and historical `ai_runs` steps still find every target, from the step
+      rows and the job's encrypted identifiers. Once those steps are done, the job row holds no
+      identifiers.
+    - **Two workers race.** The queue handler and the boot sweep claim the same job at once.
+      Exactly one claim succeeds, and each provider delete is sent once. A worker whose lease
+      lapsed mid-step has its next checkpoint refused, and makes no further provider call.
+    - **Bounded retries.** A provider that fails every time ends its step `incomplete` after the
+      retry limit. The job ends `erase_incomplete`, naming that store, with one alert. A repeat
+      `POST` retries only that step. The tombstone fences writers the whole time.
+    - **A step that crashes every run.** A step calls `process.exit()` on every run. After the
+      retry limit it ends `incomplete`, and the job ends `erase_incomplete` with one alert.
+    - **A callback that never arrives.** An SMS whose client timed out before Twilio accepted it
+      stays `ambiguous`, and no status callback ever comes. By the callback window's deadline the
+      step falls back to the content match, finds nothing and records reconciled-absent. The job
+      ends terminal.
+    - **A late target races the close.** A status-callback handler is held between its step update
+      and its commit while the worker closes the job. Once both commit, the job isn't terminal. The
+      sweep runs the re-opened step, the SID is deleted at Twilio, and the job closes again with one
+      audit event for that generation.
+    - **Age alarm and identifier retention.** A job still not terminal past the age limit raises one
+      job-age alert. An `erase_incomplete` job whose historical scan keeps failing reaches the
+      identifiers' maximum retention: the identifiers are deleted, that step ends `incomplete` for
+      good, and the job state tells the owner.
+  - **the lock covers every tombstone key:** a writer that carries only a session id, or only an
+    `invoice_id`, holds its shared stripe lock, paused before commit, when the erase starts. Phase 1
+    waits for it, and phase 2 then scrubs what it wrote.
+  - **the second Langfuse delete waits by time:** another process queues a subject trace before
+    phase 1 and sends it after the first delete. The job's second delete, at `not_before`, removes
+    it, even when the process that ran the first delete restarted in between.
+  - **the historical scan ignores a newly shortened window:** the owner shortens the retention
+    window, and the erase runs before the next purge. A pre-linkage `ai_runs` row older than the new
+    window is still found and scrubbed.
 
 ### U8. Money cap on AI spend per tenant (the GATEWAY-05 follow-up) — after U3, needs an owner decision
 
 - **Goal:** a tenant's AI spend can be capped in money, which the token buckets cannot do.
 - **Dependencies:** U3, plus owner decision 2 below.
+- **Design rules:** both rules under Key Technical Decisions apply. In this unit:
+  - **Durable, resumable jobs:** each attempt's reservation (reserve, dispatch, settle, with the
+    lease reaper as its resume), repricing, and the 80% alert.
+  - **Limits serialized with their consumers:** the ceiling and every reservation and ledger
+    transition, under one per-tenant spend lock. The ceiling, the month and the decision to admit
+    an unpriced attempt are each read after that lock is granted.
 - **Approach:**
   - A nullable `tenant_settings` monthly ceiling in integer cents (new idempotent migration). Null
     means no cap is enforced.
@@ -1366,7 +1694,9 @@ flowchart LR
     cap.** If the ledger started when a cap was set, a tenant that had already spent $90 could
     enable a $100 ceiling and spend another $100.
     - Every attempt is reserved and settled in the ledger whether or not a ceiling is set. With a
-      null ceiling, the reserve step just skips the comparison.
+      null ceiling, the reserve step skips only the comparison. It still takes the spend lock and
+      reads the ceiling under it (see "A ceiling change and a reservation take the same lock"
+      below).
     - **Caps start in the first full calendar month after the ledger ships, so no pre-ledger
       spend has to be estimated.** Every attempt to reconcile old-version spend inside a month
       left a race. A seed missed late writes. A reconcile on an interval went stale. Even a
@@ -1396,27 +1726,100 @@ flowchart LR
       null-cost runs. A tenant with substantial unpriced usage could therefore enable a $100 cap
       and still get close to another $100. So:
       - Once a verified price exists for a run's model, the run is repriced from its stored
-        `model` and `token_usage`, and the computed cost is written back.
+        `model` and `token_usage`, and the computed cost is written back. A leader-gated sweep does
+        this at boot and on an interval. Each row's state is its checkpoint, so a sweep killed
+        partway through a batch resumes with the rows it hadn't reached.
       - **Repricing reconciles the ledger in the same transaction, exactly once per physical
         attempt.** The run's `settled_unpriced` reservation row takes one guarded transition to
         `settled`, `WHERE attempt_id = $1 AND state = 'settled_unpriced'`. The ledger's `spent` grows
         by exactly the repriced amount. A repricing that runs twice matches no row the second time.
         Retried attempts each have their own row, so each one is counted.
+        - The `ai_runs` cost is written back in that same transaction, and only when the transition
+          matched a row. An `ai_runs` row therefore never shows a cost that the ledger doesn't hold.
       - Each row is repriced from its own stored inputs, never from the logical `ai_runs` row:
         - An attempt with recorded usage is settled at the new price.
-        - An attempt with no usage (it timed out after dispatch) is charged at the worst case from
-          its stored bound, and moves to `charged_unreconciled`.
+        - An attempt with no usage (it timed out after dispatch, or its lease expired) is charged at
+          the worst case from its stored bound, and moves to `charged_unreconciled`.
         So every `settled_unpriced` row can be cleared, and none blocks enabling a cap forever.
-      - The cap-enable check counts `settled_unpriced` rows for the current month, not just null
-        `ai_runs` costs. Once all of them are repriced, the ledger already holds that spend.
-      - While any current-month run is still unpriced after that repricing, the settings write that
-        enables a cap is refused. The message says plainly that this month's usage can't be fully
-        counted yet.
+      - **A reservation with no price snapshot never charges zero.** An unpriced reservation has no
+        amount. A lease reaper or an ambiguous failure that moved it to `charged_unreconciled` would
+        charge it 0. Repricing, which matches only `settled_unpriced`, would then skip it, and so
+        would the cap-enable count, while its spend stayed outside the ledger. So:
+        - The reaper and the ambiguous-failure path move a row with no snapshot to
+          `settled_unpriced`, with no usage, never to `charged_unreconciled`. Repricing then charges
+          it at the worst case, as above.
+        - A definitive no-dispatch failure still releases it.
+        - The check constraint ties each state to its snapshot: `settled` and
+          `charged_unreconciled` need a price snapshot and an amount. Only `reserved` and
+          `settled_unpriced` may lack one.
+      - The cap-enable check counts every reservation without a price snapshot, not just null
+        `ai_runs` costs: the `settled_unpriced` rows, reaped and ambiguous ones included, and the
+        `reserved` rows of unpriced attempts still in flight (see below). It counts them in every
+        month that still has an open reservation, not only the current one. Once all of them are
+        priced, the ledger already holds that spend.
+      - While any of those is still unpriced after that repricing, the settings write that enables a
+        cap is refused. The message says plainly that this month's usage can't be fully counted
+        yet.
       - A tenant that already has a cap and later gets an unpriced run has its capped reservations
         refused. That matches the existing fail-closed rule for unpriced models.
-    - Enabling a cap takes effect at once against the month's real spend. When `spent` is already
-      over the new ceiling, the settings response says so in plain words, and new AI work is
-      refused.
+    - **A ceiling change and a reservation take the same lock, so a cap can't slip in beside an
+      uncapped attempt.** Without it, an attempt can read the null ceiling and reserve or dispatch
+      with no comparison, while the settings write reads the ledger before that attempt commits and
+      enables a lower cap. An unpriced attempt is the worst case: it is still `reserved`, not yet
+      `settled_unpriced`, so the enable check misses it, and it can later settle above the new
+      ceiling. So:
+      - **One per-tenant spend lock.** Every transaction that inserts a reservation, transitions
+        one, changes the ledger or writes the ceiling first takes `pg_advisory_xact_lock` on the
+        tenant's spend key. That covers reserve, settle, release, expiry, reconciliation and
+        repricing. The lock is per tenant, not per tenant-month, so a cap written in the last
+        second of a month still serializes with a reservation that lands in the next one.
+      - **The reserve reads the ceiling under the lock.** It reads `tenant_settings` in a statement
+        that runs after the lock is granted, never a value read earlier or passed in, and compares
+        against that. Under `READ COMMITTED` each statement sees every transaction committed before
+        it starts, so a cap that committed while the reserve waited is the cap it compares against.
+      - **The month and the unpriced decision are read under the lock too.** The lock orders the
+        transactions, but not the values they act on. Postgres `now()` and `CURRENT_DATE` return
+        the transaction's start time. A settings write that begins at 23:59:59.990 on Oct 31 and
+        gets the lock just after midnight would check October. It would miss a November unpriced
+        attempt that committed while it waited, and enable the cap. Once that attempt is repriced,
+        November ends above the cap by its worst case. So:
+        - One SQL function, `spend_month(clock_timestamp())`, defines the month. The month is the
+          UTC calendar month. A tenant's timezone setting can change, and a month that moved would
+          leave open reservations in the wrong month. The settings page renders the reset time in
+          the tenant's timezone, like every other time.
+        - The reserve, the settings check, the tripwire and the ship-month rule each evaluate it in
+          a statement that runs after the lock is granted. A reservation records the month that
+          `spend_month` returned in its reserve.
+        - **An unpriced attempt is admitted only when the ceiling read under the lock is null.** The
+          reserve inserts a row with no price snapshot only in a statement guarded on that read.
+          Otherwise it returns the typed refusal. So no pre-check outside the lock decides the
+          path. Neither does a replica whose pricing table lacks the model, during a rolling deploy
+          or after an `AI_MODEL_PRICING_JSON` change.
+      - **Every ceiling write takes the lock too**, whether it enables, lowers, raises or clears the
+        cap. One that enables or lowers it then checks, in that transaction and before it writes the
+        new value:
+        - the `spent` and `reserved` of the month `spend_month` returns after the lock
+        - every reservation without a price snapshot, in each month that still has an open
+          reservation: a `reserved` row with none, which is an unpriced attempt in flight, and
+          every `settled_unpriced` row
+        - the tripwire, the ship-month rule, and the rule that every configured model has a price
+      - **Only two orders exist.** Either an attempt's reservation commits first, and the settings
+        write counts it, or the settings write commits first, and the reservation compares against
+        the new ceiling.
+      - **An attempt already dispatched when a cap is enabled counts at its worst case until it
+        settles.**
+        - A priced attempt is already in `reserved` at its worst case.
+        - An unpriced attempt in flight is priced inside the settings transaction, when its model
+          now has a verified price. The transaction writes that price into the attempt's snapshot,
+          sets its amount to the worst case from the attempt's own stored bound, and adds that to
+          `reserved`. The attempt then settles at its actual cost. Settle reads the snapshot from
+          the row in its guarded transition, so it can't settle as unpriced.
+        - A `settled_unpriced` row is repriced in the same transaction, by the transition the
+          repricing sweep uses.
+        - If any of them can't be priced, the cap write is refused, as above.
+      - Enabling a cap takes effect at once against the month's real spend. The settings response
+        states `spent + reserved` against the new ceiling in plain words. When that is already over
+        the ceiling, it says so, and new AI work is refused.
   - **Keep the ledger in micro-cents.** `computeCostMicroCents` returns micro-cents (1 cent =
     1,000,000; `packages/api/src/ai/gateway/model-pricing.ts`), so the arithmetic must stay in that
     unit.
@@ -1469,35 +1872,47 @@ flowchart LR
         The states, and the only transitions allowed out of `reserved`:
         - `settled`: the actual cost from the usage object is charged.
         - `released`: a definitive no-dispatch failure, so nothing is charged.
-        - `charged_unreconciled`: an ambiguous failure or an expired lease, charged at the
-          worst-case amount. If the provider's usage later becomes known, one guarded transition
+        - `charged_unreconciled`: a priced attempt's ambiguous failure or expired lease, charged at
+          the worst-case amount. If the provider's usage later becomes known, one guarded transition
           `charged_unreconciled → settled` adjusts `spent` by the actual cost minus the worst case.
-        - `settled_unpriced`: an uncapped tenant's call to a model with no verified price. There is
-          no amount to charge yet; see "Unpriced usage" below.
-        A check constraint holds exactly these states.
+        - `settled_unpriced`: an uncapped tenant's call to a model with no verified price, including
+          one whose outcome is ambiguous or whose lease expired. There is no amount to charge yet;
+          see "Unpriced usage" above.
+        A check constraint holds exactly these states, and only `reserved` and `settled_unpriced`
+        may lack a price snapshot (see "A reservation with no price snapshot never charges zero").
       - Its RLS matches every tenant table.
       - A per-tenant monthly `ai_spend_ledger` row holds `spent` and `reserved`.
-      - **Reserve** is one transaction. A conditional
-        `UPDATE ai_spend_ledger SET reserved = reserved + $cost WHERE spent + reserved + $cost <= cap
-        RETURNING …` runs first. When it returns a row, the reservation row is inserted. Caps start
-        only in a month with no untagged runs (see below), so `spent` is the month's full spend.
+      - **Reserve** is one transaction. It takes the spend lock, then reads the ceiling and
+        `spend_month` under it (see "A ceiling change and a reservation take the same lock" above).
+        Then a conditional `UPDATE ai_spend_ledger SET reserved = reserved + $cost WHERE spent +
+        reserved + $cost <= cap RETURNING …` runs on that month's row, against that ceiling, with no
+        comparison when it is null. When it returns a row, the reservation row is inserted with that month. Caps start
+        only in a month with no untagged runs (see above), so `spent` is the month's full spend.
       - **Every later step is a guarded transition on that one row**, in the same transaction as
-        the ledger adjustment:
+        the ledger adjustment, after the spend lock:
         `UPDATE ai_spend_reservations SET state = $next WHERE attempt_id = $1 AND state = 'reserved'
-        RETURNING amount_micro_cents`, and then the matching ledger update by exactly the returned
-        amount. That covers settle (charge the actual cost from `computeCostMicroCents`), release
-        and expire.
+        RETURNING amount_micro_cents, month`, and then the matching ledger update by exactly the
+        returned amount, on the ledger row for the returned month. That covers settle (charge the
+        actual cost from `computeCostMicroCents`), release and expire.
+        - An attempt reserved at 23:59:50 on Oct 31 that settles just after midnight adjusts
+          October's row. November's `reserved` never goes negative, and its headroom isn't inflated.
       - A transition that matches no row is a no-op. A retried completion, a reaper that races a
         late completion, and a double release therefore each count once.
-      - The lease reaper expires each attempt by its own id and amount. It never strands capacity,
-        double-charges, or releases a reservation that may have been billed.
+      - The lease reaper expires each attempt by its own id and amount, and moves an attempt with no
+        price snapshot to `settled_unpriced`. It never strands capacity, double-charges, charges
+        zero, or releases a reservation that may have been billed. It is a leader-gated sweep that
+        runs at boot and every minute, so a crashed process's reservations are charged after a
+        restart too.
       - Postgres, not Redis, holds this, because a money ledger must be durable and auditable.
-        Each transition writes an audit event.
+        Each transition writes an audit event in the same transaction as the transition, so a
+        transition that matches no row writes none.
     - **Only a failure that definitively never reached the provider releases the reservation.**
       Examples: preflight rejection, quota rejection, a connection refused before send, a 4xx
       validation error. An ambiguous failure — a timeout or connection reset after send, a 5xx after
       streaming started — has no usage object, so charge the full worst-case reservation and move it
       to `charged_unreconciled`. Otherwise outage retries would be free in the ledger and could exceed the cap.
+      An attempt with no price snapshot has no worst case yet, so it moves to `settled_unpriced`
+      instead, and repricing charges it.
       This is the same definitive-no-call rule as the onboarding plan's demo-call budget (D11).
     - **Reserve every physical dispatch, not every logical call.** `ProviderRetryDeadlineWrapper`
       can send another attempt to the same provider after a timeout
@@ -1507,16 +1922,28 @@ flowchart LR
       - A failover hop reserves again at the fallback model's price.
     - A reservation carries a lease expiry. A crashed process can't say whether its call went out, so
       an expired lease is charged at worst case and marked `charged_unreconciled`; it is not released.
+      An unpriced one goes to `settled_unpriced`, as above.
     - **Fail closed on unpriced models.** A worst-case reservation can't be computed without a price.
       U3 deliberately leaves unverified models unpriced (null, with a boot warning), and the default
       `gpt-4o-mini` is not in the built-in table.
       - For a tenant with a cap set, a request whose selected or fallback model has no verified price
-        is rejected with a typed error.
+        is rejected with a typed error. The ceiling read under the spend lock decides that, never a
+        check made before the lock (see "The month and the unpriced decision are read under the
+        lock too").
       - The settings write that enables a cap is refused until every configured tier and fallback
         model has a price, from the defaults or `AI_MODEL_PRICING_JSON`. The fail-closed path then
         only fires on later misconfiguration.
   - Reject with a typed error that the voice path turns into its existing hold-line / Gather behaviour.
-  - Alert at 80% through `alertOperator`.
+  - **Alert at 80% through `alertOperator`, from an outbox.** A reservation can't send the alert
+    inside its transaction, and a call after the commit is lost if the process exits first. So:
+    - The transaction that first takes the month to 80% of the ceiling sets `alert_80_due_at` on
+      the ledger row, under the spend lock, guarded on it being null.
+    - A ceiling write applies the same rule in its transaction, under the same lock. A lower cap
+      that puts the month past 80% marks the alert due. A higher cap that puts it back under 80%
+      clears both stamps, so the alert can fire again.
+    - A leader-gated sweep sends every due alert and then stamps `alert_80_sent_at`, guarded on it
+      being null. A crash between the send and the stamp sends it twice, which is harmless for an
+      operator alert. A crash before the send loses nothing.
 - **Test scenarios:**
   - **Unit:** a call is admitted under the cap and rejected over it.
   - **Unit:** failover is charged once.
@@ -1563,6 +1990,43 @@ flowchart LR
     - A current-month run with a null cost blocks enabling a cap.
     - After a verified price is added, the run is repriced from its `model` and `token_usage`, and
       the cap can then be enabled against the full total.
+  - **Integration (cap change versus a reservation, real Postgres, the racy order forced):** two
+    connections, each held at a set point.
+    - **Reservation first.** An uncapped tenant's attempt, reserved while its model was unpriced,
+      takes the spend lock, reads the null ceiling, inserts its `reserved` row and is held before
+      commit. A settings write that enables a cap starts. While the reservation is held, the
+      settings write doesn't return. Once the reservation commits, the settings write counts it.
+      With a verified price now present, it prices the attempt at its worst case from its stored
+      bound. Without one, it refuses the cap. The attempt then settles within the counted amount.
+    - **Settings first.** The settings write is held after its checks, before commit. A reservation
+      that starts then waits, reads the new ceiling once the write commits, and is compared against
+      it. One that would exceed the cap is refused with the typed error.
+    - **Month boundary.** A cap written in the last second of a month and a reservation in the
+      first second of the next serialize, in both orders.
+    - **Midnight while waiting.** The settings write is held between `BEGIN` and the lock while the
+      clock `spend_month` is given crosses midnight. An unpriced attempt reserves in the new month
+      and commits. The settings write then counts that attempt: it prices it at its worst case, or
+      it refuses the cap.
+    - **A settle that straddles midnight.** An attempt reserved before midnight settles after it.
+      The adjustment lands on its reserve month's ledger row, and the new month's `reserved` is
+      unchanged.
+    - **A replica with the model unpriced.** After a cap is enabled, an attempt from a replica whose
+      pricing table lacks the model is refused with the typed error, and no row without a price
+      snapshot is inserted.
+  - **Integration (unpriced attempt reaped, real Postgres):** an uncapped tenant's call to an
+    unpriced model is in flight when its process dies. The reaper moves its reservation to
+    `settled_unpriced`, never to `charged_unreconciled` at zero. Enabling a cap is refused while it
+    stays unpriced. After a price is added, repricing charges its worst case once, writes the
+    `ai_runs` cost in the same transaction, and enabling a cap then counts that spend. An ambiguous
+    timeout on the same kind of attempt ends the same way.
+  - **Integration (in-flight priced attempt):** a priced attempt is dispatched while the tenant is
+    uncapped, and a cap is then enabled. Until the attempt settles, the cap's headroom excludes its
+    worst case. It settles at its actual cost, and the difference is freed.
+  - **Integration (repricing sweep):** the sweep is killed partway through a batch. The next run
+    reprices the rest, and each row is counted once.
+  - **Integration (80% alert):** the process exits right after the reservation that crosses 80%
+    commits. After the restart the sweep sends the alert once. Lowering a cap so the month is
+    already past 80% marks the alert due without any new reservation.
 
 ## Owner decisions and actions (not code)
 
