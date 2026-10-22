@@ -1,6 +1,6 @@
 /**
  * D-044 / #1763 — when the owner dismissed the finished "Get found online"
- * checklist (`tenant_settings.get_found_online_dismissed_at`, migration 330).
+ * checklist (`tenant_settings.get_found_online_dismissed_at`, migration 331).
  */
 import type { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';

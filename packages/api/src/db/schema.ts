@@ -8249,6 +8249,29 @@ export const MIGRATIONS = {
     ALTER TABLE review_poll_state
       ADD COLUMN IF NOT EXISTS auth_generation INTEGER NOT NULL DEFAULT 0;
   `,
+
+  // #1750 (D-044) — Get found online checklist facts on tenant_settings.
+  //   presence_path           — the owner's "do you have a website?" answer; NULL = unanswered
+  //   forwarding_mode         — missed calls only (NULL reads as this default) or all calls
+  //   get_found_skipped_items — checklist item ids the owner skipped
+  // The forwarded line and its forwarding check are NOT new: they are 318's
+  // forwarding_source_number / forwarding_verified_at, bound to the line by
+  // forwarding_generation. Skipped-item ids are not CHECKed: the set grows
+  // with each slice and is validated at the request boundary.
+  '332_tenant_settings_get_found': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS presence_path TEXT,
+      ADD COLUMN IF NOT EXISTS forwarding_mode TEXT,
+      ADD COLUMN IF NOT EXISTS get_found_skipped_items TEXT[] NOT NULL DEFAULT '{}';
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_presence_path_check,
+      ADD CONSTRAINT tenant_settings_presence_path_check
+        CHECK (presence_path IN ('own_website', 'google_only', 'neither')) NOT VALID;
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_forwarding_mode_check,
+      ADD CONSTRAINT tenant_settings_forwarding_mode_check
+        CHECK (forwarding_mode IN ('missed_calls', 'all_calls')) NOT VALID;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
