@@ -58,7 +58,7 @@ function json(status: number, body: unknown): Response {
 
 let sends: Array<Record<string, unknown>>;
 
-function stubNetwork(sendReply: Record<string, unknown>) {
+function stubNetwork(sendReply: Record<string, unknown>, sendStatus = 202) {
   sends = [];
   vi.stubGlobal(
     'fetch',
@@ -67,7 +67,7 @@ function stubNetwork(sendReply: Record<string, unknown>) {
       const method = init?.method ?? 'GET';
       if (method === 'POST' && url.pathname === '/api/invoices/i-open/send') {
         sends.push(JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>);
-        return Promise.resolve(json(202, sendReply));
+        return Promise.resolve(json(sendStatus, sendReply));
       }
       if (method === 'GET' && url.pathname === '/api/invoices/i-open') return Promise.resolve(json(200, openInvoice));
       if (method === 'GET' && url.pathname === '/api/invoices') {
@@ -118,20 +118,15 @@ describe('InvoicesPage send sheet — honours the payment choice (S5a-2, U8)', (
     );
   });
 
-  it('unavailable: the line says no pay button went out this time', async () => {
-    stubNetwork({
-      viewUrl: 'https://app.test/pay/tok123',
-      viewToken: 'tok123',
-      channelsSent: [{ channel: 'sms', dispatchId: 'd1' }],
-      paymentCollectionMode: 'unavailable',
-    });
+  it('D-045 — a send refused for want of a pay link shows the reason and never says it was sent', async () => {
+    const message =
+      "Invoice INV-OPEN was not sent: its pay link couldn't be made (the payment provider did not answer). Try again in a moment, or switch to collecting payment on the spot.";
+    stubNetwork({ error: 'PAY_LINK_UNAVAILABLE', message }, 503);
     renderDetail();
     await openSheetAndSend();
 
-    const line = await screen.findByTestId('send-sheet-payment-mode');
-    expect(line.textContent).toBe(
-      "Sent without a pay button. Online payment isn't available right now.",
-    );
+    expect(await screen.findByText(`Send failed: ${message}`)).toBeInTheDocument();
+    expect(screen.queryByTestId('send-sheet-payment-mode')).not.toBeInTheDocument();
   });
 
   it('pay_link: no extra line (today\'s sheet)', async () => {

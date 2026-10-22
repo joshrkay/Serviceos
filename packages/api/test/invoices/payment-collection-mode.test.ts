@@ -9,7 +9,7 @@
  * owner who chose "Collect on the spot". Consumers fail closed on the link
  * and open on delivery.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
 import {
   InMemorySettingsRepository,
@@ -249,6 +249,7 @@ interface SendHarness {
 async function buildSendHarness(opts: {
   mode?: 'pay_link' | 'collect_on_site' | null;
   settingsRepo?: SettingsRepository;
+  ensureInvoicePayLink?: (tenantId: string, invoiceId: string) => Promise<unknown>;
 } = {}): Promise<SendHarness> {
   const customerRepo = new InMemoryCustomerRepository();
   const jobRepo = new InMemoryJobRepository();
@@ -273,6 +274,7 @@ async function buildSendHarness(opts: {
     dispatchRepo: new InMemoryDispatchRepository(),
     auditRepo: audit,
     publicBaseUrl: 'https://app.example.com',
+    ensureInvoicePayLink: opts.ensureInvoicePayLink ?? (async () => undefined),
   });
   return { send, delivery, settings, invoiceRepo, audit, invoice };
 }
@@ -335,21 +337,18 @@ describe('sendInvoice honours payment_collection_mode', () => {
     expect(h.delivery.sentSms[0].body).toContain('collects payment in person');
   });
 
-  it('settings read throws → delivery still happens with no pay CTA, the note, and one audit row (surface send)', async () => {
-    const seeded = new InMemorySettingsRepository();
-    await seeded.create(seedSettings({ paymentCollectionMode: 'pay_link' }));
+  it('settings read throws → D-045: nothing is sent, the owner gets the reason, one audit row (surface send)', async () => {
     const h = await buildSendHarness({ settingsRepo: throwingSettingsRepo(new Error('pool exhausted')) });
 
-    const result = await h.send.sendInvoice({ tenantId: TENANT, invoiceId: h.invoice.id, channel: 'both' });
-    expect(result.paymentCollectionMode).toBe('unavailable');
-    expect(result.channelsSent.map((c) => c.channel).sort()).toEqual(['email', 'sms']);
-    const sms = h.delivery.sentSms[0].body;
-    expect(sms).toContain(`See your invoice: ${result.viewUrl}`);
-    expect(sms).not.toMatch(/pay online/i);
-    // The business name is unknown when settings cannot be read — the note
-    // still reads as plain words, never a placeholder.
-    expect(sms).toContain('Your service team collects payment in person.');
-    expect(h.delivery.sentEmails[0].html).not.toContain('Pay Invoice Online');
+    await expect(
+      h.send.sendInvoice({ tenantId: TENANT, invoiceId: h.invoice.id, channel: 'both' }),
+    ).rejects.toMatchObject({
+      code: 'PAY_LINK_UNAVAILABLE',
+      statusCode: 503,
+      message: expect.stringContaining("its pay link couldn't be made"),
+    });
+    expect(h.delivery.sentSms).toHaveLength(0);
+    expect(h.delivery.sentEmails).toHaveLength(0);
 
     const rows = await h.audit.findByEntity(TENANT, 'invoice', h.invoice.id);
     const unavailable = rows.filter((r) => r.eventType === 'invoice.payment_mode_unavailable');
@@ -359,6 +358,50 @@ describe('sendInvoice honours payment_collection_mode', () => {
       surface: 'send',
       error: 'pool exhausted',
     });
+  });
+
+  it('pay_link → the pay link is made before anything is sent', async () => {
+    const order: string[] = [];
+    const h = await buildSendHarness({
+      mode: 'pay_link',
+      ensureInvoicePayLink: async (tenantId, invoiceId) => {
+        order.push(`link:${tenantId}:${invoiceId}`);
+      },
+    });
+    await h.send.sendInvoice({ tenantId: TENANT, invoiceId: h.invoice.id, channel: 'sms' });
+    expect(order).toEqual([`link:${TENANT}:${h.invoice.id}`]);
+    expect(h.delivery.sentSms).toHaveLength(1);
+  });
+
+  it('pay_link, but the link cannot be made → D-045: nothing is sent and the reason is named', async () => {
+    const h = await buildSendHarness({
+      mode: 'pay_link',
+      ensureInvoicePayLink: async () => {
+        throw new Error('Stripe is not answering');
+      },
+    });
+    await expect(
+      h.send.sendInvoice({ tenantId: TENANT, invoiceId: h.invoice.id, channel: 'both' }),
+    ).rejects.toMatchObject({
+      code: 'PAY_LINK_UNAVAILABLE',
+      message: expect.stringContaining('Stripe is not answering'),
+    });
+    expect(h.delivery.sentSms).toHaveLength(0);
+    expect(h.delivery.sentEmails).toHaveLength(0);
+  });
+
+  it('collect_on_site, or nothing left to pay → no pay link is asked for', async () => {
+    const ensure = vi.fn(async () => undefined);
+    const onSite = await buildSendHarness({ mode: 'collect_on_site', ensureInvoicePayLink: ensure });
+    await onSite.send.sendInvoice({ tenantId: TENANT, invoiceId: onSite.invoice.id, channel: 'sms' });
+
+    const paid = await buildSendHarness({ mode: 'pay_link', ensureInvoicePayLink: ensure });
+    await paid.invoiceRepo.update(TENANT, paid.invoice.id, { amountDueCents: 0 });
+    await paid.send.sendInvoice({ tenantId: TENANT, invoiceId: paid.invoice.id, channel: 'sms' });
+
+    expect(ensure).not.toHaveBeenCalled();
+    expect(onSite.delivery.sentSms).toHaveLength(1);
+    expect(paid.delivery.sentSms).toHaveLength(1);
   });
 });
 
@@ -861,6 +904,8 @@ describe('owner invoice routes honour payment_collection_mode', () => {
       dispatchRepo: new InMemoryDispatchRepository(),
       auditRepo: audit,
       publicBaseUrl: 'https://app.example.com',
+      ensureInvoicePayLink: (tenantId, invoiceId) =>
+        createInvoicePaymentLink(tenantId, invoiceId, { invoiceRepo, provider, settingsRepo: settings, auditRepo: audit }),
     });
     const app = express();
     app.use(express.json());
@@ -882,7 +927,7 @@ describe('owner invoice routes honour payment_collection_mode', () => {
         provider,
       ),
     );
-    return { app, invoice, audit, provider, delivery };
+    return { app, invoice, invoiceRepo, audit, provider, delivery };
   }
 
   it('POST /:id/send records the send-time mode on invoice.sent', async () => {
@@ -903,15 +948,25 @@ describe('owner invoice routes honour payment_collection_mode', () => {
     }
   });
 
-  it('POST /:id/send on an unreadable policy still 202s, records unavailable, and audits the occurrence', async () => {
+  it('POST /:id/send on an unreadable policy → D-045: 503 with the reason, nothing sent, the occurrence audited', async () => {
     const h = await buildOwnerApp(null, throwingSettingsRepo(new Error('db down')));
     const res = await request(h.app).post(`/api/invoices/${h.invoice.id}/send`).send({ channel: 'sms' });
-    expect(res.status).toBe(202);
-    expect(res.body.paymentCollectionMode).toBe('unavailable');
-    expect(h.delivery.sentSms[0].body).not.toMatch(/pay online/i);
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ error: 'PAY_LINK_UNAVAILABLE' });
+    expect(res.body.message).toContain('was not sent');
+    expect(h.delivery.sentSms).toHaveLength(0);
     const rows = await h.audit.findByEntity(TENANT, 'invoice', h.invoice.id);
-    expect(rows.find((r) => r.eventType === 'invoice.sent')?.metadata).toMatchObject({ paymentCollectionMode: 'unavailable' });
+    expect(rows.find((r) => r.eventType === 'invoice.sent')).toBeUndefined();
     expect(rows.filter((r) => r.eventType === 'invoice.payment_mode_unavailable')).toHaveLength(1);
+  });
+
+  it('POST /:id/send in pay_link mode mints the pay link before the text goes out', async () => {
+    const h = await buildOwnerApp('pay_link');
+    const res = await request(h.app).post(`/api/invoices/${h.invoice.id}/send`).send({ channel: 'sms' });
+    expect(res.status).toBe(202);
+    expect(h.provider.mintRequests).toHaveLength(1);
+    expect((await h.invoiceRepo.findById(TENANT, h.invoice.id))?.stripePaymentLinkUrl).toMatch(/^https:\/\/pay\.mock\.com\//);
+    expect(h.delivery.sentSms).toHaveLength(1);
   });
 
   it('POST /:id/payment-link → 409 COLLECT_ON_SITE / 503 PAYMENT_MODE_UNAVAILABLE, never a mint', async () => {

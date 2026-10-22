@@ -82,7 +82,10 @@ describe('Postgres integration — payment_collection_mode at the pay surfaces (
   let collectJobId: string;
   let payLinkJobId: string;
 
-  function buildSendService(settings: PgSettingsRepository): SendService {
+  function buildSendService(
+    settings: PgSettingsRepository,
+    ensureInvoicePayLink: (tenantId: string, invoiceId: string) => Promise<unknown> = async () => undefined,
+  ): SendService {
     return new SendService({
       delivery,
       estimateRepo: new PgEstimateRepository(pool),
@@ -93,6 +96,7 @@ describe('Postgres integration — payment_collection_mode at the pay surfaces (
       dispatchRepo: new PgDispatchRepository(pool),
       auditRepo,
       publicBaseUrl: 'https://app.example.com',
+      ensureInvoicePayLink,
     });
   }
 
@@ -421,25 +425,39 @@ describe('Postgres integration — payment_collection_mode at the pay surfaces (
     });
   });
 
-  it('read failure (real Postgres error): the send still goes out fail-closed, the mint 503s, nothing stored, the audit row is pinned', async () => {
+  it('D-045 pay_link send: the real mint stores the link before the text goes out', async () => {
+    const invoice = await seedOpenInvoice(payLinkTenant, payLinkJobId, 'SENDMINT-P');
+    const provider = new CountingProvider();
+    const send = buildSendService(settingsRepo, (tenantId, invoiceId) =>
+      createInvoicePaymentLink(tenantId, invoiceId, { invoiceRepo, provider, settingsRepo, auditRepo }),
+    );
+    await send.sendInvoice({ tenantId: payLinkTenant.tenantId, invoiceId: invoice.id, channel: 'sms' });
+
+    expect(provider.mintRequests).toHaveLength(1);
+    expect((await linkColumns(payLinkTenant.tenantId, invoice.id)).stripe_payment_link_url).toMatch(
+      /^https:\/\/pay\.mock\.com\//,
+    );
+    expect(delivery.sentSms.find((m) => m.body.includes('INV-SENDMINT-P'))?.body).toMatch(/pay online/i);
+  });
+
+  it('read failure (real Postgres error): D-045 the send is refused, the mint 503s, nothing stored, the audit row is pinned', async () => {
     // The fault really is a Postgres error from the repo's own query.
     const faulted = await readPaymentCollectionMode(faultSettingsRepo, payLinkTenant.tenantId);
     expect(faulted.ok).toBe(false);
     expect(String((faulted as { error: unknown }).error)).toContain(FAULT_MESSAGE);
 
-    // Even the pay_link tenant: a failed read is never read as pay_link.
+    // Even the pay_link tenant: a failed read is never read as pay_link, and
+    // the invoice is not sent without its pay link (D-045).
     const invoice = await seedOpenInvoice(payLinkTenant, payLinkJobId, 'FAULT-P');
     const faultSend = buildSendService(faultSettingsRepo);
-    const result = await faultSend.sendInvoice({
-      tenantId: payLinkTenant.tenantId,
-      invoiceId: invoice.id,
-      channel: 'sms',
-    });
-    expect(result.paymentCollectionMode).toBe('unavailable');
-    const sms = delivery.sentSms.find((m) => m.body.includes('INV-FAULT-P'))!;
-    expect(sms.body).toContain(`See your invoice: ${result.viewUrl}`);
-    expect(sms.body).toContain('Your service team collects payment in person.');
-    expect(sms.body).not.toMatch(/pay online/i);
+    await expect(
+      faultSend.sendInvoice({
+        tenantId: payLinkTenant.tenantId,
+        invoiceId: invoice.id,
+        channel: 'sms',
+      }),
+    ).rejects.toMatchObject({ code: 'PAY_LINK_UNAVAILABLE', statusCode: 503 });
+    expect(delivery.sentSms.find((m) => m.body.includes('INV-FAULT-P'))).toBeUndefined();
 
     const provider = new CountingProvider();
     await expect(

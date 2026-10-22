@@ -447,10 +447,9 @@ function InvoiceLineItems({ items, editable, onChange, totals, amountPaidCents, 
 // S5a-2 (U8) — the line the sheet shows after a send that carried no pay
 // button (POST /:id/send reports the choice it applied). `null` = today's
 // sheet, nothing extra.
-const SENT_MODE_LINES: Record<'pay_link' | 'collect_on_site' | 'unavailable', string | null> = {
+const SENT_MODE_LINES: Record<'pay_link' | 'collect_on_site', string | null> = {
   pay_link: null,
   collect_on_site: 'Sent. Your customer sees the bill with a note that you collect payment in person.',
-  unavailable: "Sent without a pay button. Online payment isn't available right now.",
 };
 
 function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, apiId }: {
@@ -485,7 +484,9 @@ function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, a
   type SendResp = {
     viewUrl: string;
     viewToken: string;
-    paymentCollectionMode?: 'pay_link' | 'collect_on_site' | 'unavailable';
+    // D-045 — a send whose payment setting can't be read is refused (503 with
+    // the reason), so there is no view-only "unavailable" outcome.
+    paymentCollectionMode?: 'pay_link' | 'collect_on_site';
   };
   const { mutate: sendInvoice } = useMutation<SendBody, SendResp>(
     'POST',

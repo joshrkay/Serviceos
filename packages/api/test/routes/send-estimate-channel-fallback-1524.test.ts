@@ -162,6 +162,7 @@ async function execute(w: Awaited<ReturnType<typeof world>>, proposal: Proposal)
     settingsRepo,
     dispatchRepo: new InMemoryDispatchRepository(),
     publicBaseUrl: 'https://app.example.com',
+    ensureInvoicePayLink: async () => undefined,
   });
   const handler = new SendEstimateExecutionHandler(new SendServiceEstimateDeliveryProvider(sendService));
   const result = await handler.execute(proposal, { tenantId: TENANT, executedBy: USER });
@@ -187,17 +188,26 @@ describe('#1524 — send_estimate with no channel named, phone-only customer', (
   });
 });
 
-describe('#1524 — send_estimate with no channel named, email on file', () => {
-  it('approves and the executor emails it (email wins over the phone)', async () => {
-    const w = await world({ email: 'casey@example.com', primaryPhone: PHONE, smsConsent: true });
+describe('D-045 — send_estimate with no channel named, phone and email on file', () => {
+  async function run(customer: { email?: string; primaryPhone?: string; smsConsent?: boolean }) {
+    const w = await world(customer);
     const checks = [sendRecipientReferenceCheck(w)];
     const { proposal } = await draftFromChat(w, checks);
     const approved = await approveProposal(w.proposalRepo, TENANT, proposal.id, USER, 'owner', undefined, 'ui', {
       referenceChecks: checks,
     });
+    return execute(w, approved);
+  }
 
-    const { result, delivery } = await execute(w, approved);
+  it('a customer who agreed to texts gets a text (text first, superseding #1524 email-first)', async () => {
+    const { result, delivery } = await run({ email: 'casey@example.com', primaryPhone: PHONE, smsConsent: true });
+    expect(result).toMatchObject({ success: true });
+    expect(delivery.sentEmails).toHaveLength(0);
+    expect(delivery.sentSms.map((m) => m.to)).toEqual([PHONE]);
+  });
 
+  it('a customer who has not agreed to texts gets the email', async () => {
+    const { result, delivery } = await run({ email: 'casey@example.com', primaryPhone: PHONE, smsConsent: false });
     expect(result).toMatchObject({ success: true });
     expect(delivery.sentSms).toHaveLength(0);
     expect(delivery.sentEmails.map((m) => m.to)).toEqual(['casey@example.com']);
