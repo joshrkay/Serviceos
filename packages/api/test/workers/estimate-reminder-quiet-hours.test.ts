@@ -99,6 +99,7 @@ async function world(opts: { email?: string; channel?: 'both' }) {
     settingsRepo,
     dispatchRepo,
     publicBaseUrl: 'https://app.example.com',
+    ensureInvoicePayLink: async () => undefined,
   });
   const sweep = () =>
     runEstimateReminderSweep({

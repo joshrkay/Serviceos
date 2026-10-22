@@ -694,8 +694,9 @@ export class SendInvoiceTaskHandler implements TaskHandler {
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {
-      // #1524 — no channel named is 'auto' (email on file, else a text to the
-      // phone), never a silent 'email' a phone-only customer can't receive.
+      // #1524 / D-045 — no channel named is 'auto' (a text when the customer
+      // can be texted, else their email), never a silent 'email' a
+      // phone-only customer can't receive.
       channel: ee.sendChannel ?? 'auto',
     };
     const missing: string[] = [];
@@ -1019,8 +1020,9 @@ export class SendEstimateNudgeTaskHandler implements TaskHandler {
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {
-      // #1528 — no channel named is 'auto' (email on file, else a text to the
-      // phone), the same rule as send_invoice / send_estimate — never a fixed
+      // #1528 / D-045 — no channel named is 'auto' (a text when the customer
+      // can be texted, else their email), the same rule as send_invoice /
+      // send_estimate — never a fixed
       // text an email-only customer can't receive.
       channel: ee.sendChannel ?? 'auto',
     };

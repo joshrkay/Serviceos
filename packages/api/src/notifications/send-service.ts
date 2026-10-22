@@ -4,7 +4,7 @@ import { EstimateRepository } from '../estimates/estimate';
 import { InvoiceRepository, InvoiceStatus } from '../invoices/invoice';
 import { JobRepository } from '../jobs/job';
 import { SettingsRepository } from '../settings/settings';
-import { ValidationError, NotFoundError, ConflictError } from '../shared/errors';
+import { AppError, ValidationError, NotFoundError, ConflictError } from '../shared/errors';
 import { DispatchRepository } from './dispatch-repository';
 import {
   EmailMessage,
@@ -22,28 +22,37 @@ import {
   renderPortalLinkSms,
 } from './templates';
 import { DeliveryError } from './notification-errors';
+import { createLogger } from '../logging/logger';
 import { resolveCustomerLanguage } from '../i18n/resolve-language';
 import type { AuditRepository } from '../audit/audit';
-import {
-  auditPaymentModeUnavailable,
-  readPaymentCollectionMode,
-  type PaymentCollectionModeView,
-} from '../invoices/payment-collection-mode';
+import { auditPaymentModeUnavailable, readPaymentCollectionMode } from '../invoices/payment-collection-mode';
+import type { PaymentCollectionMode } from '../settings/settings';
+
+const sendLogger = createLogger({ service: 'send-service', environment: process.env.NODE_ENV || 'dev' });
 
 export type SendChannel = 'sms' | 'email' | 'both' | 'auto';
 
 /**
- * #1524 — the channel a send with no channel named goes out on: the
- * customer's email when one is on file, else a text to their phone; nothing
- * when neither is on file. The one rule the approval-time recipient check and
- * the send itself share.
+ * D-045 — the channel a send with no channel named goes out on: a text when
+ * the customer has a phone on file and agreed to texts; otherwise their
+ * email; otherwise a text to whatever phone is on file (the gate then
+ * refuses it with the reason); nothing when neither is on file. An opt-out
+ * is left to the delivery gate, which reads the current consent ledger (a
+ * START after a STOP clears it there while `consentStatus` stays 'revoked'),
+ * and a text it refuses falls back to the email (`withEmailFallback`). The
+ * one rule the approval-time recipient check and the send itself share.
+ * Supersedes #1524's email-first default.
  */
 export function defaultSendChannel(customer: {
   email?: string | null;
   primaryPhone?: string | null;
+  smsConsent?: boolean;
 }): 'email' | 'sms' | undefined {
-  if (typeof customer.email === 'string' && customer.email.trim().length > 0) return 'email';
-  if (typeof customer.primaryPhone === 'string' && customer.primaryPhone.trim().length > 0) return 'sms';
+  const hasPhone = typeof customer.primaryPhone === 'string' && customer.primaryPhone.trim().length > 0;
+  const hasEmail = typeof customer.email === 'string' && customer.email.trim().length > 0;
+  if (hasPhone && customer.smsConsent === true) return 'sms';
+  if (hasEmail) return 'email';
+  if (hasPhone) return 'sms';
   return undefined;
 }
 
@@ -167,11 +176,11 @@ export interface SendResult {
   viewToken: string;
   /**
    * S5a-1 (U8) — invoice sends only: the payment policy applied AT SEND
-   * TIME (`pay_link` CTA, `collect_on_site` note, or `unavailable` when the
-   * read failed and the send went out fail-closed with no pay CTA). Routes
-   * record it on their `invoice.sent` audit event.
+   * TIME (`pay_link` CTA or `collect_on_site` note). Routes record it on
+   * their `invoice.sent` audit event. D-045 — a policy that can't be read
+   * refuses the send, so there is no view-only outcome.
    */
-  paymentCollectionMode?: PaymentCollectionModeView;
+  paymentCollectionMode?: PaymentCollectionMode;
   channelsSent: Array<{
     channel: 'sms' | 'email';
     recipient: string;
@@ -192,9 +201,16 @@ export interface SendServiceDeps {
   /**
    * S5a-1 (U8) — optional only for legacy harnesses: the invoice send audits
    * `invoice.payment_mode_unavailable` (surface `send`) when the policy read
-   * fails and the message goes out without a pay CTA.
+   * fails and the send is refused.
    */
   auditRepo?: AuditRepository;
+  /**
+   * D-045 — makes (or finds) the invoice's hosted pay link; throws when it
+   * can't. Called before an invoice in `pay_link` mode with a balance due is
+   * sent, so the customer never gets an invoice they can't pay
+   * (`createInvoicePaymentLink` in app.ts).
+   */
+  ensureInvoicePayLink: (tenantId: string, invoiceId: string) => Promise<unknown>;
   publicBaseUrl: string;
 }
 
@@ -331,9 +347,16 @@ export class SendService {
       );
       return channels.map((t) => (t === sms ? smsResult : rest.shift()!));
     };
-    const results = smsTarget
+    const firstResults = smsTarget
       ? await smsFirst(smsTarget)
       : await Promise.allSettled(channels.map((t) => dispatchTo(t)));
+    const { tried, results } = await withEmailFallback({
+      channel: input.channel,
+      email: input.recipientEmail ?? customer.email,
+      channels,
+      results: firstResults,
+      dispatch: dispatchTo,
+    });
 
     const sent: SendResult['channelsSent'] = [];
     const errors: string[] = [];
@@ -341,7 +364,7 @@ export class SendService {
       if (r.status === 'fulfilled') {
         sent.push(r.value);
       } else {
-        const target = channels[i];
+        const target = tried[i];
         errors.push(
           `${target.channel} to ${target.recipient}: ${
             mapDeliveryErrorForClient(r.reason)
@@ -438,25 +461,54 @@ export class SendService {
     }
 
     // S5a-1 (U8) — ONE settings read decides both the business context and
-    // the payment policy the message renders. A read that throws is not an
-    // unset key: the send still goes out (fail OPEN on delivery) but with
-    // the view-only CTA and the in-person note (fail CLOSED on the link),
-    // and the occurrence is audited. It is never read as `pay_link`.
+    // the payment policy the message renders. D-045 — an invoice never goes
+    // out without the pay link its policy calls for: a read that throws
+    // refuses the send (it used to go out view-only), and in `pay_link` mode
+    // with a balance due the link is made now, before anything is sent. If it
+    // can't be made the send is refused with the reason, and the caller shows
+    // it (an owner's send) or records it (an automatic one).
     const modeRead = await readPaymentCollectionMode(this.deps.settingsRepo, input.tenantId);
-    let paymentCollectionMode: PaymentCollectionModeView;
-    let settingsRow: Awaited<ReturnType<SettingsRepository['findByTenant']>>;
-    if (modeRead.ok) {
-      paymentCollectionMode = modeRead.mode;
-      settingsRow = modeRead.settings;
-    } else {
-      paymentCollectionMode = 'unavailable';
-      settingsRow = null;
+    if (!modeRead.ok) {
       await auditPaymentModeUnavailable(this.deps.auditRepo, {
         tenantId: input.tenantId,
         invoiceId: invoice.id,
         surface: 'send',
         error: modeRead.error,
       });
+      throw new PayLinkUnavailableError(
+        invoice.invoiceNumber,
+        "this business's payment setting couldn't be read",
+      );
+    }
+    const paymentCollectionMode = modeRead.mode;
+    const settingsRow = modeRead.settings;
+    // Who it goes to is settled before a pay link is made, so a send with no
+    // recipient never mints a Stripe link it then rolls back.
+    const channels = resolveChannels({
+      channel: input.channel,
+      customer,
+      recipientPhone: input.recipientPhone,
+      recipientEmail: input.recipientEmail,
+    });
+    if (paymentCollectionMode === 'pay_link' && invoice.amountDueCents > 0) {
+      try {
+        await this.deps.ensureInvoicePayLink(input.tenantId, invoice.id);
+      } catch (err) {
+        // Our own refusals (AppError) are written for the owner; anything else
+        // is a raw provider error (Stripe's HTTP body, ids), which stays in the
+        // server log and never reaches the screen.
+        if (!(err instanceof AppError)) {
+          sendLogger.warn('invoice pay link could not be made; send refused', {
+            tenantId: input.tenantId,
+            invoiceId: invoice.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        throw new PayLinkUnavailableError(
+          invoice.invoiceNumber,
+          err instanceof AppError ? err.message : 'the payment provider did not answer',
+        );
+      }
     }
     const businessName = settingsRow?.businessName ?? 'Your service team';
     const language = resolveCustomerLanguage({
@@ -478,57 +530,54 @@ export class SendService {
       });
     }
 
-    const channels = resolveChannels({
-      channel: input.channel,
-      customer,
-      recipientPhone: input.recipientPhone,
-      recipientEmail: input.recipientEmail,
-    });
-
     const sendStartedAt = Date.now();
-    const results = await Promise.allSettled(
-      channels.map((target) =>
-        this.dispatchOne({
-          tenantId: input.tenantId,
-          entityType: 'invoice',
-          entityId: invoice.id,
-          target,
-          customerSmsConsent: customer.smsConsent,
-          idempotencyKey: this.buildIdempotencyKey(
-            'invoice',
-            invoice.id,
-            target.channel,
-            target.recipient,
-            input.idempotencyContext ?? 'default',
-            sendStartedAt
-          ),
-          render: () =>
-            target.channel === 'sms'
-              ? this.renderInvoiceSmsMessage(target.recipient, {
-                  customerName: customer.displayName,
-                  invoiceNumber: invoice.invoiceNumber,
-                  totalCents: invoice.totals.totalCents,
-                  businessName,
-                  viewUrl,
-                  dueDateIso: invoice.dueDate?.toISOString(),
-                  customMessage: input.customMessage,
-                  language,
-                  paymentCollectionMode,
-                })
-              : this.renderInvoiceEmailMessage(target.recipient, {
-                  customerName: customer.displayName,
-                  invoiceNumber: invoice.invoiceNumber,
-                  totalCents: invoice.totals.totalCents,
-                  businessName,
-                  viewUrl,
-                  dueDateIso: invoice.dueDate?.toISOString(),
-                  customMessage: input.customMessage,
-                  language,
-                  paymentCollectionMode,
-                }),
-        })
-      )
-    );
+    const dispatchTo = (target: ChannelTarget) =>
+      this.dispatchOne({
+        tenantId: input.tenantId,
+        entityType: 'invoice',
+        entityId: invoice.id,
+        target,
+        customerSmsConsent: customer.smsConsent,
+        idempotencyKey: this.buildIdempotencyKey(
+          'invoice',
+          invoice.id,
+          target.channel,
+          target.recipient,
+          input.idempotencyContext ?? 'default',
+          sendStartedAt
+        ),
+        render: () =>
+          target.channel === 'sms'
+            ? this.renderInvoiceSmsMessage(target.recipient, {
+                customerName: customer.displayName,
+                invoiceNumber: invoice.invoiceNumber,
+                totalCents: invoice.totals.totalCents,
+                businessName,
+                viewUrl,
+                dueDateIso: invoice.dueDate?.toISOString(),
+                customMessage: input.customMessage,
+                language,
+                paymentCollectionMode,
+              })
+            : this.renderInvoiceEmailMessage(target.recipient, {
+                customerName: customer.displayName,
+                invoiceNumber: invoice.invoiceNumber,
+                totalCents: invoice.totals.totalCents,
+                businessName,
+                viewUrl,
+                dueDateIso: invoice.dueDate?.toISOString(),
+                customMessage: input.customMessage,
+                language,
+                paymentCollectionMode,
+              }),
+      });
+    const { tried, results } = await withEmailFallback({
+      channel: input.channel,
+      email: input.recipientEmail ?? customer.email,
+      channels,
+      results: await Promise.allSettled(channels.map((t) => dispatchTo(t))),
+      dispatch: dispatchTo,
+    });
 
     const sent: SendResult['channelsSent'] = [];
     const errors: string[] = [];
@@ -536,7 +585,7 @@ export class SendService {
       if (r.status === 'fulfilled') {
         sent.push(r.value);
       } else {
-        const target = channels[i];
+        const target = tried[i];
         errors.push(
           `${target.channel} to ${target.recipient}: ${
             mapDeliveryErrorForClient(r.reason)
@@ -546,9 +595,7 @@ export class SendService {
     });
 
     if (sent.length === 0) {
-      throw new ValidationError(
-        `Invoice send failed on all channels: ${errors.join('; ')}`
-      );
+      throw new InvoiceNotDeliveredError(errors);
     }
 
     // Codex P1 #2 follow-up — see the matching call in sendEstimate above.
@@ -873,9 +920,67 @@ interface ChannelTarget {
   recipient: string;
 }
 
+/**
+ * D-045 — an invoice is not sent without the pay link its policy calls for.
+ * 503: the cause (a settings read, the payment provider) is usually brief, so
+ * the owner can try again; the message says what happened and what was not
+ * sent.
+ */
+export class PayLinkUnavailableError extends AppError {
+  constructor(invoiceNumber: string, reason: string) {
+    super(
+      'PAY_LINK_UNAVAILABLE',
+      `Invoice ${invoiceNumber} was not sent: its pay link couldn't be made (${reason}). Try again in a moment, or switch to collecting payment on the spot.`,
+      503,
+    );
+    this.name = 'PayLinkUnavailableError';
+  }
+}
+
+/**
+ * Every channel of an invoice send failed. By then the send may have made the
+ * invoice's pay link and its view token, so the owner route commits with this
+ * error (res.locals.forceCommit): a rollback would leave a live Stripe link no
+ * invoice points at, and the retry would mint another.
+ */
+export class InvoiceNotDeliveredError extends ValidationError {
+  constructor(errors: string[]) {
+    super(`Invoice send failed on all channels: ${errors.join('; ')}`);
+    this.name = 'InvoiceNotDeliveredError';
+  }
+}
+
+type ChannelSent = SendResult['channelsSent'][number];
+
+/**
+ * D-045 — a send with no channel named goes by text first and falls back to
+ * email: when that text is refused (no consent, opted out, do-not-contact, a
+ * cap, texting switched off) and an email is on file, the email goes instead.
+ * A text held for quiet hours is not refused, so it does not fall back.
+ */
+async function withEmailFallback(args: {
+  channel: SendChannel;
+  email: string | undefined;
+  channels: ChannelTarget[];
+  results: PromiseSettledResult<ChannelSent>[];
+  dispatch: (target: ChannelTarget) => Promise<ChannelSent>;
+}): Promise<{ tried: ChannelTarget[]; results: PromiseSettledResult<ChannelSent>[] }> {
+  const unchanged = { tried: args.channels, results: args.results };
+  if (args.channel !== 'auto' || args.channels.length !== 1 || args.channels[0].channel !== 'sms') {
+    return unchanged;
+  }
+  const [only] = args.results;
+  if (only.status !== 'rejected' || !(only.reason instanceof SmsSuppressedError)) return unchanged;
+  const email = args.email?.trim();
+  if (!email) return unchanged;
+  const target: ChannelTarget = { channel: 'email', recipient: email };
+  const [emailResult] = await Promise.allSettled([args.dispatch(target)]);
+  return { tried: [...args.channels, target], results: [...args.results, emailResult] };
+}
+
 function resolveChannels(args: {
   channel: SendChannel;
-  customer: { primaryPhone?: string; email?: string };
+  customer: Parameters<typeof defaultSendChannel>[0];
   recipientPhone?: string;
   recipientEmail?: string;
 }): ChannelTarget[] {

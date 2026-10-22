@@ -77,6 +77,7 @@ async function sweepFor(customer: { email?: string; primaryPhone?: string; smsCo
     settingsRepo,
     dispatchRepo: new InMemoryDispatchRepository(),
     publicBaseUrl: 'https://app.example.com',
+    ensureInvoicePayLink: async () => undefined,
   });
   const auditRepo = new InMemoryAuditRepository();
   const result = await runEstimateReminderSweep({

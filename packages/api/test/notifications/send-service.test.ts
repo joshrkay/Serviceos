@@ -165,6 +165,7 @@ async function buildHarness(): Promise<Harness> {
     settingsRepo: settings,
     dispatchRepo: dispatch,
     publicBaseUrl: 'https://app.example.com',
+    ensureInvoicePayLink: async () => undefined,
   });
   return { send, delivery, dispatch, customer, job, estimate, invoice, settings, dnc };
 }
@@ -488,6 +489,7 @@ describe('SendService — failure audit and idempotency', () => {
       settingsRepo: h.settings,
       dispatchRepo: h.dispatch,
       publicBaseUrl: 'https://app.example.com',
+      ensureInvoicePayLink: async () => undefined,
     });
 
     const result = await send.sendEstimate({
