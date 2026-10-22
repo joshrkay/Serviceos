@@ -261,6 +261,8 @@ describe('runThankYouSmsSweep', () => {
       consent: { smsConsent: true, customerId: 'cust-1' },
       quietHours: 'defer',
       idempotencyKey: `thank_you_sms:${job.id}`,
+      // The gate calls this right before the provider: the claim's 'sending' step.
+      onProviderStarting: expect.any(Function),
     });
 
     const stamped = await jobRepo.findById(TENANT, job.id);

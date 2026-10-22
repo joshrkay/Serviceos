@@ -154,6 +154,63 @@ describe('Postgres integration — outbound messaging', () => {
     expect(delivery.sentSms).toHaveLength(0);
   });
 
+  it('an already-sent key reports sent even after the customer is gone', async () => {
+    const tenant = await createTestTenant(pool);
+    const { customerId } = await seedCustomer(tenant, true);
+    const { messaging, delivery } = build();
+    const text = {
+      tenantId: tenant.tenantId,
+      recipient: { kind: 'customer' as const, customerId },
+      purpose: 'automated_nudge' as const,
+      dedupe: { messageKind: 'om_resent', recordId: customerId },
+      body: 'Thanks for choosing us',
+    };
+
+    expect((await messaging.sendText(text)).status).toBe('sent');
+    await pool.query(`DELETE FROM customers WHERE id = $1`, [customerId]);
+
+    expect(await messaging.sendText(text)).toEqual({ status: 'sent', duplicate: 'sent' });
+    expect(delivery.sentSms).toHaveLength(1);
+  });
+
+  it('the claim stays reclaimable until the gate reaches the provider', async () => {
+    const tenant = await createTestTenant(pool);
+    const { customerId } = await seedCustomer(tenant, true);
+    const claimKey = `om_boundary:${customerId}`;
+    const statuses: string[] = [];
+    const readStatus = async () =>
+      (
+        await pool.query(`SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`, [
+          tenant.tenantId,
+          claimKey,
+        ])
+      ).rows[0].status as string;
+    const inner = new InMemoryDeliveryProvider();
+    // Stands in for the gate: its policy reads happen first, then the hook.
+    const gateLike = {
+      sendSms: async (m: Parameters<InMemoryDeliveryProvider['sendSms']>[0]) => {
+        statuses.push(await readStatus());
+        await m.onProviderStarting?.();
+        statuses.push(await readStatus());
+        return inner.sendSms(m);
+      },
+      sendEmail: inner.sendEmail.bind(inner),
+    };
+    const { messaging } = build(gateLike as unknown as InMemoryDeliveryProvider);
+
+    const outcome = await messaging.sendText({
+      tenantId: tenant.tenantId,
+      recipient: { kind: 'customer', customerId },
+      purpose: 'transactional',
+      dedupe: { messageKind: 'om_boundary', recordId: customerId },
+      body: 'Your tech is on the way',
+    });
+
+    expect(outcome.status).toBe('sent');
+    expect(statuses).toEqual(['claimed', 'sending']);
+    expect(await readStatus()).toBe('sent');
+  });
+
   it('a provider failure releases the claim so a retry sends', async () => {
     const tenant = await createTestTenant(pool);
     const { customerId } = await seedCustomer(tenant, true);

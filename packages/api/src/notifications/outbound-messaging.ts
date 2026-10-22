@@ -42,7 +42,7 @@ import {
   type ConsentLedgerLookup,
   type SmsSuppressionReason,
 } from './gated-message-delivery';
-import { withSendClaim } from './send-claim-ledger';
+import { readSendClaimStatus, withSendClaim } from './send-claim-ledger';
 
 /** Why a text is going out. Decides quiet hours and how strict consent is. */
 export type MessagePurpose = 'transactional' | 'reply' | 'automated_nudge' | 'marketing';
@@ -128,7 +128,11 @@ const WAITS_FOR_DAYTIME: ReadonlySet<MessagePurpose> = new Set<MessagePurpose>([
 ]);
 
 export interface OutboundMessagingDeps {
-  /** The gated delivery object (`GatedMessageDelivery` in app.ts). */
+  /**
+   * The gated delivery object (`GatedMessageDelivery` in app.ts). It must call
+   * a message's `onProviderStarting` right before the provider send; that is
+   * where the dedupe claim becomes `'sending'`.
+   */
   delivery: MessageDeliveryProvider;
   customerRepo: Pick<CustomerRepository, 'findById'>;
   dncRepo: Pick<DncRepository, 'isOnDnc'>;
@@ -225,12 +229,20 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
   }
 
   async function sendText(text: OutboundText): Promise<SendOutcome> {
+    const claimKey = outboundClaimKey(text.dedupe);
     let addressed: SmsMessage | SendOutcome;
     try {
+      // A text that already went out is reported as sent before anything else
+      // is looked up: the customer may have lost their number or opted out
+      // since, and a retry by a caller that crashed before recording the
+      // first send must not record a delivered text as blocked.
+      if (deps.pool && (await readSendClaimStatus(deps.pool, text.tenantId, claimKey)) === 'sent') {
+        return { status: 'sent', duplicate: 'sent' };
+      }
       addressed = await address(text);
     } catch (err) {
-      // A failed customer, DNC or ledger read is not a verdict: nothing was
-      // sent, and a later attempt may get through.
+      // A failed claim, customer, DNC or ledger read is not a verdict: nothing
+      // was sent, and a later attempt may get through.
       const outcome = blocked('send_failed', err instanceof Error ? err.message : String(err));
       deps.logger.warn('Outbound text recipient lookup failed', logFields(text, outcome));
       return outcome;
@@ -239,7 +251,6 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
       deps.logger.info('Outbound text blocked before sending', logFields(text, addressed));
       return addressed;
     }
-    const claimKey = outboundClaimKey(text.dedupe);
     const message: SmsMessage = { ...addressed, idempotencyKey: claimKey };
 
     let outcome: SendOutcome;
@@ -250,10 +261,23 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
       if (!deps.pool) {
         outcome = { status: 'sent', delivery: await deps.delivery.sendSms(message) };
       } else {
-        const claim = await withSendClaim(deps.pool, text.tenantId, claimKey, async () => {
-          delivered = await deps.delivery.sendSms(message);
-          return delivered;
-        });
+        // Deferred: the claim stays 'claimed' (reclaimable if the process
+        // dies) through the gate's consent, DNC, window and cap reads, and
+        // becomes 'sending' only when the gate is about to call the provider.
+        const claim = await withSendClaim(
+          deps.pool,
+          text.tenantId,
+          claimKey,
+          async (_markProviderAccepted, markProviderStarting) => {
+            delivered = await deps.delivery.sendSms({
+              ...message,
+              onProviderStarting: markProviderStarting,
+            });
+            return delivered;
+          },
+          undefined,
+          { deferSendingUntilProviderStart: true },
+        );
         outcome =
           claim.outcome === 'sent'
             ? { status: 'sent', delivery: claim.result }

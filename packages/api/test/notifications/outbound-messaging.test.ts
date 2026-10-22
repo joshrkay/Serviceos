@@ -249,6 +249,29 @@ describe('outbound messaging', () => {
     expect(switchedOff).toEqual({ status: 'blocked', reason: 'channel_disabled', permanent: false });
   });
 
+  it('reports an already-sent key as sent before looking up the recipient', async () => {
+    // The customer is gone since the first send; a retry must still learn it went out.
+    const pool = {
+      query: vi.fn(async (sql: string) =>
+        sql.includes('SELECT status') ? { rows: [{ status: 'sent' }], rowCount: 1 } : { rows: [], rowCount: 0 },
+      ),
+    } as unknown as Pool;
+    const outbound = createOutboundMessaging({
+      delivery: { sendSms, sendEmail: vi.fn() } as unknown as MessageDeliveryProvider,
+      customerRepo,
+      dncRepo,
+      consentLedger: { listByPhone: async () => [] },
+      pool,
+      logger,
+    });
+
+    expect(await outbound.sendText(toCustomer('automated_nudge'))).toEqual({
+      status: 'sent',
+      duplicate: 'sent',
+    });
+    expect(sendSms).not.toHaveBeenCalled();
+  });
+
   it('reports a delivered text as sent even when finalizing its dedupe claim fails', async () => {
     await customerRepo.create(makeCustomer());
     // Wins the claim and the 'sending' step; the final "mark sent" write fails.

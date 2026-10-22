@@ -65,7 +65,7 @@ const SUPPRESSION_AUDIT_REASON: Partial<Record<MessageBlockReason, string>> = {
 };
 import { resolveCustomerLanguage } from '../i18n/resolve-language';
 import { renderThankYouSms } from '../notifications/templates';
-import { withSendClaim, readSendClaimStatus } from '../notifications/send-claim-ledger';
+import { withSendClaim } from '../notifications/send-claim-ledger';
 
 const HOUR_MS = 60 * 60 * 1000;
 
@@ -271,12 +271,9 @@ type SendOutcome = 'sent' | 'suppressed' | 'deferred';
  * the same key this worker claimed before it moved there.
  */
 const THANK_YOU_MESSAGE_KIND = 'thank_you_sms';
-function thankYouClaimKey(jobId: string): string {
-  return `${THANK_YOU_MESSAGE_KIND}:${jobId}`;
-}
 
 /**
- * #1140 — a DISTINCT claim_key namespace from `thankYouClaimKey`, used only
+ * #1140 — a DISTINCT claim_key namespace from the send's `thank_you_sms:{jobId}`, used only
  * to gate the `notification.thank_you_sms.sent` audit write itself (see the
  * audit `withSendClaim` at the bottom of `sendOneThankYou`). The send-claim key above
  * protects the PROVIDER call (at most one real SMS); this one protects the
@@ -300,22 +297,6 @@ async function sendOneThankYou(
     // Job vanished between SELECT and now — suppress so we don't loop.
     await markHandled(deps, tenantId, jobId, null, 'job_not_found');
     return 'suppressed';
-  }
-
-  // #1184 review (PR #1196) — a job whose SMS ALREADY went out is past every
-  // suppression decision. Since #1184 "delivered, audit write failed, job left
-  // unstamped" is a normal, retryable state, and the customer can opt out in
-  // between — a STOP reply to the thank-you itself lands them on the DNC list,
-  // or the owner revokes smsConsent. Running the checks below first would stamp
-  // the job with a `suppressed` audit row for a message that was delivered, and
-  // the `sent` row would never be written. So learn that the send claim is
-  // 'sent' BEFORE any suppression check and go straight to the reconcile.
-  if ((await readSendClaimStatus(pool, tenantId, thankYouClaimKey(jobId))) === 'sent') {
-    deps.logger.info('Thank-you SMS sweep: send already completed, reconciling audit + stamp', {
-      tenantId,
-      jobId,
-    });
-    return recordSentAndStamp(deps, pool, tenantId, jobId, job.customerId);
   }
 
   const customer = await deps.customerRepo.findById(tenantId, job.customerId);
@@ -385,9 +366,9 @@ async function sendOneThankYou(
     // idempotently rather than leaving it null: otherwise the eligibility
     // query re-selects this job every tick forever and, ordered oldest-first
     // under LIMIT 500, enough unreconciled rows starve newer eligible jobs
-    // (Codex P2, PR #705). The 'sent' pre-check at the top of this function
-    // catches the common case; this covers a concurrent attempt finishing the
-    // send in between.
+    // (Codex P2, PR #705). Outbound messaging reports this before any consent
+    // or DNC check, so a customer who opted out after the send (#1184 review,
+    // PR #1196) does not turn a delivered text into a suppressed one.
     deps.logger.info('Thank-you SMS sweep: send already completed, reconciling missing stamp', {
       tenantId,
       jobId,
