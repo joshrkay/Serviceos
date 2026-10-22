@@ -102,6 +102,11 @@ PgBouncer config: `pool_mode = transaction`, `max_client_conn` high (e.g. 1000),
   > A route that bypasses the request transaction and makes more than one
   > write needs its own transaction for them — the bypass alone drops their
   > atomicity.
+  >
+  > Each entry is anchored at both ends and matches the way Express routes:
+  > one optional trailing slash and any letter case (A-R4). Without that,
+  > `POST /proposals/:id/resolve-entity/` reached the same handler inside the
+  > request transaction, and its runner took a second connection inside it.
 - Direct pool: `DB_DIRECT_MAX_CONNECTIONS` small (default 10) — only lock holders
   + the LISTEN client use it.
 - Postgres ceiling = PgBouncer `default_pool_size` (server side), independent of
