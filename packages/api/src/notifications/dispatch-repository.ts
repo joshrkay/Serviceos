@@ -50,6 +50,13 @@ export type DispatchChannel = 'sms' | 'email';
 export const DISPATCH_STATUSES = ['sent', 'delivered', 'failed', 'bounced', 'scheduled', 'blocked'] as const;
 export type DispatchStatus = (typeof DISPATCH_STATUSES)[number];
 
+/**
+ * Provider of a sent record backfilled by a retry that knew only that the
+ * text went out (no number, no receipt). The attempt that sent it may still
+ * fill in the real receipt over it.
+ */
+export const UNKNOWN_PROVIDER = 'unknown';
+
 /** Statuses of a message that reached a provider — what "was it sent?" asks. */
 export const PROVIDER_ATTEMPT_STATUSES: readonly DispatchStatus[] = ['sent', 'delivered', 'failed', 'bounced'];
 
@@ -81,7 +88,8 @@ export interface MessageDispatch {
 /**
  * One message's outcome, recorded by outbound messaging under its dedupe key.
  * A later outcome for the same key replaces an earlier scheduled or blocked
- * one; a sent or delivered row is never overwritten.
+ * one; a sent or delivered row is never overwritten, except that a real
+ * receipt replaces a backfilled placeholder (`UNKNOWN_PROVIDER`).
  */
 export interface RecordOutcomeInput {
   tenantId: string;
@@ -222,9 +230,7 @@ export class InMemoryDispatchRepository implements DispatchRepository {
     const existing = Array.from(this.rows.values()).find(
       (r) => r.tenantId === input.tenantId && r.idempotencyKey === input.idempotencyKey,
     );
-    if (existing && (existing.status === 'sent' || existing.status === 'delivered')) {
-      return { ...existing };
-    }
+    if (existing && !replaces(existing, input)) return { ...existing };
     const row: MessageDispatch = { ...outcomeColumns(input), id: existing?.id ?? uuidv4(), sentAt: new Date() };
     this.rows.set(row.id, row);
     return { ...row };
@@ -339,7 +345,9 @@ export class PgDispatchRepository extends PgBaseRepository implements DispatchRe
     const c = outcomeColumns(input);
     return this.withTenant(input.tenantId, async (client) => {
       // One row per message: a later outcome replaces a scheduled or blocked
-      // one, and a row that reached the customer is never overwritten.
+      // one, and a row that reached the customer is never overwritten (save a
+      // backfilled placeholder, which a real receipt fills in). Same rule as
+      // `replaces` below.
       const { rows } = await client.query(
         `INSERT INTO message_dispatches
           (id, tenant_id, entity_type, entity_id, channel, recipient, provider,
@@ -357,6 +365,10 @@ export class PgDispatchRepository extends PgBaseRepository implements DispatchRe
            block_reason = EXCLUDED.block_reason, block_permanent = EXCLUDED.block_permanent,
            sent_at = NOW()
          WHERE message_dispatches.status NOT IN ('sent', 'delivered')
+            OR (message_dispatches.status = 'sent'
+                AND message_dispatches.provider = '${UNKNOWN_PROVIDER}'
+                AND EXCLUDED.status = 'sent'
+                AND EXCLUDED.provider <> '${UNKNOWN_PROVIDER}')
          RETURNING *`,
         [
           uuidv4(),
@@ -487,4 +499,15 @@ function outcomeColumns(input: RecordOutcomeInput): Omit<MessageDispatch, 'id' |
     blockPermanent: outcome.status === 'blocked' ? outcome.permanent : undefined,
     errorMessage: outcome.status === 'blocked' ? outcome.detail : undefined,
   };
+}
+
+/** Whether a new outcome may replace the recorded one for the same message. */
+function replaces(existing: MessageDispatch, input: RecordOutcomeInput): boolean {
+  if (existing.status !== 'sent' && existing.status !== 'delivered') return true;
+  return (
+    existing.status === 'sent' &&
+    existing.provider === UNKNOWN_PROVIDER &&
+    input.outcome.status === 'sent' &&
+    normalizeDispatchProvider(input.outcome.provider) !== UNKNOWN_PROVIDER
+  );
 }

@@ -34,7 +34,7 @@ import type { Pool } from 'pg';
 import type { CustomerRepository } from '../customers/customer';
 import { normalizePhone, type DncRepository } from '../compliance/dnc';
 import type { Logger } from '../logging/logger';
-import type { DispatchEntityType, DispatchRepository } from './dispatch-repository';
+import { UNKNOWN_PROVIDER, type DispatchEntityType, type DispatchRepository } from './dispatch-repository';
 import type {
   DeliveryResult,
   MessageDeliveryProvider,
@@ -386,7 +386,7 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
           outcome.status === 'sent'
             ? {
                 status: 'sent',
-                provider: outcome.delivery?.provider ?? 'unknown',
+                provider: outcome.delivery?.provider ?? UNKNOWN_PROVIDER,
                 providerMessageId: outcome.delivery?.providerMessageId,
               }
             : outcome.status === 'scheduled'

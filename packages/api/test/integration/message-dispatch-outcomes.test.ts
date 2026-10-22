@@ -76,6 +76,21 @@ describe('Postgres integration — message dispatch outcomes', () => {
     expect(after).toMatchObject({ status: 'sent', providerMessageId: 'SM2' });
   });
 
+  it('fills in the real receipt over a backfilled placeholder, but not the other way round', async () => {
+    const input = await base();
+    // A retry saw the claim already sent before the sending attempt recorded it.
+    await repo.recordOutcome({ ...input, recipient: '', outcome: { status: 'sent', provider: 'unknown' } });
+
+    const real = await repo.recordOutcome({
+      ...input,
+      outcome: { status: 'sent', provider: 'twilio-sms', providerMessageId: 'SM3' },
+    });
+    expect(real).toMatchObject({ status: 'sent', provider: 'sms-gateway', providerMessageId: 'SM3', recipient: '+15550001111' });
+
+    const after = await repo.recordOutcome({ ...input, recipient: '', outcome: { status: 'sent', provider: 'unknown' } });
+    expect(after).toMatchObject({ providerMessageId: 'SM3', recipient: '+15550001111' });
+  });
+
   it('stores when a held text will go, and keeps it out of findByEntity', async () => {
     const input = await base();
     const opens = new Date('2026-10-23T15:00:00Z');

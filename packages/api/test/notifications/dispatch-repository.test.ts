@@ -41,6 +41,20 @@ describe('InMemoryDispatchRepository', () => {
       expect((await repo.findByEntity(TENANT, 'thank_you', 'job-1')).map((d) => d.status)).toEqual(['sent']);
     });
 
+    it('lets a real receipt replace a backfilled placeholder, never the reverse', async () => {
+      const repo = new InMemoryDispatchRepository();
+      await repo.recordOutcome({ ...base, recipient: '', idempotencyKey: 'k-1', outcome: { status: 'sent', provider: 'unknown' } });
+      await repo.recordOutcome({
+        ...base,
+        idempotencyKey: 'k-1',
+        outcome: { status: 'sent', provider: 'twilio-sms', providerMessageId: 'SM1' },
+      });
+      await repo.recordOutcome({ ...base, recipient: '', idempotencyKey: 'k-1', outcome: { status: 'sent', provider: 'unknown' } });
+
+      const [row] = (await repo.listByTenant(TENANT)).dispatches;
+      expect(row).toMatchObject({ provider: 'sms-gateway', providerMessageId: 'SM1', recipient: '+15550001111' });
+    });
+
     it('filters the list by status, customer and job', async () => {
       const repo = new InMemoryDispatchRepository();
       await repo.recordOutcome({ ...base, idempotencyKey: 'k-1', outcome: { status: 'blocked', reason: 'dnc', permanent: true } });
