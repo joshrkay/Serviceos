@@ -4,6 +4,8 @@ import { FeasibilityDependencies } from '../../src/scheduling/feasibility-types'
 import { Appointment } from '../../src/appointments/appointment';
 import { noSkillConstraints } from '../helpers/no-skill-constraints';
 import { HaversineFallbackProvider } from '../../src/scheduling/travel-time/haversine-fallback';
+import { InMemoryAssignmentRepository } from '../../src/appointments/assignment';
+import { InMemoryAppointmentRepository } from '../../src/appointments/in-memory-appointment';
 
 function mkAppt(over: Partial<Appointment> = {}): Appointment {
   const start = new Date('2026-05-17T09:00:00Z');
@@ -273,5 +275,26 @@ describe('checkFeasibility — calendar reads', () => {
     expect(r.blocking.some((i) => i.check === 'overlap' && i.conflictingEntityId === 'a-clash')).toBe(true);
     // Overlap + travel each read the calendar once; neither touches the 50 old visits.
     expect(findById.mock.calls.every(([, id]) => id === 'a-clash')).toBe(true);
+  });
+
+  it('catches a visit rescheduled into the window on the in-memory repos, which keep no assignment copy in step', async () => {
+    const assignmentRepo = new InMemoryAssignmentRepository();
+    const appointmentRepo = new InMemoryAppointmentRepository(assignmentRepo);
+    const target = mkAppt({ id: 'a-target', scheduledStart: new Date('2026-05-17T10:00:00Z'), scheduledEnd: new Date('2026-05-17T11:00:00Z') });
+    // Booked a week out, so the assignment's copy of the window is far away…
+    const moved = mkAppt({ id: 'a-moved', scheduledStart: new Date('2026-05-24T10:00:00Z'), scheduledEnd: new Date('2026-05-24T11:00:00Z') });
+    await appointmentRepo.create(moved);
+    await assignmentRepo.create({
+      id: 'as-moved', tenantId: 't-1', appointmentId: 'a-moved', technicianId: 'tech-1', isPrimary: true,
+      assignedBy: 'u-1', assignedAt: new Date(), scheduledStart: moved.scheduledStart, scheduledEnd: moved.scheduledEnd,
+    });
+    // …then rescheduled onto the target's slot; nothing updates that copy here.
+    await appointmentRepo.update('t-1', 'a-moved', { scheduledStart: new Date('2026-05-17T10:30:00Z'), scheduledEnd: new Date('2026-05-17T11:30:00Z') });
+    const r = await checkFeasibility(
+      { tenantId: 't-1', appointment: target, proposedTechnicianId: 'tech-1',
+        proposedScheduledStart: target.scheduledStart, proposedScheduledEnd: target.scheduledEnd },
+      { ...depsWith([], 'tech-1'), assignmentRepo, appointmentRepo },
+    );
+    expect(r.blocking.some((i) => i.check === 'overlap' && i.conflictingEntityId === 'a-moved')).toBe(true);
   });
 });
