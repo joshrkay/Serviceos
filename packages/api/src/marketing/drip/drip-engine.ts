@@ -259,15 +259,7 @@ export function createDripEngine(deps: DripEngineDeps): DripEngine {
     }
     if (
       enrollment.sourceEntityType === 'service_agreement' &&
-      enrollment.sourceEntityId &&
-      (await deps.signals.hasRenewedMembership(tenantId, {
-        agreementId: enrollment.sourceEntityId,
-        customerId: customer.id,
-        // At enrollment the membership ended within the target window; running
-        // past the window's end now means it was extended.
-        renewBy: addMinutes(enrollment.enrolledAt, sequence.targetDays * 24 * 60),
-        since: enrollment.enrolledAt,
-      }))
+      (await deps.signals.hasRenewedMembership(tenantId, enrollment.id))
     ) {
       await finish(enrollment, 'renewed', now);
       return;

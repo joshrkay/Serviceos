@@ -19,6 +19,11 @@ export interface DripTarget {
   customerId: string;
   sourceEntityType: DripSourceEntityType | null;
   sourceEntityId: string | null;
+  /**
+   * Membership renewals: the membership's end date (YYYY-MM-DD) when it was
+   * targeted, kept on the enrollment so any later extension reads as renewed.
+   */
+  sourceDueOn?: string | null;
 }
 
 export interface DripBooking {
@@ -90,14 +95,12 @@ export interface DripSignals {
   /** True when the customer texted us after `since`. */
   hasRepliedSince(tenantId: string, customerId: string, since: Date): Promise<boolean>;
   /**
-   * Membership renewals: true once the customer no longer needs reminding —
-   * the agreement is active and auto-renewing, open-ended, or runs past
-   * `renewBy`, or another active agreement created after `since` does.
+   * Membership renewals: true once the enrollment's customer no longer needs
+   * reminding: the enrolled membership (or one started after enrollment) is
+   * active and auto-renewing, open-ended, or now ends after the end date it
+   * had when targeted.
    */
-  hasRenewedMembership(
-    tenantId: string,
-    input: { agreementId: string; customerId: string; renewBy: Date; since: Date },
-  ): Promise<boolean>;
+  hasRenewedMembership(tenantId: string, enrollmentId: string): Promise<boolean>;
 }
 
 export class InMemoryDripRepository implements DripRepository {

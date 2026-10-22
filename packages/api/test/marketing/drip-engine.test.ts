@@ -229,13 +229,7 @@ describe('drip engine — exit conditions and quiet hours', () => {
     h.signals.hasRenewedMembership.mockResolvedValueOnce(true);
     await createDripEngine(h.deps).runTenant(TENANT);
     expect(h.sendText).not.toHaveBeenCalled();
-    expect(h.signals.hasRenewedMembership).toHaveBeenCalledWith(TENANT, {
-      agreementId: 'agr-1',
-      customerId: CUSTOMER,
-      // enrolledAt + the sequence's 180-day window
-      renewBy: new Date(enrollment.enrolledAt.getTime() + 180 * 86_400_000),
-      since: enrollment.enrolledAt,
-    });
+    expect(h.signals.hasRenewedMembership).toHaveBeenCalledWith(TENANT, enrollment.id);
     expect(enrollmentOf(h)).toMatchObject({ status: 'exited', exitReason: 'renewed' });
   });
 

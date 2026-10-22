@@ -157,10 +157,10 @@ export class PgDripRepository extends PgBaseRepository implements DripRepository
       for (const t of targets) {
         const r = await client.query(
           `INSERT INTO drip_enrollments
-             (tenant_id, sequence_id, customer_id, source_entity_type, source_entity_id, next_run_at)
-           VALUES ($1, $2, $3, $4, $5, $6)
+             (tenant_id, sequence_id, customer_id, source_entity_type, source_entity_id, source_due_on, next_run_at)
+           VALUES ($1, $2, $3, $4, $5, $6::date, $7)
            ON CONFLICT (tenant_id, sequence_id, customer_id) DO NOTHING`,
-          [tenantId, sequenceId, t.customerId, t.sourceEntityType, t.sourceEntityId, firstRunAt],
+          [tenantId, sequenceId, t.customerId, t.sourceEntityType, t.sourceEntityId, t.sourceDueOn ?? null, firstRunAt],
         );
         added += r.rowCount ?? 0;
       }
@@ -282,7 +282,7 @@ export class PgDripSignals extends PgBaseRepository implements DripSignals {
         // `days`, for a customer with no other active membership running past
         // that window. One row per customer: the soonest-ending membership.
         const r = await client.query(
-          `SELECT DISTINCT ON (a.customer_id) a.customer_id, a.id AS agreement_id
+          `SELECT DISTINCT ON (a.customer_id) a.customer_id, a.id AS agreement_id, a.ends_on::text AS ends_on
              FROM service_agreements a
              JOIN customers c ON c.id = a.customer_id AND c.tenant_id = a.tenant_id
             WHERE a.tenant_id = $1 AND a.status = 'active' AND a.auto_renew = false
@@ -303,6 +303,7 @@ export class PgDripSignals extends PgBaseRepository implements DripSignals {
           customerId: row.customer_id as string,
           sourceEntityType: 'service_agreement' as const,
           sourceEntityId: row.agreement_id as string,
+          sourceDueOn: row.ends_on as string,
         }));
       }
       // Unsold: an estimate still 'sent' for `days`, and the customer has no accepted estimate since.
@@ -349,18 +350,17 @@ export class PgDripSignals extends PgBaseRepository implements DripSignals {
     });
   }
 
-  async hasRenewedMembership(
-    tenantId: string,
-    input: { agreementId: string; customerId: string; renewBy: Date; since: Date },
-  ): Promise<boolean> {
+  async hasRenewedMembership(tenantId: string, enrollmentId: string): Promise<boolean> {
     return this.withTenant(tenantId, async (client) => {
       const r = await client.query(
-        `SELECT 1 FROM service_agreements a
-          WHERE a.tenant_id = $1 AND a.status = 'active'
-            AND (a.id = $2 OR (a.customer_id = $3 AND a.created_at > $5))
-            AND (a.auto_renew = true OR a.ends_on IS NULL OR a.ends_on > $4::timestamptz::date)
+        `SELECT 1 FROM drip_enrollments e
+           JOIN service_agreements a
+             ON a.tenant_id = e.tenant_id AND a.status = 'active'
+            AND (a.id = e.source_entity_id OR (a.customer_id = e.customer_id AND a.created_at > e.enrolled_at))
+          WHERE e.tenant_id = $1 AND e.id = $2 AND e.source_entity_type = 'service_agreement'
+            AND (a.auto_renew = true OR a.ends_on IS NULL OR a.ends_on > e.source_due_on)
           LIMIT 1`,
-        [tenantId, input.agreementId, input.customerId, input.renewBy, input.since],
+        [tenantId, enrollmentId],
       );
       return (r.rowCount ?? 0) > 0;
     });

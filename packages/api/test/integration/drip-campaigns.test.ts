@@ -210,7 +210,12 @@ describe('Postgres integration — drip campaigns (migrations 336/337/350)', () 
     await seedAgreement(covered, { endsOn: daysAhead(385), createdAt: daysAgo(1) });
 
     const targets = await signals.findTargets(tenant.tenantId, 'membership_renewals', 30, now, 100);
-    expect(targets).toContainEqual({ customerId: due, sourceEntityType: 'service_agreement', sourceEntityId: dueAgreement });
+    expect(targets).toContainEqual({
+      customerId: due,
+      sourceEntityType: 'service_agreement',
+      sourceEntityId: dueAgreement,
+      sourceDueOn: daysAhead(20),
+    });
     const ids = targets.map((t) => t.customerId);
     for (const skipped of [auto, far, past, cancelled, covered]) expect(ids).not.toContain(skipped);
 
@@ -231,32 +236,46 @@ describe('Postgres integration — drip campaigns (migrations 336/337/350)', () 
     });
   });
 
-  it('knows when a membership was renewed: term extended, auto-renew on, or a new one started', async () => {
-    const renewBy = new Date(now.getTime() + 30 * 86_400_000);
-    const since = daysAgo(1);
-    const check = (agreementId: string, customerId: string) =>
-      signals.hasRenewedMembership(tenant.tenantId, { agreementId, customerId, renewBy, since });
+  it('knows when a membership was renewed: any extension, auto-renew on, or a new one started', async () => {
+    const seq = await repo.createSequence(sequence({ targetKind: 'membership_renewals', targetDays: 30 }));
+    async function enrolled(name: string, over: Parameters<typeof seedAgreement>[1] = {}) {
+      const customerId = await seedCustomer(name);
+      const agreementId = await seedAgreement(customerId, over);
+      const [target] = (await signals.findTargets(tenant.tenantId, 'membership_renewals', 30, now, 500)).filter(
+        (t) => t.customerId === customerId,
+      );
+      await repo.enroll(tenant.tenantId, seq.id, [target], now);
+      const { rows } = await pool.query(
+        `SELECT id FROM drip_enrollments WHERE tenant_id = $1 AND sequence_id = $2 AND customer_id = $3`,
+        [tenant.tenantId, seq.id, customerId],
+      );
+      return { customerId, agreementId, enrollmentId: rows[0].id as string };
+    }
+    const renewed = (enrollmentId: string) => signals.hasRenewedMembership(tenant.tenantId, enrollmentId);
 
-    const waiting = await seedCustomer('StillWaiting');
-    const waitingAgreement = await seedAgreement(waiting);
-    expect(await check(waitingAgreement, waiting)).toBe(false);
+    const waiting = await enrolled('StillWaiting');
+    expect(await renewed(waiting.enrollmentId)).toBe(false);
 
-    await pool.query(`UPDATE service_agreements SET ends_on = $2 WHERE id = $1`, [waitingAgreement, daysAhead(385)]);
-    expect(await check(waitingAgreement, waiting)).toBe(true);
+    // Extended, but only to a date still inside the 30-day window: still a renewal.
+    await pool.query(`UPDATE service_agreements SET ends_on = $2 WHERE id = $1`, [waiting.agreementId, daysAhead(25)]);
+    expect(await renewed(waiting.enrollmentId)).toBe(true);
 
-    const switched = await seedCustomer('TurnedOnAutoRenew');
-    const switchedAgreement = await seedAgreement(switched);
-    await pool.query(`UPDATE service_agreements SET auto_renew = true, renewal_term_months = 12 WHERE id = $1`, [switchedAgreement]);
-    expect(await check(switchedAgreement, switched)).toBe(true);
+    const switched = await enrolled('TurnedOnAutoRenew');
+    await pool.query(`UPDATE service_agreements SET auto_renew = true, renewal_term_months = 12 WHERE id = $1`, [
+      switched.agreementId,
+    ]);
+    expect(await renewed(switched.enrollmentId)).toBe(true);
 
-    const replaced = await seedCustomer('NewMembership');
-    const oldAgreement = await seedAgreement(replaced);
-    await seedAgreement(replaced, { endsOn: daysAhead(385), createdAt: now });
-    expect(await check(oldAgreement, replaced)).toBe(true);
+    const replaced = await enrolled('NewMembership');
+    await seedAgreement(replaced.customerId, { endsOn: daysAhead(385), createdAt: new Date(now.getTime() + 60_000) });
+    expect(await renewed(replaced.enrollmentId)).toBe(true);
 
-    const lapsedOut = await seedCustomer('Cancelled');
-    const lapsedAgreement = await seedAgreement(lapsedOut, { status: 'cancelled', endsOn: daysAhead(385) });
-    expect(await check(lapsedAgreement, lapsedOut)).toBe(false);
+    const cancelled = await enrolled('Cancelled');
+    await pool.query(`UPDATE service_agreements SET status = 'cancelled', ends_on = $2 WHERE id = $1`, [
+      cancelled.agreementId,
+      daysAhead(385),
+    ]);
+    expect(await renewed(cancelled.enrollmentId)).toBe(false);
   });
 
   it('detects a booking after a date (ignoring cancelled) and a customer reply', async () => {
