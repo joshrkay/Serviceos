@@ -61,6 +61,7 @@ import {
   type ApproveChainSetResult,
   editProposal,
   formatChainSetApprovalMessage,
+  type LinkedStepHoldReason,
   rejectProposal,
   summarizeChainSetResult,
 } from '../../proposals/actions';
@@ -1027,6 +1028,39 @@ const KEEP_FOR_LATER_LINE =
   "No problem — I'll keep it in your review queue for later.";
 
 /**
+ * B3-6 / B4-3 (the SMS reply's twins) — a schedule card whose 48-hour window
+ * passed. A yes is told so, the same words whether this yes found it expiring
+ * (executeApprove) or it already read expired by the time the owner answered
+ * (the hourly sweep flipped it after the readback); it can only be redone.
+ * Any other answer on it changes nothing. Nobody handled it.
+ */
+const EXPIRED_APPROVE_LINE = "Can't approve that one — it expired. You can redo it in the app.";
+const EXPIRED_NO_CHANGE_LINE = 'That one expired — nothing changed.';
+
+/**
+ * B4-3 — a linked step held for its earlier step (approveProposal's
+ * linked-step gate, `details.linkedStepReason`): what to do about that step,
+ * not "it's missing required info" (the gate's `missingFields: ['linkedStep']`
+ * names nothing the owner can fill in). The one-tap page's spoken twin.
+ */
+const LINKED_STEP_LINES: Readonly<Record<LinkedStepHoldReason, string>> = {
+  approve_parent_first:
+    "Can't approve that yet — it depends on an earlier step. Approve that one first; this one unlocks once it has run.",
+  issue_invoice_first:
+    "Can't approve that yet — the invoice it sends will be a draft. Issue the invoice first, then approve this one.",
+  parent_did_not_run:
+    "Can't approve that one — the earlier step it depends on didn't run, so there's nothing for it to act on.",
+};
+
+/** The linked-step gate's hold reason on an approval refusal, when it is one we have a line for. */
+function linkedStepHoldReason(details: Record<string, unknown> | undefined): LinkedStepHoldReason | undefined {
+  const reason = details?.linkedStepReason;
+  return typeof reason === 'string' && Object.hasOwn(LINKED_STEP_LINES, reason)
+    ? (reason as LinkedStepHoldReason)
+    : undefined;
+}
+
+/**
  * `totalCount` is the PRE-cap candidate count so the spoken line is
  * truthful when more matched than we read out ("I found 8 — here are
  * the first 5"), instead of misreporting the capped list length.
@@ -1249,15 +1283,17 @@ async function prepareResolvedTarget(
   };
 }
 
+function isReviewable(proposal: Proposal): boolean {
+  return proposal.status === 'draft' || proposal.status === 'ready_for_review';
+}
+
 async function fetchReviewable(
   deps: VoiceApprovalDeps,
   tenantId: string,
   proposalId: string,
 ): Promise<Proposal | null> {
   const proposal = await deps.proposalRepo.findById(tenantId, proposalId);
-  if (!proposal) return null;
-  if (proposal.status !== 'draft' && proposal.status !== 'ready_for_review') return null;
-  return proposal;
+  return proposal && isReviewable(proposal) ? proposal : null;
 }
 
 async function executeApprove(
@@ -1320,9 +1356,15 @@ async function executeApprove(
       // B3-6 (the SMS reply's twin) — a schedule card whose 48-hour window
       // passed before the hourly sweep: approveProposal marks it expired and
       // refuses naming no fields. Nothing is missing; it can only be redone.
-      const card = await deps.proposalRepo.findById(ref.tenantId, proposalId).catch(() => null);
-      const heldBy =
-        card !== null && isReferenceCheckHold(err.details, card)
+      // B4-3 — a linked step held for its earlier step: say what to do about
+      // that step (its `missingFields: ['linkedStep']` names nothing to fill).
+      const linkedStepReason = linkedStepHoldReason(err.details);
+      const card = linkedStepReason
+        ? null
+        : await deps.proposalRepo.findById(ref.tenantId, proposalId).catch(() => null);
+      const heldBy = linkedStepReason
+        ? 'linked_step'
+        : card !== null && isReferenceCheckHold(err.details, card)
           ? 'reference_check'
           : card?.status === 'expired'
             ? 'expired'
@@ -1330,13 +1372,15 @@ async function executeApprove(
       await audit(deps, ref, 'proposal.voice_approve_blocked', proposalId, {
         error: err.message,
         ...(heldBy ? { heldBy } : {}),
+        ...(linkedStepReason ? { linkedStepReason } : {}),
       });
       return {
-        speak:
-          heldBy === 'reference_check'
+        speak: linkedStepReason
+          ? LINKED_STEP_LINES[linkedStepReason]
+          : heldBy === 'reference_check'
             ? "Can't approve that yet — something on it needs fixing first. Fix it in the app."
             : heldBy === 'expired'
-              ? "Can't approve that one — it expired. You can redo it in the app."
+              ? EXPIRED_APPROVE_LINE
               : "Can't approve that yet — it's missing required info. Finish it in your review queue.",
         pending: null,
         outcome: 'approve_failed',
@@ -1859,6 +1903,16 @@ function strictConfirmDecision(
   return classifyStrictConfirm(utterance);
 }
 
+/**
+ * B4-3 — is this answer a yes to approving? At the readback (confirm) it is a
+ * strict affirmative on an approve; at the code prompt (challenge) the yes was
+ * already given. Decides which expiry line an answer on an expired card hears.
+ */
+function saysYesToApprove(pending: PendingVoiceApproval, utterance: string): boolean {
+  if (pending.action !== 'approve') return false;
+  return pending.stage === 'challenge' || strictConfirmDecision('approve', utterance) === 'approve';
+}
+
 export async function continueVoiceApproval(
   deps: VoiceApprovalDeps,
   input: ContinueVoiceApprovalInput,
@@ -1906,11 +1960,26 @@ export async function continueVoiceApproval(
 
   // The target is re-fetched every turn — a meanwhile-handled proposal
   // (dashboard approval, SMS Y) fails closed with a truthful line.
-  const proposal = await fetchReviewable(deps, input.tenantId, pending.proposalId);
+  const card = await deps.proposalRepo.findById(input.tenantId, pending.proposalId);
+  const proposal = card && isReviewable(card) ? card : null;
   if (!proposal) {
-    await audit(deps, input, 'proposal.voice_approval_stale_target', pending.proposalId);
+    await audit(
+      deps,
+      input,
+      'proposal.voice_approval_stale_target',
+      pending.proposalId,
+      card ? { proposalStatus: card.status } : {},
+    );
     return {
-      speak: 'That one was already handled — nothing changed.',
+      // B4-3 — nobody handled an expired card (the hourly sweep flipped it
+      // after the readback); it ran out of time. A yes to approve hears the
+      // same words as a yes that finds it expiring.
+      speak:
+        card?.status === 'expired'
+          ? saysYesToApprove(pending, input.utterance)
+            ? EXPIRED_APPROVE_LINE
+            : EXPIRED_NO_CHANGE_LINE
+          : 'That one was already handled — nothing changed.',
       pending: null,
       outcome: 'not_found',
       proposalId: pending.proposalId,
