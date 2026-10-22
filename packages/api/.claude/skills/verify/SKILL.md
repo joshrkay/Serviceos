@@ -109,8 +109,13 @@ npm run migrate:apply        # the API does NOT migrate at boot (Railway preDepl
   local 200-server>/v1`. Without it the recording hook attaches turns but
   silently skips the enqueue (`if (!queue) return`), and embeddings fail
   harmlessly with the fake key.
-- The forged `alg:none` JWT recipe above does NOT pass against a Postgres
-  boot (`Clerk token rejected` → 401). To trigger an unauthenticated,
+- The forged `alg:none` JWT recipe above DOES pass against a Postgres boot
+  when `NODE_ENV=dev DEV_AUTH_BYPASS=true` are set (it bootstraps a real
+  tenant + owner `users` row on first use; drive owner routes, then read
+  columns/`audit_events` back with psql). Without the bypass it is
+  `Clerk token rejected` → 401. The bypass cannot exercise RBAC: a second
+  `sub` always gets its OWN new tenant as owner, even if you pre-insert a
+  `users` row for it in another tenant. To trigger an unauthenticated,
   DB-backed 500 (Sentry capture, global error handler), stop Postgres and hit
   `GET /public/estimates/<any-token>` — it throws `ECONNREFUSED` through
   `asyncRoute`.
