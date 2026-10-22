@@ -45,7 +45,6 @@ const NAME_LEAD_INS = [
   'we are called',
   'its called',
   'it is called',
-  'call it',
   'it is',
   'its',
   'were',
@@ -62,7 +61,11 @@ function collapseSpelled(tokens: string[]): string[] {
     if (j - i >= 2) {
       const letters = tokens.slice(i, j).join('');
       // Two or three letters are initials ("ABC Plumbing"); more is a spelled word ("Walsh").
-      out.push(letters.length <= 3 ? letters.toUpperCase() : letters.charAt(0).toUpperCase() + letters.slice(1).toLowerCase());
+      const spelled = letters.length <= 3 ? letters.toUpperCase() : letters.charAt(0).toUpperCase() + letters.slice(1).toLowerCase();
+      // "Walsh, W-A-L-S-H": the spelling replaces the word it spells.
+      const before = out.at(-1)?.replace(/[^a-z0-9]/gi, '').toLowerCase();
+      if (before === letters.toLowerCase()) out.pop();
+      out.push(spelled);
       i = j;
     } else {
       out.push(tokens[i]!);
@@ -72,9 +75,17 @@ function collapseSpelled(tokens: string[]): string[] {
   return out;
 }
 
-/** "walsh plumbing" -> "Walsh Plumbing"; a word that already has capitals ("HVAC", "McNeil") is kept as said. */
+/** Joining words that stay lowercase inside a name ("J and J Electric"). */
+const SMALL_WORDS = new Set(['and', 'of', 'the', 'a', 'an', '&']);
+
+/**
+ * "walsh plumbing" -> "Walsh Plumbing"; a word that already has capitals ("HVAC", "McNeil") is kept as
+ * said, and a small joining word after the first stays lowercase.
+ */
 function capitalizeLowerWords(tokens: string[]): string[] {
-  return tokens.map((w) => (w === w.toLowerCase() ? w.charAt(0).toUpperCase() + w.slice(1) : w));
+  return tokens.map((w, i) =>
+    w !== w.toLowerCase() || (i > 0 && SMALL_WORDS.has(w)) ? w : w.charAt(0).toUpperCase() + w.slice(1),
+  );
 }
 
 /**
@@ -86,6 +97,8 @@ export function spokenBusinessName(transcript: string): string | null {
   // Split letters joined by hyphens or dots ("W-A-L-S-H", "A.B.C.") so they read as a spelled run.
   const tokens = text
     .split(/\s+/)
+    // A spelled run is often set off by commas ("Walsh, W-A-L-S-H, Plumbing"): punctuation stays off it.
+    .map((t) => (/^[a-z]([-.][a-z])*[-.]?[,;:]$/i.test(t) ? t.replace(/[,;:]$/, '') : t))
     .flatMap((t) => (/^([a-z][-.])+[a-z]?\.?$/i.test(t) ? t.split(/[-.]/).filter(Boolean) : [t]))
     .filter((t) => !['um', 'umm', 'uh', 'uhh', 'uhm', 'er', 'erm', 'hmm'].includes(t.toLowerCase().replace(/[^a-z]/g, '')));
   if (tokens.length === 0) return null;
@@ -105,10 +118,10 @@ export function spokenBusinessName(transcript: string): string | null {
 
 /** Words, and two-word phrases, that name each trade. Anything that names another trade is "something else". */
 const TRADE_WORDS: ReadonlyArray<[TradePackId, readonly string[]]> = [
-  ['plumbing', ['plumber', 'plumbers', 'plumbing', 'drain', 'drains', 'sewer', 'rooter']],
+  ['plumbing', ['plumber', 'plumbers', 'plumbing', 'drain', 'drains', 'sewer', 'rooter', 'septic', 'water heater', 'water heaters']],
   [
     'hvac',
-    ['hvac', 'heating', 'cooling', 'air', 'ac', 'furnace', 'furnaces', 'heat pump', 'heat pumps', 'air conditioning', 'refrigeration'],
+    ['hvac', 'heating', 'cooling', 'air', 'ac', 'furnace', 'furnaces', 'heat pump', 'heat pumps', 'air conditioning', 'refrigeration', 'mechanical'],
   ],
   ['electrical', ['electrician', 'electricians', 'electrical', 'electric', 'wiring']],
   [
@@ -117,7 +130,7 @@ const TRADE_WORDS: ReadonlyArray<[TradePackId, readonly string[]]> = [
       'something else', 'other', 'none of those', 'none of them', 'roofing', 'roofer', 'roofers', 'landscaping', 'landscaper',
       'lawn', 'painting', 'painter', 'painters', 'cleaning', 'cleaner', 'cleaners', 'handyman', 'pest', 'garage door',
       'garage doors', 'appliance', 'appliances', 'locksmith', 'pool', 'pools', 'carpentry', 'carpenter', 'flooring',
-      'remodeling', 'construction', 'contractor', 'general contractor', 'solar', 'gutter', 'gutters', 'window',
+      'remodeling', 'construction', 'general contractor', 'solar', 'gutter', 'gutters', 'window',
       'windows', 'concrete', 'masonry', 'fencing', 'tree', 'trees', 'pressure washing', 'junk', 'moving',
     ],
   ],
@@ -138,11 +151,21 @@ function negated(said: readonly string[], at: number): boolean {
   return TRADE_NEGATIONS.has(one) || (NEGATION_BRIDGES.has(one) && TRADE_NEGATIONS.has(two));
 }
 
-export type TradeMatch =
+type TradeMatch =
   | { kind: 'trade'; packId: TradePackId }
   /** More than one trade named ("plumbing and heating"): ask which, never pick one. */
   | { kind: 'ambiguous'; packIds: TradePackId[] }
   | { kind: 'none' };
+
+/** The ways of saying "none of those" outright (not a word for another trade). */
+const OTHER_OUTRIGHT = ['something else', 'other', 'none of those', 'none of them'];
+
+function containsWords(said: readonly string[], phrase: readonly string[]): boolean {
+  for (let i = 0; i + phrase.length <= said.length; i += 1) {
+    if (phrase.every((w, k) => said[i + k] === w)) return true;
+  }
+  return false;
+}
 
 export function matchTrade(transcript: string): TradeMatch {
   // "H V A C" and "A C" are said as letters: join a run of single letters into one word.
@@ -170,8 +193,15 @@ export function matchTrade(transcript: string): TradeMatch {
       }
     }
   }
-  if (found.size === 1) return { kind: 'trade', packId: [...found][0]! };
-  if (found.size > 1) return { kind: 'ambiguous', packIds: TRADES.map((t) => t.packId).filter((id) => found.has(id)) };
+  // A named trade beats a word for another kind of work ("window AC", "air duct cleaning"), unless the owner
+  // said "something else" outright.
+  const named = TRADES.map((t) => t.packId).filter((id) => id !== 'other' && found.has(id));
+  const saysOther = OTHER_OUTRIGHT.some((p) => containsWords(said, p.split(' ')));
+  if (named.length === 1 && !saysOther) return { kind: 'trade', packId: named[0]! };
+  if (named.length > 1 || (named.length === 1 && saysOther)) {
+    return { kind: 'ambiguous', packIds: TRADES.map((t) => t.packId).filter((id) => found.has(id)) };
+  }
+  if (found.has('other')) return { kind: 'trade', packId: 'other' };
   return { kind: 'none' };
 }
 
@@ -187,7 +217,7 @@ const TEEN_WORDS = new Map(
 );
 const TENS_WORDS = new Map(Object.entries({ twenty: '2', thirty: '3', forty: '4', fifty: '5', sixty: '6', seventy: '7', eighty: '8', ninety: '9' }));
 
-export type SpokenCell =
+type SpokenCell =
   /** A US cell the API will take, as the field shows it: "(216) 555-0142". */
   | { kind: 'cell'; display: string }
   /** Digits were said, but not a 10-digit US cell (seven digits, +44, area code 0…). */
@@ -215,6 +245,8 @@ export function parseSpokenCell(transcript: string): SpokenCell {
   let plus = false;
   for (let i = 0; i < tokens.length; i += 1) {
     const t = tokens[i]!;
+    // An extension is not part of the cell: stop at it.
+    if (t === 'ext' || t === 'extension' || (t === 'x' && digits !== '')) break;
     if (t === '+' || t === 'plus') {
       if (digits === '') plus = true;
       continue;
@@ -257,6 +289,11 @@ export function parseSpokenCell(transcript: string): SpokenCell {
   }
 
   if (digits === '') return { kind: 'none' };
+  // Two numbers in one breath ("my cell is …, the office is …", or the cell said twice): the first is the cell.
+  if (!plus && digits.length >= 17) {
+    const first = digits.startsWith('1') ? digits.slice(0, 11) : digits.slice(0, 10);
+    if (isUsCellNumber(first)) digits = first;
+  }
   const typed = `${plus ? '+' : ''}${digits}`;
   if (!isUsCellNumber(typed)) return { kind: 'not_us', digits: typed };
   const national = digits.length === 11 ? digits.slice(1) : digits;
@@ -273,7 +310,7 @@ export function cellReadback(cell: string): string {
 // What Rivet asks, and in what order
 // ---------------------------------------------------------------------------
 
-export interface IntroAnswers {
+interface IntroAnswers {
   name: string;
   packId: string | null;
   /** The cell is one the API will take and was not refused. */
@@ -288,6 +325,12 @@ export function nextIntroStep(answers: IntroAnswers): IntroStep {
   return 'confirm';
 }
 
+/**
+ * How long the name step waits after the owner stops before reading the name back: a pause inside a name
+ * ("Walsh … Plumbing") is longer than the transcription's end-of-speech gap, and must not end the answer.
+ */
+export const NAME_SETTLE_MS = 1500;
+
 export const ASK_NAME = "What's your business called?";
 export const ASK_SPELL = 'Go ahead and spell it, letter by letter.';
 export const ASK_TRADE = "What's your trade: plumbing, HVAC, electrical, or something else?";
@@ -295,7 +338,7 @@ export const ASK_CELL = "What's your cell number, with the area code?";
 export const TRADE_MISS = "I didn't catch the trade. Plumbing, HVAC, electrical, or something else?";
 export const NAME_MISS = "I didn't catch a name. What's your business called?";
 export const CELL_NONE = "I didn't catch a number. Say your cell with the area code, 10 digits.";
-export const SAY_GO = 'Say “show me my shop”, or fix anything above.';
+const SAY_GO = 'Say “show me my shop”, or fix anything above.';
 
 const spokenTrade = (packId: string | null) => TRADES.find((t) => t.packId === packId)?.spoken ?? '';
 
