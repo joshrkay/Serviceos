@@ -39,6 +39,7 @@ describe('/api/settings/text-wording (D-045)', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.language).toBe('en');
+    expect(res.body.languages).toEqual(['en', 'es']);
     expect(res.body.maxLength).toBe(480);
     expect(res.body.texts.map((t: { purpose: string }) => t.purpose)).toEqual([
       'estimate_text',
@@ -49,8 +50,11 @@ describe('/api/settings/text-wording (D-045)', () => {
     const invoice = res.body.texts[1];
     expect(invoice.fillIns).toEqual(['customer_name', 'business_name', 'number', 'total', 'link']);
     expect(invoice.sampleValues.link).toBe('https://app.example.com/pay/sample');
-    expect(invoice.ours).toContain('https://app.example.com/pay/sample');
-    expect(invoice.saved).toBeNull();
+    expect(invoice.byLanguage.en.ours).toContain('https://app.example.com/pay/sample');
+    expect(invoice.byLanguage.es.ours).toContain('https://app.example.com/pay/sample');
+    expect(invoice.byLanguage.es.ours).not.toBe(invoice.byLanguage.en.ours);
+    expect(invoice.byLanguage.en.saved).toBeNull();
+    expect(invoice.byLanguage.es.saved).toBeNull();
     expect(res.body.texts[3].sampleValues).toEqual({ customer_name: 'Sam Rivera', business_name: 'Your service team' });
   });
 
@@ -62,12 +66,13 @@ describe('/api/settings/text-wording (D-045)', () => {
     expect(put.status).toBe(200);
     expect(put.body.saved.body).toBe('Hi {{customer_name}}, pay here: {{link}}');
     const list = await request(app).get('/api/settings/text-wording');
-    expect(list.body.texts[1].saved.body).toBe('Hi {{customer_name}}, pay here: {{link}}');
+    expect(list.body.texts[1].byLanguage.en.saved.body).toBe('Hi {{customer_name}}, pay here: {{link}}');
+    expect(list.body.texts[1].byLanguage.es.saved).toBeNull();
     const events = await auditRepo.findByEntity(TENANT, 'customer_text_wording', 'invoice_text');
     expect(events.map((e) => e.eventType)).toEqual(['customer_text_wording.saved']);
   });
 
-  it("saves the wording in the business's current language", async () => {
+  it("with no language given, saves in the business's language", async () => {
     await settingsRepo.create({
       id: 's-1', tenantId: TENANT, businessName: 'Acme', timezone: 'America/Chicago', estimatePrefix: 'EST',
       invoicePrefix: 'INV', nextEstimateNumber: 1, nextInvoiceNumber: 1, defaultPaymentTermDays: 30,
@@ -76,8 +81,39 @@ describe('/api/settings/text-wording (D-045)', () => {
 
     const put = await request(app).put('/api/settings/text-wording/thank_you_text').send({ body: '¡Gracias!' });
 
-    expect(put.body.saved.language).toBe('es');
-    expect(await repo.find(TENANT, 'thank_you_text')).toMatchObject({ language: 'es' });
+    expect(put.body.language).toBe('es');
+    expect(await repo.find(TENANT, 'thank_you_text', 'es')).toMatchObject({ body: '¡Gracias!' });
+  });
+
+  it('saves and resets each language on its own', async () => {
+    await request(app).put('/api/settings/text-wording/thank_you_text').send({ body: 'Thanks!', language: 'en' });
+    const es = await request(app)
+      .put('/api/settings/text-wording/thank_you_text')
+      .send({ body: '¡Gracias!', language: 'es' });
+
+    expect(es.status).toBe(200);
+    expect(es.body.language).toBe('es');
+    const list = await request(app).get('/api/settings/text-wording');
+    expect(list.body.texts[3].byLanguage.en.saved.body).toBe('Thanks!');
+    expect(list.body.texts[3].byLanguage.es.saved.body).toBe('¡Gracias!');
+
+    const reset = await request(app).delete('/api/settings/text-wording/thank_you_text?language=es');
+    expect(reset.status).toBe(200);
+    expect(await repo.find(TENANT, 'thank_you_text', 'es')).toBeNull();
+    expect(await repo.find(TENANT, 'thank_you_text', 'en')).toMatchObject({ body: 'Thanks!' });
+    const events = await auditRepo.findByEntity(TENANT, 'customer_text_wording', 'thank_you_text');
+    expect(events.map((e) => [e.eventType, e.metadata?.language])).toEqual([
+      ['customer_text_wording.saved', 'en'],
+      ['customer_text_wording.saved', 'es'],
+      ['customer_text_wording.reset', 'es'],
+    ]);
+  });
+
+  it('refuses a language it does not know', async () => {
+    const put = await request(app).put('/api/settings/text-wording/thank_you_text').send({ body: 'Hi', language: 'vi' });
+    const del = await request(app).delete('/api/settings/text-wording/thank_you_text?language=vi');
+    expect(put.status).toBe(400);
+    expect(del.status).toBe(400);
   });
 
   it("our invoice wording shows this business's payment mode (paid in person)", async () => {
@@ -90,9 +126,11 @@ describe('/api/settings/text-wording (D-045)', () => {
     const res = await request(app).get('/api/settings/text-wording');
 
     const invoice = res.body.texts.find((t: { purpose: string }) => t.purpose === 'invoice_text');
-    expect(invoice.ours).toMatch(/Acme collects payment in person/);
-    expect(invoice.addedLines).toEqual(['Acme collects payment in person. Settle up when the work is done.']);
-    expect(res.body.texts[0].addedLines).toEqual([]);
+    expect(invoice.byLanguage.en.ours).toMatch(/Acme collects payment in person/);
+    expect(invoice.byLanguage.en.addedLines).toEqual(['Acme collects payment in person. Settle up when the work is done.']);
+    expect(invoice.byLanguage.es.addedLines).toHaveLength(1);
+    expect(invoice.byLanguage.es.addedLines[0]).not.toBe(invoice.byLanguage.en.addedLines[0]);
+    expect(res.body.texts[0].byLanguage.en.addedLines).toEqual([]);
   });
 
   it('refuses a wording without the link, saying why, and saves nothing', async () => {
@@ -100,7 +138,7 @@ describe('/api/settings/text-wording (D-045)', () => {
 
     expect(res.status).toBe(400);
     expect(res.body.problems).toEqual(['Include {{link}} so the customer can open it.']);
-    expect(await repo.find(TENANT, 'estimate_text')).toBeNull();
+    expect(await repo.find(TENANT, 'estimate_text', 'en')).toBeNull();
   });
 
   it('refuses a body that is not text', async () => {
@@ -121,7 +159,7 @@ describe('/api/settings/text-wording (D-045)', () => {
 
     expect(first.status).toBe(200);
     expect(second.status).toBe(200);
-    expect(await repo.find(TENANT, 'thank_you_text')).toBeNull();
+    expect(await repo.find(TENANT, 'thank_you_text', 'en')).toBeNull();
     const events = await auditRepo.findByEntity(TENANT, 'customer_text_wording', 'thank_you_text');
     expect(events.map((e) => e.eventType)).toEqual(['customer_text_wording.reset']);
   });

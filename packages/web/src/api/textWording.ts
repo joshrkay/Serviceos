@@ -8,26 +8,33 @@ import { apiFetch } from '../utils/api-fetch';
 
 export type WordingPurpose = 'estimate_text' | 'invoice_text' | 'portal_link_text' | 'thank_you_text';
 
+export type WordingLanguage = 'en' | 'es';
+
 export interface SavedWording {
   body: string;
-  /** The language it was written in: only customers who read it get it. */
-  language: string;
   updatedAt: string;
 }
 
-export interface WordingText {
-  purpose: WordingPurpose;
-  fillIns: string[];
-  sampleValues: Record<string, string>;
-  /** Our wording, with the sample values, in the business's language. */
+/** One text in one language: customers who read that language get it. */
+export interface WordingVersion {
+  /** Our wording, with the sample values, in this language. */
   ours: string;
   /** Lines every send adds after the owner's wording (e.g. "we collect payment in person"). */
   addedLines: string[];
   saved: SavedWording | null;
 }
 
+export interface WordingText {
+  purpose: WordingPurpose;
+  fillIns: string[];
+  sampleValues: Record<string, string>;
+  byLanguage: Record<WordingLanguage, WordingVersion>;
+}
+
 export interface TextWordingState {
-  language: string;
+  /** The business's own language: the one the screen opens on. */
+  language: WordingLanguage;
+  languages: WordingLanguage[];
   maxLength: number;
   texts: WordingText[];
 }
@@ -50,20 +57,24 @@ export async function fetchTextWording(): Promise<TextWordingState> {
 }
 
 /** PUT /api/settings/text-wording/:purpose */
-export async function saveTextWording(purpose: WordingPurpose, body: string): Promise<SavedWording> {
+export async function saveTextWording(
+  purpose: WordingPurpose,
+  body: string,
+  language: WordingLanguage,
+): Promise<SavedWording> {
   const res = await apiFetch(`/api/settings/text-wording/${purpose}`, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ body }),
+    body: JSON.stringify({ body, language }),
   });
   const json = await readOrThrow<{ saved: SavedWording }>(res, 'save the wording');
   return json.saved;
 }
 
-/** DELETE /api/settings/text-wording/:purpose — back to our wording. */
-export async function resetTextWording(purpose: WordingPurpose): Promise<void> {
+/** DELETE /api/settings/text-wording/:purpose?language= — back to our wording in that language. */
+export async function resetTextWording(purpose: WordingPurpose, language: WordingLanguage): Promise<void> {
   await readOrThrow(
-    await apiFetch(`/api/settings/text-wording/${purpose}`, { method: 'DELETE' }),
+    await apiFetch(`/api/settings/text-wording/${purpose}?language=${language}`, { method: 'DELETE' }),
     'reset the wording',
   );
 }

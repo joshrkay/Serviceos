@@ -27,8 +27,13 @@ import {
   smsInvoiceCollectOnSiteLine,
 } from './templates';
 
+/** The languages an owner can write each text in (D-045, "write both"). */
+const LANGUAGES = ['en', 'es'] as const satisfies readonly Language[];
+const languageSchema = z.enum(LANGUAGES);
+
 // Generous: the real limit is checked after trimming, with a reason the owner can act on.
-const saveSchema = z.object({ body: z.string().max(20000) });
+// No language means the business's own.
+const saveSchema = z.object({ body: z.string().max(20000), language: languageSchema.optional() });
 
 const SAMPLE = {
   customerName: 'Sam Rivera',
@@ -37,7 +42,7 @@ const SAMPLE = {
   totalCents: 48500,
 };
 
-/** Our wording for each text, with sample values, in the business's language. */
+/** Our wording for each text, with sample values, in one language. */
 function ourWording(
   purpose: WordingPurpose,
   ctx: {
@@ -99,8 +104,9 @@ function sampleValues(purpose: WordingPurpose, businessName: string, baseUrl: st
 /**
  * D-045 — Settings → Text wording. The owner reads our wording for each
  * customer text (with sample values), saves their own with `{{fill-ins}}`, or
- * resets to ours. Their wording goes to customers who read the business's
- * language; everyone else gets ours, translated (customer-text-wording.ts).
+ * resets to ours, once per language. A customer gets the owner's wording in
+ * the language they read when there is one, else ours in that language
+ * (customer-text-wording.ts).
  */
 export function createCustomerTextWordingRouter(deps: {
   repo: CustomerTextWordingRepository;
@@ -110,6 +116,10 @@ export function createCustomerTextWordingRouter(deps: {
 }): Router {
   const router = Router();
   const baseUrl = deps.publicBaseUrl.replace(/\/$/, '');
+  const businessLanguage = async (tenantId: string): Promise<Language> =>
+    resolveCustomerLanguage({
+      tenantDefaultLanguage: (await deps.settingsRepo.findByTenant(tenantId))?.defaultLanguage,
+    });
 
   router.get(
     '/',
@@ -127,30 +137,31 @@ export function createCustomerTextWordingRouter(deps: {
       const paymentCollectionMode = settings?.paymentCollectionMode ?? 'pay_link';
       res.json({
         language,
+        languages: LANGUAGES,
         maxLength: MAX_WORDING_LENGTH,
-        texts: WORDING_PURPOSES.map((purpose) => {
-          const mine = saved.find((s) => s.purpose === purpose);
-          return {
-            purpose,
-            fillIns: WORDING_FILL_INS[purpose],
-            sampleValues: sampleValues(purpose, businessName, baseUrl),
-            ours: ourWording(purpose, {
-              businessName,
-              language,
-              baseUrl,
-              paymentCollectionMode,
+        texts: WORDING_PURPOSES.map((purpose) => ({
+          purpose,
+          fillIns: WORDING_FILL_INS[purpose],
+          sampleValues: sampleValues(purpose, businessName, baseUrl),
+          byLanguage: Object.fromEntries(
+            LANGUAGES.map((lang) => {
+              const mine = saved.find((s) => s.purpose === purpose && s.language === lang);
+              return [
+                lang,
+                {
+                  ours: ourWording(purpose, { businessName, language: lang, baseUrl, paymentCollectionMode }),
+                  // Lines every send adds after the owner's wording (an invoice
+                  // paid in person says so), so the preview shows what customers get.
+                  addedLines:
+                    purpose === 'invoice_text'
+                      ? smsInvoiceCollectOnSiteLine({ businessName, language: lang, paymentCollectionMode })
+                      : [],
+                  saved: mine ? { body: mine.body, updatedAt: mine.updatedAt.toISOString() } : null,
+                },
+              ];
             }),
-            // Lines every send adds after the owner's wording (an invoice paid
-            // in person says so), so the preview shows what customers get.
-            addedLines:
-              purpose === 'invoice_text'
-                ? smsInvoiceCollectOnSiteLine({ businessName, language, paymentCollectionMode })
-                : [],
-            saved: mine
-              ? { body: mine.body, language: mine.language, updatedAt: mine.updatedAt.toISOString() }
-              : null,
-          };
-        }),
+          ),
+        })),
       });
     }),
   );
@@ -178,9 +189,8 @@ export function createCustomerTextWordingRouter(deps: {
         return;
       }
       const { tenantId, userId, role } = req.auth!;
-      // Saved in the business's language now: only customers who read it get it.
-      const settings = await deps.settingsRepo.findByTenant(tenantId);
-      const language = resolveCustomerLanguage({ tenantDefaultLanguage: settings?.defaultLanguage });
+      // Only customers who read this language get it.
+      const language = parsed.data.language ?? (await businessLanguage(tenantId));
       const saved = await deps.repo.save(tenantId, purpose, body, language, userId);
       await deps.auditRepo.create(
         createAuditEvent({
@@ -195,7 +205,8 @@ export function createCustomerTextWordingRouter(deps: {
       );
       res.json({
         purpose,
-        saved: { body: saved.body, language: saved.language, updatedAt: saved.updatedAt.toISOString() },
+        language,
+        saved: { body: saved.body, updatedAt: saved.updatedAt.toISOString() },
       });
     }),
   );
@@ -211,8 +222,14 @@ export function createCustomerTextWordingRouter(deps: {
         res.status(404).json({ error: 'NOT_FOUND', message: 'No such text' });
         return;
       }
+      const lang = languageSchema.optional().safeParse(req.query.language);
+      if (!lang.success) {
+        res.status(400).json({ error: 'VALIDATION_ERROR', message: 'Unknown language.' });
+        return;
+      }
       const { tenantId, userId, role } = req.auth!;
-      const removed = await deps.repo.remove(tenantId, purpose);
+      const language = lang.data ?? (await businessLanguage(tenantId));
+      const removed = await deps.repo.remove(tenantId, purpose, language);
       if (removed) {
         await deps.auditRepo.create(
           createAuditEvent({
@@ -222,11 +239,11 @@ export function createCustomerTextWordingRouter(deps: {
             eventType: 'customer_text_wording.reset',
             entityType: 'customer_text_wording',
             entityId: purpose,
-            metadata: { purpose },
+            metadata: { purpose, language },
           }),
         );
       }
-      res.json({ purpose, saved: null });
+      res.json({ purpose, language, saved: null });
     }),
   );
 
