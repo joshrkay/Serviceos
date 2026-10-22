@@ -53,6 +53,12 @@ export interface DraftRequest {
    * Returning a reason refuses the draft (`nothing_left`).
    */
   beforeGate?: (proposal: Proposal) => string | undefined;
+  /**
+   * Where a draft that was approved but turns out to need an answer goes.
+   * Chat keeps it a `draft`. Voice memos pass `ready_for_review`, the status
+   * every other memo hold uses, so the owner is still told about the card.
+   */
+  heldStatus?: 'draft' | 'ready_for_review';
 }
 
 export async function draftProposal(request: DraftRequest): Promise<DraftOutcome> {
@@ -65,7 +71,7 @@ export async function draftProposal(request: DraftRequest): Promise<DraftOutcome
 /** The checks every draft gets, in order. Mutates and returns the outcome. */
 function finishDraft(
   proposal: Proposal,
-  request: Pick<DraftRequest, 'operatorText' | 'entities' | 'verifiedIds' | 'beforeGate'>,
+  request: Pick<DraftRequest, 'operatorText' | 'entities' | 'verifiedIds' | 'beforeGate' | 'heldStatus'>,
 ): DraftOutcome {
   const verifiedIds = request.verifiedIds ?? {};
   stampVerifiedIds(proposal, verifiedIds);
@@ -75,13 +81,14 @@ function finishDraft(
   applyVerifiedIdsToPayload(proposal, verifiedIds);
   const refused = request.beforeGate?.(proposal);
   if (refused) return { kind: 'refusal', code: 'nothing_left', reason: refused };
-  applyContractGate(proposal);
+  const heldStatus = request.heldStatus ?? 'draft';
+  applyContractGate(proposal, heldStatus);
   const missingFields = missingFieldsFor(proposal);
   const clarification = (proposal.payload as { clarification?: { needed?: unknown } }).clarification;
   if (missingFields.length > 0 || clarification?.needed === true) {
     // A question is never already approved, whichever check raised it.
     if (proposal.status === 'approved') {
-      proposal.status = 'draft';
+      proposal.status = heldStatus;
       proposal.approvedAt = undefined;
     }
     return { kind: 'clarification', proposal, missingFields };
@@ -203,13 +210,16 @@ export function contractGateMissingFields(
  *      and resolve — so gating a booking on `customerId` is also what lets
  *      the resolver fill it from the customer name in the same turn;
  *   2. a proposal that had already been decided `approved` is pulled back to
- *      `draft`. An auto-approving type whose payload cannot execute must
+ *      `draft` (or the surface's `heldStatus`). An auto-approving type whose payload cannot execute must
  *      never reach the worker; the operator's tap is the only thing that
  *      should move it, and only once the gate is closed.
  *
  * Returns the fields it added (empty when the payload was already fine).
  */
-export function applyContractGate(proposal: Proposal): string[] {
+export function applyContractGate(
+  proposal: Proposal,
+  heldStatus: 'draft' | 'ready_for_review' = 'draft',
+): string[] {
   const existing = new Set(missingFieldsFor(proposal));
   const pendingReference = [...existing].some((field) => isGatedReferenceField(field));
   const gaps = contractGateMissingFields(proposal.proposalType, proposal.payload, pendingReference);
@@ -221,7 +231,7 @@ export function applyContractGate(proposal: Proposal): string[] {
     missingFields: [...existing, ...added],
   };
   if (proposal.status === 'approved') {
-    proposal.status = 'draft';
+    proposal.status = heldStatus;
     // A later tap keeps an existing approvedAt, so a stale one would start
     // the undo window at drafting time instead of at the tap.
     proposal.approvedAt = undefined;

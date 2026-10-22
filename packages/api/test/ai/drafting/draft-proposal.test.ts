@@ -211,6 +211,30 @@ describe('draftProposal', () => {
     expect(outcome.proposal.approvedAt).toBeUndefined();
   });
 
+  it('a surface can hold a pulled-back draft for review instead of leaving it a draft', async () => {
+    const handler = handlerReturning({ jobId: JOB });
+    const approving: TaskHandler = {
+      ...handler,
+      handle: async (ctx) => {
+        const result = await handler.handle(ctx);
+        Object.assign(result.proposal, { status: 'approved', approvedAt: new Date() });
+        return result;
+      },
+    };
+
+    const outcome = await draftProposal({
+      handler: approving,
+      context: CONTEXT,
+      operatorText: `job ${JOB}`,
+      entities: {},
+      heldStatus: 'ready_for_review',
+    });
+
+    if (outcome.kind === 'refusal') throw new Error('expected a draft');
+    expect(outcome.proposal.status).toBe('ready_for_review');
+    expect(outcome.proposal.approvedAt).toBeUndefined();
+  });
+
   it('refuses with a reason when the handler drafts nothing', async () => {
     const outcome = await draftProposal({
       handler: handlerReturning(undefined),

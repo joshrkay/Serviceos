@@ -1957,6 +1957,8 @@ async function processSegment(
     // OBS-2 — the drafting run is the proposal's aiRunId; keep the classifier
     // run that routed this segment reachable too.
     classifierAiRunId: classification.aiRunId,
+    // Held like every other memo hold, so the owner still hears about it.
+    heldStatus: 'ready_for_review',
   });
   if (drafted.kind === 'refusal') {
     // Never silent: the memo still gets a card saying it wasn't acted on.
