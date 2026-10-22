@@ -355,6 +355,13 @@ interface ResolvedEntityRecord {
   field: string;
   kind?: string;
   label?: string;
+  /**
+   * A4-5 — every candidate id the question this pick answered offered. A
+   * later pick of one of them comes from a screen showing that answered
+   * question: refused as already handled (`readPick`), whenever it arrives.
+   * Absent on resolutions recorded before this field existed.
+   */
+  offeredIds?: string[];
 }
 
 function readResolvedEntities(sourceContext: Record<string, unknown>): ResolvedEntityRecord[] {
@@ -367,6 +374,9 @@ function readResolvedEntities(sourceContext: Record<string, unknown>): ResolvedE
       field: typeof r.field === 'string' ? r.field : '',
       kind: typeof r.kind === 'string' ? r.kind : undefined,
       label: typeof r.label === 'string' ? r.label : undefined,
+      offeredIds: Array.isArray(r.offeredIds)
+        ? r.offeredIds.filter((id): id is string => typeof id === 'string')
+        : undefined,
     }))
     .filter((r) => r.id.length > 0 && r.field.length > 0);
 }
@@ -459,13 +469,24 @@ interface OpenPick {
 /**
  * Read `candidateId`'s pick off `proposal`: `already_applied` when this exact
  * pick already landed on the row (a retried/double-tapped request — see the
- * module doc), otherwise what it resolves. Throws ValidationError when the row
- * is not awaiting a choice, or the choice is not one of its candidates.
+ * module doc), otherwise what it resolves. Throws the already-handled 409
+ * when the choice belongs to a question another pick answered (A4-5), and a
+ * ValidationError when the row is not awaiting a choice or the choice is not
+ * one of its candidates.
+ *
+ * The same read decides at the first read and again under the row lock
+ * (A3-1), so a pick that lost to another one gets the same answer whether
+ * that pick landed before this one's first read or while it waited on the
+ * lock.
  */
 function readPick(proposal: Proposal, candidateId: string): PickRead {
   const payload = asRecord(proposal.payload);
   const sourceContext = asRecord(proposal.sourceContext);
-  const alreadyResolved = readResolvedEntities(sourceContext).some((r) => r.id === candidateId);
+  const resolved = readResolvedEntities(sourceContext);
+  const alreadyResolved = resolved.some((r) => r.id === candidateId);
+  // A4-5 — offered by a question that is already answered, by a different
+  // choice: the owner picked from a screen that still showed it.
+  const answeredByAnother = !alreadyResolved && resolved.some((r) => r.offeredIds?.includes(candidateId));
 
   const candidates = readCandidates(payload, sourceContext);
   if (candidates.length === 0) {
@@ -478,6 +499,7 @@ function readPick(proposal: Proposal, candidateId: string): PickRead {
     // already resolved earlier in this proposal's history, the retry is a
     // successful no-op, not an error.
     if (alreadyResolved) return { kind: 'already_applied' };
+    if (answeredByAnother) throw pickNotSaved(proposal.status);
     throw new ValidationError(PICK_NOTHING_TO_CHOOSE);
   }
 
@@ -496,6 +518,7 @@ function readPick(proposal: Proposal, candidateId: string): PickRead {
     // twice: report it applied instead of 400ing a request that already
     // succeeded once.
     if (alreadyResolved) return { kind: 'already_applied' };
+    if (answeredByAnother) throw pickNotSaved(proposal.status);
     throw new ValidationError(PICK_NOT_AN_OPTION);
   }
 
@@ -511,12 +534,13 @@ function readPick(proposal: Proposal, candidateId: string): PickRead {
   // queue drains, see advanceToNextAmbiguity) needs EVERY resolved entity from
   // this chain, not just the last one.
   const resolvedEntities: ResolvedEntityRecord[] = [
-    ...readResolvedEntities(sourceContext),
+    ...resolved,
     {
       id: chosen.id,
       field,
       ...(entityKind ? { kind: entityKind } : {}),
       ...(chosen.label ? { label: chosen.label } : {}),
+      offeredIds: candidates.map((c) => c.id),
     },
   ];
 
@@ -565,20 +589,6 @@ function pathFor(pick: OpenPick, deps: ResolveEntityDeps): PickPath {
 }
 
 /**
- * `readPick` on a row that may have changed since the pick first read it. The
- * first read already accepted this choice, so a choice that no longer fits
- * the row means someone else's change got there first: 409, not 400.
- */
-function readPickAgain(row: Proposal, candidateId: string): PickRead {
-  try {
-    return readPick(row, candidateId);
-  } catch (err) {
-    if (err instanceof ValidationError) throw pickNotSaved(row.status);
-    throw err;
-  }
-}
-
-/**
  * A3-1 — the annotate-only and next-ambiguity patches are built from the
  * LOCKED row, never from the row read before the transaction. Their patch is
  * a pure function of the row and the choice, so building it under the lock
@@ -586,10 +596,11 @@ function readPickAgain(row: Proposal, candidateId: string): PickRead {
  * resolve-line that committed in the gap is kept, and the pick lands on top.
  *
  * Unsafe to rebuild, refused with a 409: the row left review
- * (lockOpenForPick) or the choice no longer fits it (another pick moved it
- * on), both "already handled"; or it now takes a different path, "try again".
- * Returns undefined when the locked row shows this exact pick already landed
- * (a double tap): no write, no audit.
+ * (lockOpenForPick) or another pick answered the question (readPick), both
+ * "already handled", the same answer the first read gives (A3-2, A4-5); or
+ * it now takes a different path, "try again". Returns undefined when the
+ * locked row shows this exact pick already landed (a double tap): no write,
+ * no audit.
  */
 async function lockPickForPatch(
   deps: ResolveEntityDeps,
@@ -599,7 +610,7 @@ async function lockPickForPatch(
   expected: 'annotate' | 'advance',
 ): Promise<{ row: Proposal; pick: OpenPick } | undefined> {
   const row = await lockOpenForPick(deps, tenantId, proposalId);
-  const pick = readPickAgain(row, candidateId);
+  const pick = readPick(row, candidateId);
   if (pick.kind === 'already_applied') return undefined;
   if (pathFor(pick, deps).kind !== expected) throw pickRaced(row.status);
   return { row, pick };
@@ -931,11 +942,11 @@ async function redraftResolvedProposal(
   const landed = await deps.transactionRunner.run(tenantId, async () => {
     // A3-1 — the draft came from `read`, across the LLM call. If the row
     // moved since, the draft is stale: never write it over the change. When
-    // another pick answered the question, readPickAgain refuses it as already
+    // another pick answered the question, readPick refuses it as already
     // handled; when the question is still open, a retry goes through.
     const row = await lockOpenForPick(deps, tenantId, proposalId);
     if (proposalChangedSince(read, row)) {
-      if (readPickAgain(row, candidateId).kind === 'already_applied') return false;
+      if (readPick(row, candidateId).kind === 'already_applied') return false;
       throw pickRaced(row.status);
     }
 

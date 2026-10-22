@@ -147,6 +147,17 @@ describe('A3-4 — resolve-entity owner copy', () => {
     expectOwnerCopy(res, 400, 'That choice is not one of the options.');
   });
 
+  it('a choice on a question someone already answered (a stale screen): the same plain 409 as when they race', async () => {
+    const seeded = await proposalRepo.create(clarification());
+    const a = app();
+    expect((await pick(a, seeded.id, CUST_A)).status).toBe(200);
+
+    const res = await pick(a, seeded.id, CUST_B);
+
+    expectOwnerCopy(res, 409, 'This was already handled, so that choice was not saved.');
+    expect(res.body.error).toBe('CONFLICT');
+  });
+
   it('a decision landing between the lock and the status write: assertStatusWrite is mapped to the same plain 409', async () => {
     const seeded = await proposalRepo.create(clarification());
     // The row is approved by someone else just before the re-draft's status

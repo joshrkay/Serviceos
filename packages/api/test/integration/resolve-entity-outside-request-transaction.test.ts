@@ -597,7 +597,7 @@ describe('A1 — resolve-entity holds no connection across its LLM call and comm
     expect(row.payload.entityReference).toBe('Rodriguez job');
     expect((row.payload.entityCandidates as Array<{ id: string }>).map((c) => c.id)).toEqual([JOB_A, JOB_B]);
     expect(row.source_context.resolvedEntities).toEqual([
-      { id: CUST_B, field: 'customerId', kind: 'customer', label: 'Bob Jones' },
+      { id: CUST_B, field: 'customerId', kind: 'customer', label: 'Bob Jones', offeredIds: [CUST_A, CUST_B] },
     ]);
     expect(row.status).toBe('draft');
     expect(await resolvedAudits(seeded.id)).toBe(1);

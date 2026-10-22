@@ -729,7 +729,7 @@ describe('U8/U1 — resolveProposalEntity multi-ambiguity chain (P8/U-multi)', (
     expect(ctx.pendingEntityAmbiguities).toBeUndefined();
     // The customer pick is preserved for the eventual redraft.
     expect(ctx.resolvedEntities).toEqual([
-      { id: CUST_B, field: 'customerId', kind: 'customer', label: 'Bob Jones' },
+      { id: CUST_B, field: 'customerId', kind: 'customer', label: 'Bob Jones', offeredIds: [CUST_A, CUST_B] },
     ]);
     // originalIntent must survive — the final redraft still needs it.
     expect(ctx.originalIntent).toBeDefined();
@@ -778,8 +778,8 @@ describe('U8/U1 — resolveProposalEntity multi-ambiguity chain (P8/U-multi)', (
     expect(ctx.entityCandidates).toBeUndefined();
     expect(ctx.pendingEntityAmbiguities).toBeUndefined();
     expect(ctx.resolvedEntities).toEqual([
-      { id: CUST_B, field: 'customerId', kind: 'customer', label: 'Bob Jones' },
-      { id: JOB_B, field: 'jobId', kind: 'job', label: 'Rodriguez — bath' },
+      { id: CUST_B, field: 'customerId', kind: 'customer', label: 'Bob Jones', offeredIds: [CUST_A, CUST_B] },
+      { id: JOB_B, field: 'jobId', kind: 'job', label: 'Rodriguez — bath', offeredIds: [JOB_A, JOB_B] },
     ]);
 
     // Audit trail covers BOTH steps: the intermediate advance and the final redraft.
@@ -1681,7 +1681,7 @@ describe('A1 — resolveProposalEntity commits each path in one short transactio
       expect(payload.entityReference).toBe('Rodriguez job');
       expect((payload.entityCandidates as Array<{ id: string }>).map((c) => c.id)).toEqual([JOB_A, JOB_B]);
       expect((result.sourceContext as Record<string, unknown>).resolvedEntities).toEqual([
-        { id: CUST_B, field: 'customerId', kind: 'customer', label: 'Bob Jones' },
+        { id: CUST_B, field: 'customerId', kind: 'customer', label: 'Bob Jones', offeredIds: [CUST_A, CUST_B] },
       ]);
       expect(result.status).toBe('draft');
     });
@@ -1695,7 +1695,7 @@ describe('A1 — resolveProposalEntity commits each path in one short transactio
       expect(events).toEqual([`BEGIN ${TENANT_UUID}`, 'findByIdsForUpdate (in tx)', 'ROLLBACK']);
       const row = await repo.findById(TENANT_UUID, PROPOSAL);
       expect((row!.sourceContext as Record<string, unknown>).resolvedEntities).toEqual([
-        { id: CUST_A, field: 'customerId', kind: 'customer', label: 'Bob Smith' },
+        { id: CUST_A, field: 'customerId', kind: 'customer', label: 'Bob Smith', offeredIds: [CUST_A, CUST_B] },
       ]);
       expect(await resolvedAuditCount()).toBe(1);
     });
@@ -1749,6 +1749,113 @@ describe('A1 — resolveProposalEntity commits each path in one short transactio
       expect(result.proposalType).toBe('draft_invoice');
       expect(result.status).toBe('ready_for_review');
       expect(events.filter((e) => e.startsWith('update') || e.startsWith('create'))).toEqual([]);
+      expect(await resolvedAuditCount()).toBe(1);
+    });
+  });
+
+  // A4-5 — a pick on a question another pick already answered got a 409
+  // ("already handled") when that pick landed while it waited on the row
+  // lock, but a 400 ("nothing left to choose" / "not one of the options")
+  // when it had landed before the first read: the same situation, two
+  // answers, split by timing. Each resolution now records the choices its
+  // question offered, so the first read can tell it too.
+  describe('A4-5 — a pick on an already-answered question gets the same 409 at the first read as under the lock', () => {
+    const PENDING_JOB = {
+      pendingEntityAmbiguities: [
+        {
+          entityKind: 'job',
+          reference: 'Rodriguez job',
+          candidates: [
+            { id: JOB_A, kind: 'job', label: 'Rodriguez — kitchen', score: 0.8 },
+            { id: JOB_B, kind: 'job', label: 'Rodriguez — bath', score: 0.79 },
+          ],
+        },
+      ],
+    };
+
+    const pickOf = (candidateId: string, deps: Partial<Parameters<typeof resolveProposalEntity>[1]> = {}) =>
+      resolveProposalEntity(
+        { tenantId: TENANT_UUID, proposalId: PROPOSAL, candidateId, actorId: OWNER, actorRole: 'owner' },
+        { proposalRepo: repo, auditRepo, transactionRunner: runner, ...deps },
+      );
+
+    const resolvedAuditCount = async () =>
+      (await auditRepo.findByEntity(TENANT_UUID, 'proposal', PROPOSAL)).filter(
+        (a) => a.eventType === 'proposal.entity_resolved',
+      ).length;
+
+    /** What the owner sees: status, code and words. */
+    const refusal = (err: unknown) => {
+      expect(err).toBeInstanceOf(ConflictError);
+      const e = err as ConflictError;
+      return { statusCode: e.statusCode, code: e.code, message: e.message };
+    };
+
+    /** The same refusal under the row lock: the other pick lands after this one's first read (A3-1). */
+    async function refusalUnderTheLock(seed: Proposal, deps: Partial<Parameters<typeof resolveProposalEntity>[1]> = {}) {
+      await repo.create(seed);
+      const realFindById = repo.findById.bind(repo);
+      vi.spyOn(repo, 'findById').mockImplementationOnce(async (tenantId, id) => {
+        const snapshot = await realFindById(tenantId, id);
+        await pickOf(CUST_A, deps);
+        return snapshot;
+      });
+      const err = await pickOf(CUST_B, deps).catch((e: unknown) => e);
+      vi.mocked(repo.findById).mockRestore();
+      return refusal(err);
+    }
+
+    it.each([
+      ['annotate-only', {}, {}],
+      ['next ambiguity', PENDING_JOB, {}],
+      ['re-draft', ORIGINAL_INTENT, { redraftHandlerFactory: () => draftingHandler() }],
+    ] as const)('%s: refused at the first read with the 409 the row lock gives; nothing is written', async (_path, ctx, deps) => {
+      await repo.create(clarification(ctx));
+      await pickOf(CUST_A, deps);
+      const answered = await repo.findById(TENANT_UUID, PROPOSAL);
+      events.length = 0;
+
+      const err = await pickOf(CUST_B, deps).catch((e: unknown) => e);
+
+      expect(refusal(err)).toEqual({
+        statusCode: 409,
+        code: 'CONFLICT',
+        message: 'This was already handled, so that choice was not saved.',
+      });
+      expect((err as ConflictError).details).toEqual({ status: answered!.status });
+      // Refused before any transaction: no lock, no write, no second audit.
+      expect(events).toEqual([]);
+      expect(await repo.findById(TENANT_UUID, PROPOSAL)).toEqual(answered);
+      expect(await resolvedAuditCount()).toBe(1);
+
+      // Word for word what the owner gets when the other pick lands while
+      // this one waits on the row lock instead.
+      repo = new InMemoryProposalRepository();
+      auditRepo = new InMemoryAuditRepository();
+      expect(refusal(err)).toEqual(await refusalUnderTheLock(clarification(ctx), deps));
+    });
+
+    it('each resolution records the choices its question offered', async () => {
+      await repo.create(clarification(PENDING_JOB));
+      const advanced = await pickOf(CUST_A);
+      expect((advanced.sourceContext as Record<string, unknown>).resolvedEntities).toEqual([
+        { id: CUST_A, field: 'customerId', kind: 'customer', label: 'Bob Smith', offeredIds: [CUST_A, CUST_B] },
+      ]);
+    });
+
+    it('an id no question ever offered is still the 400 "not one of the options" (grounding), on an answered row too', async () => {
+      await repo.create(clarification(PENDING_JOB));
+      await pickOf(CUST_A);
+      const err = await pickOf('99999999-9999-4999-8999-999999999999').catch((e: unknown) => e);
+      expect(err).toBeInstanceOf(ValidationError);
+      expect((err as ValidationError).message).toBe('That choice is not one of the options.');
+    });
+
+    it('the same pick again (a double tap) is still a no-op success', async () => {
+      await repo.create(clarification(PENDING_JOB));
+      await pickOf(CUST_A);
+      const again = await pickOf(CUST_A);
+      expect((again.payload as Record<string, unknown>).entityReference).toBe('Rodriguez job');
       expect(await resolvedAuditCount()).toBe(1);
     });
   });
