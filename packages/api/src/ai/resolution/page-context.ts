@@ -291,6 +291,16 @@ export function pageNoteTargetKind(input: PageNoteTargetInput): string | undefin
   if (intent !== 'add_note') return undefined;
   const named = entities?.noteTargetKind;
   if (typeof named === 'string' && named.trim().length > 0) return undefined;
+  // "Add a note to this appointment" names the visit, which the note store
+  // cannot hold: say so (the handler gates the kind) rather than quietly
+  // filing it on the visit's job. A plain note on a visit page is the job's.
+  if (
+    page.context.entityType === 'appointment' &&
+    filledKeys.includes('appointmentId') &&
+    POINTS_AT_PAGE_RECORD_RE.appointment.test(text)
+  ) {
+    return 'appointment';
+  }
   const kind = NOTE_TARGET_BY_PAGE[page.context.entityType];
   if (!kind || !filledKeys.includes(`${kind}Id`)) return undefined;
   if (POINTS_AT_JOB_RE.test(text)) return undefined;

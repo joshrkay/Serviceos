@@ -282,6 +282,8 @@ export function useDeepgramDictation(opts: {
         } catch {
           /* ignore non-JSON error bodies */
         }
+        // Stopped while the error body was read: the error is the old attempt's.
+        if (superseded()) return 'cancelled';
         setError(
           res.status === 503
             ? (serverMessage ?? 'Live transcription is not available right now.')

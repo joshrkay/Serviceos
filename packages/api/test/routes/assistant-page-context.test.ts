@@ -397,4 +397,14 @@ describe('chat: a note spoken on a document page goes on that document', () => {
     const [draft] = await proposalRepo.findByTenant(TENANT);
     expect(draft.payload).toMatchObject({ targetKind: 'job', targetId: JOB });
   });
+
+  it('gates "add a note to this appointment" visibly instead of filing it on the job', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const app = buildApp(scriptedGateway('add_note', { noteBody: 'bring the ladder' }), resolver(notFound), proposalRepo);
+    await chat(app, 'add a note to this appointment: bring the ladder', { entityType: 'appointment', entityId: APPOINTMENT });
+    const [draft] = await proposalRepo.findByTenant(TENANT);
+    expect(draft.payload).toMatchObject({ targetKind: 'appointment' });
+    expect(draft.payload.targetId).toBeUndefined();
+    expect(missingFieldsFor(draft)).toContain('targetKind');
+  });
 });

@@ -360,6 +360,12 @@ describe('pageNoteTargetKind', () => {
     expect(target({ intent: 'update_job' })).toBeUndefined();
   });
 
+  it('names the visit on an appointment page only when the words point at it', () => {
+    const visit = { page: { context: { entityType: 'appointment' as const } }, filledKeys: ['appointmentId', 'jobId', 'customerId'] };
+    expect(target({ ...visit, text: 'add a note to this appointment: bring the ladder' })).toBe('appointment');
+    expect(target({ ...visit, text: 'add a note: bring the ladder' })).toBeUndefined();
+  });
+
   it('targets the customer when the words point at the customer on a document page', () => {
     expect(target({ text: 'add a note for her: call after 5' })).toBe('customer');
     expect(

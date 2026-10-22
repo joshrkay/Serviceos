@@ -155,6 +155,21 @@ describe('Story 3.2 — useDeepgramDictation', () => {
     expect(FakeWebSocket.instances).toHaveLength(0);
   });
 
+  it('a start stopped while its error body was read reports cancelled and leaves no stale error', async () => {
+    let releaseBody: (v: unknown) => void = () => {};
+    apiFetchMock.mockResolvedValueOnce({ ok: false, status: 500, json: () => new Promise((r) => { releaseBody = r; }) });
+    const { result } = renderHook(() => useDeepgramDictation({}));
+
+    let first: Promise<string> = Promise.resolve('');
+    await act(async () => { first = result.current.start(); await Promise.resolve(); await Promise.resolve(); });
+    act(() => { result.current.stop(); });
+    await act(async () => {
+      releaseBody({ message: 'stale failure' });
+      expect(await first).toBe('cancelled');
+    });
+    expect(result.current.error).toBeNull();
+  });
+
   it('surfaces a 503 (not configured) as an error and does not record', async () => {
     apiFetchMock.mockResolvedValue({ ok: false, status: 503, json: async () => ({}) });
     const { result } = renderHook(() => useDeepgramDictation({}));
