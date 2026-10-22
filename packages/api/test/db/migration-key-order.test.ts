@@ -70,6 +70,36 @@ describe('migration key guard', () => {
     expect(validateAgainstBase([...base, '332_other'], base, pins, sameBody)).toHaveLength(1);
   });
 
+  it('a pinned restoration may not displace a base key that already owns its prefix', () => {
+    // Stale branch: it still carries the old '332_old' (pinned on the base's
+    // snapshot, body intact) but lost the '332_current' main renumbered into
+    // that slot. Hash equality alone would wave it through.
+    const base = ['331_a', '332_current', '333_b'];
+    const body = 'ALTER TABLE t ADD COLUMN IF NOT EXISTS x INT;';
+    const pins = new Map([['332_old', hashMigration(body)]]);
+    const hashes = new Map([['332_old', hashMigration(body)]]);
+    const v = validateAgainstBase(['331_a', '332_old', '333_b'], base, pins, hashes);
+    expect(v.some((m) => m.includes("'332_old' would displace base key '332_current'"))).toBe(true);
+    expect(v.some((m) => m.includes("base key '332_current' is missing"))).toBe(true);
+    // Same restoration with the base key kept and the restoration moved past
+    // the tail is the shape #1792 shipped: no violations.
+    expect(
+      validateAgainstBase(
+        [...base, '346_old'],
+        base,
+        new Map([['346_old', hashMigration(body)]]),
+        new Map([['346_old', hashMigration(body)]]),
+      ),
+    ).toEqual([]);
+  });
+
+  it('a base key absent from the branch is reported as dropped', () => {
+    const base = ['331_a', '332_b', '333_c'];
+    const v = validateAgainstBase(['331_a', '333_c'], base);
+    expect(v).toHaveLength(1);
+    expect(v[0]).toContain("base key '332_b' is missing from this branch");
+  });
+
   it('extractPinnedHashesFromSnapshot reads snapshot rows only, key → hash', () => {
     const src =
       "const SNAPSHOT = [\n" +

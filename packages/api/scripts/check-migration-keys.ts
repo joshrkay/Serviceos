@@ -109,12 +109,33 @@ export function validateAgainstBase(
   branchHashes: ReadonlyMap<string, string> = new Map(),
 ): string[] {
   const base = new Set(baseKeys);
+  const branch = new Set(branchKeys);
   const baseMax = Math.max(0, ...baseKeys.map((k) => Number(k.slice(0, 3))));
+  const basePrefixOwner = new Map(baseKeys.map((k) => [k.slice(0, 3), k]));
   const violations: string[] = [];
+  // Every key on the base is applied history; a branch that lacks one has
+  // dropped a migration (what the 2026-10-22 UI merges did). Report it
+  // directly instead of only catching the stale key that took its place.
+  for (const key of baseKeys) {
+    if (!branch.has(key)) {
+      violations.push(
+        `base key '${key}' is missing from this branch — origin/main's registry still has it; ` +
+          `a merge dropped it, put it back`,
+      );
+    }
+  }
   for (const key of branchKeys) {
     if (base.has(key)) continue;
     const pinned = basePins.get(key);
     if (pinned !== undefined) {
+      const owner = basePrefixOwner.get(key.slice(0, 3));
+      if (owner !== undefined && owner !== key) {
+        violations.push(
+          `restored key '${key}' would displace base key '${owner}', which already owns prefix ${key.slice(0, 3)} — ` +
+            `keep the base key and put the restoration back under a new key past the tail`,
+        );
+        continue;
+      }
       if (branchHashes.get(key) === pinned) continue;
       violations.push(
         `restored key '${key}' does not match the hash origin/main's snapshot pins for it — ` +
