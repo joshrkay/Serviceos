@@ -94,10 +94,10 @@ and that is a stated ceiling of this pin rather than an oversight.**
 
 | Budget | Count |
 |---|---|
-| Owner-only routes in code | **81** |
+| Owner-only routes in code | **83** |
 | `cadence: daily` | **2** |
 | `cadence: onboarding` | **16** |
-| `cadence: occasional` | **63** |
+| `cadence: occasional` | **65** |
 | `ownerRequiredDailyWebActions` — `daily` ∧ not reachable | **1** |
 | `ownerRequiredOnboardingWebActions` — `onboarding` ∧ not reachable | **16** |
 
