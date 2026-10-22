@@ -823,13 +823,18 @@ describe("SendService — the owner's own text wording (D-045)", () => {
       }),
     );
 
-    const sending = ordered.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'both' });
+    const sending = ordered.sendEstimate(
+      { tenantId: TENANT, estimateId: est.id, channel: 'both' },
+      { onProviderStarting: () => void events.push('claim:sending') },
+    );
     await new Promise((r) => setTimeout(r, 10));
     expect(events).toEqual(['wording:start']);
     release();
     await sending;
 
-    expect(events.slice(0, 3)).toEqual(['wording:start', 'wording:end', 'email']);
+    // The wording read is prep: it ends before an automatic reminder's claim
+    // turns 'sending' (never reclaimed), and before any channel goes out.
+    expect(events.slice(0, 4)).toEqual(['wording:start', 'wording:end', 'claim:sending', 'email']);
   });
 
   it('the email is untouched by the text wording', async () => {

@@ -80,6 +80,19 @@ describe('/api/settings/text-wording (D-045)', () => {
     expect(await repo.find(TENANT, 'thank_you_text')).toMatchObject({ language: 'es' });
   });
 
+  it("our invoice wording shows this business's payment mode (paid in person)", async () => {
+    await settingsRepo.create({
+      id: 's-2', tenantId: TENANT, businessName: 'Acme', timezone: 'America/Chicago', estimatePrefix: 'EST',
+      invoicePrefix: 'INV', nextEstimateNumber: 1, nextInvoiceNumber: 1, defaultPaymentTermDays: 30,
+      paymentCollectionMode: 'collect_on_site', createdAt: new Date(), updatedAt: new Date(),
+    });
+
+    const res = await request(app).get('/api/settings/text-wording');
+
+    const invoice = res.body.texts.find((t: { purpose: string }) => t.purpose === 'invoice_text');
+    expect(invoice.ours).toMatch(/Acme collects payment in person/);
+  });
+
   it('refuses a wording without the link, saying why, and saves nothing', async () => {
     const res = await request(app).put('/api/settings/text-wording/estimate_text').send({ body: 'Your estimate is ready' });
 

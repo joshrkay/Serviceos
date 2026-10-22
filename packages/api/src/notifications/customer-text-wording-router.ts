@@ -5,7 +5,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
-import { SettingsRepository } from '../settings/settings';
+import { PaymentCollectionMode, SettingsRepository } from '../settings/settings';
 import { resolveCustomerLanguage } from '../i18n/resolve-language';
 import { routeParam } from '../shared/route-params';
 import type { Language } from '../ai/i18n/i18n';
@@ -39,7 +39,12 @@ const SAMPLE = {
 /** Our wording for each text, with sample values, in the business's language. */
 function ourWording(
   purpose: WordingPurpose,
-  ctx: { businessName: string; language: Language; baseUrl: string },
+  ctx: {
+    businessName: string;
+    language: Language;
+    baseUrl: string;
+    paymentCollectionMode: PaymentCollectionMode;
+  },
 ): string {
   switch (purpose) {
     case 'estimate_text':
@@ -59,6 +64,8 @@ function ourWording(
         businessName: ctx.businessName,
         viewUrl: `${ctx.baseUrl}/pay/sample`,
         language: ctx.language,
+        // What this business's invoices actually say (paid in person or online).
+        paymentCollectionMode: ctx.paymentCollectionMode,
       }).body;
     case 'portal_link_text':
       return renderPortalLinkSms({
@@ -125,7 +132,12 @@ export function createCustomerTextWordingRouter(deps: {
             purpose,
             fillIns: WORDING_FILL_INS[purpose],
             sampleValues: sampleValues(purpose, businessName, baseUrl),
-            ours: ourWording(purpose, { businessName, language, baseUrl }),
+            ours: ourWording(purpose, {
+              businessName,
+              language,
+              baseUrl,
+              paymentCollectionMode: settings?.paymentCollectionMode ?? 'pay_link',
+            }),
             saved: mine
               ? { body: mine.body, language: mine.language, updatedAt: mine.updatedAt.toISOString() }
               : null,

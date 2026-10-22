@@ -15,6 +15,7 @@ import type { Pool } from 'pg';
 
 import type { Language } from '../ai/i18n/i18n';
 import { PgBaseRepository } from '../db/pg-base';
+import { withRequestSavepoint } from '../middleware/tenant-context';
 import {
   extractTemplateVariables,
   renderMessageTemplate,
@@ -193,27 +194,14 @@ export class PgCustomerTextWordingRepository
     });
   }
 
-  /**
-   * Read inside a savepoint: on a send this runs on the request's own
-   * transaction, and a failed read (timeout, table not migrated yet) must
-   * leave that transaction usable so the send goes on with our wording.
-   */
   async find(tenantId: string, purpose: WordingPurpose): Promise<SavedWording | null> {
     return this.withTenant(tenantId, async (client) => {
-      await client.query('SAVEPOINT text_wording_read');
-      try {
-        const result = await client.query(
-          `SELECT purpose, body, language, updated_by, updated_at FROM customer_text_wording
-            WHERE tenant_id = $1 AND purpose = $2`,
-          [tenantId, purpose],
-        );
-        await client.query('RELEASE SAVEPOINT text_wording_read');
-        return result.rows[0] ? rowToWording(result.rows[0]) : null;
-      } catch (err) {
-        await client.query('ROLLBACK TO SAVEPOINT text_wording_read');
-        await client.query('RELEASE SAVEPOINT text_wording_read').catch(() => undefined);
-        throw err;
-      }
+      const result = await client.query(
+        `SELECT purpose, body, language, updated_by, updated_at FROM customer_text_wording
+          WHERE tenant_id = $1 AND purpose = $2`,
+        [tenantId, purpose],
+      );
+      return result.rows[0] ? rowToWording(result.rows[0]) : null;
     });
   }
 
@@ -273,7 +261,10 @@ export function createCustomerTextWording(deps: {
     async textFor(args) {
       let saved: SavedWording | null;
       try {
-        saved = await deps.repo.find(args.tenantId, args.purpose);
+        // A savepoint on a send's own request transaction: a failed read
+        // (timeout, table not migrated yet) must leave that transaction
+        // usable so the send goes on with our wording.
+        saved = await withRequestSavepoint(() => deps.repo.find(args.tenantId, args.purpose));
       } catch (err) {
         deps.logger.warn('Owner text wording could not be read; sending our wording', {
           tenantId: args.tenantId,

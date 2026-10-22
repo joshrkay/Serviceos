@@ -306,16 +306,10 @@ export class SendService {
       recipientEmail: input.recipientEmail,
     });
 
-    // Codex P1 (PR #705) — the provider dispatch begins NOW. Signal any claim
-    // wrapper so it flips its claim to 'sending' at this instant (not before
-    // the prep above). May reject if the deferred claim CAS was lost to a
-    // concurrent reclaimer, in which case we must NOT dispatch — the rejection
-    // propagates out un-caught and aborts the send before any channel is hit.
-    await options?.onProviderStarting?.();
-
     // Read the owner's wording once, before any channel goes out: the
     // channels run in parallel on the request's one connection, and the
-    // read's savepoint must not interleave with their writes.
+    // read's savepoint must not interleave with their writes. It is prep, so
+    // it runs before the claim below turns 'sending' (never reclaimed).
     const smsText = channels.some((t) => t.channel === 'sms')
       ? await this.textInWording({
           tenantId: input.tenantId,
@@ -341,6 +335,14 @@ export class SendService {
             }).body,
         })
       : '';
+
+    // Codex P1 (PR #705) — the provider dispatch begins NOW. Signal any claim
+    // wrapper so it flips its claim to 'sending' at this instant (not before
+    // the prep above). May reject if the deferred claim CAS was lost to a
+    // concurrent reclaimer, in which case we must NOT dispatch — the rejection
+    // propagates out un-caught and aborts the send before any channel is hit.
+    await options?.onProviderStarting?.();
+
     // Any individual channel failure is recorded as a failed dispatch row in
     // the audit table without aborting the others (Promise.allSettled).
     const sendStartedAt = Date.now();
