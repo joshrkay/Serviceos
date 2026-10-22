@@ -73,4 +73,18 @@ describe('PortalPaymentMethods', () => {
     await waitFor(() => expect(confirmSetupMock).toHaveBeenCalled());
     expect(await screen.findByTestId('card-saved-notice')).toBeInTheDocument();
   });
+
+  it('shows an error and re-enables Save when confirmSetup rejects', async () => {
+    paymentMethodsMock.mockResolvedValue({ paymentMethods: [] });
+    startCardSetupMock.mockResolvedValue({ clientSecret: 'seti_secret', setupIntentId: 'seti_1' });
+    confirmSetupMock.mockRejectedValue(new Error('network down'));
+    render(<PortalPaymentMethods token="tok" />);
+    await screen.findByTestId('no-cards');
+    fireEvent.click(screen.getByTestId('add-card-button'));
+    await screen.findByTestId('add-card-form');
+    fireEvent.click(screen.getByText('Save card'));
+    expect(await screen.findByText(/Could not save your card/)).toBeInTheDocument();
+    expect(screen.getByText('Save card').closest('button')).not.toBeDisabled();
+    expect(screen.queryByTestId('card-saved-notice')).not.toBeInTheDocument();
+  });
 });
