@@ -86,7 +86,7 @@ async function harness() {
     }),
   } as unknown as SettingsRepository;
 
-  const users: Array<Pick<User, 'id' | 'tenantId' | 'role' | 'status' | 'clerkUserId' | 'mobileNumber'>> = [
+  const users: Array<Pick<User, 'id' | 'tenantId' | 'role' | 'status' | 'clerkUserId' | 'mobileNumber' | 'deletedAt'>> = [
     { id: 'u-owner', tenantId: TENANT, role: 'owner', status: 'active', clerkUserId: 'clerk-owner' },
     { id: BACKUP_ID, tenantId: TENANT, role: 'dispatcher', status: 'active', clerkUserId: 'clerk-backup-line', mobileNumber: BACKUP_MOBILE },
   ];
@@ -172,7 +172,7 @@ async function harness() {
   const ask = (sessionId: string, callSid: string, key: AskKey) =>
     adapter.handleGather({ sessionId, callSid, speechResult: ASK[key].speech, confidence: 0.95, tenantId: TENANT });
 
-  return { adapter, store, tenantSettings, settingsFailure, backup, dailyDigestRepo, call, ask };
+  return { adapter, store, tenantSettings, settingsFailure, users, backup, dailyDigestRepo, call, ask };
 }
 
 function expectNoTenantData(xml: string) {
@@ -264,5 +264,56 @@ describe('B3-1 — the same re-check on the media-streams entry point', () => {
 
     expect(line).toContain(OWNER_REFUSAL);
     expectNoTenantData(line);
+  });
+});
+
+// B4-2 — the per-turn re-check compared who the line resolves to now with who
+// it was picked up as by their subject (the Clerk login when they have one,
+// else the users row id). A backup who signed up while on the call changed
+// subject, and the line dropped as if they had been replaced. It now compares
+// the users row: the same person keeps the line, and only the same person
+// gets back what the line was granted at pick-up.
+describe('B4-2 — the line belongs to the same person, whatever their login', () => {
+  it('a backup who links a login mid-call keeps the line and every lookup', async () => {
+    const h = await harness();
+    h.backup.clerkUserId = null;
+    const sessionId = await h.call(BACKUP_MOBILE, 'CA-linked-login');
+    expect(await h.ask(sessionId, 'CA-linked-login', 'day')).toContain(ASK.day.answer);
+    const pickedUpActor = h.store.get(sessionId)!.actorUserId;
+    expect(pickedUpActor).toBe(BACKUP_ID);
+
+    h.backup.clerkUserId = 'clerk-signed-up-mid-call';
+    for (const key of ['digest', 'pending'] as const) {
+      expect(await h.ask(sessionId, 'CA-linked-login', key)).toContain(ASK[key].answer);
+    }
+    const session = h.store.get(sessionId)!;
+    expect(session.machine.currentContext.ownerSession).toBe(true);
+    expect(session.machine.currentContext.extendedIntents).toBe(true);
+    // What was granted at pick-up, unchanged: the call gains nothing mid-call.
+    expect(session.actorUserId).toBe(pickedUpActor);
+  });
+
+  it('a teammate made backup on the same mobile mid-call gets nothing; the backup gets it back when the line names them again', async () => {
+    const h = await harness();
+    h.users.push({
+      id: 'user-teammate',
+      tenantId: TENANT,
+      role: 'dispatcher',
+      status: 'active',
+      clerkUserId: 'clerk-teammate',
+      mobileNumber: BACKUP_MOBILE,
+    });
+    const sessionId = await h.call(BACKUP_MOBILE, 'CA-same-mobile');
+    expect(await h.ask(sessionId, 'CA-same-mobile', 'day')).toContain(ASK.day.answer);
+
+    h.tenantSettings.backupSupervisorUserId = 'user-teammate';
+    const refused = await h.ask(sessionId, 'CA-same-mobile', 'digest');
+    expect(refused).toContain(OWNER_REFUSAL);
+    expectNoTenantData(refused);
+    expect(h.store.get(sessionId)!.actorUserId).toBeUndefined();
+
+    h.tenantSettings.backupSupervisorUserId = BACKUP_ID;
+    expect(await h.ask(sessionId, 'CA-same-mobile', 'digest')).toContain(ASK.digest.answer);
+    expect(h.store.get(sessionId)!.actorUserId).toBe('clerk-backup-line');
   });
 });

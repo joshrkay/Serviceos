@@ -399,19 +399,22 @@ export interface VoiceSession {
    * at the start of every turn, so a line that no longer resolves keeps no
    * owner-line privilege that turn (`refreshOwnerLine`). Absent on a
    * session whose owner authority came from an authenticated owner (in-app)
-   * or a harness fixture: that is the owner.
+   * or a harness fixture: that is the owner. B4-2 — `userRowId` (a backup's
+   * users row; none for the owner phone) is who the line was picked up as,
+   * and what that re-check compares: a backup who links a login mid-call
+   * changes `userId`, not who they are.
    */
-  ownerLineApprover?: Pick<ResolvedApprover, 'role' | 'userId'>;
+  ownerLineApprover?: Pick<ResolvedApprover, 'role' | 'userId' | 'userRowId'>;
   /**
    * B3-1 — what the caller-ID-established owner line was granted at pick-up
    * besides `ownerSession`: the extended owner lookups and the phone actor
    * (`actorUserId`, the subject every owner lookup is authorised by). The
    * turn processor's per-turn re-check (`refreshOwnerLine`) records it the
    * first time it runs, drops all of it for a turn whose re-check no longer
-   * resolves the line (or resolves it to someone other than
-   * `ownerLineApprover`), and restores it on a later turn that resolves it
-   * to the same approver again. Absent on a session that carries no
-   * `ownerLineApprover`.
+   * resolves the line (or resolves it to someone other than the person
+   * `ownerLineApprover.userRowId` names), and restores it on a later turn
+   * that resolves it to that same person again. Absent on a session that
+   * carries no `ownerLineApprover`.
    */
   ownerLineGrant?: { extendedIntents: boolean; actorUserId?: string };
   /**

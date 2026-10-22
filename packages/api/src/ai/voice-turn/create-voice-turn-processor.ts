@@ -4126,10 +4126,13 @@ export function createVoiceTurnProcessor(
       session.callerPhone,
     );
     // The grant belongs to whoever the line was picked up as: the owner phone
-    // (no user id) or that one backup. A caller-ID that now resolves to
-    // someone else (the owner phone moved to the backup's mobile) is not that
-    // line, so it gets nothing this call; calling back picks it up afresh.
-    const now = resolved && resolved.userId === session.ownerLineApprover.userId ? resolved : null;
+    // (no users row) or that one backup (their users row — B4-2: not their
+    // subject, which changes when they link a login mid-call). A caller-ID
+    // that now resolves to someone else (the owner phone moved to the
+    // backup's mobile, another teammate made backup on it) is not that line:
+    // it gets nothing while it does, and only a turn that names the same
+    // person again gets the grant back.
+    const now = resolved && resolved.userRowId === session.ownerLineApprover.userRowId ? resolved : null;
     session.machine.setOwnerLinePrivileges({
       ownerSession: now !== null,
       extendedIntents: now !== null && grant.extendedIntents,

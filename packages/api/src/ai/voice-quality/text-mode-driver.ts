@@ -63,7 +63,7 @@
 import { performance } from 'node:perf_hooks';
 import { v4 as uuidv4 } from 'uuid';
 import { LLMGateway } from '../gateway/gateway';
-import { resolveOwnerLineApprover } from '../voice-turn/shared/owner-session';
+import { ownerLineStamp, resolveOwnerLineApprover } from '../voice-turn/shared/owner-session';
 import {
   createVoiceTurnProcessor,
   type VoiceTurnProcessor,
@@ -365,12 +365,7 @@ export class TextModeDriver implements AgentDriver {
     // B1 — carried on the session for every approval turn, exactly as the
     // telephony establishment stamps it. A fixture forced to the owner line
     // with no caller-ID match carries none: that is the owner.
-    if (lineApprover) {
-      session.ownerLineApprover = {
-        role: lineApprover.role,
-        ...(lineApprover.userId ? { userId: lineApprover.userId } : {}),
-      };
-    }
+    if (lineApprover) session.ownerLineApprover = ownerLineStamp(lineApprover);
 
     // The caller's number as Twilio sends it; '' when blocked/withheld
     // (establishInboundSession pins it for both transports).

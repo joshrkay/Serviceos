@@ -80,7 +80,7 @@ import {
   injectSafetySayLines,
 } from './shared/safety-say-lines';
 import { isBlockedCallerId } from '../ai/voice-turn/shared/blocked-caller-id';
-import { resolveOwnerLineApprover } from '../ai/voice-turn/shared/owner-session';
+import { ownerLineStamp, resolveOwnerLineApprover } from '../ai/voice-turn/shared/owner-session';
 import { switchSessionLanguage } from '../ai/voice-turn/shared/language-switch';
 import {
   queueCallbackProposal as queueCallbackProposalShared,
@@ -1217,12 +1217,7 @@ export class TwilioGatherAdapter {
     // stays as defense-in-depth but is no longer the sole source.
     if (opts.from) session.callerPhone = opts.from;
     if (opts.stirVerstat) session.stirVerstat = opts.stirVerstat;
-    if (ownerSession && lineApprover) {
-      session.ownerLineApprover = {
-        role: lineApprover.role,
-        ...(lineApprover.userId ? { userId: lineApprover.userId } : {}),
-      };
-    }
+    if (ownerSession && lineApprover) session.ownerLineApprover = ownerLineStamp(lineApprover);
     if (approverCallerId) {
       if (!ownerSession) session.ownerLineUnverified = true;
       this.auditOwnerLineAttestation(session, opts.stirVerstat, ownerSession);

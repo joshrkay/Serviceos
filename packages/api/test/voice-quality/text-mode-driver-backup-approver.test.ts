@@ -134,7 +134,7 @@ describe('B1 follow-up — TextModeDriver carries the resolved approver (product
     expect(stored.status).toBe('approved');
     expect(stored.executedByRole).toBe('dispatcher');
     expect(stored.executedBy).toBe(BACKUP_SUBJECT);
-    expect(h.store.get(sessionId)?.ownerLineApprover).toEqual({ role: 'dispatcher', userId: BACKUP_SUBJECT });
+    expect(h.store.get(sessionId)?.ownerLineApprover).toEqual({ role: 'dispatcher', userId: BACKUP_SUBJECT, userRowId: BACKUP_ID });
   });
 
   it('a technician backup is recognised but approves nothing', async () => {
@@ -147,7 +147,7 @@ describe('B1 follow-up — TextModeDriver carries the resolved approver (product
 
     expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
     expect(answer.agentResponse).toContain('take approvals on this line');
-    expect(h.store.get(sessionId)?.ownerLineApprover).toEqual({ role: 'technician', userId: BACKUP_SUBJECT });
+    expect(h.store.get(sessionId)?.ownerLineApprover).toEqual({ role: 'technician', userId: BACKUP_SUBJECT, userRowId: BACKUP_ID });
   });
 
   it('the owner phone carries the owner; an explicit owner fixture with no caller-ID match carries none', async () => {
@@ -216,7 +216,7 @@ describe("B4-1 — TextModeDriver: a backup's actor is the backup's own, whateve
     h.provider.setDefaultResponse(JSON.stringify({ intentType: 'lookup_digest', confidence: 0.96 }));
     const { sessionId } = await h.driver.startSession({ tenantId: TENANT, callerId: BACKUP_MOBILE, callerIdBlocked: false });
 
-    expect(h.store.get(sessionId)?.ownerLineApprover).toEqual({ role: 'technician', userId: BACKUP_SUBJECT });
+    expect(h.store.get(sessionId)?.ownerLineApprover).toEqual({ role: 'technician', userId: BACKUP_SUBJECT, userRowId: BACKUP_ID });
     expect(h.store.get(sessionId)?.actorUserId).toBe(BACKUP_SUBJECT);
     const answer = await h.driver.speak(sessionId, 'question about the digest');
     expect(answer.agentResponse).toContain('owner-level report');

@@ -58,3 +58,18 @@ export async function resolveOwnerLineApprover(
     return null;
   }
 }
+
+/**
+ * B1 — what establishment carries on the session as `ownerLineApprover` for a
+ * recognised line: the role it approves as, the subject approvals attribute
+ * to, and (B4-2) the users row naming the person, which the per-turn
+ * re-check compares. Both establishment paths (the telephony core and the
+ * Layer 1 driver) stamp it through here so they cannot drift.
+ */
+export function ownerLineStamp(approver: ResolvedApprover): Pick<ResolvedApprover, 'role' | 'userId' | 'userRowId'> {
+  return {
+    role: approver.role,
+    ...(approver.userId ? { userId: approver.userId } : {}),
+    ...(approver.userRowId ? { userRowId: approver.userRowId } : {}),
+  };
+}

@@ -61,6 +61,13 @@ export interface ResolvedApprover {
    * the one-tap actor) exactly as before.
    */
   userId?: string;
+  /**
+   * B4-2 — the backup supervisor's users row id. `userId` is their subject,
+   * which changes when they link a login (row id → Clerk subject); this does
+   * not, so "is this the same person as before" compares it. Absent for the
+   * owner phone.
+   */
+  userRowId?: string;
   via: 'owner_phone' | 'backup_supervisor';
 }
 
@@ -120,7 +127,7 @@ async function activeBackup(
 }
 
 function backupApprover(backup: User & { role: Role }): ResolvedApprover {
-  return { role: backup.role, userId: backup.clerkUserId ?? backup.id, via: 'backup_supervisor' };
+  return { role: backup.role, userId: backup.clerkUserId ?? backup.id, userRowId: backup.id, via: 'backup_supervisor' };
 }
 
 export interface ApprovalSmsRecipientDeps extends ApproverIdentityDeps {

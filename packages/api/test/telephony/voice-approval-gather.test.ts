@@ -663,6 +663,7 @@ describe('B1 — a backup supervisor on the owner line approves as themselves (G
     expect(h.store.get(sessionId)!.ownerLineApprover).toEqual({
       role: 'dispatcher',
       userId: 'clerk-backup-gather',
+      userRowId: BACKUP_ID,
     });
     const stored = (await h.proposalRepo.findById(TENANT, proposal.id))!;
     expect(stored.status).toBe('approved');
@@ -703,7 +704,11 @@ describe('B1 follow-up — the owner line re-checks its approver at every approv
   const REFUSED = 'take approvals on this line';
 
   function mutableBackupHarness(classifications: string[]) {
-    const backup: { role: string; status: 'active' | 'suspended' } = { role: 'dispatcher', status: 'active' };
+    const backup: { role: string; status: 'active' | 'suspended'; clerkUserId: string | null } = {
+      role: 'dispatcher',
+      status: 'active',
+      clerkUserId: 'clerk-backup-recheck',
+    };
     const tenantSettings = { ownerPhone: OWNER_PHONE, backupSupervisorUserId: BACKUP_ID, escalationSettings: {} };
     const h = makeHarness({
       gateway: gatewayReturning(classifications),
@@ -716,7 +721,7 @@ describe('B1 follow-up — the owner line re-checks its approver at every approv
                 tenantId: TENANT,
                 role: backup.role,
                 status: backup.status,
-                clerkUserId: 'clerk-backup-recheck',
+                clerkUserId: backup.clerkUserId,
                 mobileNumber: BACKUP_MOBILE,
               }
             : null,
@@ -742,7 +747,11 @@ describe('B1 follow-up — the owner line re-checks its approver at every approv
     const proposal = await seedPending(m.proposalRepo);
     const callSid = `CA-recheck-${_label.replace(/\W+/g, '-')}`;
     const sessionId = await startCall(m, BACKUP_MOBILE, callSid);
-    expect(m.store.get(sessionId)!.ownerLineApprover).toEqual({ role: 'dispatcher', userId: 'clerk-backup-recheck' });
+    expect(m.store.get(sessionId)!.ownerLineApprover).toEqual({
+      role: 'dispatcher',
+      userId: 'clerk-backup-recheck',
+      userRowId: BACKUP_ID,
+    });
 
     const readback = await say(m, sessionId, callSid, 'approve the Henderson estimate');
     expect(readback).toContain('Henderson Family LLC');
@@ -806,5 +815,23 @@ describe('B1 follow-up — the owner line re-checks its approver at every approv
     const stored = (await m.proposalRepo.findById(TENANT, proposal.id))!;
     expect(stored.status).toBe('approved');
     expect(stored.executedByRole).toBe('dispatcher');
+  });
+
+  // B4-2 — signing up changes a backup's subject (row id → Clerk login), not
+  // who they are: the line is the same person's, so their yes still counts,
+  // attributed to the login they hold at the yes.
+  it('a backup who links a login between the readback and the yes approves as themselves', async () => {
+    const m = mutableBackupHarness([APPROVE_CLASSIFICATION]);
+    m.backup.clerkUserId = null;
+    const proposal = await seedPending(m.proposalRepo);
+    const sessionId = await startCall(m, BACKUP_MOBILE, 'CA-recheck-linked');
+    await say(m, sessionId, 'CA-recheck-linked', 'approve the Henderson estimate');
+    m.backup.clerkUserId = 'clerk-linked-mid-call';
+    await say(m, sessionId, 'CA-recheck-linked', 'yes');
+
+    const stored = (await m.proposalRepo.findById(TENANT, proposal.id))!;
+    expect(stored.status).toBe('approved');
+    expect(stored.executedByRole).toBe('dispatcher');
+    expect(stored.executedBy).toBe('clerk-linked-mid-call');
   });
 });
