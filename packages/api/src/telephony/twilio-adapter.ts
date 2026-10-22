@@ -2364,6 +2364,10 @@ export class TwilioGatherAdapter {
       });
     }
 
+    // B3-1 — the owner line's privileges as of this turn (re-checked from
+    // the pinned caller-ID), before anything below reads them.
+    await this.processor.refreshOwnerLine(session, opts.tenantId);
+
     // RV-140 — shared deterministic safety scan (see
     // runDeterministicSafetyScan). Runs after the transcript append so the
     // triggering utterance is always captured, BEFORE any LLM call.

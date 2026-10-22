@@ -7,7 +7,9 @@
  * authorises by ACTOR: it resolves the asking user's DB-authoritative role
  * and fails closed. `lookup_my_day` also needs the speaker's identity to
  * self-scope. So the phone resolves an actor, ONCE, where the session is
- * established, and stamps it on the session as `actorUserId`.
+ * established, and stamps it on the session as `actorUserId`. (B3-1 — an
+ * owner line's actor is withdrawn for any turn on which the line no longer
+ * resolves: the voice turn processor's `refreshOwnerLine`.)
  *
  * Resolution order — every step tenant-scoped, none from utterance content:
  *   1. the tenant user whose registered mobile matches the caller-ID

@@ -395,11 +395,23 @@ export interface VoiceSession {
    * B1 follow-up — it marks the line as caller-ID-established: the turn
    * processor re-resolves the approver from that caller-ID at every voice
    * approve / reject / edit (`currentApprovalLine`), so a backup demoted,
-   * deactivated or replaced mid-call acts as who they are now. Absent on a
+   * deactivated or replaced mid-call acts as who they are now — and (B3-1)
+   * at the start of every turn, so a line that no longer resolves keeps no
+   * owner-line privilege that turn (`refreshOwnerLine`). Absent on a
    * session whose owner authority came from an authenticated owner (in-app)
    * or a harness fixture: that is the owner.
    */
   ownerLineApprover?: Pick<ResolvedApprover, 'role' | 'userId'>;
+  /**
+   * B3-1 — what the caller-ID-established owner line was granted at pick-up
+   * besides `ownerSession`: the extended owner lookups and the phone actor
+   * (`actorUserId`, the subject every owner lookup is authorised by). The
+   * turn processor's per-turn re-check (`refreshOwnerLine`) records it the
+   * first time it runs, drops all of it for a turn whose re-check no longer
+   * resolves the line, and restores it on a later turn that does. Absent on
+   * a session that carries no `ownerLineApprover`.
+   */
+  ownerLineGrant?: { extendedIntents: boolean; actorUserId?: string };
   /**
    * True once the recording disclosure has actually been emitted to the caller
    * on this call (set by `bootstrapCallEstablishment`, which is the only
