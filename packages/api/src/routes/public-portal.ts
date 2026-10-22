@@ -593,9 +593,18 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
       );
 
       if (deps.autoReplyToNewLead) {
-        // The customer's stored SMS consent covers the number it was given
-        // for — not a different number typed into this form.
+        // Consent covers only the number it was given for.
+        //  - A contact-bound link (a secondary contact, e.g. an on-site
+        //    tenant): the tick counts only for a number they typed. A blank
+        //    phone falls back to the account holder's number, which the
+        //    contact cannot consent for, and the holder's stored consent is
+        //    not consent to texts about a request they didn't make.
+        //  - The account holder: the tick, or their stored consent when the
+        //    lead's number is their saved one.
+        const contactBound = !!req.portal!.contactId;
+        const tickApplies = parsed.smsConsent === true && (!contactBound || !!parsed.primaryPhone);
         const storedConsentApplies =
+          !contactBound &&
           customer.smsConsent === true &&
           !!customer.primaryPhone &&
           !!lead.primaryPhone &&
@@ -603,7 +612,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         await deps.autoReplyToNewLead({
           lead,
           outcome,
-          smsConsent: parsed.smsConsent === true || storedConsentApplies,
+          smsConsent: tickApplies || storedConsentApplies,
         });
       }
 

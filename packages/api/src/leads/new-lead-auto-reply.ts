@@ -17,7 +17,8 @@
  * Best-effort: never throws, so lead capture is never disturbed. Not silent:
  * once the owner has the feature on, every outcome is audited on the lead
  * (`lead.speed_to_lead`), and a text that should have gone out but could not
- * pushes the owner to call the lead instead.
+ * pushes the owner to call the lead instead (or, when the send could not be
+ * confirmed either way, to check the lead's messages before calling).
  */
 import { createAuditEventBestEffort, type AuditRepository } from '../audit/audit';
 import { ConversationReplyError } from '../conversations/reply-service';
@@ -29,7 +30,10 @@ import { sendSpeedToLeadResponse, type SpeedToLeadSender } from './speed-to-lead
 
 export const NEW_LEAD_AUTO_REPLY_ACTOR_ID = 'system:speed-to-lead';
 
-/** Outcomes that mean the lead was owed a text and did not get one. */
+/** The sender could not confirm whether the text went out (see LeadTextUnconfirmedError). */
+const UNCONFIRMED = 'send_failed:unconfirmed';
+
+/** Outcomes that mean the lead was owed a text and may not have got one. */
 const OWNER_SHOULD_FOLLOW_UP = (reason: string): boolean =>
   reason === 'unavailable' ||
   (reason.startsWith('send_failed:') && reason !== 'send_failed:dnc_blocked');
@@ -102,10 +106,14 @@ export function createNewLeadAutoReply(deps: NewLeadAutoReplyDeps): NewLeadAutoR
 
     if (OWNER_SHOULD_FOLLOW_UP(reason)) {
       const who = [lead.firstName, lead.lastName].filter(Boolean).join(' ').trim() || 'A new lead';
+      // 'unconfirmed': the text may have gone out but wasn't recorded, so a
+      // blind "call them" could double-contact the lead.
+      const message =
+        reason === UNCONFIRMED
+          ? `${who} asked for a text back. The automatic reply may have gone out, but it couldn't be confirmed. Check their messages before you call.`
+          : `${who} asked for a text back, but the automatic reply didn't go out. Give them a call.`;
       try {
-        await notifyOwner(lead.tenantId, 'escalation', {
-          reason: `${who} asked for a text back, but the automatic reply didn't go out. Give them a call.`,
-        });
+        await notifyOwner(lead.tenantId, 'escalation', { reason: message });
       } catch {
         // The audit row above still records the miss.
       }

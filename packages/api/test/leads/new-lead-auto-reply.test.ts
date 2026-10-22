@@ -7,6 +7,7 @@ import { createNewLeadAutoReply } from '../../src/leads/new-lead-auto-reply';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemorySettingsRepository, type TenantSettings } from '../../src/settings/settings';
 import { ConversationReplyError } from '../../src/conversations/reply-service';
+import { LeadTextUnconfirmedError } from '../../src/leads/lead-conversation-sender';
 import type { Lead } from '../../src/leads/lead';
 
 const TENANT = 'tenant-1';
@@ -101,6 +102,19 @@ describe('createNewLeadAutoReply (#1738)', () => {
     expect(await reply({ lead: lead(), outcome: 'created', smsConsent: true })).toBe('send_failed:twilio 500');
     expect(notifyOwner).toHaveBeenCalledWith(TENANT, 'escalation', {
       reason: "Sandra Wu asked for a text back, but the automatic reply didn't go out. Give them a call.",
+    });
+  });
+
+  it('asks the owner to check before calling when the send could not be confirmed', async () => {
+    const send = vi.fn(async () => {
+      throw new LeadTextUnconfirmedError(new Error('db down'));
+    });
+    const { reply, audits } = await setup({ send });
+    expect(await reply({ lead: lead(), outcome: 'created', smsConsent: true })).toBe('send_failed:unconfirmed');
+    expect((await audits())[0].metadata).toMatchObject({ sent: false, outcome: 'send_failed:unconfirmed' });
+    expect(notifyOwner).toHaveBeenCalledWith(TENANT, 'escalation', {
+      reason:
+        "Sandra Wu asked for a text back. The automatic reply may have gone out, but it couldn't be confirmed. Check their messages before you call.",
     });
   });
 

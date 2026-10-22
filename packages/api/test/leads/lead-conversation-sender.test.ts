@@ -1,14 +1,16 @@
 import { describe, it, expect, vi } from 'vitest';
 import { InMemoryConversationRepository } from '../../src/conversations/conversation-service';
-import { createLeadConversationSender } from '../../src/leads/lead-conversation-sender';
+import { createLeadConversationSender, LeadTextUnconfirmedError } from '../../src/leads/lead-conversation-sender';
 import type { Lead } from '../../src/leads/lead';
 
 const TENANT = 'tenant-1';
 
-function setup(opts: { dnc?: boolean } = {}) {
+function setup(opts: { dnc?: boolean; dispatchFails?: boolean; deliveryFails?: boolean } = {}) {
   const conversationRepo = new InMemoryConversationRepository();
   const delivery = {
-    sendSms: vi.fn().mockResolvedValue({ providerMessageId: 'SM-1', provider: 'sms-gateway', channel: 'sms' }),
+    sendSms: opts.deliveryFails
+      ? vi.fn().mockRejectedValue(new Error('twilio 500'))
+      : vi.fn().mockResolvedValue({ providerMessageId: 'SM-1', provider: 'sms-gateway', channel: 'sms' }),
     sendEmail: vi.fn(),
   };
   const auditRepo = { create: vi.fn().mockResolvedValue(undefined) };
@@ -23,7 +25,12 @@ function setup(opts: { dnc?: boolean } = {}) {
       leadRepo: { findById: vi.fn().mockResolvedValue(lead) },
       dncRepo: { isOnDnc: vi.fn().mockResolvedValue(opts.dnc ?? false) },
        
-      dispatchRepo: { create: vi.fn().mockImplementation(async (i) => ({ id: 'd1', sentAt: new Date(), ...i })) } as any,
+      dispatchRepo: {
+        create: vi.fn().mockImplementation(async (i) => {
+          if (opts.dispatchFails && i.status === 'sent') throw new Error('db down');
+          return { id: 'd1', sentAt: new Date(), ...i };
+        }),
+      } as any,
        
       delivery: delivery as any,
     },
@@ -63,5 +70,20 @@ describe('createLeadConversationSender (#1738)', () => {
     await sender({ tenantId: TENANT, leadId: 'lead-1', toPhone: '+15555550123', body: 'a' });
     const [conversation] = await conversationRepo.findByEntity(TENANT, 'lead', 'lead-1');
     expect(conversation).toMatchObject({ title: 'Google Local Services lead', createdBy: 'system:lsa' });
+  });
+
+  it('a provider failure stays a definite delivery_failed refusal', async () => {
+    const { sender } = setup({ deliveryFails: true });
+    await expect(
+      sender({ tenantId: TENANT, leadId: 'lead-1', toPhone: '+15555550123', body: 'a' }),
+    ).rejects.toMatchObject({ code: 'delivery_failed' });
+  });
+
+  it('a failure after the provider accepted the text is "unconfirmed", not "not sent"', async () => {
+    const { sender, delivery } = setup({ dispatchFails: true });
+    const err = await sender({ tenantId: TENANT, leadId: 'lead-1', toPhone: '+15555550123', body: 'a' }).catch((e) => e);
+    expect(delivery.sendSms).toHaveBeenCalledTimes(1);
+    expect(err).toBeInstanceOf(LeadTextUnconfirmedError);
+    expect(err.message).toBe('unconfirmed');
   });
 });

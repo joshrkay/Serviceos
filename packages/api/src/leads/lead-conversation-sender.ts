@@ -9,7 +9,11 @@
  * leads.
  */
 import type { AuditRepository } from '../audit/audit';
-import { sendConversationReply, type ConversationReplyDeps } from '../conversations/reply-service';
+import {
+  ConversationReplyError,
+  sendConversationReply,
+  type ConversationReplyDeps,
+} from '../conversations/reply-service';
 import type { SpeedToLeadSender } from './speed-to-lead';
 import { openOrAppendConversation } from '../sms/inbound-capture';
 
@@ -18,6 +22,20 @@ export interface LeadConversationSenderDeps {
   conversationRepo: Parameters<typeof openOrAppendConversation>[2]['conversationRepo'];
   auditRepo: AuditRepository;
   getBusinessName(tenantId: string): Promise<string | undefined>;
+}
+
+/**
+ * The reply path threw something other than a `ConversationReplyError`. Its
+ * own refusals (DNC, provider failure, …) are all `ConversationReplyError`s
+ * thrown before or instead of the provider send; anything else can come from
+ * the dispatch / message writes AFTER the provider accepted the text. So the
+ * text may have gone out: callers must not tell anyone it definitely didn't.
+ */
+export class LeadTextUnconfirmedError extends Error {
+  constructor(cause: unknown) {
+    super('unconfirmed', { cause });
+    this.name = 'LeadTextUnconfirmedError';
+  }
 }
 
 export interface LeadConversationSenderOptions {
@@ -39,16 +57,21 @@ export function createLeadConversationSender(
       { createdBy: opts.actorId, auditRepo: deps.auditRepo, actorRole: 'system' },
     );
     const businessName = await deps.getBusinessName(tenantId);
-    await sendConversationReply(
-      { ...deps.reply, auditRepo: deps.auditRepo, ...(businessName ? { businessName } : {}) },
-      {
-        tenantId,
-        conversationId: conversation.id,
-        body,
-        actorId: opts.actorId,
-        actorRole: 'system',
-        channel: 'sms',
-      },
-    );
+    try {
+      await sendConversationReply(
+        { ...deps.reply, auditRepo: deps.auditRepo, ...(businessName ? { businessName } : {}) },
+        {
+          tenantId,
+          conversationId: conversation.id,
+          body,
+          actorId: opts.actorId,
+          actorRole: 'system',
+          channel: 'sms',
+        },
+      );
+    } catch (err) {
+      if (err instanceof ConversationReplyError) throw err;
+      throw new LeadTextUnconfirmedError(err);
+    }
   };
 }
