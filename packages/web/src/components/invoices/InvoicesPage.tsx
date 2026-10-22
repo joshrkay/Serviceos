@@ -452,12 +452,14 @@ const SENT_MODE_LINES: Record<'pay_link' | 'collect_on_site', string | null> = {
   collect_on_site: 'Sent. Your customer sees the bill with a note that you collect payment in person.',
 };
 
-function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, onIssued, apiId }: {
+function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, issued, onIssued, apiId }: {
   inv: InvCompat; amountDueCents: number;
   /** The invoice's real Stripe payment link, when one exists. */
   paymentLink?: string;
   onClose: () => void; onSent: () => void;
-  /** The draft was issued here; the parent refetches so a reopened sheet sees it open. */
+  /** This draft was already issued from a sheet, even if the refetch hasn't landed yet. */
+  issued: boolean;
+  /** The draft was issued here; the parent remembers it and refetches. */
   onIssued: () => void;
   /** The invoice's API id — the sheet posts to /api/invoices/:id/send
    *  (and /:id/issue first, when the invoice is still a draft). */
@@ -508,19 +510,12 @@ function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, o
     `/api/invoices/${apiId}/issue`
   );
 
-  // Remembered apart from the send: when the issue succeeds but the send is
-  // refused (e.g. the pay link couldn't be made), a retry must not issue the
-  // now-open invoice again ("Invalid transition from open to open"). The
-  // parent refetches too, so a closed and reopened sheet sees it open.
-  const [issued, setIssued] = useState(false);
-
   async function handleSend() {
     setSending(true);
     setSendError(null);
     try {
       if (inv.status === 'Draft' && !issued) {
         await issueInvoice({});
-        setIssued(true);
         onIssued();
       }
       const result = await sendInvoice({
@@ -993,6 +988,11 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
   const { mutate: updateInvoice } = useMutation<Record<string, unknown>, InvoiceResponse>('PUT', `/api/invoices/${invoiceId}`);
 
   const [sendOpen,  setSendOpen]  = useState(false);
+  // Remembered here, not in the sheet: when the issue succeeds but the send is
+  // refused (e.g. the pay link couldn't be made), a retry, even from a closed
+  // and reopened sheet before the refetch lands, must not issue the now-open
+  // invoice again ("Invalid transition from open to open").
+  const [issuedId, setIssuedId] = useState<string | null>(null);
   const [markOpen,  setMarkOpen]  = useState(false);
   const [paid,      setPaid]      = useState(false);
 
@@ -1406,7 +1406,8 @@ function InvoiceDetail({ invoiceId, onBack }: { invoiceId: string; onBack: () =>
           // "Payment journey" it drives) is reflected immediately, without
           // requiring a manual page reload — mirrors MarkPaidSheet's onPaid.
           onSent={() => { void refetch(); }}
-          onIssued={() => { void refetch(); }}
+          issued={issuedId === inv.id}
+          onIssued={() => { setIssuedId(inv.id); void refetch(); }}
         />
       )}
       {markOpen && (
