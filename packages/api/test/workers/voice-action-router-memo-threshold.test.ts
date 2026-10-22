@@ -231,6 +231,8 @@ describe('C-1698-P1 — the memo creator-mode loader fails closed', () => {
       resolveMemberRole: async () => 'dispatcher',
       resolveMemberMode: createMemoCreatorModeLoader(() => service),
       thresholdResolver: async () => override ?? undefined,
+      // A booking naming no real customer is gated, never auto-approved.
+      entityResolver: resolvesCustomer(),
     });
     await worker.handle(
       msg({ tenantId: TENANT, userId: 'system', transcript: 'Book Mrs Lee next Tuesday at 2pm', recordingId: RECORDING_ID }),
