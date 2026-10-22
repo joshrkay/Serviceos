@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import type { Pool } from 'pg';
 import { InMemoryCustomerRepository, type Customer } from '../../src/customers/customer';
 import { InMemoryDncRepository } from '../../src/compliance/dnc';
 import {
@@ -246,6 +247,33 @@ describe('outbound messaging', () => {
 
     expect(revoked).toEqual({ status: 'blocked', reason: 'revoked', permanent: true });
     expect(switchedOff).toEqual({ status: 'blocked', reason: 'channel_disabled', permanent: false });
+  });
+
+  it('reports a delivered text as sent even when finalizing its dedupe claim fails', async () => {
+    await customerRepo.create(makeCustomer());
+    // Wins the claim and the 'sending' step; the final "mark sent" write fails.
+    const pool = {
+      query: vi.fn(async (sql: string) => {
+        if (sql.includes("status = 'sent'")) throw new Error('connection reset');
+        return { rows: [{ claim_key: 'k' }], rowCount: 1 };
+      }),
+    } as unknown as Pool;
+    const outbound = createOutboundMessaging({
+      delivery: { sendSms, sendEmail: vi.fn() } as unknown as MessageDeliveryProvider,
+      customerRepo,
+      dncRepo,
+      consentLedger: { listByPhone: async () => [] },
+      pool,
+      logger,
+    });
+
+    const outcome = await outbound.sendText(toCustomer('transactional'));
+
+    expect(outcome).toEqual({
+      status: 'sent',
+      delivery: { provider: 'test', providerMessageId: 'm-1', channel: 'sms' },
+    });
+    expect(sendSms).toHaveBeenCalledTimes(1);
   });
 
   it('turns a provider error into a retryable block with the reason, never a throw', async () => {

@@ -243,13 +243,17 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
     const message: SmsMessage = { ...addressed, idempotencyKey: claimKey };
 
     let outcome: SendOutcome;
+    // Set the moment the provider accepts, so a ledger failure AFTER that
+    // (finalizing the claim) is still reported as the delivery it was.
+    let delivered: DeliveryResult | undefined;
     try {
       if (!deps.pool) {
         outcome = { status: 'sent', delivery: await deps.delivery.sendSms(message) };
       } else {
-        const claim = await withSendClaim(deps.pool, text.tenantId, claimKey, () =>
-          deps.delivery.sendSms(message),
-        );
+        const claim = await withSendClaim(deps.pool, text.tenantId, claimKey, async () => {
+          delivered = await deps.delivery.sendSms(message);
+          return delivered;
+        });
         outcome =
           claim.outcome === 'sent'
             ? { status: 'sent', delivery: claim.result }
@@ -258,6 +262,15 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
               : blocked('in_flight');
       }
     } catch (err) {
+      if (delivered) {
+        // The text went out; only marking the claim 'sent' failed. The claim
+        // stays 'sending' (never reclaimed), so a retry cannot resend it.
+        deps.logger.warn('Outbound text sent but its dedupe claim was not finalized', {
+          ...logFields(text, { status: 'sent', delivery: delivered }),
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return { status: 'sent', delivery: delivered };
+      }
       // withSendClaim has already released the claim: nothing reached the
       // provider, so a later attempt may send.
       if (err instanceof SmsDeferredError) {
