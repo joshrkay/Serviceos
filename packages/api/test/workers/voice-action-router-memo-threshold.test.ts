@@ -13,6 +13,7 @@
  * override when a mode is missing (unit-pinned in auto-approve.test.ts).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { resolvesCustomer } from '../helpers/resolves-customer';
 
 vi.mock('../../src/analytics/posthog', () => ({
   recordVoiceError: vi.fn(),
@@ -111,6 +112,7 @@ describe('OVAS-04 — memo auto-approval honours the creator’s mode and the te
       gateway: bookingGateway(opts.draftConfidence),
       proposalRepo,
       voiceRepo: ownerMemo,
+      entityResolver: resolvesCustomer(),
       tenantSchedulingResolver: async () => ({ timezone: 'America/Phoenix' }),
       resolveMemberRole: async () => 'owner',
       ...(opts.mode !== undefined ? { resolveMemberMode: async () => opts.mode ?? null } : {}),

@@ -181,3 +181,5 @@ Terms for how the product states what it can prove about itself. The PRD's
 - **Draft outcome** — what drafting a proposal returns to a surface: a
   *proposal*, a *clarification* question, or a *refusal* with a reason. The
   surface only decides how to say it.
+  Lives in `src/ai/drafting/draft-proposal.ts` (`draftProposal`); chat and
+  voice memos draft through it so far.
