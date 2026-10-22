@@ -244,8 +244,9 @@ export async function queueCloseFallbackChain(
           channel: 'voice_inbound',
           ownerPhone,
           summaryText: updatedHead.summary,
-          renderSmsBody: (approveUrl: string) =>
-            renderChainSms(smsMembers, { approveUrl: approveUrl || undefined }),
+          // B1 follow-up — a recipient who cannot approve is asked for no reply.
+          renderSmsBody: (approveUrl: string, { recipientCannotApprove }) =>
+            renderChainSms(smsMembers, { approveUrl: approveUrl || undefined, recipientCannotApprove }),
           payload: updatedHead.payload,
         });
         smsSent = result.smsSent;

@@ -93,4 +93,43 @@ describe('OBS-2 — proposals.ai_run_id → the drafting run, keyed to the conve
     );
     expect(foreign).toEqual([]);
   });
+
+  // B3 — a chat correction ("no, make it …") and an entity-pick re-draft
+  // rewrite the SAME row with a fresh draft through the generic update. The
+  // row must then join to the run that authored the new payload, and a fresh
+  // draft with no persisted run must clear the link rather than keep naming
+  // the first run (the FK makes a made-up id impossible either way).
+  it('a rewrite through the generic update re-points ai_run_id to the fresh draft run, or clears it', async () => {
+    const repo = new PgProposalRepository(pool);
+    const conversationId = crypto.randomUUID();
+    const draft = (message: string) =>
+      new EstimateTaskHandler(gateway()).handle({
+        tenantId: tenant.tenantId,
+        userId: tenant.userId,
+        message,
+        conversationId,
+        customerId: crypto.randomUUID(),
+      });
+    const { proposal: first } = await draft('Quote a capacitor replacement');
+    await repo.create(first);
+    const { proposal: correction } = await draft('no, make it two capacitors');
+    expect(correction.aiRunId).toBeDefined();
+    expect(correction.aiRunId).not.toBe(first.aiRunId);
+
+    await repo.update(tenant.tenantId, first.id, {
+      payload: correction.payload,
+      aiRunId: correction.aiRunId,
+      confidenceFactors: correction.confidenceFactors,
+      explanation: correction.explanation,
+    });
+    const { rows } = await pool.query(
+      `SELECT ai_run_id, confidence_factors FROM proposals WHERE tenant_id = $1 AND id = $2`,
+      [tenant.tenantId, first.id],
+    );
+    expect(rows[0].ai_run_id).toBe(correction.aiRunId);
+    expect(rows[0].confidence_factors).toEqual(correction.confidenceFactors ?? null);
+
+    await repo.update(tenant.tenantId, first.id, { aiRunId: undefined });
+    expect((await repo.findById(tenant.tenantId, first.id))?.aiRunId).toBeUndefined();
+  });
 });
