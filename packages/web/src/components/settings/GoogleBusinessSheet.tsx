@@ -12,10 +12,11 @@
  * approval. When credentials break (revoked access), the API surfaces a
  * poll-state backoff here as a visible "attention" state.
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { X, Star, AlertCircle, MapPin } from 'lucide-react';
 import { toast } from 'sonner';
 import { apiFetch } from '../../utils/api-fetch';
+import { GoogleProfileWalkthrough } from './GoogleProfileWalkthrough';
 
 interface GoogleBusinessIntegrationView {
   id: string;
@@ -41,6 +42,9 @@ interface GoogleBusinessLocationView {
   address: string | null;
   reviewUrl: string | null;
 }
+
+/** How often the open sheet re-checks Google while waiting on verification. */
+const RECHECK_INTERVAL_MS = 60_000;
 
 async function errorDetail(res: Response, fallback: string): Promise<string> {
   try {
@@ -70,10 +74,17 @@ export function GoogleBusinessSheet({ onClose, onReviewUrlChange }: GoogleBusine
   /** Null until the picker is opened; the locations Google lists. */
   const [locations, setLocations] = useState<GoogleBusinessLocationView[] | null>(null);
   const [loadingLocations, setLoadingLocations] = useState(false);
+  // Mirrors loadingLocations for the timed re-check, whose closure is stale.
+  const loadingLocationsRef = useRef(false);
+  loadingLocationsRef.current = loadingLocations;
 
-  async function loadLocations() {
+  /** quiet: the sheet's own re-check while the owner is away verifying on
+   *  Google. It only acts when a location has appeared (handing off to the
+   *  picker); an empty answer or a failure leaves the walkthrough alone. */
+  async function loadLocations({ quiet = false }: { quiet?: boolean } = {}) {
+    if (quiet && loadingLocationsRef.current) return;
     setLoadingLocations(true);
-    setError('');
+    if (!quiet) setError('');
     try {
       const res = await apiFetch('/api/googlebusiness-integrations/google/locations');
       if (!res.ok) {
@@ -86,7 +97,14 @@ export function GoogleBusinessSheet({ onClose, onReviewUrlChange }: GoogleBusine
         reviewUrlFilled?: boolean;
         reviewUrlCleared?: boolean;
       };
+      if (quiet && !json.data?.length) return;
       setLocations(json.data ?? []);
+      // The server recorded the new count: the account now needs a pick.
+      setIntegration((prev) =>
+        prev && prev.locationState === 'no_location' && json.data?.length
+          ? { ...prev, locationState: 'needs_pick' }
+          : prev,
+      );
       if (json.integration && !json.listingRemoved) {
         // Google updated the saved listing (e.g. a review link after
         // verification); the server saved it.
@@ -108,7 +126,7 @@ export function GoogleBusinessSheet({ onClose, onReviewUrlChange }: GoogleBusine
         );
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Could not load locations');
+      if (!quiet) setError(err instanceof Error ? err.message : 'Could not load locations');
     } finally {
       setLoadingLocations(false);
     }
@@ -179,6 +197,27 @@ export function GoogleBusinessSheet({ onClose, onReviewUrlChange }: GoogleBusine
       cancelled = true;
     };
   }, []);
+
+  // Waiting on Google: look again when the owner comes back to this tab and
+  // every minute while it is open, so a newly verified profile is picked up
+  // without a reconnect.
+  const waitingOnGoogle = integration?.locationState === 'no_location' && locations === null;
+  useEffect(() => {
+    if (!waitingOnGoogle) return;
+    const recheck = () => {
+      if (document.visibilityState === 'visible') void loadLocations({ quiet: true });
+    };
+    const timer = window.setInterval(recheck, RECHECK_INTERVAL_MS);
+    document.addEventListener('visibilitychange', recheck);
+    window.addEventListener('focus', recheck);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', recheck);
+      window.removeEventListener('focus', recheck);
+    };
+    // loadLocations only touches state setters and a ref.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [waitingOnGoogle]);
 
   async function connect() {
     setBusy(true);
@@ -335,26 +374,10 @@ export function GoogleBusinessSheet({ onClose, onReviewUrlChange }: GoogleBusine
 
           {isConnected && !needsAttention && locations === null && (
             locationState === 'no_location' ? (
-              <div
-                data-testid="googlebusiness-no-location"
-                className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3"
-              >
-                <p className="text-sm text-amber-900">
-                  This Google account has no Business Profile yet.
-                </p>
-                <p className="text-xs text-amber-800 mt-0.5">
-                  Once Google verifies your profile, check again to connect it.
-                </p>
-                <button
-                  type="button"
-                  onClick={() => void loadLocations()}
-                  disabled={loadingLocations}
-                  data-testid="googlebusiness-check-again"
-                  className="mt-2 min-h-11 rounded-xl border border-amber-300 bg-white px-4 text-sm text-amber-900 disabled:opacity-60"
-                >
-                  {loadingLocations ? 'Checking…' : 'Check again'}
-                </button>
-              </div>
+              <GoogleProfileWalkthrough
+                checking={loadingLocations}
+                onCheckAgain={() => void loadLocations()}
+              />
             ) : locationState === 'connected' ? (
               <button
                 type="button"
