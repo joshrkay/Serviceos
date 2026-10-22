@@ -307,6 +307,16 @@ export interface GoogleBusinessIntegrationRepository
     selection: GoogleBusinessLocationSelection,
   ): Promise<GoogleBusinessIntegrationSummary | null>;
   /**
+   * Record how many locations a later successful discovery saw (the
+   * connect-time count can be missing when discovery failed then), so
+   * "no location" is reported instead of "pick one". Null when the tenant
+   * has no integration row.
+   */
+  recordLocationCount(
+    tenantId: string,
+    locationCount: number,
+  ): Promise<GoogleBusinessIntegrationSummary | null>;
+  /**
    * Hard-delete the row. The poll worker treats "no row" as a silent
    * skip (many tenants legitimately have no GBP), so deletion — not a
    * status flip — is what stops per-sweep failure noise after
@@ -444,12 +454,26 @@ export class InMemoryGoogleBusinessIntegrationRepository
     tenantId: string,
     selection: GoogleBusinessLocationSelection,
   ): Promise<GoogleBusinessIntegrationSummary | null> {
+    return this.mergeProviderData(tenantId, selectionProviderData(selection));
+  }
+
+  async recordLocationCount(
+    tenantId: string,
+    locationCount: number,
+  ): Promise<GoogleBusinessIntegrationSummary | null> {
+    return this.mergeProviderData(tenantId, { locationCount });
+  }
+
+  private mergeProviderData(
+    tenantId: string,
+    patch: Partial<StoredProviderData>,
+  ): GoogleBusinessIntegrationSummary | null {
     const entry = this.rows.get(tenantId);
     if (!entry) return null;
     const creds = entry.row.credentials as StoredGoogleBusinessCredentials;
     const credentials: Record<string, unknown> = {
       ...entry.row.credentials,
-      providerData: { ...creds.providerData, ...selectionProviderData(selection) },
+      providerData: { ...creds.providerData, ...patch },
     };
     entry.row = {
       ...entry.row,
@@ -623,9 +647,23 @@ export class PgGoogleBusinessIntegrationRepository
     tenantId: string,
     selection: GoogleBusinessLocationSelection,
   ): Promise<GoogleBusinessIntegrationSummary | null> {
+    return this.mergeProviderData(tenantId, selectionProviderData(selection));
+  }
+
+  async recordLocationCount(
+    tenantId: string,
+    locationCount: number,
+  ): Promise<GoogleBusinessIntegrationSummary | null> {
+    return this.mergeProviderData(tenantId, { locationCount });
+  }
+
+  private async mergeProviderData(
+    tenantId: string,
+    patch: Partial<StoredProviderData>,
+  ): Promise<GoogleBusinessIntegrationSummary | null> {
     return this.withTenant(tenantId, async (client) => {
-      // Merge into providerData: the listing fields are replaced, the
-      // tokens and locationCount are kept.
+      // Merge into providerData: the patched fields are replaced, the
+      // tokens and every other field are kept.
       const result = await client.query(
         `UPDATE tenant_integrations
             SET credentials = jsonb_set(
@@ -640,7 +678,7 @@ export class PgGoogleBusinessIntegrationRepository
         [
           tenantId,
           GOOGLE_BUSINESS_PROVIDER,
-          JSON.stringify(selectionProviderData(selection)),
+          JSON.stringify(patch),
         ],
       );
       if (result.rows.length === 0) return null;

@@ -272,14 +272,18 @@ export function createGoogleBusinessOAuthCallbackRouter(
       const reviewCursorReset = selection
         ? await resetReviewCursorIfMoved(deps, consumed.tenantId, previous, selection)
         : false;
-      const reviewUrl: Awaited<ReturnType<typeof fillReviewUrl>> = selection
-        ? await fillReviewUrl(
-            deps,
-            consumed.tenantId,
-            previous?.reviewUrl ?? null,
-            selection.reviewUrl,
-          )
-        : { reviewUrlFilled: false };
+      // With no listing chosen after a reconnect whose discovery worked (the
+      // saved one is gone), a link the app filled from it is cleared; a
+      // typed one stays.
+      const reviewUrl: Awaited<ReturnType<typeof fillReviewUrl>> =
+        selection || (locations !== null && previous)
+          ? await fillReviewUrl(
+              deps,
+              consumed.tenantId,
+              previous?.reviewUrl ?? null,
+              selection?.reviewUrl ?? null,
+            )
+          : { reviewUrlFilled: false };
 
       if (deps.auditRepo) {
         // No Clerk session on the callback — the actor falls back to
@@ -451,7 +455,15 @@ export function createGoogleBusinessIntegrationsRouter(
     requirePermission('settings:update'),
     async (req: AuthenticatedRequest, res: Response) => {
       try {
-        const locations = await discoverForTenant(req.auth!.tenantId);
+        const tenantId = req.auth!.tenantId;
+        const locations = await discoverForTenant(tenantId);
+        // A connect whose discovery failed stored no count; once Google
+        // answers, an empty account must read as "waiting on Google", not
+        // "pick a location".
+        const current = await deps.integrationRepo.get(tenantId);
+        if (current && current.locationCount !== locations.length) {
+          await deps.integrationRepo.recordLocationCount(tenantId, locations.length);
+        }
         res.json({ data: locations });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);

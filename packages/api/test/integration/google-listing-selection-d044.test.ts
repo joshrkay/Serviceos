@@ -165,4 +165,19 @@ describe('D-044 Google listing selection (real Postgres)', () => {
     expect(state?.consecutive429Count).toBe(1);
     expect(state?.backoffUntil).not.toBeNull();
   });
+
+  it('recordLocationCount merges the count into providerData and keeps the listing', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    const repo = new PgGoogleBusinessIntegrationRepository(pool);
+    await repo.upsert({
+      tenantId,
+      accessToken: 'AT-1',
+      refreshToken: 'RT-1',
+      accessTokenExpiresAt: new Date('2026-10-22T05:00:00Z'),
+    });
+    expect((await repo.get(tenantId))?.locationCount ?? null).toBeNull();
+    const updated = await repo.recordLocationCount(tenantId, 0);
+    expect(updated).toMatchObject({ locationCount: 0, locationId: null });
+    expect((await repo.getTokens(tenantId))?.accessToken).toBe('AT-1');
+  });
 });

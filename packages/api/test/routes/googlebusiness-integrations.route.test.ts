@@ -675,6 +675,57 @@ describe('Google Business integrations routes', () => {
       expect(event.metadata).toMatchObject({ discoveryFailed: true, reviewCursorReset: false });
     });
 
+    it('a later empty discovery after a failed one moves the owner to waiting on Google', async () => {
+      const tokenOnly = makeConnectFetch({});
+      const discoveryDown = vi.fn(async (input: string | URL | Request) =>
+        String(input).includes('oauth2.googleapis.com/token')
+          ? tokenOnly(input)
+          : jsonRes({ error: { message: 'unavailable' } }, 503),
+      );
+      await connect({}, { googleFetch: discoveryDown as unknown as typeof fetch });
+      const app = buildApp({
+        integrationRepo,
+        stateRepo,
+        googleConfig: GOOGLE_CONFIG,
+        googleFetch: makeConnectFetch({ '123': [] }) as unknown as typeof fetch,
+      });
+      expect((await request(app).get('/api/googlebusiness-integrations/')).body.data.locationState).toBe(
+        'needs_pick',
+      );
+      const res = await request(app).get('/api/googlebusiness-integrations/google/locations');
+      expect(res.body.data).toEqual([]);
+      expect((await request(app).get('/api/googlebusiness-integrations/')).body.data.locationState).toBe(
+        'no_location',
+      );
+    });
+
+    it('a reconnect where the saved listing is gone clears the link the app filled from it', async () => {
+      const settingsRepo = await settingsWith();
+      await connect({ '123': ONE_LOCATION }, { settingsRepo });
+      const res = await connect(
+        {
+          '456': TWO_LOCATIONS['456'],
+          '789': [{ name: 'locations/777', title: 'Acme South' }],
+        },
+        { settingsRepo },
+      );
+      expect(res.headers.location).toContain('googlebusiness_review_link=cleared');
+      expect((await settingsRepo.findByTenant(TENANT))?.googleReviewUrl ?? null).toBeNull();
+      const status = await request(buildApp({ integrationRepo, stateRepo })).get(
+        '/api/googlebusiness-integrations/',
+      );
+      expect(status.body.data.locationState).toBe('needs_pick');
+    });
+
+    it('a reconnect where the saved listing is gone keeps a link the owner typed', async () => {
+      const settingsRepo = await settingsWith('https://g.page/r/typed-by-owner');
+      await connect({ '123': ONE_LOCATION }, { settingsRepo });
+      await connect({ '789': [] }, { settingsRepo });
+      expect((await settingsRepo.findByTenant(TENANT))?.googleReviewUrl).toBe(
+        'https://g.page/r/typed-by-owner',
+      );
+    });
+
     it('switching listings restarts review polling; re-choosing the same one does not', async () => {
       const pollStateRepo = new InMemoryReviewPollStateRepository(() => new Date());
       await connect({ '123': ONE_LOCATION }, { pollStateRepo });
