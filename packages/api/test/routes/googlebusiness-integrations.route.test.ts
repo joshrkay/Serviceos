@@ -692,6 +692,31 @@ describe('Google Business integrations routes', () => {
       );
     });
 
+    it('PUT /google/location to a listing with no review link clears the old one and says so', async () => {
+      const WITH_UNVERIFIED: Record<string, StubLocation[]> = {
+        '123': ONE_LOCATION,
+        '789': [{ name: 'locations/777', title: 'Acme South' }],
+      };
+      const settingsRepo = await settingsWith();
+      await connect(WITH_UNVERIFIED, { settingsRepo });
+      const app = buildApp({
+        integrationRepo,
+        stateRepo,
+        googleConfig: GOOGLE_CONFIG,
+        googleFetch: makeConnectFetch(WITH_UNVERIFIED) as unknown as typeof fetch,
+        settingsRepo,
+      });
+      await request(app)
+        .put('/api/googlebusiness-integrations/google/location')
+        .send({ accountId: '123', locationId: '999' });
+      const res = await request(app)
+        .put('/api/googlebusiness-integrations/google/location')
+        .send({ accountId: '789', locationId: '777' });
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ reviewUrlFilled: false, reviewUrlCleared: true });
+      expect((await settingsRepo.findByTenant(TENANT))?.googleReviewUrl ?? null).toBeNull();
+    });
+
     it('PUT /google/location rejects a location Google does not list for this connection', async () => {
       await connect(TWO_LOCATIONS);
       const app = buildApp({

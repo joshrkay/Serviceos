@@ -111,16 +111,18 @@ async function fillReviewUrl(
   tenantId: string,
   previousDerived: string | null,
   derived: string | null,
-): Promise<{ reviewUrlFilled: boolean; reviewUrlError?: string }> {
+): Promise<{ reviewUrlFilled: boolean; reviewUrlCleared?: boolean; reviewUrlError?: string }> {
   if (!deps.settingsRepo) return { reviewUrlFilled: false };
   try {
+    const outcome = await applyDerivedGoogleReviewUrl(
+      deps.settingsRepo,
+      tenantId,
+      previousDerived,
+      derived,
+    );
     return {
-      reviewUrlFilled: await applyDerivedGoogleReviewUrl(
-        deps.settingsRepo,
-        tenantId,
-        previousDerived,
-        derived,
-      ),
+      reviewUrlFilled: outcome === 'set',
+      ...(outcome === 'cleared' ? { reviewUrlCleared: true } : {}),
     };
   } catch (err) {
     return {
@@ -472,6 +474,7 @@ export function createGoogleBusinessIntegrationsRouter(
         res.json({
           data: statusView(updated, pollState),
           reviewUrlFilled: reviewUrl.reviewUrlFilled,
+          reviewUrlCleared: reviewUrl.reviewUrlCleared ?? false,
         });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);

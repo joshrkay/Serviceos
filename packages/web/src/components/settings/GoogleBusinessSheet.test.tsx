@@ -217,6 +217,37 @@ describe('GoogleBusinessSheet', () => {
       );
     });
 
+    it('tells the owner when the old review link was removed', async () => {
+      apiFetchMock
+        .mockResolvedValueOnce(
+          jsonResponse({
+            data: connectedIntegration({ locationId: null, locationState: 'needs_pick' }),
+          }),
+        )
+        .mockResolvedValueOnce(jsonResponse({ data: LOCATIONS }))
+        .mockResolvedValueOnce(
+          jsonResponse({
+            data: connectedIntegration({
+              accountId: '456',
+              locationId: '555',
+              locationTitle: 'Acme North',
+              reviewUrl: null,
+              locationState: 'connected',
+            }),
+            reviewUrlFilled: false,
+            reviewUrlCleared: true,
+          }),
+        );
+      render(<GoogleBusinessSheet onClose={() => {}} />);
+      await screen.findByTestId('googlebusiness-location-picker');
+      fireEvent.click(screen.getByText('Acme North'));
+      await waitFor(() =>
+        expect(toastSuccess).toHaveBeenCalledWith(
+          'Acme North connected. Google has no review link for it yet, so the old one was removed.',
+        ),
+      );
+    });
+
     it('no Business Profile yet: says so and offers Check again', async () => {
       apiFetchMock
         .mockResolvedValueOnce(

@@ -100,13 +100,16 @@ export function GoogleBusinessSheet({ onClose }: GoogleBusinessSheetProps) {
       const json = (await res.json()) as {
         data: GoogleBusinessIntegrationView;
         reviewUrlFilled?: boolean;
+        reviewUrlCleared?: boolean;
       };
       setIntegration(json.data);
       setLocations(null);
       toast.success(
         json.reviewUrlFilled
           ? `${location.title} connected. Your Google review link is set.`
-          : `${location.title} connected.`,
+          : json.reviewUrlCleared
+            ? `${location.title} connected. Google has no review link for it yet, so the old one was removed.`
+            : `${location.title} connected.`,
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Could not save location';

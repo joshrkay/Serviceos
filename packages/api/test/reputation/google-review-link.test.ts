@@ -11,17 +11,28 @@ import { InMemorySettingsRepository } from '../../src/settings/settings';
 
 const DERIVED = 'https://g.page/r/new/review';
 const OLD_DERIVED = 'https://g.page/r/old/review';
+const SET = { kind: 'set', url: DERIVED };
 
 describe('nextGoogleReviewUrl', () => {
   it('fills an empty setting', () => {
-    expect(nextGoogleReviewUrl({ current: null, previousDerived: null, derived: DERIVED })).toBe(DERIVED);
-    expect(nextGoogleReviewUrl({ current: '  ', previousDerived: null, derived: DERIVED })).toBe(DERIVED);
+    expect(nextGoogleReviewUrl({ current: null, previousDerived: null, derived: DERIVED })).toEqual(SET);
+    expect(nextGoogleReviewUrl({ current: '  ', previousDerived: null, derived: DERIVED })).toEqual(SET);
   });
 
   it('replaces the link a previous listing derived', () => {
     expect(
       nextGoogleReviewUrl({ current: OLD_DERIVED, previousDerived: OLD_DERIVED, derived: DERIVED }),
-    ).toBe(DERIVED);
+    ).toEqual(SET);
+  });
+
+  it('clears the previous listing link when the new listing has none', () => {
+    expect(
+      nextGoogleReviewUrl({ current: OLD_DERIVED, previousDerived: OLD_DERIVED, derived: null }),
+    ).toEqual({ kind: 'clear' });
+    // ...but never a link the owner typed.
+    expect(
+      nextGoogleReviewUrl({ current: 'https://g.page/r/mine', previousDerived: OLD_DERIVED, derived: null }),
+    ).toBeNull();
   });
 
   it('never overwrites a link the owner typed', () => {
@@ -43,13 +54,13 @@ describe('applyDerivedGoogleReviewUrl', () => {
   it('writes the derived link to settings and reports it', async () => {
     const repo = new InMemorySettingsRepository();
     await repo.upsertIdentityFields('t1', { businessName: 'Acme' });
-    expect(await applyDerivedGoogleReviewUrl(repo, 't1', null, DERIVED)).toBe(true);
+    expect(await applyDerivedGoogleReviewUrl(repo, 't1', null, DERIVED)).toBe('set');
     expect((await repo.findByTenant('t1'))?.googleReviewUrl).toBe(DERIVED);
   });
 
   it('leaves a tenant with no settings row alone', async () => {
     const repo = new InMemorySettingsRepository();
-    expect(await applyDerivedGoogleReviewUrl(repo, 'nobody', null, DERIVED)).toBe(false);
+    expect(await applyDerivedGoogleReviewUrl(repo, 'nobody', null, DERIVED)).toBe('kept');
     expect(await repo.findByTenant('nobody')).toBeNull();
   });
 
@@ -58,7 +69,7 @@ describe('applyDerivedGoogleReviewUrl', () => {
     await repo.upsertIdentityFields('t1', { businessName: 'Acme' });
     await applyDerivedGoogleReviewUrl(repo, 't1', null, 'https://g.page/r/old');
     // Disconnect deleted the integration row, so the caller knows no previous link.
-    expect(await applyDerivedGoogleReviewUrl(repo, 't1', null, 'https://g.page/r/new')).toBe(true);
+    expect(await applyDerivedGoogleReviewUrl(repo, 't1', null, 'https://g.page/r/new')).toBe('set');
     expect((await repo.findByTenant('t1'))?.googleReviewUrl).toBe('https://g.page/r/new');
   });
 
@@ -67,7 +78,7 @@ describe('applyDerivedGoogleReviewUrl', () => {
     await repo.upsertIdentityFields('t1', { businessName: 'Acme' });
     await applyDerivedGoogleReviewUrl(repo, 't1', null, 'https://g.page/r/old');
     await repo.update('t1', { googleReviewUrl: 'https://g.page/r/typed' });
-    expect(await applyDerivedGoogleReviewUrl(repo, 't1', null, 'https://g.page/r/new')).toBe(false);
+    expect(await applyDerivedGoogleReviewUrl(repo, 't1', null, 'https://g.page/r/new')).toBe('kept');
     expect((await repo.findByTenant('t1'))?.googleReviewUrl).toBe('https://g.page/r/typed');
   });
 
@@ -75,7 +86,15 @@ describe('applyDerivedGoogleReviewUrl', () => {
     const repo = new InMemorySettingsRepository();
     await repo.upsertIdentityFields('t1', { businessName: 'Acme' });
     await repo.update('t1', { googleReviewUrl: 'https://g.page/r/old' });
-    expect(await applyDerivedGoogleReviewUrl(repo, 't1', null, 'https://g.page/r/old')).toBe(false);
-    expect(await applyDerivedGoogleReviewUrl(repo, 't1', null, 'https://g.page/r/new')).toBe(true);
+    expect(await applyDerivedGoogleReviewUrl(repo, 't1', null, 'https://g.page/r/old')).toBe('kept');
+    expect(await applyDerivedGoogleReviewUrl(repo, 't1', null, 'https://g.page/r/new')).toBe('set');
+  });
+
+  it('clears an app-filled link when the owner switches to a listing with no review link', async () => {
+    const repo = new InMemorySettingsRepository();
+    await repo.upsertIdentityFields('t1', { businessName: 'Acme' });
+    await applyDerivedGoogleReviewUrl(repo, 't1', null, 'https://g.page/r/old');
+    expect(await applyDerivedGoogleReviewUrl(repo, 't1', null, null)).toBe('cleared');
+    expect((await repo.findByTenant('t1'))?.googleReviewUrl ?? null).toBeNull();
   });
 });

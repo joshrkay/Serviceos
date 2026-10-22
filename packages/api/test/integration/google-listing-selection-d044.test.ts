@@ -105,7 +105,7 @@ describe('D-044 Google listing selection (real Postgres)', () => {
 
     expect(
       await applyDerivedGoogleReviewUrl(settingsRepo, tenantId, null, 'https://g.page/r/review-999'),
-    ).toBe(true);
+    ).toBe('set');
     const read = async () =>
       (
         await pool.query(`SELECT google_review_url FROM tenant_settings WHERE tenant_id = $1`, [
@@ -130,7 +130,7 @@ describe('D-044 Google listing selection (real Postgres)', () => {
         'https://g.page/r/review-999',
         'https://g.page/r/review-555',
       ),
-    ).toBe(false);
+    ).toBe('kept');
     expect(await read()).toBe('https://g.page/r/typed');
   });
 
