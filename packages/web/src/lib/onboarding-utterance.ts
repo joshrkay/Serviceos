@@ -42,6 +42,8 @@ export interface UtteranceScreen {
   commands?: readonly ScreenCommand[];
   /** Words that are none of the above are the answer itself (a name, a price). */
   freeAnswer?: boolean;
+  /** Words worth boosting for the transcription on this screen beyond its cards and commands ("HVAC"). */
+  keyterms?: readonly string[];
 }
 
 export type Utterance =

@@ -644,6 +644,17 @@ describe('useRivetVoice — listening (S3-5)', () => {
     expect(result.current.listening.missed).toBeNull();
   });
 
+  it("boosts a screen's own words after its command phrases, and hands free answers back as said", async () => {
+    const { result, onResult } = mountTurn({
+      screen: { freeAnswer: true, commands: [{ id: 'show', phrases: ['show me my shop'] }], keyterms: ['plumbing', 'HVAC'] },
+    });
+    await makeItMine(result);
+    expect(new URL(socket().url).searchParams.getAll('keyterm')).toEqual(['show me my shop', 'plumbing', 'HVAC']);
+    act(() => socket().open());
+    say('Walsh Plumbing');
+    expect(onResult.mock.calls.map(([u]) => u)).toEqual([{ kind: 'free', text: 'Walsh Plumbing' }]);
+  });
+
   it('sorts help and commands on a screen that offers them, and boosts the command phrases', async () => {
     const { result, onResult } = mountTurn({
       screen: { help: ['repeat'], commands: [{ id: 'make_it_mine', phrases: ['make it mine'] }] },
