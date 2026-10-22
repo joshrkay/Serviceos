@@ -33,3 +33,4 @@ export * from './contracts/onboarding-draft.js';
 export * from './contracts/onboarding-narration.js';
 export * from './contracts/demo-call.js';
 export * from './contracts/skill-tags.js';
+export * from './contracts/call-forwarding.js';

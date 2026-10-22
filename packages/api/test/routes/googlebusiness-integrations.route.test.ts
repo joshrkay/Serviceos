@@ -768,6 +768,22 @@ describe('Google Business integrations routes', () => {
       );
     });
 
+    it('#1764: a re-check after Google verifies the profile moves waiting-on-Google to a pick', async () => {
+      await connect({ '123': [] });
+      expect((await request(buildApp({ integrationRepo, stateRepo, googleConfig: GOOGLE_CONFIG })).get('/api/googlebusiness-integrations/')).body.data.locationState).toBe('no_location');
+      const app = buildApp({
+        integrationRepo,
+        stateRepo,
+        googleConfig: GOOGLE_CONFIG,
+        googleFetch: makeConnectFetch({ '123': ONE_LOCATION }) as unknown as typeof fetch,
+      });
+      const res = await request(app).get('/api/googlebusiness-integrations/google/locations');
+      expect(res.body.data).toHaveLength(1);
+      expect((await request(app).get('/api/googlebusiness-integrations/')).body.data.locationState).toBe(
+        'needs_pick',
+      );
+    });
+
     it('the picker picks up a review link Google added to the saved listing', async () => {
       const settingsRepo = await settingsWith();
       await connect({ '123': [{ name: 'locations/999', title: 'Acme Plumbing' }] }, { settingsRepo });

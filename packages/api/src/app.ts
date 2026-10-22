@@ -1,6 +1,6 @@
 // Must precede every .use() call — see the module comment (#1555).
 import './bootstrap/stamp-mount-paths';
-import express from 'express';
+import express, { type RequestHandler } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
@@ -16,9 +16,25 @@ import { loadConfig, resolveMediaStreamsEnabled, validateEnvSchema } from './sha
 import { resolveWebDistDir } from './web-static-path';
 import { registerMarketingRedirects } from './marketing-redirects';
 import { createWebhookRouter } from './webhooks/routes';
+import { createLsaWebhookRouter } from './lsa/lsa-webhook-router';
+import { createLsaIntegrationRouter } from './routes/lsa-integration';
+import { createLsaSpeedToLeadSender } from './lsa/lsa-speed-to-lead-sender';
+import { createLsaDispositionReporter } from './lsa/disposition-reporter';
+import { InMemoryLsaIntegrationRepository } from './lsa/lsa-integration';
+import { PgLsaIntegrationRepository } from './lsa/pg-lsa-integration';
 import { createIntegrationResolver, createVapiSecretResolver } from './webhooks/integration-resolver';
 import { createTelephonyRouter, createDidTenantResolver } from './routes/telephony';
 import { createCallsRouter, createCallBridgeRouter } from './routes/calls';
+import { createDripCampaignsRouter } from './routes/drip-campaigns';
+import { createDripEngine } from './marketing/drip/drip-engine';
+import { PgDripRepository, PgDripSignals } from './marketing/drip/pg-drip-repository';
+import { DRIP_FEATURE_FLAG } from './marketing/drip/sequence';
+import { runDripCampaignSweep, DRIP_SWEEP_INTERVAL_MS } from './workers/drip-campaign-worker';
+import { initiateOutboundCall } from './telephony/outbound-call-service';
+import { recipientQuietHours } from './compliance/jurisdiction';
+import { standingContactRevocation } from './compliance/resolve-outbound-consent';
+import { normalizePhone as normalizeDncPhone } from './compliance/dnc';
+import { normalizeMobileE164 } from './shared/phone/normalize';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
 import {
   createEmergencyPageWorker,
@@ -123,6 +139,7 @@ import {
 import { createConversationRouter } from './routes/conversations';
 import { createSettingsRouter } from './routes/settings';
 import { createBrandVoiceRouter } from './tenants/brand/brand-voice-router';
+import { createGetFoundRouter } from './get-found/get-found-router';
 import { listAllTenantIds } from './tenants/list-tenant-ids';
 import { createDncRouter } from './routes/dnc';
 import { createVerticalRouter } from './routes/verticals';
@@ -216,6 +233,11 @@ import {
   createVoiceQualityGradingWorker,
   VOICE_QUALITY_GRADING_INTERVAL_MS,
 } from './workers/voice-quality-grading-worker';
+import { createCallScoringWorker, CALL_SCORING_INTERVAL_MS } from './workers/call-scoring-worker';
+import { createVoiceCallScorer } from './voice/scoring/score-voice-call';
+import { InMemoryCallScoreStore } from './voice/scoring/call-score-store';
+import { PgCallScoreStore } from './voice/scoring/pg-call-score-store';
+import { createVoiceCallScoringRouter } from './routes/voice-call-scoring';
 import {
   runSloMonitor,
   SLO_MONITOR_INTERVAL_MS,
@@ -392,6 +414,26 @@ import {
   createGoogleBusinessOAuthCallbackRouter,
 } from './routes/googlebusiness-integrations';
 import { createGetFoundOnlineRouter } from './routes/get-found-online';
+import { createPublicWebchatRouter } from './routes/public-webchat';
+import { createWebchatSettingsRouter } from './routes/webchat-settings';
+import { createVoiceTurnProcessor, type VoiceTurnProcessor } from './ai/voice-turn';
+import { createWebchatService, WEBCHAT_FLAG } from './webchat/webchat-service';
+import { createTurnstileVerifier } from './webchat/webchat-guard';
+import { InMemoryWebchatConfigRepository, PgWebchatConfigRepository } from './webchat/webchat-config';
+import { InMemoryWebchatUsageRepository, PgWebchatUsageRepository } from './webchat/webchat-usage';
+import {
+  InMemoryCallForwardingRepository,
+  PgCallForwardingRepository,
+} from './onboarding/call-forwarding';
+import { ForwardingCheckService, PgForwardingCheckRepository } from './onboarding/forwarding-check';
+import { createTenantSiteRouter } from './routes/tenant-site';
+import { InMemoryTenantSiteRepository, PgTenantSiteRepository } from './tenant-site/tenant-site';
+import { createTenantSiteHostMiddleware } from './tenant-site/host-middleware';
+import { loadTenantSiteView } from './tenant-site/view';
+import { createNodeDnsResolver } from './tenant-site/custom-domain';
+import { createRailwayCertificateProvider } from './tenant-site/railway-certificate-provider';
+import { runCustomDomainSweep, CUSTOM_DOMAIN_SWEEP_INTERVAL_MS } from './workers/custom-domain-sweep';
+import { TenantSiteAboutTask } from './ai/tasks/tenant-site-about-task';
 import {
   InMemoryGetFoundOnlineDismissalRepository,
   PgGetFoundOnlineDismissalRepository,
@@ -711,6 +753,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // Vapi signed — same treatment as Stripe/Clerk.
   app.use('/webhooks/vapi', express.raw({ type: 'application/json' }));
 
+  // #1738 — Google Local Services Ads lead webhook: HMAC over the exact bytes.
+  app.use('/webhooks/lsa', express.raw({ type: 'application/json' }));
+
   // Twilio posts application/x-www-form-urlencoded — mount the matching parser
   // before global express.json() so /webhooks/twilio/* routes get populated
   // req.body fields (used for signature verification + AccountSid match).
@@ -820,6 +865,17 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // <repoRoot>/packages/web/dist in both dev (__dirname=.../api/src) and the
   // built image (__dirname=.../api/dist/src). See web-static-path.ts.
   const frontendPath = resolveWebDistDir(__dirname);
+
+  // D-044 / #1768 — hosted tenant sites, served by Host header
+  // (`<slug>.<TENANT_SITE_BASE_DOMAIN>`) AHEAD of the SPA static files and
+  // catch-all. Off entirely when the base domain is unset; any other host
+  // (the app domain included) falls straight through. The handler is bound
+  // once the repositories exist, further down.
+  let tenantSiteHost: RequestHandler | undefined;
+  if (config.TENANT_SITE_BASE_DOMAIN) {
+    app.use((req, res, next) => (tenantSiteHost ? tenantSiteHost(req, res, next) : next()));
+  }
+
   app.use(express.static(frontendPath));
 
   // CORS — use explicit origin(s) in prod/staging (validated by config),
@@ -2199,6 +2255,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     ? new TwilioCustomerMessageService(messageDelivery, dispatchRepo, customerRepo)
     : undefined;
   const executionHandlers = createExecutionHandlerRegistry({
+    googleBusinessIntegrationRepo,
+    googleBusinessConfig: googleBusinessOAuthConfig ?? null,
     customerRepo,
     jobRepo,
     // B7 (money-loss fix) — update_job routes status changes through
@@ -2594,6 +2652,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     orphanedNumberSweep: 590031,
     // #1602 — nightly production call-quality grading sampler. DISTINCT key.
     voiceQualityGrading: 590032,
+    // #1736 — post-call scoring sweep (per-tenant opt-in). DISTINCT key.
+    callScoring: 590046,
     // U7 (S6-4) — demo lease reaper (expired leases, stale resets). DISTINCT key.
     demoLeaseReaper: 590033,
     // S5a-6 — daily pay-link reconciliation sweep (collect-on-site tenants
@@ -2601,6 +2661,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     paymentLinkReconciliation: 590034,
     // Dispatch FR-2 — service-location geocode sweep. DISTINCT key.
     geocodeLocations: 590035,
+    // #1735 — outbound drip campaign step sweep. DISTINCT key.
+    dripCampaigns: 590036,
+    // #1770 — connected-domain verification sweep. DISTINCT key.
+    customDomains: 590044,
   } as const;
   // #1090 — every leader-gated sweep run is registered here so `runShutdown`
   // can wait for the tick that is ALREADY RUNNING before it closes the pool.
@@ -4543,6 +4607,22 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // TWILIO_DEFAULT_TENANT_ID is only ever a dev seam (with a WARN).
   const phoneNumberRepo = pool ? new PgPhoneNumberRepository(pool) : undefined;
 
+  // D-044 / #1765, #1766 — call forwarding setup and its check call. Built here
+  // because the inbound voice webhook (below) recognises the check coming back.
+  const callForwardingRepo = pool
+    ? new PgCallForwardingRepository(pool)
+    : new InMemoryCallForwardingRepository();
+  const forwardingCheckService = pool
+    ? new ForwardingCheckService({
+        repo: new PgForwardingCheckRepository(pool),
+        forwardingRepo: callForwardingRepo,
+        getBusinessPhone: async (tenantId) =>
+          (await settingsRepo.findByTenant(tenantId))?.businessPhone ?? null,
+        getCreds: (tenantId) => getTenantTwilioCreds(tenantId, pool),
+        auditRepo,
+      })
+    : undefined;
+
   // F6b: Whisper TwiML route — mounted BEFORE requireAuth so Twilio's signed
   // GETs (no Clerk session) are accepted, and BEFORE the telephony router
   // below because that router's signature middleware runs for EVERY
@@ -4610,6 +4690,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       authTokenGetter: resolveTwilioWebhookCredential,
       publicBaseUrl: process.env.PUBLIC_API_URL,
       ...(phoneNumberRepo ? { phoneNumberRepo } : {}),
+      ...(forwardingCheckService ? { forwardingCheck: forwardingCheckService } : {}),
       resolveTenantId: createDidTenantResolver(phoneNumberRepo ? { phoneNumberRepo } : {}),
       // WS8 — a worker-role process never attaches the media-streams WS
       // handler (see the role gate on attachMediaStreamServer below), so its
@@ -5291,6 +5372,74 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     }) as any;
   }
 
+  // #1737 — embeddable web chat (Avoca parity). Public and unauthenticated, so
+  // mounted BEFORE the global /api auth below, with the D-044 controls: tenant
+  // flag `webchat_widget` + owner toggle (both off by default), embed token,
+  // allowed-origin list, bot-check hook, per-IP + per-session limits, per-tenant
+  // daily turn/cost caps, and WEBCHAT_DISABLED as the global kill switch.
+  // Visitor turns run through the same speechTurn pipeline as an inbound call;
+  // nothing the AI drafts executes without the owner approving the proposal.
+  const webchatConfigRepo = pool
+    ? new PgWebchatConfigRepository(pool)
+    : new InMemoryWebchatConfigRepository();
+  const webchatUsageRepo = pool
+    ? new PgWebchatUsageRepository(pool)
+    : new InMemoryWebchatUsageRepository();
+  const webchatGloballyKilled = () => process.env.WEBCHAT_DISABLED === 'true';
+  const webchatIsEnabledForTenant = (tenantId: string) =>
+    isFlagEnabledForTenant(tenantId, WEBCHAT_FLAG);
+  const webchatProcessors = new Map<string, VoiceTurnProcessor>();
+  const webchatService = createWebchatService({
+    configRepo: webchatConfigRepo,
+    usageRepo: webchatUsageRepo,
+    settingsRepo,
+    store: voiceSessionStore,
+    processorFor: (businessName) => {
+      let processor = webchatProcessors.get(businessName);
+      if (!processor) {
+        if (webchatProcessors.size >= 500) webchatProcessors.clear();
+        processor = createVoiceTurnProcessor({
+          store: voiceSessionStore,
+          gateway: llmGateway,
+          ...(pool ? { pool } : {}),
+          auditRepo,
+          proposalRepo,
+          customerRepo,
+          leadRepo,
+          settingsRepo,
+          voiceSessionRepo,
+          systemActorId: 'system:webchat',
+          businessName,
+        });
+        webchatProcessors.set(businessName, processor);
+      }
+      return processor;
+    },
+    auditRepo,
+    leadRepo,
+    voiceSessionRepo,
+    isEnabledForTenant: webchatIsEnabledForTenant,
+    globallyKilled: webchatGloballyKilled,
+    ...(process.env.WEBCHAT_TURNSTILE_SECRET
+      ? { botVerifier: createTurnstileVerifier(process.env.WEBCHAT_TURNSTILE_SECRET) }
+      : {}),
+    bookingUrlFor: (tenantId) => `${config.publicOrigins.web}/book?t=${tenantId}`,
+  });
+  const webchatSweep = setInterval(() => webchatService.sweep(), 5 * 60 * 1000);
+  webchatSweep.unref();
+  app.use(
+    '/api/public/webchat',
+    // Coarse shared-Redis per-IP bucket; the service adds per-IP/session windows.
+    rateLimit({
+      windowMs: 60 * 1000,
+      max: 60,
+      standardHeaders: true,
+      legacyHeaders: false,
+      store: createRateLimitStore(redisUrl, 'public-webchat:'),
+    }),
+    createPublicWebchatRouter({ service: webchatService }),
+  );
+
   // Auth middleware for API routes
   const clerkSecret = process.env.CLERK_SECRET_KEY ?? '';
   app.use('/api', verifyClerkSession(clerkSecret));
@@ -5804,17 +5953,151 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     createGoogleBusinessIntegrationsRouter(googleBusinessRouterDeps),
   );
 
+  // #1738 — Google Local Services Ads lead intake. Off until an owner links
+  // it (no row => the webhook 403s); the speed-to-lead text is a further
+  // owner opt-in and always goes through the DNC/consent-gated reply path.
+  const lsaIntegrationRepo = pool
+    ? new PgLsaIntegrationRepository(pool)
+    : new InMemoryLsaIntegrationRepository();
+  app.use(
+    '/webhooks',
+    createLsaWebhookRouter({
+      integrationRepo: lsaIntegrationRepo,
+      leadRepo,
+      auditRepo,
+      webhookRepo: webhookEventRepo,
+      settingsRepo,
+      ...(messageDelivery
+        ? {
+            sendSpeedToLead: createLsaSpeedToLeadSender({
+              reply: { conversationRepo, customerRepo, leadRepo, dncRepo, dispatchRepo, delivery: messageDelivery },
+              conversationRepo,
+              auditRepo,
+              getBusinessName: async (tid) => (await settingsRepo.findByTenant(tid))?.businessName,
+            }),
+          }
+        : {}),
+    }),
+  );
+  app.use(
+    '/api/lsa-integration',
+    createLsaIntegrationRouter({
+      integrationRepo: lsaIntegrationRepo,
+      leadRepo,
+      auditRepo,
+      publicApiUrl: config.publicOrigins.api,
+      canStoreSecrets: !pool || Boolean(process.env.TENANT_ENCRYPTION_KEY),
+      // No-op unless LSA_DISPOSITION_REPORTING_ENABLED=true AND a Google client
+      // is supplied (none yet: OAuth follow-up).
+      dispositionReporter: createLsaDispositionReporter(process.env),
+    }),
+  );
+
   // D-044 / #1763 — the owner's "Get found online" home checklist, derived
   // from the Google Business connection and the review-link setting.
+  // #1737 — the owner's web chat settings (snippet, allowed sites, caps, toggle).
+  app.use(
+    '/api/webchat',
+    createWebchatSettingsRouter({
+      configRepo: webchatConfigRepo,
+      usageRepo: webchatUsageRepo,
+      auditRepo,
+      apiBaseUrl: config.publicOrigins.api,
+      isEnabledForTenant: webchatIsEnabledForTenant,
+      globallyKilled: webchatGloballyKilled,
+    }),
+  );
+
+  const tenantSiteRepo = pool ? new PgTenantSiteRepository(pool) : new InMemoryTenantSiteRepository();
+  const tenantSiteViewDeps = {
+    settingsRepo,
+    packRegistry: canonicalPackRegistry,
+    pool,
+    webOrigin: config.publicOrigins.web,
+  };
+  // D-046 / #1770 — connecting an owner's own domain needs a certificate
+  // provider; Railway's custom-domain API is the default and stays inert
+  // (feature off) until RAILWAY_API_TOKEN is set.
+  const customDomainProvider = config.TENANT_SITE_BASE_DOMAIN ? createRailwayCertificateProvider(process.env) : null;
+  const customDomainDns = createNodeDnsResolver();
+  const appHostnames = [config.publicOrigins.web, config.publicOrigins.api].map((o) => new URL(o).hostname);
+  if (config.TENANT_SITE_BASE_DOMAIN) {
+    tenantSiteHost = createTenantSiteHostMiddleware({
+      baseDomain: config.TENANT_SITE_BASE_DOMAIN,
+      siteRepo: tenantSiteRepo,
+      appHosts: appHostnames,
+      loadView: (tenantId) => loadTenantSiteView(tenantSiteViewDeps, tenantId),
+      // Unauthenticated, DB-backed: cap per IP like the other public routes.
+      limiter: rateLimit({
+        windowMs: 60 * 1000,
+        max: 120,
+        standardHeaders: true,
+        legacyHeaders: false,
+        store: createRateLimitStore(redisUrl, 'tenant-site:'),
+      }),
+    });
+  }
+  app.use(
+    '/api/tenant-site',
+    createTenantSiteRouter({
+      baseDomain: config.TENANT_SITE_BASE_DOMAIN,
+      siteRepo: tenantSiteRepo,
+      settingsRepo,
+      viewDeps: tenantSiteViewDeps,
+      auditRepo,
+      // D-044 / #1769 — the about copy is drafted through the LLM gateway and
+      // arrives as an owner-approved proposal.
+      aboutTask: new TenantSiteAboutTask(llmGateway),
+      proposalRepo,
+      ...(customDomainProvider
+        ? { domain: { provider: customDomainProvider, dns: customDomainDns, reservedHosts: appHostnames } }
+        : {}),
+    }),
+  );
+  if (shouldRunWorkers && config.TENANT_SITE_BASE_DOMAIN && customDomainProvider) {
+    const customDomainLogger = createLogger({
+      service: 'custom-domain-sweep',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    const customDomainBase = config.TENANT_SITE_BASE_DOMAIN;
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.customDomains, async () => {
+        await runCustomDomainSweep({
+          baseDomain: customDomainBase,
+          siteRepo: tenantSiteRepo,
+          settingsRepo,
+          auditRepo,
+          dns: customDomainDns,
+          provider: customDomainProvider,
+          logger: customDomainLogger,
+        });
+      }).catch((err) => {
+        customDomainLogger.error('Custom-domain sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, CUSTOM_DOMAIN_SWEEP_INTERVAL_MS));
+  }
+
   app.use(
     '/api/get-found-online',
     createGetFoundOnlineRouter({
       integrationRepo: googleBusinessIntegrationRepo,
+      proposalRepo,
+      webOrigin: tenantSiteViewDeps.webOrigin,
       ...(googleReviewsPollStateRepo ? { pollStateRepo: googleReviewsPollStateRepo } : {}),
       settingsRepo,
       dismissalRepo: pool
         ? new PgGetFoundOnlineDismissalRepository(pool)
         : new InMemoryGetFoundOnlineDismissalRepository(),
+      forwardingRepo: callForwardingRepo,
+      ...(forwardingCheckService ? { forwardingCheck: forwardingCheckService } : {}),
+      ...(pool
+        ? {
+            getRivetNumber: async (tenantId: string) =>
+              (await getTenantTwilioCreds(tenantId, pool)).phoneE164,
+          }
+        : {}),
       auditRepo,
     }),
   );
@@ -6262,6 +6545,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     '/api/settings/brand-voice',
     createBrandVoiceRouter(brandVoiceRepo, settingsRepo, auditRepo),
   );
+  // #1750 (D-044) — the Get-found checklist: derived from facts on every read;
+  // the owner's answers (presence path, call routing mode, skips) are audited.
+  if (pool) {
+    app.use('/api/get-found', createGetFoundRouter({ pool, settingsRepo, auditRepo }));
+  }
   // #1564 — owner-only A2P 10DLC texting registration (Settings → Phone).
   // Mounted whenever there is a database; answers 503 without
   // TENANT_ENCRYPTION_KEY because the EIN must be stored encrypted.
@@ -6280,6 +6568,73 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           : null,
       }),
     );
+  }
+  // #1735 — outbound multi-step drip campaigns (SMS | call | email). Off by
+  // default behind the per-tenant `drip_campaigns` flag; owner-only routes and
+  // a leader-locked step sweep. Every step is consent-gated inside the engine.
+  if (pool) {
+    const dripLogger = createLogger({
+      service: 'drip-campaigns',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    const a2pStore = new PgA2pRegistrationStore(pool);
+    const dripRecipientLocale = createRecipientLocaleResolver({ settingsRepo, locationRepo });
+    const dripRepo = new PgDripRepository(pool);
+    const dripE164 = (phone: string): string => {
+      try {
+        return normalizeMobileE164(phone);
+      } catch {
+        return phone; // unparseable: the consent gate classifies it malformed
+      }
+    };
+    const dripEngine = createDripEngine({
+      repo: dripRepo,
+      signals: new PgDripSignals(pool),
+      customerRepo,
+      messaging: outboundMessaging,
+      sendEmail: messageDelivery
+        ? (message) => messageDelivery!.sendEmail(message)
+        : null,
+      placeCall: callDeps
+        ? (input) => initiateOutboundCall(callDeps, input)
+        : null,
+      checkCallConsent: (ctx: OutboundConsentContext) => checkOutboundConsent({ pool, auditRepo }, ctx),
+      isSmsRegistered: async (tenantId) =>
+        (await a2pStore.get(tenantId))?.progress.status === 'approved',
+      quietHours: async ({ tenantId, customerId, phone }) =>
+        recipientQuietHours(await dripRecipientLocale({ tenantId, customerId, to: phone ?? '' })),
+      isOptedOut: async (tenantId, phone) =>
+        (await dncRepo.isOnDnc(tenantId, normalizeDncPhone(phone))) ||
+        standingContactRevocation(await consentEventRepo.listByPhone(tenantId, phone)).revoked,
+      normalizePhone: dripE164,
+      auditRepo,
+      logger: dripLogger,
+    });
+    app.use(
+      '/api/drip-campaigns',
+      createDripCampaignsRouter({
+        repo: dripRepo,
+        engine: dripEngine,
+        isEnabledForTenant: isFlagEnabledForTenant,
+        auditRepo,
+      }),
+    );
+    if (shouldRunWorkers) {
+      registerInterval(setInterval(() => {
+        void runAsLeader(SWEEP_LOCK.dripCampaigns, async () => {
+          await runDripCampaignSweep({
+            listTenantIds: () => listAllTenantIds(pool),
+            isEnabledForTenant: (tenantId) => isFlagEnabledForTenant(tenantId, DRIP_FEATURE_FLAG),
+            engine: dripEngine,
+            logger: dripLogger,
+          });
+        }).catch((err) => {
+          dripLogger.error('Drip campaign sweep failed', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }, DRIP_SWEEP_INTERVAL_MS));
+    }
   }
   // D-045 — Settings → Text wording (owner's own wording for customer texts).
   app.use(
@@ -6392,6 +6747,49 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         voiceQualityInFlight = false;
       });
     }, VOICE_QUALITY_GRADING_INTERVAL_MS));
+  }
+
+  // #1736 — post-call scoring + the owner's "correct this call". OFF per tenant
+  // until the owner flips tenant_settings.call_scoring_enabled; the sweep scores
+  // eligible calls (#1602's consent / billable gates) through the LLM gateway.
+  // Corrections queue for export into the voice-quality corpus (see
+  // ai/voice-quality/corpus/correction-case.ts). In-memory dev: empty stores.
+  const callScoreStore = pool ? new PgCallScoreStore(pool) : new InMemoryCallScoreStore();
+  const callScorer = createVoiceCallScorer({
+    store: callScoreStore,
+    sessions: voiceQualityStore,
+    gateway: llmGateway,
+  });
+  const callScoringLogger = createLogger({
+    service: 'call-scoring',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  const callScoringWorker = createCallScoringWorker({
+    store: callScoreStore,
+    scorer: callScorer,
+    listTenantIds: () => listAllTenantIds(pool),
+    logger: callScoringLogger,
+    auditRepo,
+  });
+  app.use(
+    '/api/voice/scoring',
+    createVoiceCallScoringRouter({ store: callScoreStore, sessions: voiceQualityStore, auditRepo }),
+  );
+  if (shouldRunWorkers) {
+    let callScoringInFlight = false;
+    registerInterval(setInterval(() => {
+      if (callScoringInFlight) return;
+      callScoringInFlight = true;
+      void runAsLeader(SWEEP_LOCK.callScoring, async () => {
+        await callScoringWorker.handle();
+      }).catch((err) => {
+        callScoringLogger.error('call-scoring sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }).finally(() => {
+        callScoringInFlight = false;
+      });
+    }, CALL_SCORING_INTERVAL_MS));
   }
 
   app.use(

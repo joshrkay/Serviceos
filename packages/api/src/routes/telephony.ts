@@ -63,6 +63,7 @@ import type { SettingsRepository } from '../settings/settings';
 import { resolveEscalationSettings } from '../settings/settings';
 import type { LeadRepository } from '../leads/lead';
 import type { GateReason } from '../voice/trial-limits';
+import type { ForwardingCheckService } from '../onboarding/forwarding-check';
 import { t, type Language } from '../ai/i18n/i18n';
 import type { CallMeBackRepository } from '../voice/call-me-back/call-me-back';
 import { createAuditEvent } from '../audit/audit';
@@ -115,6 +116,12 @@ export interface TelephonyRouterDeps {
    * `createDidTenantResolver`, which goes through the same repository.
    */
   resolveTenantId: (opts: { to: string; from: string }) => Promise<string | undefined> | string | undefined;
+  /**
+   * D-044 / #1766 — recognises the owner's call-forwarding check coming back
+   * through their carrier. Consulted for every resolved inbound call BEFORE
+   * the voice gate or any AI work; a recognised call is hung up on.
+   */
+  forwardingCheck?: Pick<ForwardingCheckService, 'recognizeInbound'>;
   /**
    * D2-3 — test seam for the Sentry client used to capture
    * `telephony.tenant_lookup_miss` events. Defaults to
@@ -540,6 +547,23 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
         .type('text/xml')
         .send(numberNotInServiceTwiml());
       return;
+    }
+
+    // D-044 / #1766 — the owner's forwarding check coming back. Hang up: the
+    // call must never reach the gate, a session or the AI. A lookup failure
+    // is not a pass; the call carries on as an ordinary call.
+    if (deps.forwardingCheck) {
+      try {
+        if (await deps.forwardingCheck.recognizeInbound({ tenantId, from, callSid })) {
+          res.status(200).type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
+          return;
+        }
+      } catch (err) {
+        logger.warn('telephony/voice: forwarding check lookup failed — treating as a normal call', {
+          callSid,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
 
     // §10 voice gates — subscription, go-live, usage caps. Voicemail on a

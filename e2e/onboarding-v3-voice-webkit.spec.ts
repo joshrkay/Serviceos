@@ -42,7 +42,10 @@ import { fakeDeepgram } from './helpers/fake-deepgram';
  * said aloud; and fifteen everyday and edge answers (ordinals, fillers, prices, card
  * words, a full pass by voice, misses, negation, ambiguity, unfinished words,
  * the same words twice, tap then speak) each save exactly what was meant, or
- * nothing. That real speech is recognised (audio/mp4 accepted by the stream,
+ * nothing. Questions (build plan PR 3): "what does that mean?", "give me an
+ * example", "what do most shops do?" and "say that again" are answered in the
+ * transcript card and aloud, save nothing, and the next answer still picks;
+ * "what does the first one mean?" is a question, never a pick. That real speech is recognised (audio/mp4 accepted by the stream,
  * the transcript card on a phone) needs a Deepgram key and a microphone: a
  * device run through the web verify skill (owner action).
  *
@@ -664,7 +667,9 @@ test.describe('v3 spoken answers, everyday and edge (voice-only onboarding PR 1)
     deepgram.say('banana');
     await expect(transcript).toHaveText('I heard “banana”. Tap one, or say first or second.');
     deepgram.say('purple monkey');
-    await expect(transcript).toHaveText('I heard “purple monkey”. Tap one, or say first or second. For example, say “first”.');
+    await expect(transcript).toHaveText(
+      'I heard “purple monkey”. Tap one, or say first or second. For example, say “first”, or ask “what does that mean?”',
+    );
     expect(saves).toEqual([]);
     deepgram.say('first');
     await expect.poll(() => saved(saves)).toEqual([['greeting', 'a']]);
@@ -722,5 +727,81 @@ test.describe('v3 spoken answers, everyday and edge (voice-only onboarding PR 1)
     await page.waitForTimeout(1_500);
     expect(saved(saves)).toEqual([['greeting', 'b']]);
     expect((await v3Events(page, 'v3_choice_made')).map((e) => e.answer_mode)).toEqual(['voice']);
+  });
+
+  // Build plan PR 3: the owner asks Rivet about a choice, out loud. He answers in the card and
+  // aloud, asks "Which one?" again, saves nothing, and the next answer still picks.
+  // Copy from packages/api/src/onboarding/choices/registry/common.ts.
+  const GREETING_EXPLAIN =
+    "This is the first thing a caller hears when I pick up your phone. It's in your business's name, so pick the one that sounds like you.";
+  const GREETING_EXAMPLE =
+    'Someone calls on their lunch break with a problem. The first gets them talking about it right away. The second sounds warmer and takes a breath longer.';
+
+  /** Every line Rivet was asked to say, in the batches the shell sent. */
+  function recordSpoken(page: Page): string[] {
+    const spoken: string[] = [];
+    page.on('request', (req) => {
+      if (new URL(req.url()).pathname !== '/api/voice/tts/batch' || req.method() !== 'POST') return;
+      spoken.push(...(((req.postDataJSON() ?? {}) as { items?: string[] }).items ?? []));
+    });
+    return spoken;
+  }
+
+  const helpCases = [
+    { name: '16. "What does that mean?" is explained, then asked again', says: 'what does that mean', answer: `${GREETING_EXPLAIN} Which one?`, spoken: GREETING_EXPLAIN },
+    { name: '17. "Give me an example" tells one real call', says: 'can you give me an example', answer: `${GREETING_EXAMPLE} Which one?`, spoken: GREETING_EXAMPLE },
+    {
+      name: '18. "What do most shops do?" names the usual pick and why',
+      says: 'what do most shops do',
+      answer: /^Most shops pick the first: .+, how can I help\? Short\. Gets to the problem fast\. Callers in a hurry like it\. Which one\?$/,
+      spoken: 'Most shops pick the first:',
+    },
+  ] as const;
+  for (const c of helpCases) {
+    test(c.name, { tag: '@chromium' }, async ({ page }) => {
+      test.setTimeout(90_000);
+      const spoken = recordSpoken(page);
+      const { saves, deepgram } = await listeningOnGreeting(page, `help_${c.says.length}`);
+      deepgram.say(c.says);
+      await expect(page.getByTestId('rivet-transcript')).toHaveText(c.answer);
+      await expect.poll(() => spoken.some((line) => line.startsWith(c.spoken))).toBe(true);
+      await expectNothingPicked(page, saves, QUESTIONS[0]);
+      // Still listening on the same socket: the answer comes after the question.
+      deepgram.say('second');
+      await expect.poll(() => saved(saves)).toEqual([['greeting', 'b']]);
+      await onTurn(page, deepgram, 1);
+    });
+  }
+
+  test('19. "Say that again" says the turn again, then "first" answers', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    const { saves, deepgram } = await listeningOnGreeting(page, 'repeat');
+    const plays = () => page.evaluate(() => (window as unknown as Watched).__audio.plays.length);
+    await expect.poll(plays).toBeGreaterThan(0);
+    const before = await plays();
+    deepgram.say('sorry, can you say that again');
+    await expect(page.getByTestId('rivet-transcript')).toHaveText('Saying it again.');
+    await expect.poll(plays).toBeGreaterThan(before);
+    await expectNothingPicked(page, saves, QUESTIONS[0]);
+    deepgram.say('first');
+    await expect.poll(() => saved(saves)).toEqual([['greeting', 'a']]);
+  });
+
+  test('20. "What does the first one mean?" is a question, not a pick, on a later turn too', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    const { saves, deepgram } = await listeningOnGreeting(page, 'question_not_pick');
+    deepgram.say('first');
+    await onTurn(page, deepgram, 1);
+    deepgram.say('first');
+    await onTurn(page, deepgram, 2);
+    deepgram.say('what does the first one mean');
+    await expect(page.getByTestId('rivet-transcript')).toContainText('Booking it means I put the job on your calendar');
+    await page.waitForTimeout(1_500);
+    expect(saved(saves)).toEqual([
+      ['greeting', 'a'],
+      ['trip_fee_and_rate', 'a'],
+    ]);
+    deepgram.say('hold it for me');
+    await expect.poll(() => saved(saves).at(-1)).toEqual(['booking_posture', 'b']);
   });
 });

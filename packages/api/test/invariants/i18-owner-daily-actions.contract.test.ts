@@ -133,9 +133,12 @@ const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 16;
 // "Pick, don't build" S4: +1 onboarding (PUT /api/onboarding/draft/metro).
 // "Pick, don't build" S4: +2 onboarding (POST /api/onboarding/draft/undo, /reset).
 // D-044 (#1762, #1763): +4 occasional (Google listing picker GET/PUT, get-found-online GET + dismiss).
-const OWNER_ONLY_ROUTES = 85;
 // D-045: +2 occasional (PUT/DELETE /api/settings/text-wording/:purpose — owner's text wording).
-const OWNER_ONLY_ROUTES = 83;
+// D-044 (#1752): +4 occasional (/api/get-found presence-path, forwarding-mode, item skip PUT/DELETE).
+// #1790 (merged 2026-10-22 with this contract red): +33 occasional — call forwarding
+// setup/check, hosted tenant site (publish, about, address, domain), drip campaigns,
+// webchat settings/token, LSA integration, voice call-score corrections.
+const OWNER_ONLY_ROUTES = 124;
 
 // ── Derivation ──────────────────────────────────────────────────────────────
 
