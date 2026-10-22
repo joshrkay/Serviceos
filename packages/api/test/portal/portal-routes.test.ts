@@ -812,7 +812,7 @@ describe('#1738 portal service request: instant reply consent', () => {
       expect(res.status).toBe(201);
       return autoReplyToNewLead.mock.calls[0][0] as {
         smsConsent: boolean;
-        lead: { primaryPhone?: string; firstName?: string };
+        lead: { primaryPhone?: string; firstName?: string; lastName?: string };
       };
     }
 
@@ -829,7 +829,7 @@ describe('#1738 portal service request: instant reply consent', () => {
     it('counts the tick for a number the contact typed, and greets the contact, not the account holder', async () => {
       const call = await submitAsContact({ smsConsent: true, primaryPhone: '+15555550177' });
       expect(call.smsConsent).toBe(true);
-      expect(call.lead.firstName).toBe('Site');
+      expect(call.lead).toMatchObject({ firstName: 'Site', lastName: 'Contact' });
     });
   });
 });

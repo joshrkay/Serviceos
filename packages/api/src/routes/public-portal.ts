@@ -616,7 +616,10 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
           const contactRepo = deps.middlewareOptions?.contactRepo ?? deps.contactRepo;
           // A failed lookup must not fail a request already captured; "there" greets instead.
           const contact = await contactRepo?.findById(tenantId, req.portal!.contactId!).catch(() => null);
-          greetAs = { ...lead, firstName: contact?.name.trim().split(/\s+/)[0] ?? '' };
+          // The whole name comes from the contact: the account holder's
+          // surname must not ride along into the owner's follow-up alert.
+          const [first = '', ...rest] = contact?.name.trim().split(/\s+/) ?? [];
+          greetAs = { ...lead, firstName: first, lastName: rest.join(' ') };
         }
         await deps.autoReplyToNewLead({
           lead: greetAs,
