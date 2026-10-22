@@ -12,7 +12,7 @@
  * proposal can be created. Map and route ordering are deferred (#1290).
  */
 import React from 'react';
-import { render, screen, fireEvent } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { DispatchBoard } from './DispatchBoard';
 import type { FeasibilityResult } from '../../components/dispatch/feasibility-types';
@@ -47,10 +47,11 @@ const PREVIEW: FeasibilityResult = {
 };
 
 const previewInputs: unknown[] = [];
+let previewOverride: FeasibilityResult | null = null;
 vi.mock('../../components/dispatch/useFeasibilityPreview', () => ({
   useFeasibilityPreview: (input: unknown) => {
     previewInputs.push(input);
-    return { preview: input ? PREVIEW : null, isLoading: false };
+    return { preview: input ? (previewOverride ?? PREVIEW) : null, isLoading: false };
   },
 }));
 
@@ -104,6 +105,7 @@ function drag(card: HTMLElement, lane: HTMLElement, appointmentId: string) {
 describe('#1290 — board surfaces travel-time and skill checks on technician lanes', () => {
   beforeEach(() => {
     previewInputs.length = 0;
+    previewOverride = null;
     vi.mocked(useDispatchBoard).mockReturnValue({
       data: boardData,
       isLoading: false,
@@ -166,5 +168,53 @@ describe('#1290 — board surfaces travel-time and skill checks on technician la
         proposedScheduledEnd: '2026-10-14T11:30:00Z',
       });
     }
+  });
+
+  // Dispatch FR-2 phase 3c — "Allow overlap if select by user".
+  it('a reassign blocked only by an overlap can be booked anyway, and the POST says the dispatcher accepted it', async () => {
+    previewOverride = {
+      ...PREVIEW, feasible: false, warnings: [],
+      blocking: [{ check: 'overlap', severity: 'blocking', message: 'Overlaps with appointment a-other', conflictingEntityId: 'a-other' }],
+    };
+    global.fetch = vi.fn().mockResolvedValue({
+      ok: true, json: () => Promise.resolve({ id: 'proposal-xyz' }), text: () => Promise.resolve(''),
+    }) as unknown as typeof fetch;
+    render(<DispatchBoard />);
+    const lanes = screen.getAllByTestId('technician-lane');
+    const source = lanes.find((l) => l.getAttribute('data-technician-id') === 'tech-1')!;
+    const target = lanes.find((l) => l.getAttribute('data-technician-id') === 'tech-2')!;
+    const card = source.querySelector('[data-appointment-id="appt-1"]') as HTMLElement;
+    const { target: dropEl, dt } = drag(card, target, 'appt-1');
+    fireEvent.drop(dropEl, { dataTransfer: dt });
+
+    const confirm = screen.getByTestId('confirm-proposal-confirm');
+    expect(confirm).toBeDisabled();
+    fireEvent.click(screen.getByTestId('confirm-accept-overlap-checkbox'));
+    expect(confirm).toBeEnabled();
+    fireEvent.click(confirm);
+
+    await waitFor(() => expect(global.fetch).toHaveBeenCalledTimes(1));
+    const body = JSON.parse((global.fetch as any).mock.calls[0][1].body);
+    expect(body.proposalType).toBe('reassign_appointment');
+    expect(body.payload).toMatchObject({ appointmentId: 'appt-1', toTechnicianId: 'tech-2', acceptOverlap: true });
+    expect(body.payload.reason).toMatch(/accepted an overlap/);
+    expect(body.summary).toMatch(/dispatcher accepted the overlap/);
+  });
+
+  it('without the tick, an overlap-blocked reassign is never posted', () => {
+    previewOverride = {
+      ...PREVIEW, feasible: false, warnings: [],
+      blocking: [{ check: 'overlap', severity: 'blocking', message: 'Overlaps with appointment a-other', conflictingEntityId: 'a-other' }],
+    };
+    global.fetch = vi.fn() as unknown as typeof fetch;
+    render(<DispatchBoard />);
+    const lanes = screen.getAllByTestId('technician-lane');
+    const source = lanes.find((l) => l.getAttribute('data-technician-id') === 'tech-1')!;
+    const target = lanes.find((l) => l.getAttribute('data-technician-id') === 'tech-2')!;
+    const card = source.querySelector('[data-appointment-id="appt-1"]') as HTMLElement;
+    const { target: dropEl, dt } = drag(card, target, 'appt-1');
+    fireEvent.drop(dropEl, { dataTransfer: dt });
+    fireEvent.click(screen.getByTestId('confirm-proposal-confirm'));
+    expect(global.fetch).not.toHaveBeenCalled();
   });
 });

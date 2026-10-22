@@ -3,7 +3,7 @@ import { AppointmentRepository } from '../appointments/appointment';
 import {
   FeasibilityDependencies, FeasibilityResult, SkillConstraintStatus,
 } from '../scheduling/feasibility-types';
-import { checkFeasibility } from '../scheduling/feasibility';
+import { checkFeasibility, withAcceptedOverlap, overlappingAppointmentIds } from '../scheduling/feasibility';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 export type CreateSchedulingProposalResult =
@@ -43,6 +43,8 @@ export interface CreateSchedulingInput {
     fromTechnicianId?: string;
     technicianId?: string;
     reason?: string;
+    acceptOverlap?: true;
+    acceptedOverlapAppointmentIds?: string[];
   };
   summary?: string;
   expectedVersion: string | null;
@@ -127,22 +129,37 @@ export async function createSchedulingProposal(
   // check was skipped entirely (remove_crew_member, or an unassigned
   // appointment) — the same honest default checkFeasibility itself uses.
   let skillConstraints: SkillConstraintStatus = 'not_evaluated';
+  // FR-2 phase 3c — only a reassign carries the user's "book anyway", and
+  // the consent is pinned to the overlapping visits found NOW: the server
+  // writes their ids onto the payload (anything the client sent there is
+  // dropped) and approval accepts only those. No overlap now → nothing was
+  // accepted, so the flag is dropped too.
+  const acceptOverlap = input.proposalType === 'reassign_appointment' && input.payload.acceptOverlap === true;
+  const { acceptOverlap: _acceptOverlap, acceptedOverlapAppointmentIds: _ids, ...payloadRest } = input.payload;
+  let acceptedOverlapAppointmentIds: string[] = [];
   if (input.proposalType !== 'remove_crew_member' && proposedTechnicianId !== '') {
-    const feasibility = await checkFeasibility(
+    const raw = await checkFeasibility(
       {
         tenantId: input.tenantId, appointment,
         proposedTechnicianId, proposedScheduledStart: proposedStart, proposedScheduledEnd: proposedEnd,
       },
       feasibilityDeps,
     );
+    if (acceptOverlap) acceptedOverlapAppointmentIds = overlappingAppointmentIds(raw);
+    const feasibility = withAcceptedOverlap(raw, new Set(acceptedOverlapAppointmentIds));
     skillConstraints = feasibility.skillConstraints;
     if (feasibility.blocking.length > 0) return { kind: 'infeasible', feasibility };
   }
+  const overlapAccepted = acceptedOverlapAppointmentIds.length > 0;
+  const payload: Record<string, unknown> = {
+    ...payloadRest,
+    ...(overlapAccepted ? { acceptOverlap: true, acceptedOverlapAppointmentIds } : {}),
+  };
 
   const proposal = createProposal({
     tenantId: input.tenantId,
     proposalType: input.proposalType,
-    payload: input.payload as unknown as Record<string, unknown>,
+    payload,
     summary: input.summary ?? `${input.proposalType.replace(/_/g, ' ')} via dispatch`,
     createdBy: input.actorId,
   });
@@ -175,6 +192,7 @@ export async function createSchedulingProposal(
           proposedScheduledEnd: proposedEnd.toISOString(),
           // 4.9 / #1001 — the explicit skill-constraint outcome, persisted.
           skillConstraints,
+          ...(overlapAccepted ? { overlapAccepted: true, acceptedOverlapAppointmentIds } : {}),
         },
       }),
     );
