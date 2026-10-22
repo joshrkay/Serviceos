@@ -2247,7 +2247,7 @@ export class TwilioGatherAdapter {
       // lands while the first attempt is still establishing says both notices
       // ahead of the hold line.
       if (session.greetingText) {
-        return buildTwiML(
+        const replayTwiml = buildTwiML(
           [{ type: 'tts_play', payload: { text: session.greetingText } }],
           {
             gatherActionUrl: this.gatherUrl(session.id),
@@ -2256,6 +2256,14 @@ export class TwilioGatherAdapter {
             ...(replayHints ? { hints: replayHints } : {}),
           },
         );
+        // This document carries both notices, so it is a point of evidence
+        // too: commit the parked ledger thunk if the first attempt has not
+        // (it may be the stalled request Twilio gave up on). A no-op once
+        // the first attempt committed — the map entry is taken once.
+        void this.commitRecordingConsent({ callSid: opts.callSid }).catch(() => {
+          /* swallow — the thunk already swallows; this guards the lookup */
+        });
+        return replayTwiml;
       }
       // Establishment has not pinned the language yet: resolve the tenant's
       // own (never assume English), without pinning it on the session —

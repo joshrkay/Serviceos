@@ -146,4 +146,55 @@ describe('PRIV-4 — a /voice retry still carries the virtual-assistant notice',
     });
     expect(noticeRows()).toHaveLength(1);
   });
+
+  it('a retry after the greeting was rendered but before the first attempt committed ledgers the notice once', async () => {
+    // Codex review on 9db67fa0: the cached-greeting replay spoke both notices
+    // but left the parked ledger thunk for the first attempt, which may be
+    // the stalled request Twilio gave up on.
+    const store = new VoiceSessionStore({ startInterval: false });
+    const auditRepo = { create: vi.fn(async () => undefined) };
+    // Hold the first attempt's STT-hints lookup, which runs after bootstrap
+    // rendered the greeting and before the first attempt commits.
+    let releaseHints!: () => void;
+    const hintsGate = new Promise<void>((resolve) => {
+      releaseHints = resolve;
+    });
+    let hintCalls = 0;
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: gateway(),
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      auditRepo: auditRepo as never,
+      sttHintsResolver: async () => {
+        hintCalls += 1;
+        if (hintCalls === 1) await hintsGate;
+        return [];
+      },
+    });
+    const noticeRows = () =>
+      auditRepo.create.mock.calls.filter(
+        (c: unknown[]) => (c[0] as { eventType: string }).eventType === 'virtual_assistant_notice.played',
+      );
+
+    const firstPending = adapter.handleInbound(call);
+    for (let i = 0; i < 50 && hintCalls === 0; i++) {
+      await new Promise<void>((r) => {
+        setTimeout(r, 0);
+      });
+    }
+    expect(store.findByCallSid(call.callSid)?.greetingText).toContain(NOTICE);
+    expect(noticeRows()).toHaveLength(0);
+
+    const replay = await adapter.handleInbound(call);
+    expect(says(replay)[0]).toContain(NOTICE);
+    await vi.waitFor(() => expect(noticeRows()).toHaveLength(1));
+
+    releaseHints();
+    await firstPending;
+    await new Promise<void>((r) => {
+      setTimeout(r, 0);
+    });
+    expect(noticeRows()).toHaveLength(1);
+  });
 });
