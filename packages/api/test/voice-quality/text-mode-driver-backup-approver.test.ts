@@ -37,7 +37,7 @@ afterEach(() => {
   for (const c of cleanups.splice(0)) c();
 });
 
-async function build(role: 'dispatcher' | 'technician') {
+async function build(role: 'dispatcher' | 'technician', opts: { storedMobile?: string; ownerRow?: boolean } = {}) {
   const store = new VoiceSessionStore({ startInterval: false });
   const bus = new AgentEventBus();
   cleanups.push(() => {
@@ -52,8 +52,18 @@ async function build(role: 'dispatcher' | 'technician') {
     email: 'backup@example.com',
     role,
     canFieldServe: role === 'technician',
-    mobileNumber: BACKUP_MOBILE,
+    mobileNumber: opts.storedMobile ?? BACKUP_MOBILE,
   } as never);
+  if (opts.ownerRow) {
+    await userRepo.create({
+      id: 'user-vq-owner',
+      tenantId: TENANT,
+      clerkUserId: 'clerk-vq-owner',
+      email: 'owner@example.com',
+      role: 'owner',
+      canFieldServe: true,
+    } as never);
+  }
   const settingsRepo = {
     findByTenant: async (t: string) =>
       t === TENANT ? { tenantId: TENANT, ownerPhone: OWNER_PHONE, backupSupervisorUserId: BACKUP_ID } : null,
@@ -192,5 +202,24 @@ describe('B3-7 — TextModeDriver resolves a backup caller\'s phone actor as pro
     expect((await h.driver.speak(sessionId, 'question about the digest')).agentResponse).toContain(
       'Owner digest: revenue was strong',
     );
+  });
+});
+
+// B4-1 — production's approver lookup recognises the backup's line comparing
+// phones with normalizePhone; the actor lookup matched E.164 exactly, missed a
+// mobile stored in another format and bridged to the tenant's single owner.
+// The driver resolves a backup's actor through the same resolver, so the same
+// call in the harness was authorised as the owner too.
+describe("B4-1 — TextModeDriver: a backup's actor is the backup's own, whatever format their mobile is stored in", () => {
+  it.each(['(512) 555-0111', '15125550111'])('stored as %s', async (storedMobile) => {
+    const h = await build('technician', { storedMobile, ownerRow: true });
+    h.provider.setDefaultResponse(JSON.stringify({ intentType: 'lookup_digest', confidence: 0.96 }));
+    const { sessionId } = await h.driver.startSession({ tenantId: TENANT, callerId: BACKUP_MOBILE, callerIdBlocked: false });
+
+    expect(h.store.get(sessionId)?.ownerLineApprover).toEqual({ role: 'technician', userId: BACKUP_SUBJECT });
+    expect(h.store.get(sessionId)?.actorUserId).toBe(BACKUP_SUBJECT);
+    const answer = await h.driver.speak(sessionId, 'question about the digest');
+    expect(answer.agentResponse).toContain('owner-level report');
+    expect(answer.agentResponse).not.toContain('revenue was strong');
   });
 });

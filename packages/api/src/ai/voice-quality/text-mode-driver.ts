@@ -382,13 +382,13 @@ export class TextModeDriver implements AgentDriver {
     if (ownerSession) {
       // B3-7 — the backup supervisor's line resolves its actor exactly as
       // production does (`resolvePhoneActor`: their registered mobile → their
-      // own subject; nothing resolved → no actor), so their lookups are
-      // authorised as their role. The owner phone (or a forced owner
+      // own subject; nothing resolved → no actor, never the owner — B4-1), so
+      // their lookups are authorised as their role. The owner phone (or a forced owner
       // fixture) keeps the synthetic owner subject: the harness's stand-in
       // for the owner_phone bridge.
       if (lineApprover?.via === 'backup_supervisor') {
         const actor = this.deps.userRepo
-          ? await resolvePhoneActor({ userRepo: this.deps.userRepo }, tenantId, from, true)
+          ? await resolvePhoneActor({ userRepo: this.deps.userRepo }, tenantId, from, lineApprover)
           : null;
         if (actor) session.actorUserId = actor.userId;
       } else {
@@ -411,7 +411,7 @@ export class TextModeDriver implements AgentDriver {
     // exactly as establishInboundSession resolves it. The owner line keeps
     // its synthetic subject above; the owner-phone bridge is not exercised.
     if (!ownerSession && from && this.deps.userRepo) {
-      const actor = await resolvePhoneActor({ userRepo: this.deps.userRepo }, tenantId, from, false);
+      const actor = await resolvePhoneActor({ userRepo: this.deps.userRepo }, tenantId, from, null);
       if (actor) {
         session.actorUserId = actor.userId;
         session.events.emit(

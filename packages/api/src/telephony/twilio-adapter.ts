@@ -1233,12 +1233,15 @@ export class TwilioGatherAdapter {
     // carry only the ownerSession boolean. Fail-soft: never blocks the call.
     // #1223 — the actor is a caller-ID identity too (a registered mobile), so
     // it is only resolved on an A-attested call; otherwise no actor.
+    // B4-1 — it is told which owner line the caller-ID was recognised as (on an
+    // attested call, `lineApprover` is exactly the owner line), so a backup's
+    // line is authorised as that backup or nobody, never as the owner.
     const actor = attested
       ? await resolvePhoneActor(
           { ...(this.deps.userRepo ? { userRepo: this.deps.userRepo } : {}) },
           opts.tenantId,
           opts.from,
-          ownerSession,
+          ownerSession ? lineApprover : null,
         )
       : null;
     if (actor) {
