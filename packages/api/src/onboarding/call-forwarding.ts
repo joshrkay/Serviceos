@@ -33,8 +33,13 @@ export interface CallForwardingRepository {
     tenantId: string,
     choice: CallForwardingChoice,
   ): Promise<CallForwardingSetup | null | undefined>;
-  /** False when no setup exists to record the pass on. */
-  recordCheckPassed(tenantId: string, at: Date): Promise<boolean>;
+  /**
+   * Records a pass for a check placed from `rivetNumber`. False when no setup
+   * exists to record it on, or when the tenant's Rivet number is no longer
+   * that one: a number change voids the proof, and a check from the released
+   * number must not restore it.
+   */
+  recordCheckPassed(tenantId: string, at: Date, rivetNumber: string): Promise<boolean>;
 }
 
 export class InMemoryCallForwardingRepository implements CallForwardingRepository {
@@ -55,7 +60,7 @@ export class InMemoryCallForwardingRepository implements CallForwardingRepositor
     return previous;
   }
 
-  async recordCheckPassed(tenantId: string, at: Date): Promise<boolean> {
+  async recordCheckPassed(tenantId: string, at: Date, _rivetNumber: string): Promise<boolean> {
     const row = this.rows.get(tenantId);
     if (!row) return false;
     this.rows.set(tenantId, { ...row, checkPassedAt: at });
@@ -121,13 +126,22 @@ export class PgCallForwardingRepository
     });
   }
 
-  async recordCheckPassed(tenantId: string, at: Date): Promise<boolean> {
+  async recordCheckPassed(tenantId: string, at: Date, rivetNumber: string): Promise<boolean> {
     return this.withTenant(tenantId, async (client) => {
+      // The locked read of the Twilio line serialises against the number-change
+      // worker's repoint: a pass recorded first is voided by the repoint, and a
+      // pass that waits on the repoint sees the new number and records nothing.
       const result = await client.query(
-        `UPDATE tenant_settings
+        `WITH line AS (
+           SELECT 1 FROM tenant_integrations
+            WHERE tenant_id = $1 AND provider = 'twilio' AND provider_data->>'phoneE164' = $3
+            FOR SHARE
+         )
+         UPDATE tenant_settings
             SET call_forwarding_verified_at = $2, updated_at = NOW()
-          WHERE tenant_id = $1 AND call_forwarding_carrier IS NOT NULL`,
-        [tenantId, at],
+          WHERE tenant_id = $1 AND call_forwarding_carrier IS NOT NULL
+            AND EXISTS (SELECT 1 FROM line)`,
+        [tenantId, at, rivetNumber],
       );
       return (result.rowCount ?? 0) > 0;
     });

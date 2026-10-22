@@ -18,7 +18,8 @@ import { registerMarketingRedirects } from './marketing-redirects';
 import { createWebhookRouter } from './webhooks/routes';
 import { createLsaWebhookRouter } from './lsa/lsa-webhook-router';
 import { createLsaIntegrationRouter } from './routes/lsa-integration';
-import { createLsaSpeedToLeadSender } from './lsa/lsa-speed-to-lead-sender';
+import { createLeadConversationSender } from './leads/lead-conversation-sender';
+import { createNewLeadAutoReply, NEW_LEAD_AUTO_REPLY_ACTOR_ID } from './leads/new-lead-auto-reply';
 import { createLsaDispositionReporter } from './lsa/disposition-reporter';
 import { InMemoryLsaIntegrationRepository } from './lsa/lsa-integration';
 import { PgLsaIntegrationRepository } from './lsa/pg-lsa-integration';
@@ -139,7 +140,6 @@ import {
 import { createConversationRouter } from './routes/conversations';
 import { createSettingsRouter } from './routes/settings';
 import { createBrandVoiceRouter } from './tenants/brand/brand-voice-router';
-import { createGetFoundRouter } from './get-found/get-found-router';
 import { listAllTenantIds } from './tenants/list-tenant-ids';
 import { createDncRouter } from './routes/dnc';
 import { createVerticalRouter } from './routes/verticals';
@@ -3524,6 +3524,26 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // BUG-2 — share the single `tenantRepo` instance constructed at the
   // top of this module so intake-created customers and dashboard-
   // created customers resolve under the same tenant ID in dev.
+  // #1738 — instant reply text for new web-form / portal leads. Owner opt-in
+  // (`speed_to_lead_enabled`), visitor consent required, DNC-gated send; with
+  // no SMS delivery configured every attempt records 'unavailable'.
+  const newLeadAutoReply = createNewLeadAutoReply({
+    settingsRepo,
+    auditRepo,
+    ...(messageDelivery
+      ? {
+          send: createLeadConversationSender(
+            {
+              reply: { conversationRepo, customerRepo, leadRepo, dncRepo, dispatchRepo, delivery: messageDelivery },
+              conversationRepo,
+              auditRepo,
+              getBusinessName: async (tid) => (await settingsRepo.findByTenant(tid))?.businessName,
+            },
+            { title: 'New lead', actorId: NEW_LEAD_AUTO_REPLY_ACTOR_ID },
+          ),
+        }
+      : {}),
+  });
   const intakeTenantRepo = tenantRepo;
   app.use(
     '/public/intake',
@@ -3535,7 +3555,15 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // Shared Redis store so the cap holds across replicas.
       store: createRateLimitStore(redisUrl, 'public-intake:'),
     }),
-    createPublicIntakeRouter(leadRepo, intakeTenantRepo, auditRepo, settingsRepo, canonicalPackRegistry, pool)
+    createPublicIntakeRouter(
+      leadRepo,
+      intakeTenantRepo,
+      auditRepo,
+      settingsRepo,
+      canonicalPackRegistry,
+      pool,
+      newLeadAutoReply,
+    )
   );
 
   // Public unauthenticated estimate approval flow (token-authenticated).
@@ -3688,6 +3716,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         ? { apiKey: process.env.STRIPE_SECRET_KEY }
         : undefined,
       connectAccountResolver,
+      autoReplyToNewLead: newLeadAutoReply,
     }),
   );
 
@@ -5994,12 +6023,15 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       settingsRepo,
       ...(messageDelivery
         ? {
-            sendSpeedToLead: createLsaSpeedToLeadSender({
-              reply: { conversationRepo, customerRepo, leadRepo, dncRepo, dispatchRepo, delivery: messageDelivery },
-              conversationRepo,
-              auditRepo,
-              getBusinessName: async (tid) => (await settingsRepo.findByTenant(tid))?.businessName,
-            }),
+            sendSpeedToLead: createLeadConversationSender(
+              {
+                reply: { conversationRepo, customerRepo, leadRepo, dncRepo, dispatchRepo, delivery: messageDelivery },
+                conversationRepo,
+                auditRepo,
+                getBusinessName: async (tid) => (await settingsRepo.findByTenant(tid))?.businessName,
+              },
+              { title: 'Google Local Services lead', actorId: 'system:lsa' },
+            ),
           }
         : {}),
     }),
@@ -6570,11 +6602,6 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     '/api/settings/brand-voice',
     createBrandVoiceRouter(brandVoiceRepo, settingsRepo, auditRepo),
   );
-  // #1750 (D-044) — the Get-found checklist: derived from facts on every read;
-  // the owner's answers (presence path, call routing mode, skips) are audited.
-  if (pool) {
-    app.use('/api/get-found', createGetFoundRouter({ pool, settingsRepo, auditRepo }));
-  }
   // #1564 — owner-only A2P 10DLC texting registration (Settings → Phone).
   // Mounted whenever there is a database; answers 503 without
   // TENANT_ENCRYPTION_KEY because the EIN must be stored encrypted.

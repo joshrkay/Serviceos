@@ -65,12 +65,12 @@ function service(opts: { seconds: number; cap?: number | null; fetchFn?: typeof 
 }
 
 describe('CallUsageBillingService (unit)', () => {
-  it('invoices 60 Starter minutes as one $50.00 item and completes the settlement', async () => {
+  it('invoices 100 Starter minutes as one $50.00 item and completes the settlement', async () => {
     const fetchFn = vi.fn(async () => new Response(JSON.stringify({ id: 'ii_1' })));
-    const { settle, settlementRepo } = service({ seconds: 3_600, fetchFn: fetchFn as unknown as typeof fetch });
+    const { settle, settlementRepo } = service({ seconds: 6_000, fetchFn: fetchFn as unknown as typeof fetch });
 
     expect(await settle()).toEqual({
-      planId: 'starter', billableMinutes: 60, overageMinutes: 40, customerChargeCents: 5_000, invoiceItemId: 'ii_1',
+      planId: 'starter', billableMinutes: 100, overageMinutes: 40, customerChargeCents: 5_000, invoiceItemId: 'ii_1',
     });
     const body = fetchFn.mock.calls[0][1].body as URLSearchParams;
     expect(body.get('amount')).toBe('5000');
@@ -87,7 +87,7 @@ describe('CallUsageBillingService (unit)', () => {
 
   it('returns the stored result for an already-completed period', async () => {
     const fetchFn = vi.fn(async () => new Response(JSON.stringify({ id: 'ii_1' })));
-    const { settle } = service({ seconds: 3_600, fetchFn: fetchFn as unknown as typeof fetch });
+    const { settle } = service({ seconds: 6_000, fetchFn: fetchFn as unknown as typeof fetch });
     await settle();
     expect((await settle()).invoiceItemId).toBe('ii_1');
     expect(fetchFn).toHaveBeenCalledTimes(1);
@@ -95,12 +95,12 @@ describe('CallUsageBillingService (unit)', () => {
 
   it('marks the settlement failed, alerts and throws when Stripe errors or returns no id', async () => {
     const onAlert = vi.fn();
-    const down = service({ seconds: 3_600, onAlert, fetchFn: (async () => new Response('down', { status: 503 })) as unknown as typeof fetch });
+    const down = service({ seconds: 6_000, onAlert, fetchFn: (async () => new Response('down', { status: 503 })) as unknown as typeof fetch });
     await expect(down.settle()).rejects.toThrow(/failed \(503\)/);
     expect([...down.settlementRepo.rows.values()][0].status).toBe('failed');
     expect(onAlert).toHaveBeenCalledWith(expect.objectContaining({ rule: 'call_settlement_failed' }));
 
-    const noId = service({ seconds: 3_600, fetchFn: (async () => new Response('{}')) as unknown as typeof fetch });
+    const noId = service({ seconds: 6_000, fetchFn: (async () => new Response('{}')) as unknown as typeof fetch });
     await expect(noId.settle()).rejects.toThrow(/returned no id/);
   });
 
@@ -108,7 +108,7 @@ describe('CallUsageBillingService (unit)', () => {
     const fetchFn = vi.fn()
       .mockResolvedValueOnce(new Response('down', { status: 503 }))
       .mockResolvedValueOnce(new Response(JSON.stringify({ id: 'ii_retry' })));
-    const { settle, settlementRepo } = service({ seconds: 3_600, fetchFn: fetchFn as unknown as typeof fetch });
+    const { settle, settlementRepo } = service({ seconds: 6_000, fetchFn: fetchFn as unknown as typeof fetch });
     const out = await settle();
     expect(out.invoiceItemId).toBe('ii_retry');
     expect(fetchFn).toHaveBeenCalledTimes(2);
@@ -122,7 +122,7 @@ describe('CallUsageBillingService (unit)', () => {
     const queue = new InMemoryQueue();
     const onAlert = vi.fn();
     const fetchFn = vi.fn(async () => new Response('down', { status: 503 }));
-    const { settle, settlementRepo } = service({ seconds: 3_600, onAlert, queue, fetchFn: fetchFn as unknown as typeof fetch });
+    const { settle, settlementRepo } = service({ seconds: 6_000, onAlert, queue, fetchFn: fetchFn as unknown as typeof fetch });
     await expect(settle()).rejects.toThrow(/failed \(503\)/);
     expect(fetchFn).toHaveBeenCalledTimes(OVERAGE_INVOICE_ITEM_MAX_ATTEMPTS);
     expect([...settlementRepo.rows.values()][0].status).toBe('failed');
@@ -136,7 +136,7 @@ describe('CallUsageBillingService (unit)', () => {
 
   it('retrySettlement re-drives a failed settlement without an invoice pin', async () => {
     const fetchFn = vi.fn(async () => new Response(JSON.stringify({ id: 'ii_2' })));
-    const { svc, settlementRepo } = service({ seconds: 3_600, fetchFn: fetchFn as unknown as typeof fetch });
+    const { svc, settlementRepo } = service({ seconds: 6_000, fetchFn: fetchFn as unknown as typeof fetch });
     await svc.settlePeriod({ tenantId: 't1', periodStart: START, periodEnd: END, subscriptionPriceId: 'price_starter' });
     const failed = { ...[...settlementRepo.rows.values()][0], status: 'failed' as const };
     const out = await svc.retrySettlement({ tenantId: 't1', settlement: failed });
@@ -149,7 +149,7 @@ describe('CallUsageBillingService (unit)', () => {
 
   it('retrySettlement returns an already-completed settlement as-is', async () => {
     const fetchFn = vi.fn(async () => new Response(JSON.stringify({ id: 'ii_1' })));
-    const { svc, settlementRepo } = service({ seconds: 3_600, fetchFn: fetchFn as unknown as typeof fetch });
+    const { svc, settlementRepo } = service({ seconds: 6_000, fetchFn: fetchFn as unknown as typeof fetch });
     await svc.settlePeriod({ tenantId: 't1', periodStart: START, periodEnd: END, subscriptionPriceId: 'price_starter' });
     const completed = [...settlementRepo.rows.values()][0];
     const out = await svc.retrySettlement({ tenantId: 't1', settlement: completed });
@@ -158,12 +158,12 @@ describe('CallUsageBillingService (unit)', () => {
   });
 
   it('refuses an unknown subscription price and a tenant with no Stripe customer', async () => {
-    await expect(service({ seconds: 3_600 }).settle('price_other')).rejects.toThrow(/Unknown subscription price/);
-    await expect(service({ seconds: 3_600, customer: null }).settle()).rejects.toThrow(/no Stripe customer/);
+    await expect(service({ seconds: 6_000 }).settle('price_other')).rejects.toThrow(/Unknown subscription price/);
+    await expect(service({ seconds: 6_000, customer: null }).settle()).rejects.toThrow(/no Stripe customer/);
   });
 
   it('applies the owner cap', async () => {
-    const { settle } = service({ seconds: 200 * 60, cap: 20_000 });
+    const { settle } = service({ seconds: 300 * 60, cap: 20_000 });
     expect((await settle()).customerChargeCents).toBe(20_000);
   });
 });

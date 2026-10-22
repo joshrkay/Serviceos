@@ -7,7 +7,7 @@
  *   - Public read endpoints (customer/estimates/invoices/jobs/agreements/appointments)
  *   - Public POST /:token/request-service creates a lead with source='web_form'
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import express, { Request, Response, NextFunction } from 'express';
 import request from 'supertest';
 import { v4 as uuidv4 } from 'uuid';
@@ -34,6 +34,8 @@ import {
 import { InMemoryLeadRepository } from '../../src/leads/lead';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemorySettingsRepository } from '../../src/settings/settings';
+import { InMemoryContactRepository } from '../../src/customers/contact';
+import { createPortalSession } from '../../src/portal/portal-service';
 import { createPortalRouter } from '../../src/routes/portal';
 import { createPublicPortalRouter } from '../../src/routes/public-portal';
 
@@ -59,6 +61,11 @@ async function build(opts: {
   invoiceRepoOverride?: import('../../src/invoices/invoice').InvoiceRepository;
   /** WS6 — when supplied, the portal resolves the tenant timezone from it. */
   tenantTimezone?: string;
+  /** #1738 — instant-reply hook; the customer's stored SMS consent. */
+  autoReplyToNewLead?: import('../../src/leads/new-lead-auto-reply').NewLeadAutoReply;
+  customerSmsConsent?: boolean;
+  /** Enables contact-bound portal tokens. */
+  contactRepo?: InMemoryContactRepository;
 } = {}): Promise<Harness> {
   const app = express();
   app.use(express.json());
@@ -99,7 +106,7 @@ async function build(opts: {
     email: 'pat@example.com',
     primaryPhone: '+15555550100',
     preferredChannel: 'email',
-    smsConsent: false,
+    smsConsent: opts.customerSmsConsent ?? false,
     isArchived: false,
     createdBy: ACTOR,
     createdAt: new Date(),
@@ -122,6 +129,8 @@ async function build(opts: {
       auditRepo,
       settingsRepo,
       paymentLinkProvider: opts.paymentLinkProvider,
+      ...(opts.autoReplyToNewLead ? { autoReplyToNewLead: opts.autoReplyToNewLead } : {}),
+      ...(opts.contactRepo ? { contactRepo: opts.contactRepo } : {}),
     }),
   );
 
@@ -746,6 +755,85 @@ describe('P10-001 POST /api/public/portal/:token/request-service', () => {
   });
 });
 
+describe('#1738 portal service request: instant reply consent', () => {
+  async function submit(opts: { customerSmsConsent?: boolean; body: Record<string, unknown> }) {
+    const autoReplyToNewLead = vi.fn(async () => 'sent');
+    const h = await build({ autoReplyToNewLead, customerSmsConsent: opts.customerSmsConsent });
+    const token = await mintToken(h);
+    const res = await request(h.app)
+      .post(`/api/public/portal/${token}/request-service`)
+      .send({ summary: 'Water heater leaking', ...opts.body });
+    expect(res.status).toBe(201);
+    return autoReplyToNewLead.mock.calls[0][0] as { outcome: string; smsConsent: boolean; lead: { id: string } };
+  }
+
+  it('passes a ticked box as consent for a new request', async () => {
+    const call = await submit({ body: { smsConsent: true } });
+    expect(call).toMatchObject({ outcome: 'created', smsConsent: true });
+  });
+
+  it('is no consent when the box is unticked and the customer never agreed to texts', async () => {
+    expect((await submit({ body: {} })).smsConsent).toBe(false);
+  });
+
+  it("counts the customer's stored consent for the number on file", async () => {
+    expect((await submit({ customerSmsConsent: true, body: {} })).smsConsent).toBe(true);
+    expect((await submit({ customerSmsConsent: true, body: { primaryPhone: '(555) 555-0100' } })).smsConsent).toBe(true);
+  });
+
+  it('does not carry stored consent over to a different number typed into the form', async () => {
+    const call = await submit({ customerSmsConsent: true, body: { primaryPhone: '+15555550199' } });
+    expect(call.smsConsent).toBe(false);
+  });
+
+  describe('a contact-bound link (e.g. an on-site contact)', () => {
+    async function submitAsContact(body: Record<string, unknown>) {
+      const autoReplyToNewLead = vi.fn(async () => 'sent');
+      const contactRepo = new InMemoryContactRepository();
+      const h = await build({ autoReplyToNewLead, customerSmsConsent: true, contactRepo });
+      const contact = await contactRepo.create({
+        id: uuidv4(),
+        tenantId: TENANT,
+        customerId: h.customer.id,
+        name: 'Site Contact',
+        role: 'site',
+        phone: '+15555550177',
+        isPrimary: false,
+        isArchived: false,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      });
+      const { token } = await createPortalSession(TENANT, h.customer.id, ACTOR, h.portalRepo, undefined, undefined, undefined, {
+        contactId: contact.id,
+      });
+      const res = await request(h.app)
+        .post(`/api/public/portal/${token}/request-service`)
+        .send({ summary: 'Water heater leaking', ...body });
+      expect(res.status).toBe(201);
+      return autoReplyToNewLead.mock.calls[0][0] as {
+        smsConsent: boolean;
+        lead: { primaryPhone?: string; firstName?: string; lastName?: string };
+      };
+    }
+
+    it("cannot tick consent for the account holder's number by leaving the phone blank", async () => {
+      const call = await submitAsContact({ smsConsent: true });
+      expect(call.lead.primaryPhone).toBe('+15555550100');
+      expect(call.smsConsent).toBe(false);
+    });
+
+    it("does not borrow the account holder's stored consent", async () => {
+      expect((await submitAsContact({})).smsConsent).toBe(false);
+    });
+
+    it('counts the tick for a number the contact typed, and greets the contact, not the account holder', async () => {
+      const call = await submitAsContact({ smsConsent: true, primaryPhone: '+15555550177' });
+      expect(call.smsConsent).toBe(true);
+      expect(call.lead).toMatchObject({ firstName: 'Site', lastName: 'Contact' });
+    });
+  });
+});
+
 describe('P10-001 portal token middleware: rate limiting', () => {
   it('returns 429 after the per-token limit is exhausted', async () => {
     const portalRepo = new InMemoryPortalSessionRepository();
@@ -787,7 +875,6 @@ describe('P10-001 portal token middleware: rate limiting', () => {
       }),
     );
 
-    const { createPortalSession } = await import('../../src/portal/portal-service');
     const created = await createPortalSession(TENANT, customer.id, ACTOR, portalRepo);
     const token = created.token;
 

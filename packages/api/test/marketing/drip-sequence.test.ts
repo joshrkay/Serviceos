@@ -3,6 +3,7 @@ import {
   addMinutes,
   advanceAfterStep,
   createDripSequenceSchema,
+  DEFAULT_TARGET_DAYS,
   exitReasonForBlock,
   firstRunAt,
   renderStepBody,
@@ -47,6 +48,12 @@ describe('drip sequence contract', () => {
       createDripSequenceSchema.parse({ name: 'x', targetKind: 'lapsed_customers', steps: [sms(60 * 24 * 31)] }),
     ).toThrow();
     expect(() => createDripSequenceSchema.parse({ name: 'x', targetKind: 'everyone', steps: [sms(0)] })).toThrow();
+  });
+
+  it('accepts membership renewals, defaulting to 30 days before the membership ends (#1735)', () => {
+    const parsed = createDripSequenceSchema.parse({ name: 'Renew', targetKind: 'membership_renewals', steps: [sms(0)] });
+    expect(parsed.targetKind).toBe('membership_renewals');
+    expect(DEFAULT_TARGET_DAYS.membership_renewals).toBe(30);
   });
 });
 

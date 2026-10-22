@@ -113,7 +113,7 @@ describe('/api/get-found-online', () => {
     await settingsRepo.update(TENANT, { googleReviewUrl: REVIEW, websiteUrl: 'https://joes.sites.example.com' });
     await integrationRepo.recordListingWebsite(TENANT, '999', 'https://joes.sites.example.com');
     await forwardingRepo.save(TENANT, { carrier: 'att', mode: 'all' });
-    await forwardingRepo.recordCheckPassed(TENANT, new Date('2026-10-20T15:00:00Z'));
+    await forwardingRepo.recordCheckPassed(TENANT, new Date('2026-10-20T15:00:00Z'), '+15125550123');
   }
 
   it('a fresh tenant sees every item open', async () => {

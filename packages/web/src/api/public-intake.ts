@@ -36,6 +36,8 @@ export interface SubmitIntakeLeadPayload {
   utmMedium?: string;
   utmCampaign?: string;
   attribution?: Record<string, string>;
+  /** #1738 — the unticked "text me about this request" box. */
+  smsConsent?: boolean;
   /** Honeypot — always sent empty; bots that fill every field trip it. */
   _company_url: string;
 }

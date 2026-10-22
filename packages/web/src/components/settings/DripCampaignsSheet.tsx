@@ -58,6 +58,7 @@ const emptyStep = (channel: DripChannel = 'sms'): StepDraft => ({
 const TARGET_LABEL: Record<DripTargetKind, string> = {
   lapsed_customers: 'Lapsed customers',
   unsold_estimates: 'Unsold estimates',
+  membership_renewals: 'Membership renewals',
 };
 
 /** Draft rows -> API steps, or the first validation message. Pure; exported for tests. */
@@ -267,6 +268,7 @@ export function DripCampaignsSheet({
                 >
                   <option value="lapsed_customers">Lapsed customers (no job in 6 months)</option>
                   <option value="unsold_estimates">Unsold estimates (sent, not accepted)</option>
+                  <option value="membership_renewals">Memberships ending in the next 30 days</option>
                 </Select>
 
                 {drafts.map((d, i) => (
