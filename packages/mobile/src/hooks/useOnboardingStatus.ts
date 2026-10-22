@@ -46,7 +46,7 @@ const REFETCH_TTL_MS = 10_000;
  * AI check, test call) stay available on /onboarding and are soft-nudged —
  * they must not hard-block the product when Stripe/Twilio are still pending.
  */
-function isIdentityStepDone(status: OnboardingStatusResponse | null): boolean {
+export function isIdentityStepDone(status: OnboardingStatusResponse | null): boolean {
   if (!status || !Array.isArray(status.steps)) return false;
   return status.steps.some(
     (step) => step.id === 'identity' && step.status === 'done',

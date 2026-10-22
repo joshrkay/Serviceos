@@ -11,10 +11,13 @@ import type {
   RecordLookupEventInput,
 } from '../../lookup-events/lookup-event-service';
 import { t, type Language } from '../i18n/i18n';
+import { customerJobsForLookup } from './customer-jobs';
 
 export interface LookupJobsInput {
   tenantId: string;
   customerId: string;
+  /** The job the operator pointed at ("this job" on its invoice): only that job. */
+  jobId?: string;
   /** Max jobs returned. Default 3. */
   recentLimit?: number;
   timezone?: string;
@@ -87,19 +90,9 @@ export async function lookupJobs(
     }
   };
 
-  if (!deps.jobRepo.findByCustomer) {
-    const message = t('lookup.jobs.error', lang);
-    await recordEvent({ resultStatus: 'error', resultCount: 0, summary: message });
-    return {
-      status: 'error',
-      summary: message,
-      data: { error: 'JobRepository.findByCustomer is required' },
-    };
-  }
-
   let jobs: Job[];
   try {
-    jobs = await deps.jobRepo.findByCustomer(input.tenantId, input.customerId, {
+    jobs = await customerJobsForLookup(deps.jobRepo, input.tenantId, input.customerId, input.jobId, {
       includeArchived: true,
       limit: recentLimit,
     });
@@ -130,8 +123,9 @@ export async function lookupJobs(
   const head = items[0];
   // #1331 owner decision (2026-10-01): name every recent job (up to 3,
   // newest first — the repo's order), not only the latest.
-  const summary =
-    items.length === 1
+  const summary = input.jobId
+    ? `Job ${head.jobNumber} — ${head.summary} is ${humanizeStatus(head.status)}.`
+    : items.length === 1
       ? `Your most recent job is ${head.jobNumber} — ${head.summary}, currently ${humanizeStatus(head.status)}.`
       : `You have ${items.length} recent jobs: ${items
           .slice(0, 3)

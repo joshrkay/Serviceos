@@ -630,6 +630,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['327_service_locations_geocode_status', '8de7949551f27df07e557b82ce08edab52d318b0034fe46fce0230330c248c78'],
   // Dispatch FR-2 phase 2 — users.skills + jobs.required_skills (TEXT[], no CHECK).
   ['328_skill_tags', '7b58a5e30ea28966566996c314b41b155333fe55ce687e8463eabf92ad7261ea'],
+  // D-045 — message_dispatches outcome columns (scheduled/blocked) + 3 NOT VALID CHECKs + 3 partial indexes.
+  ['329_message_dispatch_outcomes', '928d38a17d9f73b2175b5a0d71557b8fbb15719bec0f0415d007b15731ef3ea4'],
 ];
 
 function hashMigration(value: string): string {

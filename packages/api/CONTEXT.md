@@ -147,3 +147,34 @@ Terms for how the product states what it can prove about itself. The PRD's
   that passes when it arrives back on our number.
 - **Get found online checklist** — the derived home-page checklist of
   web-presence setup. Separate from onboarding steps, which gate activation.
+
+## Outbound messaging and drafting (D-045)
+
+- **Outbound messaging** — the one module every customer or owner text goes
+  through. A sender names the recipient and the message purpose; the module
+  decides consent, quiet hours, duplicates and channel, and records the
+  outcome. Lives in `src/notifications/outbound-messaging.ts`; files not yet
+  moved onto it are listed in
+  `test/notifications/outbound-messaging-migration-guard.test.ts`.
+  _Avoid_: notification service, SMS sender.
+- **Message purpose** — why a message goes out, which decides when it may:
+  *transactional* (invoice, estimate, confirmation) and *reply* (to someone
+  who just contacted us) send now; *automated nudge* (thank-you, review
+  request, reminder) and *marketing* wait for the customer's daytime window,
+  and marketing also needs marketing consent.
+- **Send outcome** — what outbound messaging returns and records for every
+  message: *sent*, *scheduled* (with the time), or *blocked* (with the
+  reason). Never silent; the record links the customer and, when there is
+  one, the job and the invoice or estimate.
+- **Message record** — the one `message_dispatches` row per customer
+  message, keyed by its dedupe key. A later outcome replaces a scheduled or
+  blocked one; a sent row is never overwritten. "Did this go out?"
+  (`findByEntity`) sees only rows that reached a provider.
+  _Avoid_: dispatch log entry (it now also holds texts that never went).
+- **Status-write gate** — the lifecycle check every proposal status write
+  runs inside the repository (`proposals/lifecycle.ts#assertStatusWrite`).
+  A move the transition table does not list is refused; a caller cannot
+  route around it by writing the status directly.
+- **Draft outcome** — what drafting a proposal returns to a surface: a
+  *proposal*, a *clarification* question, or a *refusal* with a reason. The
+  surface only decides how to say it.

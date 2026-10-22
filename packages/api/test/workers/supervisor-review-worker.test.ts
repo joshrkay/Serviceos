@@ -356,7 +356,7 @@ describe('annotateProposal — narrow merge (concurrent-edit safety)', () => {
     // candidate but before annotateProposal calls update().
     const complete = vi.fn(async (_req: LLMRequest) => {
       // Concurrent approval during LLM latency.
-      await repo.update(TENANT_A, proposal.id, { status: 'approved' });
+      await repo.updateStatus(TENANT_A, proposal.id, 'approved');
       return okResponse(GOOD_JSON);
     });
     const deps = makeDeps(repo, { gateway: { complete } });
@@ -501,7 +501,7 @@ describe('annotation attempt budget — retry-storm brake', () => {
     const repo = new InMemoryProposalRepository();
     const proposal = await seedReadyProposal(repo, TENANT_A);
     const complete = vi.fn(async (_req: LLMRequest) => {
-      await repo.update(TENANT_A, proposal.id, { status: 'approved' });
+      await repo.updateStatus(TENANT_A, proposal.id, 'approved');
       return okResponse(GOOD_JSON);
     });
     const deps = makeDeps(repo, { gateway: { complete } });

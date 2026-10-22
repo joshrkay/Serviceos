@@ -7,9 +7,10 @@ import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgDncRepository } from '../../src/compliance/dnc';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { createLogger } from '../../src/logging/logger';
-import type { FeedbackDispatcher } from '../../src/feedback/dispatcher';
 import { runThankYouSmsSweep } from '../../src/workers/thank-you-sms-worker';
-import { MessageDeliveryFeedbackDispatcher } from '../../src/feedback/dispatcher';
+import { PgDispatchRepository } from '../../src/notifications/dispatch-repository';
+import { createOutboundMessaging } from '../../src/notifications/outbound-messaging';
+import type { MessageDeliveryProvider } from '../../src/notifications/delivery-provider';
 import { GatedMessageDelivery } from '../../src/notifications/gated-message-delivery';
 import type { SmsMessage } from '../../src/notifications/delivery-provider';
 import { createRecipientLocaleResolver } from '../../src/notifications/recipient-locale';
@@ -21,6 +22,8 @@ import {
 } from '../../src/jobs/job-lifecycle';
 import { v4 as uuidv4 } from 'uuid';
 
+/** No consent-ledger events: the thank-you is an automated nudge, not marketing. */
+const noLedger = { listByPhone: async () => [] };
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
 const NOW = new Date('2026-06-17T15:00:00Z');
 const FOUR_HOURS_AGO = new Date(NOW.getTime() - 4 * 60 * 60 * 1000);
@@ -30,13 +33,17 @@ interface CapturedSend {
   body: string;
 }
 
-function makeCapturingDispatcher(): { dispatcher: FeedbackDispatcher; calls: CapturedSend[] } {
+function makeCapturingDelivery(): { delivery: MessageDeliveryProvider; calls: CapturedSend[] } {
   const calls: CapturedSend[] = [];
   return {
     calls,
-    dispatcher: {
-      async send(input) {
+    delivery: {
+      async sendSms(input) {
         calls.push(input);
+        return { provider: 'test', providerMessageId: `m-${calls.length}`, channel: 'sms' };
+      },
+      async sendEmail() {
+        throw new Error('not used');
       },
     },
   };
@@ -83,7 +90,7 @@ describe('thank-you-sms worker — integration', () => {
   }): Promise<{ customerId: string; jobId: string; locationId: string; phone: string }> {
     const customerId = uuidv4();
     // Unique-per-call phone so a test that runs the sweep across all
-    // tenants in the shared container can still scope its dispatcher
+    // tenants in the shared container can still scope its provider
     // assertions to the seed it owns.
     const phone = opts.primaryPhone ?? `+1555${customerId.replace(/-/g, '').slice(0, 7)}`;
     await pool.query(
@@ -124,15 +131,16 @@ describe('thank-you-sms worker — integration', () => {
     const a = await seedCustomerAndJob({ completedAtAgo: 'four_hours' });
     const b = await seedCustomerAndJob({ completedAtAgo: 'one_hour' });
 
-    const { dispatcher, calls } = makeCapturingDispatcher();
+    const { delivery, calls } = makeCapturingDelivery();
+    const messaging = createOutboundMessaging({ delivery, customerRepo, dncRepo, consentLedger: noLedger, dispatchRepo: new PgDispatchRepository(pool), pool, logger });
     await runThankYouSmsSweep({
-      pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+      pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
       now: () => NOW,
     });
 
     // Tenant-scoped assertions: the sweep iterates every tenant in the
     // shared container, so other tests' fixtures can ride in the
-    // aggregate counts. Filter dispatcher captures by THIS test's
+    // aggregate counts. Filter provider captures by THIS test's
     // unique phones and pin column writes on the seeded ids.
     const ourCalls = calls.filter((c) => c.to === a.phone || c.to === b.phone);
     expect(ourCalls.map((c) => c.to)).toEqual([a.phone]);
@@ -142,6 +150,23 @@ describe('thank-you-sms worker — integration', () => {
     expect(aRow.rows[0].thank_you_sms_sent_at).not.toBeNull();
     const bRow = await pool.query(`SELECT thank_you_sms_sent_at FROM jobs WHERE id = $1`, [b.jobId]);
     expect(bRow.rows[0].thank_you_sms_sent_at).toBeNull();
+
+    // D-045 — the sent thank-you is the job's and customer's message record.
+    const record = await pool.query(
+      `SELECT status, entity_type, entity_id, job_id, customer_id, purpose
+         FROM message_dispatches WHERE job_id = $1`,
+      [a.jobId],
+    );
+    expect(record.rows).toEqual([
+      {
+        status: 'sent',
+        entity_type: 'thank_you',
+        entity_id: a.jobId,
+        job_id: a.jobId,
+        customer_id: a.customerId,
+        purpose: 'automated_nudge',
+      },
+    ]);
   });
 
   it('skips a tenant whose send_thank_you_sms is FALSE', async () => {
@@ -151,9 +176,10 @@ describe('thank-you-sms worker — integration', () => {
     );
     const seed = await seedCustomerAndJob({ completedAtAgo: 'four_hours' });
 
-    const { dispatcher, calls } = makeCapturingDispatcher();
+    const { delivery, calls } = makeCapturingDelivery();
+    const messaging = createOutboundMessaging({ delivery, customerRepo, dncRepo, consentLedger: noLedger, dispatchRepo: new PgDispatchRepository(pool), pool, logger });
     await runThankYouSmsSweep({
-      pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+      pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
       now: () => NOW,
     });
 
@@ -166,15 +192,16 @@ describe('thank-you-sms worker — integration', () => {
   it('is idempotent — a second sweep on the same data does not re-send', async () => {
     const seed = await seedCustomerAndJob({ completedAtAgo: 'four_hours' });
 
-    const { dispatcher, calls } = makeCapturingDispatcher();
+    const { delivery, calls } = makeCapturingDelivery();
+    const messaging = createOutboundMessaging({ delivery, customerRepo, dncRepo, consentLedger: noLedger, dispatchRepo: new PgDispatchRepository(pool), pool, logger });
     await runThankYouSmsSweep({
-      pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+      pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
       now: () => NOW,
     });
     expect(calls.filter((c) => c.to === seed.phone).length).toBe(1);
 
     await runThankYouSmsSweep({
-      pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+      pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
       now: () => NOW,
     });
     // Idempotency: the second sweep must not re-call this tenant's phone.
@@ -184,9 +211,10 @@ describe('thank-you-sms worker — integration', () => {
   it('writes a notification.thank_you_sms.sent audit event scoped to the job entity', async () => {
     const { jobId } = await seedCustomerAndJob({ completedAtAgo: 'four_hours' });
 
-    const { dispatcher } = makeCapturingDispatcher();
+    const { delivery } = makeCapturingDelivery();
+    const messaging = createOutboundMessaging({ delivery, customerRepo, dncRepo, consentLedger: noLedger, dispatchRepo: new PgDispatchRepository(pool), pool, logger });
     await runThankYouSmsSweep({
-      pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+      pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
       now: () => NOW,
     });
 
@@ -235,9 +263,10 @@ describe('thank-you-sms worker — integration', () => {
         [tenant.tenantId, `thank_you_sms:${seed.jobId}`],
       );
 
-      const { dispatcher, calls } = makeCapturingDispatcher();
+      const { delivery, calls } = makeCapturingDelivery();
+    const messaging = createOutboundMessaging({ delivery, customerRepo, dncRepo, consentLedger: noLedger, dispatchRepo: new PgDispatchRepository(pool), pool, logger });
       await runThankYouSmsSweep({
-        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+        pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
         now: () => NOW,
       });
 
@@ -259,9 +288,10 @@ describe('thank-you-sms worker — integration', () => {
         [tenant.tenantId, `thank_you_sms:${seed.jobId}`],
       );
 
-      const { dispatcher, calls } = makeCapturingDispatcher();
+      const { delivery, calls } = makeCapturingDelivery();
+    const messaging = createOutboundMessaging({ delivery, customerRepo, dncRepo, consentLedger: noLedger, dispatchRepo: new PgDispatchRepository(pool), pool, logger });
       await runThankYouSmsSweep({
-        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+        pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
         now: () => NOW,
       });
 
@@ -275,15 +305,16 @@ describe('thank-you-sms worker — integration', () => {
 
     it('two concurrent sweeps against the same eligible job send exactly once', async () => {
       const seed = await seedCustomerAndJob({ completedAtAgo: 'four_hours' });
-      const { dispatcher, calls } = makeCapturingDispatcher();
+      const { delivery, calls } = makeCapturingDelivery();
+    const messaging = createOutboundMessaging({ delivery, customerRepo, dncRepo, consentLedger: noLedger, dispatchRepo: new PgDispatchRepository(pool), pool, logger });
 
       await Promise.all([
         runThankYouSmsSweep({
-          pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+          pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
           now: () => NOW,
         }),
         runThankYouSmsSweep({
-          pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+          pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
           now: () => NOW,
         }),
       ]);
@@ -301,9 +332,10 @@ describe('thank-you-sms worker — integration', () => {
         completedAt: new Date(NOW.getTime() - 30 * 24 * 60 * 60 * 1000),
       });
 
-      const { dispatcher, calls } = makeCapturingDispatcher();
+      const { delivery, calls } = makeCapturingDelivery();
+    const messaging = createOutboundMessaging({ delivery, customerRepo, dncRepo, consentLedger: noLedger, dispatchRepo: new PgDispatchRepository(pool), pool, logger });
       await runThankYouSmsSweep({
-        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher, auditRepo, logger,
+        pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
         now: () => NOW,
       });
 
@@ -324,8 +356,14 @@ describe('thank-you-sms worker — integration', () => {
 
       const delivered: SmsMessage[] = [];
       const gated = (now: Date) =>
-        new MessageDeliveryFeedbackDispatcher(
-          new GatedMessageDelivery({
+        createOutboundMessaging({
+          customerRepo,
+          dncRepo,
+          consentLedger: noLedger,
+          dispatchRepo: new PgDispatchRepository(pool),
+          pool,
+          logger,
+          delivery: new GatedMessageDelivery({
             base: {
               sendSms: async (m) => {
                 delivered.push(m);
@@ -345,10 +383,10 @@ describe('thank-you-sms worker — integration', () => {
               now: () => now,
             },
           }),
-        );
+        });
 
       await runThankYouSmsSweep({
-        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher: gated(late), auditRepo, logger,
+        pool, jobRepo, customerRepo, settingsRepo, messaging: gated(late), auditRepo, logger,
         now: () => late,
       });
       expect(delivered.some((m) => m.to === seed.phone)).toBe(false);
@@ -356,7 +394,7 @@ describe('thank-you-sms worker — integration', () => {
       expect(night.rows[0].thank_you_sms_sent_at).toBeNull();
 
       await runThankYouSmsSweep({
-        pool, jobRepo, customerRepo, settingsRepo, dncRepo, dispatcher: gated(morning), auditRepo, logger,
+        pool, jobRepo, customerRepo, settingsRepo, messaging: gated(morning), auditRepo, logger,
         now: () => morning,
       });
       expect(delivered.filter((m) => m.to === seed.phone)).toHaveLength(1);

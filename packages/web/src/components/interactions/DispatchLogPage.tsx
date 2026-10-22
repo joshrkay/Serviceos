@@ -3,51 +3,47 @@
  *
  * Lists `message_dispatches` rows (SMS / email) sent on behalf of the
  * tenant — appointment confirmations, delay notices, estimate sends,
- * invoice sends — backed by `GET /api/interactions`. Satisfies QA
- * checklist §9A (interactions audit).
+ * invoice sends, and (D-045) texts held until morning or not sent, with the
+ * reason — backed by `GET /api/interactions/dispatches`. Satisfies QA
+ * checklist §9A (interactions audit). `?status=blocked` is the owner's list of
+ * texts that did not go out; `?jobId=` / `?customerId=` scope it to the job or
+ * customer whose status bubble was tapped.
  */
 
 import { useState, useEffect } from 'react';
+import { Link, useSearchParams } from 'react-router';
 import { MessageSquare } from 'lucide-react';
 import { apiFetch } from '../../utils/api-fetch';
 import { Spinner, EmptyState } from '../ui';
 import { ErrorState } from '../ErrorState';
 import { useTenantTimezone } from '../../hooks/useTenantTimezone';
-import { formatDateTimeInTenantTz } from '../../utils/formatInTenantTz';
-
-interface MessageDispatch {
-  id: string;
-  entityType: string;
-  entityId: string;
-  channel: 'sms' | 'email';
-  recipient: string;
-  provider: string;
-  providerMessageId?: string;
-  status: string;
-  errorMessage?: string;
-  sentAt: string;
-  deliveredAt?: string;
-}
+import { summarizeMessage, TONE_CLASSES, type MessageDispatch } from './message-status';
 
 const CHANNEL_BADGE: Record<string, string> = {
   sms:   'bg-blue-100 text-blue-700',
   email: 'bg-violet-100 text-violet-700',
-};
-const STATUS_BADGE: Record<string, string> = {
-  sent:      'bg-green-100 text-green-700',
-  delivered: 'bg-emerald-100 text-emerald-700',
-  failed:    'bg-red-100 text-red-700',
-  bounced:   'bg-amber-100 text-amber-700',
 };
 const ENTITY_LABEL: Record<string, string> = {
   estimate:                 'Estimate',
   invoice:                  'Invoice',
   appointment_confirmation: 'Appt Confirmation',
   delay_notice:             'Delay Notice',
+  thank_you:                'Thank-you',
 };
+
+/** D-045 — status filters. "Not sent" is the owner's list of blocked texts. */
+const STATUS_FILTERS: Array<{ value: string; label: string }> = [
+  { value: '',          label: 'All' },
+  { value: 'blocked',   label: 'Not sent' },
+  { value: 'scheduled', label: 'Held' },
+];
 
 export function DispatchLogPage() {
   const tz = useTenantTimezone();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const status = searchParams.get('status') ?? '';
+  const jobId = searchParams.get('jobId');
+  const customerId = searchParams.get('customerId');
   const [dispatches, setDispatches] = useState<MessageDispatch[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -57,7 +53,11 @@ export function DispatchLogPage() {
     let cancelled = false;
     setLoading(true);
     setError(null);
-    apiFetch('/api/interactions/dispatches?limit=50')
+    const query = new URLSearchParams({ limit: '50' });
+    if (status) query.set('status', status);
+    if (jobId) query.set('jobId', jobId);
+    if (customerId) query.set('customerId', customerId);
+    apiFetch(`/api/interactions/dispatches?${query.toString()}`)
       .then(async (res) => {
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
@@ -71,7 +71,16 @@ export function DispatchLogPage() {
       })
       .finally(() => { if (!cancelled) setLoading(false); });
     return () => { cancelled = true; };
-  }, []);
+  }, [status, jobId, customerId]);
+
+  function selectStatus(value: string) {
+    const next = new URLSearchParams(searchParams);
+    if (value) next.set('status', value);
+    else next.delete('status');
+    setSearchParams(next);
+  }
+
+  const scope = jobId ? 'this job' : customerId ? 'this customer' : null;
 
   return (
     <div className="h-full flex flex-col overflow-hidden">
@@ -80,8 +89,33 @@ export function DispatchLogPage() {
           <h1 className="text-slate-900 text-lg font-semibold">Dispatch log</h1>
           <p className="text-sm text-slate-500 mt-0.5">
             Outbound SMS and email — appointment confirmations, delay notices,
-            estimate and invoice deliveries.
+            estimate and invoice deliveries, and texts that were held or not sent.
           </p>
+          {scope && (
+            <p className="text-sm text-slate-600 mt-2" data-testid="dispatch-log-scope">
+              Showing messages for {scope}.{' '}
+              <Link to="/interactions/dispatch" className="inline-flex min-h-11 min-w-11 items-center text-primary hover:underline">
+                Show all
+              </Link>
+            </p>
+          )}
+          <div className="mt-3 flex flex-wrap gap-2" role="group" aria-label="Filter by status">
+            {STATUS_FILTERS.map((f) => (
+              <button
+                key={f.value || 'all'}
+                type="button"
+                aria-pressed={status === f.value}
+                onClick={() => selectStatus(f.value)}
+                className={`min-h-11 min-w-11 rounded-full border px-4 text-sm ${
+                  status === f.value
+                    ? 'border-slate-900 bg-slate-900 text-white'
+                    : 'border-slate-200 bg-white text-slate-700'
+                }`}
+              >
+                {f.label}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
@@ -98,43 +132,71 @@ export function DispatchLogPage() {
           )}
 
           {!loading && !error && dispatches.length === 0 && (
-            <EmptyState
-              icon={<MessageSquare size={20} />}
-              title="No outbound messages yet"
-              description="Send an estimate or invoice and dispatch records will appear here."
-            />
+            status === 'blocked' ? (
+              <EmptyState
+                icon={<MessageSquare size={20} />}
+                title="Every text went out"
+                description="Texts that couldn't be sent show up here with the reason."
+              />
+            ) : (
+              <EmptyState
+                icon={<MessageSquare size={20} />}
+                title="No outbound messages yet"
+                description="Send an estimate or invoice and dispatch records will appear here."
+              />
+            )
           )}
 
           {!loading && !error && dispatches.length > 0 && (
             <>
               <p className="text-xs text-slate-400">{total} total dispatch{total !== 1 ? 'es' : ''}</p>
-              {dispatches.map((d) => (
-                <div key={d.id} className="rounded-xl border border-slate-200 bg-white overflow-hidden">
-                  <div className="flex items-center justify-between px-4 py-2.5 bg-slate-50 border-b border-slate-100">
-                    <div className="flex items-center gap-2">
-                      <span className={`rounded-full px-2 py-0.5 text-xs ${CHANNEL_BADGE[d.channel] ?? 'bg-slate-100 text-slate-600'}`}>
-                        {d.channel.toUpperCase()}
+              {dispatches.map((d) => {
+                const summary = summarizeMessage(d, tz);
+                return (
+                  <div key={d.id} className="rounded-xl border border-slate-200 bg-white overflow-hidden" data-testid="dispatch-row">
+                    <div className="flex items-center justify-between gap-2 px-4 py-2.5 bg-slate-50 border-b border-slate-100">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className={`rounded-full px-2 py-0.5 text-xs ${CHANNEL_BADGE[d.channel] ?? 'bg-slate-100 text-slate-600'}`}>
+                          {d.channel.toUpperCase()}
+                        </span>
+                        <span className="truncate text-xs text-slate-500">{ENTITY_LABEL[d.entityType] ?? d.entityType}</span>
+                      </div>
+                      <span className={`shrink-0 rounded-full border px-2 py-0.5 text-xs ${TONE_CLASSES[summary.tone]}`}>
+                        {d.status}
                       </span>
-                      <span className="text-xs text-slate-500">{ENTITY_LABEL[d.entityType] ?? d.entityType}</span>
                     </div>
-                    <span className={`rounded-full px-2 py-0.5 text-xs ${STATUS_BADGE[d.status] ?? 'bg-slate-100 text-slate-500'}`}>
-                      {d.status}
-                    </span>
+                    <div className="px-4 py-3 flex flex-col gap-1">
+                      <p className="text-sm font-medium text-slate-800 break-words">{summary.headline}</p>
+                      {d.recipient && (
+                        <p className="text-sm text-slate-700 truncate">{d.recipient}</p>
+                      )}
+                      {d.providerMessageId && (
+                        <p className="text-xs text-slate-400 font-mono truncate">{d.providerMessageId}</p>
+                      )}
+                      <p className="text-xs text-slate-400">
+                        {summary.when}{d.provider !== 'unknown' ? ` · ${d.provider}` : ''}
+                      </p>
+                      {d.errorMessage && (
+                        <p className="text-xs text-red-600 mt-1 break-words">{d.errorMessage}</p>
+                      )}
+                      {(d.jobId || d.customerId) && (
+                        <div className="flex flex-wrap gap-x-4">
+                          {d.jobId && (
+                            <Link to={`/jobs/${d.jobId}`} className="inline-flex min-h-11 min-w-11 items-center text-sm text-primary hover:underline">
+                              Open job
+                            </Link>
+                          )}
+                          {d.customerId && (
+                            <Link to={`/customers/${d.customerId}`} className="inline-flex min-h-11 min-w-11 items-center text-sm text-primary hover:underline">
+                              Open customer
+                            </Link>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                  <div className="px-4 py-3 flex flex-col gap-1">
-                    <p className="text-sm font-medium text-slate-800 truncate">{d.recipient}</p>
-                    {d.providerMessageId && (
-                      <p className="text-xs text-slate-400 font-mono truncate">{d.providerMessageId}</p>
-                    )}
-                    <p className="text-xs text-slate-400">
-                      {formatDateTimeInTenantTz(d.sentAt, tz)} · {d.provider}
-                    </p>
-                    {d.errorMessage && (
-                      <p className="text-xs text-red-600 mt-1">{d.errorMessage}</p>
-                    )}
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </>
           )}
         </div>
