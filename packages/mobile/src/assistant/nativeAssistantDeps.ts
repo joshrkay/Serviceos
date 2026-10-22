@@ -8,7 +8,7 @@
  * excluded from unit coverage and spike-verified on device.
  */
 
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import { createAudioPlayer, setAudioModeAsync, type AudioPlayer } from 'expo-audio';
 import type { AssistantAudioPlayer } from './useAssistantSession';
 
@@ -39,20 +39,28 @@ export const assistantAudioPlayer: AssistantAudioPlayer = {
     // #1603 — `shouldPlayInBackground`: a spoken answer finishes with the
     // screen off / app backgrounded. iOS: pairs with `UIBackgroundModes:
     // ["audio"]` (app.json) on the `.playback` session category expo-audio
-    // selects when not recording. Android (expo-audio 0.3.5): the module stops
-    // pausing players on background; the media-playback FOREGROUND SERVICE
-    // (needed for long clips under Doze) only ships with expo-audio's later
-    // SDK releases + its config plugin — see docs/mobile/RELEASE-RUNBOOK.md.
+    // selects when not recording. Android (expo-audio 57): the config plugin
+    // declares the media-playback foreground service, and the player must be
+    // activated for the lock screen below or the OS stops playback after
+    // ~3 min in the background; that activation requires `doNotMix`
+    // (expo-audio docs) — see docs/mobile/RELEASE-RUNBOOK.md.
     await setAudioModeAsync({
       allowsRecording: false,
       playsInSilentMode: true,
       shouldPlayInBackground: true,
+      interruptionMode: 'doNotMix',
     });
     if (!player) {
       player = createAudioPlayer(uri);
+      // One answer at a time: release the lock-screen session when the clip
+      // ends so the "now playing" card does not outlive the answer.
+      player.addListener('playbackStatusUpdate', (status) => {
+        if (status.didJustFinish) player?.clearLockScreenControls();
+      });
     } else {
       player.replace(uri);
     }
+    player.setActiveForLockScreen(true, { title: 'Rivet', artist: 'Assistant answer' });
     player.play();
     if (previousUri) {
       void FileSystem.deleteAsync(previousUri, { idempotent: true }).catch(() => {});

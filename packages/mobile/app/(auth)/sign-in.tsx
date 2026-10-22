@@ -1,4 +1,4 @@
-import { useSignIn } from '@clerk/clerk-expo';
+import { useSignIn } from '@clerk/expo/legacy';
 import { useLocalSearchParams, useRouter, type Href } from 'expo-router';
 import { useState } from 'react';
 import { ActivityIndicator, Pressable, Text, TextInput, View } from 'react-native';
@@ -12,10 +12,13 @@ const isClerkTestEmail = (email: string): boolean => /\+clerk_test@/i.test(email
 
 type PendingFactor = 'first' | 'second';
 
-// Native email + password sign-in. Clerk-expo has no prebuilt native UI, so we
-// drive the flow with the `useSignIn` hook. When Clerk demands an email_code
-// step (first factor, second factor, or Client Trust on a new device) we
-// prepare the factor — which sends the code email — and collect the code here.
+// Native email + password sign-in. Clerk has no prebuilt native UI, so we
+// drive the flow with the resource-style `useSignIn` hook. Clerk Core 3
+// (@clerk/expo 4) keeps that hook at `@clerk/expo/legacy`; the root export is
+// the new signals API, a separate flow rewrite the OTP contract tests do not
+// cover yet. When Clerk demands an email_code step (first factor, second
+// factor, or Client Trust on a new device) we prepare the factor — which sends
+// the code email — and collect the code here.
 export default function SignIn() {
   const { signIn, setActive, isLoaded } = useSignIn();
   const router = useRouter();
