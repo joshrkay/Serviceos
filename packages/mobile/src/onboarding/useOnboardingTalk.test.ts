@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FAILED_COPY, SESSION_GONE_COPY, type OnboardingTurnOutcome } from './talkThrough';
 import {
   NOT_HEARD_COPY,
+  SAVE_CHECK_FAILED_COPY,
   SAVE_FAILED_COPY,
   SAVE_POLL_ATTEMPTS,
   SAVE_SLOW_COPY,
@@ -16,9 +17,12 @@ import {
 
 const SESSION = '6f0a8b52-0c64-4d0f-9d43-6f5f2b1a7c11';
 
-const reply = (assistantMessage: string, extra: Partial<{ completed: boolean; proposalIds: string[]; sessionId: string }> = {}): OnboardingTurnOutcome => ({
+const reply = (
+  assistantMessage: string,
+  extra: Partial<{ completed: boolean; proposalIds: string[]; sessionId: string; turnCount: number }> = {},
+): OnboardingTurnOutcome => ({
   kind: 'turn',
-  turn: { sessionId: SESSION, assistantMessage, completed: false, proposalIds: [], ...extra },
+  turn: { sessionId: SESSION, assistantMessage, completed: false, turnCount: 0, proposalIds: [], ...extra },
 });
 
 function makeDeps(overrides: Partial<OnboardingTalkDeps> = {}): OnboardingTalkDeps {
@@ -27,6 +31,7 @@ function makeDeps(overrides: Partial<OnboardingTalkDeps> = {}): OnboardingTalkDe
     transcribe: vi.fn().mockResolvedValue({ transcript: 'Walsh Plumbing' }),
     speak: vi.fn(),
     approve: vi.fn().mockResolvedValue({ approved: ['p1', 'p2'], failed: [] }),
+    stillAwaiting: vi.fn().mockImplementation(async (ids: string[]) => ids),
     identityDone: vi.fn().mockResolvedValue(true),
     timezone: 'America/New_York',
     wait: vi.fn().mockResolvedValue(undefined),
@@ -115,11 +120,51 @@ describe('useOnboardingTalk', () => {
     vi.mocked(deps.sendTurn).mockResolvedValueOnce({ kind: 'failed', message: FAILED_COPY });
     await act(() => result.current.sendText('We do plumbing'));
     expect(result.current.error).toEqual({ message: FAILED_COPY, action: 'retry_turn' });
-    vi.mocked(deps.sendTurn).mockResolvedValueOnce(reply('Who works with you?'));
+    // The server never took it: the replay shows the count unchanged, so the words are re-sent.
+    vi.mocked(deps.sendTurn)
+      .mockResolvedValueOnce(reply('What do you call the business?', { turnCount: 0 }))
+      .mockResolvedValueOnce(reply('Who works with you?', { turnCount: 1 }));
     await act(() => result.current.recover());
+    expect(vi.mocked(deps.sendTurn).mock.calls.at(-2)?.[0]).toEqual({ sessionId: SESSION, clientTimezone: 'America/New_York' });
     expect(deps.sendTurn).toHaveBeenLastCalledWith({ sessionId: SESSION, userMessage: 'We do plumbing', clientTimezone: 'America/New_York' });
     expect(result.current.turns.filter((t) => t.role === 'owner')).toHaveLength(1);
+    expect(result.current.turns.at(-1)?.text).toBe('Who works with you?');
     expect(result.current.error).toBeNull();
+  });
+
+  it('a turn the server took but whose answer was lost is not re-sent on "Try again"', async () => {
+    const deps = makeDeps();
+    const { result } = await started(deps);
+    vi.mocked(deps.sendTurn).mockResolvedValueOnce({ kind: 'failed', message: FAILED_COPY });
+    await act(() => result.current.sendText('We do plumbing'));
+    vi.mocked(deps.sendTurn).mockResolvedValueOnce(reply('Who works with you?', { turnCount: 1 }));
+    await act(() => result.current.recover());
+    expect(deps.sendTurn).toHaveBeenLastCalledWith({ sessionId: SESSION, clientTimezone: 'America/New_York' });
+    expect(vi.mocked(deps.sendTurn).mock.calls.filter(([req]) => req.userMessage === 'We do plumbing')).toHaveLength(1);
+    expect(result.current.turns.map((t) => t.text)).toEqual(['What do you call the business?', 'We do plumbing', 'Who works with you?']);
+    expect(result.current.status).toBe('ready');
+  });
+
+  it('a lost completing turn lands in review from the replay', async () => {
+    const deps = makeDeps();
+    const { result } = await started(deps);
+    vi.mocked(deps.sendTurn).mockResolvedValueOnce({ kind: 'failed', message: FAILED_COPY });
+    await act(() => result.current.sendText('Weekdays seven to five'));
+    vi.mocked(deps.sendTurn).mockResolvedValueOnce(reply("That's everything I need.", { turnCount: 5, completed: true, proposalIds: ['p1'] }));
+    await act(() => result.current.recover());
+    expect(result.current.status).toBe('review');
+    expect(result.current.proposalIds).toEqual(['p1']);
+  });
+
+  it('a replay that also fails keeps "Try again"', async () => {
+    const deps = makeDeps();
+    const { result } = await started(deps);
+    vi.mocked(deps.sendTurn).mockResolvedValueOnce({ kind: 'failed', message: FAILED_COPY });
+    await act(() => result.current.sendText('We do plumbing'));
+    vi.mocked(deps.sendTurn).mockResolvedValueOnce({ kind: 'failed', message: FAILED_COPY });
+    await act(() => result.current.recover());
+    expect(result.current.error).toEqual({ message: FAILED_COPY, action: 'retry_turn' });
+    expect(result.current.status).toBe('ready');
   });
 
   it('an expired conversation is said out loud, and "Start again" opens a new one', async () => {
@@ -170,8 +215,41 @@ describe('useOnboardingTalk', () => {
     expect(result.current.error?.message).toMatch(/^1 setup item still needs a detail/);
     vi.mocked(deps.approve).mockResolvedValueOnce({ approved: ['p2'], failed: [] });
     await act(() => result.current.recover());
+    expect(deps.stillAwaiting).toHaveBeenCalledWith(['p2']);
     expect(deps.approve).toHaveBeenLastCalledWith(['p2']);
     expect(result.current.status).toBe('finished');
+  });
+
+  it('a save whose answer was lost but went through is not re-approved on "Try again"', async () => {
+    const deps = makeDeps({ approve: vi.fn().mockRejectedValueOnce(new Error('offline')) });
+    const { result } = await inReview(deps);
+    await act(() => result.current.save());
+    vi.mocked(deps.stillAwaiting).mockResolvedValueOnce([]);
+    await act(() => result.current.recover());
+    expect(deps.approve).toHaveBeenCalledTimes(1);
+    expect(result.current.status).toBe('finished');
+  });
+
+  it('a retry only re-approves what is still waiting', async () => {
+    const deps = makeDeps({ approve: vi.fn().mockRejectedValueOnce(new Error('offline')) });
+    const { result } = await inReview(deps);
+    await act(() => result.current.save());
+    vi.mocked(deps.stillAwaiting).mockResolvedValueOnce(['p2']);
+    vi.mocked(deps.approve).mockResolvedValueOnce({ approved: ['p2'], failed: [] });
+    await act(() => result.current.recover());
+    expect(deps.approve).toHaveBeenLastCalledWith(['p2']);
+    expect(result.current.status).toBe('finished');
+  });
+
+  it('a retry that cannot check what was saved says so and sends nothing', async () => {
+    const deps = makeDeps({ approve: vi.fn().mockRejectedValueOnce(new Error('offline')) });
+    const { result } = await inReview(deps);
+    await act(() => result.current.save());
+    vi.mocked(deps.stillAwaiting).mockResolvedValueOnce(null);
+    await act(() => result.current.recover());
+    expect(deps.approve).toHaveBeenCalledTimes(1);
+    expect(result.current.error).toEqual({ message: SAVE_CHECK_FAILED_COPY, action: 'retry_save' });
+    expect(result.current.status).toBe('review');
   });
 
   it('a save that does not reach the server says so and can be retried', async () => {

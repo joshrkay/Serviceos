@@ -14,7 +14,7 @@ import { API_BASE_URL } from '../lib/env';
 import { useApiClient } from '../lib/useApiClient';
 import { useApproveBatch } from '../proposals/useApproveBatch';
 import { fetchAnswerSpeech, loadSpeakAnswers } from '../voice/speakAnswers';
-import { deviceTimezoneOrUndefined, postOnboardingTurn } from './talkThrough';
+import { deviceTimezoneOrUndefined, postOnboardingTurn, stillAwaitingApproval } from './talkThrough';
 import { useOnboardingTalk, type OnboardingTalkDeps, type UseOnboardingTalk } from './useOnboardingTalk';
 
 export function useOnboardingTalkController(): UseOnboardingTalk {
@@ -42,6 +42,7 @@ export function useOnboardingTalkController(): UseOnboardingTalk {
         }
       },
       approve,
+      stillAwaiting: (ids) => stillAwaitingApproval(apiFetch, ids),
       identityDone: async () => {
         try {
           return isIdentityStepDone(await fetchOnboardingStatus(apiFetch));

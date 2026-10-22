@@ -23,6 +23,8 @@ export interface OnboardingTurn {
   sessionId: string;
   assistantMessage: string;
   completed: boolean;
+  /** Owner turns the server has recorded. A lost response is detected by this having moved. */
+  turnCount: number;
   /** Proposal ids emitted when the conversation completes. Empty until then. */
   proposalIds: string[];
 }
@@ -56,10 +58,12 @@ function parseTurn(body: unknown): OnboardingTurn | null {
   if (!body || typeof body !== 'object') return null;
   const b = body as Record<string, unknown>;
   if (typeof b.sessionId !== 'string' || typeof b.assistantMessage !== 'string') return null;
+  if (typeof b.turnCount !== 'number') return null;
   return {
     sessionId: b.sessionId,
     assistantMessage: b.assistantMessage,
     completed: b.completed === true,
+    turnCount: b.turnCount,
     proposalIds: Array.isArray(b.proposalIds) ? b.proposalIds.filter((id): id is string => typeof id === 'string') : [],
   };
 }
@@ -86,6 +90,32 @@ export async function postOnboardingTurn(api: ApiFetch, req: OnboardingTurnReque
     turn = null;
   }
   return turn ? { kind: 'turn', turn } : { kind: 'failed', message: FAILED_COPY };
+}
+
+/** Statuses a proposal can still be approved from (packages/api/src/proposals/actions.ts APPROVABLE_FROM). */
+const AWAITING_APPROVAL = new Set(['draft', 'ready_for_review']);
+
+/**
+ * Which of these setup items still await approval, read one by one from GET
+ * /api/proposals/:id. Used before re-sending an approval whose response was
+ * lost: an item that already went through must not be re-approved (the API
+ * refuses it, which would read as a failure). Null when any status can't be read.
+ */
+export async function stillAwaitingApproval(api: ApiFetch, ids: readonly string[]): Promise<string[] | null> {
+  try {
+    const statuses = await Promise.all(
+      ids.map(async (id) => {
+        const res = await api(`/api/proposals/${encodeURIComponent(id)}`);
+        if (!res.ok) throw new Error(String(res.status));
+        const body = (await res.json()) as { status?: unknown };
+        if (typeof body.status !== 'string') throw new Error('no status');
+        return body.status;
+      }),
+    );
+    return ids.filter((_, i) => AWAITING_APPROVAL.has(statuses[i]));
+  } catch {
+    return null;
+  }
 }
 
 /**

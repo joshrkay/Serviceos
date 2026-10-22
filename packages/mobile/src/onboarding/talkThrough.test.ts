@@ -7,6 +7,7 @@ import {
   FORBIDDEN_COPY,
   postOnboardingTurn,
   SESSION_GONE_COPY,
+  stillAwaitingApproval,
 } from './talkThrough';
 
 const json = (status: number, body: unknown) =>
@@ -33,7 +34,7 @@ describe('postOnboardingTurn', () => {
     });
     expect(out).toEqual({
       kind: 'turn',
-      turn: { sessionId: TURN.sessionId, assistantMessage: TURN.assistantMessage, completed: false, proposalIds: [] },
+      turn: { sessionId: TURN.sessionId, assistantMessage: TURN.assistantMessage, completed: false, turnCount: 0, proposalIds: [] },
     });
   });
 
@@ -58,9 +59,32 @@ describe('postOnboardingTurn', () => {
     expect(await postOnboardingTurn(api, {})).toEqual({ kind: 'failed', message: FAILED_COPY });
   });
 
+  it('a 200 without a turn count is a failed turn: a lost answer could not be detected later', async () => {
+    const api = vi.fn().mockResolvedValue(json(200, { ...TURN, turnCount: undefined }));
+    expect(await postOnboardingTurn(api, {})).toEqual({ kind: 'failed', message: FAILED_COPY });
+  });
+
   it('a 200 without a reply is a failed turn, never an empty bubble', async () => {
     const api = vi.fn().mockResolvedValue(json(200, { sessionId: TURN.sessionId }));
     expect(await postOnboardingTurn(api, {})).toEqual({ kind: 'failed', message: FAILED_COPY });
+  });
+});
+
+describe('stillAwaitingApproval', () => {
+  it('keeps only the items that can still be approved', async () => {
+    const statuses: Record<string, string> = { a: 'ready_for_review', b: 'approved', c: 'draft', d: 'executed' };
+    const api = vi.fn().mockImplementation(async (path: string) => json(200, { status: statuses[path.split('/').at(-1)!] }));
+    expect(await stillAwaitingApproval(api, ['a', 'b', 'c', 'd'])).toEqual(['a', 'c']);
+    expect(api).toHaveBeenCalledWith('/api/proposals/a');
+  });
+
+  it.each([
+    ['a failed read', () => Promise.resolve(json(500, { error: 'X' }))],
+    ['a network failure', () => Promise.reject(new TypeError('Network request failed'))],
+    ['a body without a status', () => Promise.resolve(json(200, {}))],
+  ])('is null after %s, never a guess', async (_label, impl) => {
+    const api = vi.fn().mockImplementation(impl);
+    expect(await stillAwaitingApproval(api, ['a'])).toBeNull();
   });
 });
 

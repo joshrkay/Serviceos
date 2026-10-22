@@ -17,6 +17,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { BatchApproveResult } from '../proposals/useApproveBatch';
 import {
   approvalFailureCopy,
+  type OnboardingTurn,
   type OnboardingTurnOutcome,
   type OnboardingTurnRequest,
 } from './talkThrough';
@@ -36,6 +37,8 @@ export interface OnboardingTalkDeps {
   speak: (text: string, isCurrent: () => boolean) => Promise<void> | void;
   /** Batch-approve the setup items. Throws on a non-2xx. */
   approve: (proposalIds: string[]) => Promise<BatchApproveResult>;
+  /** Which of these items still await approval; null when that can't be read. */
+  stillAwaiting: (proposalIds: string[]) => Promise<string[] | null>;
   /** Whether the business-identity step is done: true, false, or null when the status could not be read. */
   identityDone: () => Promise<boolean | null>;
   /** Device IANA zone; undefined when unknown (the server then asks). */
@@ -84,6 +87,7 @@ export const STT_UNAVAILABLE_COPY = "Voice isn't available right now. Type your 
 export const MIC_DENIED_COPY = 'Microphone access is off. Turn it on in Settings, or type your answer.';
 export const MIC_FAILED_COPY = "I couldn't start the microphone. Try again, or type your answer.";
 export const SAVE_FAILED_COPY = "I couldn't save your setup. Check your connection and try again.";
+export const SAVE_CHECK_FAILED_COPY = "I couldn't check what was already saved. Check your connection and try again.";
 export const SAVE_SLOW_COPY = "Your setup is saved but still being applied. Check again in a moment.";
 export const STATUS_UNKNOWN_COPY = "Your setup is saved, but I couldn't confirm it's finished. Check again in a moment.";
 
@@ -109,6 +113,10 @@ export function useOnboardingTalk(deps: OnboardingTalkDeps): UseOnboardingTalk {
     sessionId.current = id;
   };
   const lastMessage = useRef<string | undefined>(undefined);
+  /** Owner turns the server has confirmed. */
+  const knownTurnCount = useRef(0);
+  /** The last owner turn failed without an answer: it may or may not have reached the server. */
+  const turnUnconfirmed = useRef(false);
   const counter = useRef(0);
   /** Bumped by hush(); a pending clip plays only while its generation is still current. */
   const speechGen = useRef(0);
@@ -126,33 +134,14 @@ export function useOnboardingTalk(deps: OnboardingTalkDeps): UseOnboardingTalk {
     setTurns((t) => [...t, turn]);
   }, []);
 
-  /** One round-trip. `userMessage` undefined = the opening greeting. */
-  const runTurn = useCallback(
-    async (userMessage: string | undefined) => {
-      const { sendTurn, speak, timezone } = depsRef.current;
-      setStatus(userMessage === undefined ? 'starting' : 'sending');
-      setError(null);
-      lastMessage.current = userMessage;
-      const outcome = await sendTurn({
-        ...(sessionId.current ? { sessionId: sessionId.current } : {}),
-        ...(userMessage !== undefined ? { userMessage } : {}),
-        ...(timezone ? { clientTimezone: timezone } : {}),
-      });
-      if (!mounted.current) return;
-      if (outcome.kind !== 'turn') {
-        if (outcome.kind === 'session_gone' || outcome.kind === 'conflict') setSession(undefined);
-        setError({
-          message: outcome.message,
-          action: outcome.kind === 'forbidden' ? 'none' : outcome.kind === 'failed' ? 'retry_turn' : 'restart',
-        });
-        setStatus(sessionId.current ? 'ready' : 'starting');
-        return;
-      }
-      const { turn } = outcome;
+  const applyTurn = useCallback(
+    (turn: OnboardingTurn) => {
       setSession(turn.sessionId);
+      knownTurnCount.current = turn.turnCount;
+      turnUnconfirmed.current = false;
       push('rivet', turn.assistantMessage);
       const gen = speechGen.current;
-      void speak(turn.assistantMessage, () => mounted.current && speechGen.current === gen);
+      void depsRef.current.speak(turn.assistantMessage, () => mounted.current && speechGen.current === gen);
       if (turn.completed) {
         setProposalIds(turn.proposalIds);
         setStatus('review');
@@ -162,6 +151,68 @@ export function useOnboardingTalk(deps: OnboardingTalkDeps): UseOnboardingTalk {
     },
     [push],
   );
+
+  const applyFailure = useCallback((outcome: Exclude<OnboardingTurnOutcome, { kind: 'turn' }>) => {
+    if (outcome.kind === 'session_gone' || outcome.kind === 'conflict') setSession(undefined);
+    setError({
+      message: outcome.message,
+      action: outcome.kind === 'forbidden' ? 'none' : outcome.kind === 'failed' ? 'retry_turn' : 'restart',
+    });
+    setStatus(sessionId.current ? 'ready' : 'starting');
+  }, []);
+
+  const request = (userMessage?: string) => {
+    const { timezone } = depsRef.current;
+    return depsRef.current.sendTurn({
+      ...(sessionId.current ? { sessionId: sessionId.current } : {}),
+      ...(userMessage !== undefined ? { userMessage } : {}),
+      ...(timezone ? { clientTimezone: timezone } : {}),
+    });
+  };
+
+  /** One round-trip. `userMessage` undefined = the opening greeting. */
+  const runTurn = useCallback(
+    async (userMessage: string | undefined) => {
+      setStatus(userMessage === undefined ? 'starting' : 'sending');
+      setError(null);
+      lastMessage.current = userMessage;
+      const outcome = await request(userMessage);
+      if (!mounted.current) return;
+      if (outcome.kind === 'turn') {
+        applyTurn(outcome.turn);
+        return;
+      }
+      turnUnconfirmed.current = outcome.kind === 'failed' && userMessage !== undefined;
+      applyFailure(outcome);
+    },
+    [applyTurn, applyFailure],
+  );
+
+  /**
+   * "Try again" after a turn whose answer was lost. The server may already have
+   * taken it, and re-sending would answer the NEXT question with the same words.
+   * A turn with no message replays Rivet's latest line without advancing; if the
+   * owner-turn count moved, that line is the lost answer and nothing is re-sent.
+   */
+  const retryTurn = useCallback(async () => {
+    if (!turnUnconfirmed.current || !sessionId.current) {
+      await runTurn(lastMessage.current);
+      return;
+    }
+    setStatus('sending');
+    setError(null);
+    const probe = await request();
+    if (!mounted.current) return;
+    if (probe.kind !== 'turn') {
+      applyFailure(probe);
+      return;
+    }
+    if (probe.turn.turnCount > knownTurnCount.current) {
+      applyTurn(probe.turn);
+      return;
+    }
+    await runTurn(lastMessage.current);
+  }, [runTurn, applyTurn, applyFailure]);
 
   const started = useRef(false);
   useEffect(() => {
@@ -237,10 +288,26 @@ export function useOnboardingTalk(deps: OnboardingTalkDeps): UseOnboardingTalk {
     setError({ message: lastKnown === null ? STATUS_UNKNOWN_COPY : SAVE_SLOW_COPY, action: 'check_again' });
   }, []);
 
-  const save = useCallback(async () => {
-    const ids = proposalIds;
+  /** `reconcile`: a retry. The last attempt may have gone through, so only re-approve what still waits. */
+  const save = useCallback(async (reconcile = false) => {
+    let ids = proposalIds;
     setStatus('saving');
     setError(null);
+    if (reconcile) {
+      const waiting = await depsRef.current.stillAwaiting(ids);
+      if (!mounted.current) return;
+      if (waiting === null) {
+        setError({ message: SAVE_CHECK_FAILED_COPY, action: 'retry_save' });
+        setStatus('review');
+        return;
+      }
+      if (waiting.length === 0) {
+        await awaitIdentity();
+        return;
+      }
+      ids = waiting;
+      setProposalIds(waiting);
+    }
     let result: BatchApproveResult;
     try {
       result = await depsRef.current.approve(ids);
@@ -264,18 +331,18 @@ export function useOnboardingTalk(deps: OnboardingTalkDeps): UseOnboardingTalk {
   const recover = useCallback(async () => {
     const action = error?.action;
     if (action === 'retry_turn') {
-      await runTurn(lastMessage.current);
+      await retryTurn();
     } else if (action === 'restart') {
       sessionId.current = undefined;
       setTurns([]);
       await runTurn(undefined);
     } else if (action === 'retry_save') {
-      await save();
+      await save(true);
     } else if (action === 'check_again') {
       setError(null);
       await awaitIdentity();
     }
-  }, [error, runTurn, save, awaitIdentity]);
+  }, [error, retryTurn, runTurn, save, awaitIdentity]);
 
-  return { status, turns, proposalIds, error, sttUnavailable, sendText, sendAudio, hush, recover, save };
+  return { status, turns, proposalIds, error, sttUnavailable, sendText, sendAudio, hush, recover, save: () => save() };
 }
