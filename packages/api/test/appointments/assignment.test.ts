@@ -578,8 +578,10 @@ describe('assignTechnician — dispatcher-accepted overlap (Dispatch FR-2 phase 
     const created = await assignTechnician(input(clash.id, { acceptOverlapWith: [busy.id] }), assignmentRepo, { appointmentRepo, auditRepo });
 
     expect(created.overlapAccepted).toBe(true);
+    expect(created.overlapAcceptedWith).toEqual([busy.id]);
     const events = await auditRepo.findByEntity('tenant-1', 'appointment', clash.id);
-    expect(events.find((e) => e.eventType === 'appointment.technician_assigned')?.metadata).toMatchObject({ overlapAccepted: true });
+    expect(events.find((e) => e.eventType === 'appointment.technician_assigned')?.metadata)
+      .toMatchObject({ overlapAccepted: true, overlapAcceptedWith: [busy.id] });
   });
 
   it('does not mark a booking that did not actually overlap, even with an acceptance', async () => {
