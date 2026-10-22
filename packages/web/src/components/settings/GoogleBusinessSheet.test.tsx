@@ -287,6 +287,55 @@ describe('GoogleBusinessSheet', () => {
       );
     });
 
+    it('#1764: no Business Profile shows the walkthrough with working Google links and glove targets', async () => {
+      apiFetchMock.mockResolvedValueOnce(
+        jsonResponse({ data: connectedIntegration({ locationId: null, locationState: 'no_location' }) }),
+      );
+      render(<GoogleBusinessSheet onClose={() => {}} />);
+      await screen.findByTestId('googlebusiness-no-location');
+      expect(screen.getByTestId('googlebusiness-walkthrough-steps').children).toHaveLength(3);
+      expect(screen.getByText(/postcard, phone, text, email or a short video/)).toBeInTheDocument();
+      expect(screen.getByText(/You have to finish this yourself/)).toBeInTheDocument();
+      const create = screen.getByTestId('googlebusiness-create-profile');
+      expect(create).toHaveAttribute('href', 'https://business.google.com/create');
+      expect(create).toHaveAttribute('target', '_blank');
+      expect(create.getAttribute('rel')).toContain('noopener');
+      expect(screen.getByTestId('googlebusiness-verify-help')).toHaveAttribute(
+        'href',
+        expect.stringContaining('support.google.com/business'),
+      );
+      for (const id of ['googlebusiness-create-profile', 'googlebusiness-verify-help', 'googlebusiness-check-again']) {
+        expect(screen.getByTestId(id).className).toContain('min-h-11');
+        expect(screen.getByTestId(id).className).toContain('w-full');
+      }
+    });
+
+    it('#1764: re-checks on its own and hands off to the picker once a location appears', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true });
+      try {
+        apiFetchMock
+          .mockResolvedValueOnce(
+            jsonResponse({ data: connectedIntegration({ locationId: null, locationState: 'no_location' }) }),
+          )
+          // First timed re-check: still nothing, the walkthrough stays.
+          .mockResolvedValueOnce(jsonResponse({ data: [] }))
+          .mockResolvedValueOnce(jsonResponse({ data: LOCATIONS }));
+        render(<GoogleBusinessSheet onClose={() => {}} />);
+        await screen.findByTestId('googlebusiness-no-location');
+        await vi.advanceTimersByTimeAsync(60_000);
+        await waitFor(() => expect(apiFetchMock).toHaveBeenCalledTimes(2));
+        expect(screen.getByTestId('googlebusiness-no-location')).toBeInTheDocument();
+        expect(screen.queryByTestId('googlebusiness-no-locations-found')).toBeNull();
+        await vi.advanceTimersByTimeAsync(60_000);
+        await waitFor(() =>
+          expect(screen.getAllByTestId('googlebusiness-location-option')).toHaveLength(2),
+        );
+        expect(screen.queryByTestId('googlebusiness-no-location')).toBeNull();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('needs a pick but the automatic load failed: offers a retry', async () => {
       apiFetchMock
         .mockResolvedValueOnce(

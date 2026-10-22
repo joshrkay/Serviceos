@@ -1898,6 +1898,25 @@ the carrier sends us nothing, so the forwarding check is a point-in-time proof. 
 shows the date of the last passing check, reopens when the owner changes carrier or forwarding mode
 in the app, and offers a re-check; detecting carrier-side changes is not promised.
 
+**Amended 2026-10-22 (owner, reconciling the parallel "Get found online" thread, issue #1750).**
+A second grilling the same day recorded its own D-044 on branch `claude/tender-sagan-r78w4n`.
+Reconciled point by point, this entry stays the source of truth and gains:
+- **Presence path.** One onboarding question — *own website*, *Google only*, or *neither* —
+  decides which checklist items show. *Google only* still gets a quiet tenant site as the
+  listing's website, with no domain step.
+- **Skippable items.** The owner can skip an item into a hidden row and bring it back; a
+  skipped item counts as settled. Detection still wins: a skipped item that becomes true shows
+  done.
+- **Day-one owners are not a forwarding mode.** An owner with no existing business line
+  forwards nothing; their call item is done once their Rivet number is live **and** has
+  answered a real inbound call — provisioning alone does not count.
+- **A forwarding mode change voids the last check.** Changing forwarding mode clears the
+  passing check (and advances the line's `forwarding_generation`), so a check proven under one
+  mode never completes the other.
+- **Deferred, not rejected:** creating Google profiles through Google's API (behind Google's
+  API-access approval) and an AI web chat (needs its own abuse, cost-cap and usage-metering
+  decision — what unit a conversation bills as). Both return as their own decisions.
+
 ## D-045 — Outbound messaging decides its own policy; invoices go by text with a pay link; proposal status moves only through the lifecycle
 
 **Date:** 2026-10-21
