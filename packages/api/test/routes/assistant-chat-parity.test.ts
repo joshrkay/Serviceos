@@ -38,6 +38,8 @@ import {
   applyContractGate,
   applyVerifiedIdsToPayload,
   contractGateMissingFields,
+} from '../../src/ai/drafting/draft-proposal';
+import {
   createAssistantRouter,
   isDraftCorrection,
   isImmediateRepeat,

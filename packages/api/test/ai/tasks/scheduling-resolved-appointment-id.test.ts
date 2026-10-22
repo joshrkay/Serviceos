@@ -20,6 +20,7 @@ import {
   CancelAppointmentTaskHandler,
 } from '../../../src/ai/tasks/voice-extended-tasks';
 import { TaskContext } from '../../../src/ai/tasks/task-handlers';
+import { draftProposal } from '../../../src/ai/drafting/draft-proposal';
 import { missingFieldsFor } from '../../../src/proposals/proposal';
 import {
   InMemoryAppointmentRepository,
@@ -126,6 +127,22 @@ describe('scheduling tasks consume the resolver-verified appointmentId', () => {
     );
 
     expect(proposal.payload.appointmentId).toBe(GARCIA_APPT);
+  });
+
+  it('a cancel that found the one active appointment by lookup keeps it through the drafting scrub', async () => {
+    const repo = new InMemoryAppointmentRepository();
+    await repo.create(appointment(GARCIA_APPT, 3));
+
+    const outcome = await draftProposal({
+      handler: new CancelAppointmentTaskHandler(repo, undefined),
+      context: ctx({ message: 'Cancel my appointment', existingEntities: {} }),
+      operatorText: 'Cancel my appointment',
+      entities: {},
+    });
+
+    expect(outcome.kind).toBe('proposal');
+    if (outcome.kind !== 'proposal') return;
+    expect(outcome.proposal.payload.appointmentId).toBe(GARCIA_APPT);
   });
 
   it('ignores a non-UUID appointmentId rather than trusting it', async () => {
