@@ -29,6 +29,10 @@ export interface AssembledChoice {
   settingKey: AnyChoiceKey;
   question: string;
   supportLine?: string;
+  /** Rivet's answer to "what does that mean?". Absent on drafts assembled before it existed. */
+  explain?: string;
+  /** Rivet's answer to "give me an example". Absent on drafts assembled before it existed. */
+  example?: string;
   options: [AssembledOption, AssembledOption];
   mostShops: OptionKey;
 }
@@ -128,6 +132,8 @@ function assembleChoice(
     settingKey: entry.settingKey,
     question: renderTemplate(entry.question, entryTokens),
     supportLine: entry.supportLine === undefined ? undefined : renderTemplate(entry.supportLine, entryTokens),
+    explain: renderTemplate(entry.explain, entryTokens),
+    example: renderTemplate(entry.example, entryTokens),
     options,
     mostShops: entry.mostShops,
   };

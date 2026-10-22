@@ -19,7 +19,7 @@
  * for any price a trade pack ships.
  */
 import { describe, it, expect } from 'vitest';
-import { narrateTurn } from '@ai-service-os/shared';
+import { answerHelp, narrateTurn, type NarratedChoice, type OnboardingHelpRequest } from '@ai-service-os/shared';
 import { CHOICE_REGISTRY, REGISTRY_TRADES } from '../../../src/onboarding/choices/registry';
 import { renderTemplate, type TemplateTokens } from '../../../src/onboarding/choices/assemble';
 import {
@@ -42,8 +42,8 @@ interface RenderedTurn {
   clips: string[];
 }
 
-function renderEveryTurn(): RenderedTurn[] {
-  const turns: RenderedTurn[] = [];
+function renderEveryChoice(): Array<{ trade: string; settingKey: string; choice: NarratedChoice }> {
+  const choices: Array<{ trade: string; settingKey: string; choice: NarratedChoice }> = [];
   for (const trade of REGISTRY_TRADES) {
     for (const entry of CHOICE_REGISTRY[trade]) {
       const [a, b] = entry.options.map((o) => ({
@@ -52,14 +52,34 @@ function renderEveryTurn(): RenderedTurn[] {
         detail: o.detail ? renderTemplate(o.detail, LONGEST) : undefined,
         rivetLine: renderTemplate(o.rivetLine, LONGEST),
       }));
-      turns.push({
-        trade,
-        settingKey: entry.settingKey,
-        clips: narrateTurn({ question: renderTemplate(entry.question, LONGEST), options: [a, b], mostShops: entry.mostShops }),
-      });
+      const choice: NarratedChoice = {
+        question: renderTemplate(entry.question, LONGEST),
+        supportLine: entry.supportLine ? renderTemplate(entry.supportLine, LONGEST) : undefined,
+        explain: renderTemplate(entry.explain, LONGEST),
+        example: renderTemplate(entry.example, LONGEST),
+        options: [a, b],
+        mostShops: entry.mostShops,
+      };
+      choices.push({ trade, settingKey: entry.settingKey, choice });
     }
   }
-  return turns;
+  return choices;
+}
+
+function renderEveryTurn(): RenderedTurn[] {
+  return renderEveryChoice().map(({ trade, settingKey, choice }) => ({ trade, settingKey, clips: narrateTurn(choice) }));
+}
+
+const HELP: readonly OnboardingHelpRequest[] = ['repeat', 'explain', 'example', 'most_shops'];
+
+/** Every help answer, on every turn — and the fallbacks a draft from before the explanations gets. */
+function renderEveryHelpAnswer(): RenderedTurn[] {
+  return renderEveryChoice().flatMap(({ trade, settingKey, choice }) =>
+    HELP.flatMap((help) => [
+      { trade, settingKey: `${settingKey}:${help}`, clips: answerHelp(choice, help) },
+      { trade, settingKey: `${settingKey}:${help}:old-draft`, clips: answerHelp({ ...choice, explain: undefined, example: undefined }, help) },
+    ]),
+  );
 }
 
 const turnChars = (t: RenderedTurn) => t.clips.reduce((sum, c) => sum + c.length, 0);
@@ -105,5 +125,25 @@ describe('choice registry, narrated — inside the one-turn TTS batch caps', () 
       heaviestTurnChars: 654,
       heaviestTurn: 'plumbing/existing_number',
     });
+  });
+});
+
+describe('help answers ("what does that mean?", "give me an example"…) — inside the same caps', () => {
+  const answers = renderEveryHelpAnswer();
+
+  it('every answer is one batch request: at most 4 clips, 320 per clip, 900 in all', () => {
+    for (const t of answers) {
+      expect(t.clips.length, `${t.trade}/${t.settingKey}`).toBeLessThanOrEqual(TTS_BATCH_MAX_ITEMS);
+      for (const clip of t.clips) {
+        expect(clip.length, `${t.trade}/${t.settingKey}: "${clip}"`).toBeLessThanOrEqual(TTS_BATCH_MAX_ITEM_CHARS);
+      }
+      expect(turnChars(t), `${t.trade}/${t.settingKey}`).toBeLessThanOrEqual(TTS_BATCH_MAX_TURN_CHARS);
+    }
+  });
+
+  it('every turn has its own explanation and example, and each ends by asking again', () => {
+    for (const t of answers.filter((x) => !x.settingKey.endsWith(':old-draft'))) {
+      expect(t.clips.at(-1), `${t.trade}/${t.settingKey}`).toMatch(/Which one\?$/);
+    }
   });
 });

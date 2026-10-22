@@ -19,6 +19,10 @@ export function greetingEntry(): ChoiceEntry {
     settingKey: 'greeting',
     question: 'How should I answer your phone?',
     supportLine: 'Tap one to hear it. Say "first" or "second" to pick.',
+    explain:
+      "This is the first thing a caller hears when I pick up your phone. It's in your business's name, so pick the one that sounds like you.",
+    example:
+      "Someone calls on their lunch break with a problem. The first gets them talking about it right away. The second sounds warmer and takes a breath longer.",
     options: [
       {
         key: 'a',
@@ -44,6 +48,10 @@ export function priceEntry(v: TradeVoice): ChoiceEntry {
     settingKey: 'trip_fee_and_rate',
     question: 'What do you charge to come out?',
     supportLine: `This is the first number a caller hears. Here's where ${v.tradeNoun} shops in {city} land.`,
+    explain:
+      "The trip fee is what a customer pays for you to come out and look. The hourly rate is what the work costs after that. These are the numbers I quote when callers ask.",
+    example:
+      `Say a caller asks ${v.priceAsk}. With the first, I tell them it's {tripFee} for the visit, credited toward the repair, and you give the full price once you've seen the job.`,
     options: [
       {
         key: 'a',
@@ -71,6 +79,10 @@ export function bookingPostureEntry(): ChoiceEntry {
     settingKey: 'booking_posture',
     question: 'When someone wants a repair, do I book it or hold it for you?',
     supportLine: 'Emergencies skip this. Those always come straight to you.',
+    explain:
+      "Booking it means I put the job on your calendar while the caller is still on the line. Holding it means I take their details and you pick the time.",
+    example:
+      "A caller needs a repair this week. With the first, they hang up with Tuesday at 2. With the second, they hear you'll confirm within the hour, and one tap from you texts them the time.",
     options: [
       {
         key: 'a',
@@ -96,6 +108,10 @@ export function paymentEntry(): ChoiceEntry {
     settingKey: 'payment_collection_mode',
     question: "When a job's done, how do you want to get paid?",
     supportLine: 'You never have to write a bill. I make it from the job and send it. You just pick how.',
+    explain:
+      "This is how the customer pays once the work is done. Either way I write the bill from the job, so you never type one up.",
+    example:
+      "You finish a repair at 3pm. With the first, the customer gets a text with the bill and pays from their phone. With the second, you take payment before you leave and I send the receipt.",
     options: [
       {
         key: 'a',
@@ -121,6 +137,10 @@ export function bookingHoursEntry(): ChoiceEntry {
     settingKey: 'booking_hours',
     question: 'When should I put jobs on your calendar?',
     supportLine: "I'll answer every call at any hour either way. This is just when I can book.",
+    explain:
+      "These are the days and times I can put jobs on your calendar. I still answer every call, at any hour. This only decides when jobs can be booked.",
+    example:
+      "A caller rings on Saturday morning wanting a visit. With the first, I can book them in that day. With the second, I take their details and book them for Monday.",
     options: [
       {
         key: 'a',
@@ -146,6 +166,10 @@ export function emergencyEntry(v: TradeVoice): ChoiceEntry {
     settingKey: 'emergency_target',
     question: 'Who do I ring first when it is an emergency?',
     supportLine: `Say a caller tells me "${v.emergencyExample}". Safety first, then a person. That part I always do. This part is yours.`,
+    explain:
+      "When a caller has a real emergency, I get you on the line fast. This decides how I reach you: a call only, or a call and then a text if you miss it.",
+    example:
+      `A caller says "${v.emergencyExample}". I tell them how to stay safe, then ring your cell. With the second, if you miss it, I also text you their number and the problem.`,
     options: [
       {
         key: 'a',
@@ -171,6 +195,10 @@ export function afterHoursEntry(): ChoiceEntry {
     settingKey: 'after_hours_mode',
     question: 'Same call at 9pm. Do I answer and book, or take a message?',
     supportLine: 'Either way an emergency still rings you.',
+    explain:
+      "This is for calls that come in after you've closed for the day. I can still answer and book them a slot, or say you're closed and take a message. Emergencies ring you either way.",
+    example:
+      "A caller rings at 9pm about a problem that can wait till morning. With the first, they get booked for 8am. With the second, they leave their name and number and you call them first thing.",
     options: [
       {
         key: 'a',
@@ -196,6 +224,10 @@ export function existingNumberEntry(): ChoiceEntry {
     settingKey: 'existing_number',
     question: 'Do customers already call a business number?',
     supportLine: "If not, the number I'm about to give you is your business number. Nothing to forward.",
+    explain:
+      "I'm about to give you a phone number that I answer. If customers already call a different business number, that one needs forwarding to me. If they only call your cell, the new number becomes your business number.",
+    example:
+      "Say your truck already shows a business number. Pick the second, and I text you a link that forwards it to me. If customers just call your cell, pick the first and put the new number on the truck.",
     options: [
       {
         key: 'a',
