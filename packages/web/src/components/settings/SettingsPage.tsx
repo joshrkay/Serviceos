@@ -636,6 +636,11 @@ export function SettingsPage() {
     // ?googlebusiness_error=<reason> when Google rejects / user declines.
     const googleBusinessConnected = params.get('googlebusiness_connected') === '1';
     const googleBusinessError = params.get('googlebusiness_error');
+    // D-044 — set when the connection worked but the review link didn't
+    // follow it ('failed') or was removed because the listing has none.
+    const googleBusinessReviewLink = params.get('googlebusiness_review_link');
+    // D-044 — the home "Get found online" checklist deep-links here.
+    const openTarget = params.get('open');
 
     let needsUrlUpdate = false;
     if (isConnected || connectionError) {
@@ -649,9 +654,30 @@ export function SettingsPage() {
       setGoogleBusinessOpen(true);
       if (googleBusinessConnected) {
         toast.success('Google Business connected');
+        if (googleBusinessReviewLink === 'failed') {
+          toast.error(
+            "Your Google review link couldn't be updated. Add it under Public review links.",
+          );
+        } else if (googleBusinessReviewLink === 'cleared') {
+          toast.error(
+            'Google has no review link for this location yet, so the old one was removed.',
+          );
+        }
       } else if (googleBusinessError) {
         toast.error(`Google Business connection failed: ${googleBusinessError}`);
       }
+      needsUrlUpdate = true;
+    }
+    if (openTarget === 'google-business') {
+      setGoogleBusinessOpen(true);
+      needsUrlUpdate = true;
+    } else if (openTarget === 'review-links') {
+      // The Reviews section renders on first paint; focus once it's laid out.
+      window.setTimeout(() => {
+        const input = document.getElementById('google-review-url');
+        input?.scrollIntoView({ block: 'center' });
+        input?.focus();
+      }, 0);
       needsUrlUpdate = true;
     }
     if (stripeReturned) {
@@ -677,6 +703,8 @@ export function SettingsPage() {
       params.delete('quickbooks_error');
       params.delete('googlebusiness_connected');
       params.delete('googlebusiness_error');
+      params.delete('googlebusiness_review_link');
+      params.delete('open');
       const next = `${window.location.pathname}${params.toString() ? `?${params}` : ''}`;
       window.history.replaceState(null, '', next);
     }
@@ -1803,7 +1831,10 @@ export function SettingsPage() {
 
       {/* Calendar sync sheet — Google OAuth connect/disconnect (PR 1). */}
       {googleBusinessOpen && (
-        <GoogleBusinessSheet onClose={() => setGoogleBusinessOpen(false)} />
+        <GoogleBusinessSheet
+          onClose={() => setGoogleBusinessOpen(false)}
+          onReviewUrlChange={(url) => setGoogleReviewUrl(url ?? '')}
+        />
       )}
       {calendarSyncOpen && (
         <CalendarSyncSheet onClose={() => setCalendarSyncOpen(false)} />

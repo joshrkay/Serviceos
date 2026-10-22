@@ -190,6 +190,8 @@ function mapRow(row: Record<string, unknown>): TenantSettings {
     // Migration 120. NULL → undefined to match the InMemory repo shape.
     googleReviewUrl: (row.google_review_url as string | null) ?? undefined,
     yelpReviewUrl: (row.yelp_review_url as string | null) ?? undefined,
+    // D-044 — migration 330.
+    googleReviewUrlDerived: (row.google_review_url_derived as string | null) ?? undefined,
     // P11-002 — language stack. default_language / auto_detect_language
     // are NOT NULL with column defaults, so a pre-migration row still
     // reads 'en' / true.
@@ -471,6 +473,8 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
         // Migration 120 — public review links.
         googleReviewUrl: 'google_review_url',
         yelpReviewUrl: 'yelp_review_url',
+        // D-044 — migration 330.
+        googleReviewUrlDerived: 'google_review_url_derived',
         // P11-002 — language stack.
         defaultLanguage: 'default_language',
         autoDetectLanguage: 'auto_detect_language',
@@ -632,6 +636,17 @@ export class PgSettingsRepository extends PgBaseRepository implements SettingsRe
           params.push(value ?? null);
           paramIndex++;
         }
+      }
+
+      // D-044 — a review link written by anyone but the listing flow (which
+      // names both keys) keeps the "app filled this" marker only while the
+      // link still equals it; an owner's own value is never re-claimed.
+      if (updates.googleReviewUrl !== undefined && updates.googleReviewUrlDerived === undefined) {
+        setClauses.push(
+          `google_review_url_derived = CASE WHEN google_review_url_derived IS NOT DISTINCT FROM $${paramIndex}::text THEN google_review_url_derived ELSE NULL END`,
+        );
+        params.push(updates.googleReviewUrl ?? null);
+        paramIndex++;
       }
 
       if (needsTerminologyMerge) {
