@@ -208,6 +208,31 @@ describe('dispatchAssistantLookup — the record on screen (page context)', () =
     expect(reply?.message.content).toContain('one estimate — EST-WH');
   });
 
+  it('"what\'s the status of this job?" on its invoice answers for that job, not the customer\'s others', async () => {
+    const d = await deps();
+    const jobRepo = d.shared.jobRepo as InMemoryJobRepository;
+    await jobRepo.create({
+      id: 'd0000000-0000-4000-8000-000000001608', tenantId: TENANT, customerId: 'cust-keller', locationId: 'loc-keller',
+      jobNumber: 'JOB-0003', summary: 'Furnace tune-up', status: 'scheduled', priority: 'normal', createdBy: 'u1',
+      createdAt: SEEDED, updatedAt: SEEDED,
+    } as Job);
+
+    const reply = await dispatchAssistantLookup(
+      {
+        tenantId: TENANT,
+        userId: MIKE_CLERK,
+        intent: 'lookup_jobs',
+        extractedEntities: {},
+        message: "what's the status of this job?",
+        page: { customerId: 'cust-keller', jobId: JOB_KELLER },
+      },
+      d,
+    );
+    expect(reply?.outcome).toBe('answered');
+    expect(reply?.message.content).toContain('Water heater replacement');
+    expect(reply?.message.content).not.toContain('Furnace tune-up');
+  });
+
   it('a balance asked on an invoice or job page is that record\'s, not the customer\'s whole balance', async () => {
     const d = await deps();
     const jobRepo = d.shared.jobRepo as InMemoryJobRepository;

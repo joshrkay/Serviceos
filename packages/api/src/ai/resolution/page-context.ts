@@ -353,15 +353,17 @@ export function pageLookupIds(input: PageLookupInput): PageLookupIds {
   // Pointing at the record on screen ("this invoice") points at its customer
   // and job too, since a document page expands to both. A question about the
   // page's own kind of record may point with a bare "it" ("is it paid?"),
-  // unless it names the job or the customer instead.
+  // unless it names the job or the customer instead. A record named outright
+  // ("is this invoice for Maria paid?") is resolved, never swapped for the
+  // page's, which may be someone else's.
+  const namesRecord = isExplicitReference(entities?.customerName) || isExplicitReference(entities?.jobReference);
   const pointsAtPage =
-    POINTS_AT_PAGE_RECORD_RE[page.context.entityType].test(text) ||
-    ((readsPageDocument || readsPageVisit) &&
-      BARE_POINTER_RE.test(text) &&
-      !POINTS_AT_JOB_RE.test(text) &&
-      !POINTS_AT_CUSTOMER_RE.test(text) &&
-      !isExplicitReference(entities?.customerName) &&
-      !isExplicitReference(entities?.jobReference));
+    !namesRecord &&
+    (POINTS_AT_PAGE_RECORD_RE[page.context.entityType].test(text) ||
+      ((readsPageDocument || readsPageVisit) &&
+        BARE_POINTER_RE.test(text) &&
+        !POINTS_AT_JOB_RE.test(text) &&
+        !POINTS_AT_CUSTOMER_RE.test(text)));
 
   // A record the operator named outright ("Maria Alvarez", "the Khan
   // install") is theirs to resolve, even in a question that also says "this".

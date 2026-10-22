@@ -596,7 +596,7 @@ export async function executeLookupAnswer(
 
       case 'lookup_jobs': {
         if (!shared.jobRepo) return { kind: 'unsupported' };
-        const r = await lookupJobs(sharedInput, { jobRepo: shared.jobRepo, ...events });
+        const r = await lookupJobs({ ...sharedInput, ...jobScope }, { jobRepo: shared.jobRepo, ...events });
         if (r.status === 'error') return { kind: 'failed', error: r.data.error };
         const jobs = r.status === 'found' ? r.data.jobs : [];
         const rows = jobs

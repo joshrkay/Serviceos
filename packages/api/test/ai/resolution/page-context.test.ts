@@ -294,6 +294,14 @@ describe('pageLookupIds on a document page', () => {
     expect(ask('is it paid?', { customerName: 'Maria Alvarez' })).toEqual({});
   });
 
+  it('"is this invoice for Maria paid?" resolves Maria instead of reading the page invoice', () => {
+    for (const entities of [{ customerName: 'Maria Alvarez' }, { jobReference: 'the Khan install' }]) {
+      expect(
+        pageLookupIds({ intent: 'lookup_invoices', entities, text: 'is this invoice for Maria Alvarez paid?', page: invoicePage }),
+      ).toEqual({});
+    }
+  });
+
   it('"what does this invoice owe?" reads that invoice by its number', () => {
     const invoicePage = { ids: { invoiceId: OTHER, jobId: JOB, customerId: CUSTOMER }, documentNumber: 'INV-0042', context: { entityType: 'invoice' as const } };
     expect(
