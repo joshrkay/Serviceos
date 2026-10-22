@@ -587,10 +587,11 @@ export interface RivetTurnListenerOptions {
   onResult: (utterance: Utterance) => void;
 }
 
-/** What Deepgram is told to listen for on a screen: the card labels, "first"/"second", and its command phrases. */
+/** What Deepgram is told to listen for on a screen: the card labels, "first"/"second", its command phrases and its own words. */
 function screenKeyterms(screen: UtteranceScreen): string[] {
   const terms = screen.options ? [screen.options[0].label, screen.options[1].label, 'first', 'second'] : [];
   for (const command of screen.commands ?? []) terms.push(...command.phrases);
+  terms.push(...(screen.keyterms ?? []));
   return terms;
 }
 

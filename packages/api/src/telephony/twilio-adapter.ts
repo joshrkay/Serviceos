@@ -20,6 +20,7 @@
 
 import type { FeasibilityDependencies } from '../scheduling/feasibility-types';
 import type { Pool } from 'pg';
+import type { CallSummaryRepository } from '../ai/skills/pg-call-summary';
 import {
   classifyIntent,
   isLookupIntent,
@@ -190,8 +191,10 @@ export interface TwilioAdapterDeps {
    * media-streams transport has.
    */
   vulnerabilityTriageHook?: VulnerabilityTriageHook;
-  /** Postgres pool — passed to identifyCaller and summarizeSession. */
+  /** Postgres pool — passed to identifyCaller and updateDerivedConsentStatus. */
   pool?: Pool;
+  /** A2 — end-of-call summary persistence; reaches the processor via the deps spread. */
+  callSummaryRepo?: CallSummaryRepository;
   /** Repos used to persist side-effect rows (audit/proposal/escalation). */
   proposalRepo?: ProposalRepository;
   auditRepo?: AuditRepository;

@@ -10,6 +10,7 @@ import { PgLocationRepository } from '../../src/locations/pg-location';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 import { SendInvoiceTaskHandler } from '../../src/ai/tasks/voice-extended-tasks';
 import { resolveProposalEntity } from '../../src/proposals/resolve-entity';
+import { PgTenantTransactionRunner } from '../../src/db/tenant-transaction';
 import { approveProposal } from '../../src/proposals/actions';
 import { missingFieldsFor } from '../../src/proposals/proposal';
 
@@ -140,7 +141,8 @@ describe('Postgres integration — B2 reference→candidates on a gated send_inv
         actorId: tenant.userId,
         actorRole: 'owner',
       },
-      { proposalRepo, auditRepo },
+      // The runner app.ts wires: the pick's lock, patch and audit commit together.
+      { proposalRepo, auditRepo, transactionRunner: new PgTenantTransactionRunner(pool) },
     );
 
     expect((resolved.payload as Record<string, unknown>).invoiceId).toBe(invoiceId);

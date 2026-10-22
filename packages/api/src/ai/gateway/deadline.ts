@@ -165,3 +165,29 @@ export function isLocalDeadlineOrAbort(err: unknown): boolean {
     lower.includes('deadline exceeded')
   );
 }
+
+/** A caller's abort, whatever reason it aborted its signal with. */
+class CallerAbortError extends Error {
+  constructor(reason: unknown) {
+    super(
+      `Request was aborted by the caller: ${reason instanceof Error ? reason.message : String(reason)}`,
+      { cause: reason },
+    );
+    this.name = 'AbortError';
+  }
+}
+
+/**
+ * The error to reject with when a deadline signal aborts. Our own timer's
+ * DeadlineExceededError (or any other local-shaped Error) is returned as is.
+ * Anything else is the reason a CALLER aborted `request.signal` with (e.g.
+ * `new Error('caller hung up')`), which {@link isLocalDeadlineOrAbort} cannot
+ * recognise: rejecting with it raw would count a hang-up as a provider-health
+ * failure in the breaker (FM-01). It is wrapped as a local abort instead, with
+ * the original kept as `cause`.
+ */
+export function asLocalAbort(reason: unknown): Error {
+  return reason instanceof Error && isLocalDeadlineOrAbort(reason)
+    ? reason
+    : new CallerAbortError(reason);
+}
