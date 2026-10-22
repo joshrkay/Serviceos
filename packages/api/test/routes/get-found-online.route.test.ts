@@ -105,7 +105,7 @@ describe('/api/get-found-online', () => {
       },
       locationCount: 1,
     });
-    await settingsRepo.update(TENANT, { googleReviewUrl: REVIEW });
+    await settingsRepo.update(TENANT, { googleReviewUrl: REVIEW, websiteUrl: 'https://joes.sites.example.com' });
     await forwardingRepo.save(TENANT, { carrier: 'att', mode: 'all' });
     await forwardingRepo.recordCheckPassed(TENANT, new Date('2026-10-20T15:00:00Z'));
   }
@@ -118,13 +118,14 @@ describe('/api/get-found-online', () => {
         { id: 'google_listing', status: 'current', reason: 'not_connected' },
         { id: 'review_link', status: 'pending', reason: 'missing' },
         { id: 'call_forwarding', status: 'pending', reason: 'not_set_up' },
+        { id: 'website', status: 'pending', reason: 'missing' },
       ],
       allDone: false,
       visible: true,
     });
   });
 
-  it('reads the connected listing, the review link and a poll paused by rejected credentials', async () => {
+  it('reads the connected listing, the review link, the website and a poll paused by rejected credentials', async () => {
     await connectListing();
     expect((await request(app()).get('/api/get-found-online')).body.data.allDone).toBe(true);
 

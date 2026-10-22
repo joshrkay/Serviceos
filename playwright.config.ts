@@ -146,6 +146,9 @@ const devAuthApiServerEnv: NodeJS.ProcessEnv = {
   LOG_LEVEL: process.env.LOG_LEVEL ?? 'warn',
   TELEPHONY_ENABLED: 'false',
   EMAIL_ENABLED: 'false',
+  // #1768 (D-044) — serve hosted tenant sites by Host header on this pair;
+  // e2e/tenant-site-mobile.spec.ts maps *.sites.e2e.test to this API.
+  TENANT_SITE_BASE_DOMAIN: 'sites.e2e.test',
   // Force InMemory repos regardless of any DATABASE_URL/E2E_USE_TEST_DB set
   // for the legacy webServer pair — dev-auth specs run against seeded
   // InMemory data (verify-seed.mjs), never a real/ephemeral Postgres.
@@ -330,6 +333,8 @@ export default defineConfig<DevAuthFixtures>({
               'lsa-leads-mobile.spec.ts',
               // #1735 — Settings → Follow-up campaigns sheet at 320px.
               'drip-campaigns-mobile.spec.ts',
+              // #1768 (D-044) — hosted tenant site + Settings → Website card at 320px.
+              'tenant-site-mobile.spec.ts',
             ],
             testIgnore: [],
             dependencies: ['devauth-setup'],

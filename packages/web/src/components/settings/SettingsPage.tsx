@@ -18,6 +18,7 @@ import { SuppliersSheet } from '../jobs/SuppliersSheet';
 import { apiFetch } from '../../utils/api-fetch';
 import { AiMinutesCard } from './AiMinutesCard';
 import { CallQualityCard } from './CallQualityCard';
+import { WebsiteCard } from './WebsiteCard';
 import { useMe } from '../../hooks/useMe';
 import { SupervisorBackupSection } from './SupervisorBackupSection';
 import { BusinessProfileSheet } from './BusinessProfileSheet';
@@ -685,6 +686,20 @@ export function SettingsPage() {
         input?.scrollIntoView({ block: 'center' });
         input?.focus();
       }, 0);
+      needsUrlUpdate = true;
+    } else if (openTarget === 'website') {
+      // The card mounts once /api/me resolves; wait for it, then focus.
+      let tries = 0;
+      const focusWebsite = () => {
+        const input = document.getElementById('website-url');
+        if (input) {
+          input.scrollIntoView({ block: 'center' });
+          input.focus();
+        } else if (tries++ < 20) {
+          window.setTimeout(focusWebsite, 150);
+        }
+      };
+      window.setTimeout(focusWebsite, 0);
       needsUrlUpdate = true;
     }
     if (stripeReturned) {
@@ -1617,6 +1632,10 @@ export function SettingsPage() {
             </div>
           </div>
         </div>
+
+        {/* D-044 / #1768 — the owner's website, or the one we host. The API is
+            owner-only, so only owners mount it. */}
+        {me?.role === 'owner' && <WebsiteCard />}
 
         {/* AI answering minutes — usage against the plan bundle, and the
             owner's overage cap (the API enforces owner-only too). */}

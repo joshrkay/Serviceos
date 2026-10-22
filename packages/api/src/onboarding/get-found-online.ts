@@ -6,13 +6,12 @@
  * a Google verification postcard can take weeks.
  *
  * Every item is derived, so a tenant who disconnects Google sees the item
- * reopen instead of a stale tick. Later tickets (website #1768, Google
- * website #1771) add their items here.
+ * reopen instead of a stale tick. Later tickets (Google website #1771) add their items here.
  */
 import type { CallForwardingCarrier, CallForwardingMode } from '@ai-service-os/shared';
 import type { GoogleBusinessLocationState } from '../reputation/google-business-integration';
 
-export type GetFoundOnlineItemId = 'google_listing' | 'review_link' | 'call_forwarding';
+export type GetFoundOnlineItemId = 'google_listing' | 'review_link' | 'call_forwarding' | 'website';
 
 /**
  * done — finished. current — the owner's next step. pending — open, after
@@ -59,6 +58,8 @@ export interface GetFoundOnlineFacts {
     mode: CallForwardingMode;
     checkPassedAt: Date | null;
   } | null;
+  /** tenant_settings.website_url: the owner's own site or the published tenant site. */
+  websiteUrl: string | null | undefined;
   /** When the owner dismissed the finished checklist; null if never. */
   dismissedAt: Date | null;
 }
@@ -97,6 +98,10 @@ function callForwarding(facts: GetFoundOnlineFacts): Evaluated['result'] {
   return forwarding.checkPassedAt ? 'done' : { status: 'open', reason: 'not_checked' };
 }
 
+function website(facts: GetFoundOnlineFacts): Evaluated['result'] {
+  return facts.websiteUrl?.trim() ? 'done' : { status: 'open', reason: 'missing' };
+}
+
 export function deriveGetFoundOnlineChecklist(
   facts: GetFoundOnlineFacts,
 ): GetFoundOnlineChecklist {
@@ -104,6 +109,7 @@ export function deriveGetFoundOnlineChecklist(
     { id: 'google_listing', result: googleListing(facts) },
     { id: 'review_link', result: reviewLink(facts) },
     { id: 'call_forwarding', result: callForwarding(facts) },
+    { id: 'website', result: website(facts) },
   ];
 
   // The first open item is the owner's next step; waiting and error items

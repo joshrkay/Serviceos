@@ -8249,6 +8249,7 @@ export const MIGRATIONS = {
     ALTER TABLE review_poll_state
       ADD COLUMN IF NOT EXISTS auth_generation INTEGER NOT NULL DEFAULT 0;
   `,
+
   // D-044 / #1765 — how the owner forwards their own number to their Rivet
   // line: carrier and mode (missed calls only, or all calls). NULL carrier
   // means forwarding was never set up; verified_at is the last passing check
@@ -8264,6 +8265,7 @@ export const MIGRATIONS = {
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS call_forwarding_verified_at TIMESTAMPTZ;
   `,
+
   // D-044 / #1766 — the forwarding check: a short-lived correlation record
   // between the test call we place and the call that comes back through the
   // owner's carrier. The inbound voice webhook matches on (tenant, Rivet
@@ -8293,8 +8295,31 @@ export const MIGRATIONS = {
     ALTER TABLE call_forwarding_checks FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_call_forwarding_checks ON call_forwarding_checks;
     CREATE POLICY tenant_isolation_call_forwarding_checks ON call_forwarding_checks
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 
+  // D-044 / #1768 — the hosted tenant site: one row per business holding its
+  // chosen address (slug) and whether it is live, plus the owner's website URL
+  // on tenant settings ("I have one", or the published tenant site). The slug
+  // is the subdomain on TENANT_SITE_BASE_DOMAIN, unique across tenants.
+  '334_tenant_sites': `
+    CREATE TABLE IF NOT EXISTS tenant_sites (
+      tenant_id UUID PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+      slug TEXT NOT NULL CHECK (slug ~ '^[a-z0-9]([a-z0-9-]{1,40}[a-z0-9])$'),
+      published BOOLEAN NOT NULL DEFAULT FALSE,
+      published_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tenant_sites_slug ON tenant_sites (slug);
+    ALTER TABLE tenant_sites ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE tenant_sites FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_tenant_sites ON tenant_sites;
+    CREATE POLICY tenant_isolation_tenant_sites ON tenant_sites
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS website_url TEXT;
+  `,
 
   // #1735 — outbound multi-step drip campaigns (SMS | call | email). A
   // sequence is an ordered list of steps (JSONB, validated by the Zod
@@ -8350,6 +8375,7 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_drip_enrollments ON drip_enrollments
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
   // #1735 — append-only per-step outcome log (what the engine did for each
   // step of each enrollment; the audit trail is separate).
   '337_drip_step_events': `
@@ -8391,6 +8417,7 @@ export const MIGRATIONS = {
     CREATE POLICY tenant_isolation_webchat_config ON webchat_config
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
+
   // #1737 — per-tenant per-UTC-day web chat usage; the daily turn and cost caps
   // are enforced against this row (webchat/webchat-usage.ts). Cost is integer cents.
   '341_webchat_usage_daily': `

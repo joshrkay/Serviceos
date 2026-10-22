@@ -24,6 +24,7 @@ const OPEN = {
     { id: 'google_listing', status: 'current', reason: 'needs_pick' },
     { id: 'review_link', status: 'pending', reason: 'missing' },
     { id: 'call_forwarding', status: 'pending', reason: 'not_set_up' },
+    { id: 'website', status: 'pending', reason: 'missing' },
   ],
   allDone: false,
   visible: true,
@@ -34,6 +35,7 @@ const DONE = {
     { id: 'google_listing', status: 'done' },
     { id: 'review_link', status: 'done' },
     { id: 'call_forwarding', status: 'done', checkedAt: '2026-10-20T15:00:00.000Z' },
+    { id: 'website', status: 'done' },
   ],
   allDone: true,
   visible: true,
@@ -65,7 +67,7 @@ describe('GetFoundOnlineCard', () => {
     AH.fetcher.mockResolvedValueOnce(jsonResponse({ data: OPEN }));
     renderCard();
     await screen.findByTestId('get-found-online-card');
-    expect(screen.getByTestId('get-found-online-progress')).toHaveTextContent('0 of 3 done');
+    expect(screen.getByTestId('get-found-online-progress')).toHaveTextContent('0 of 4 done');
     expect(screen.getByTestId('get-found-online-item-google_listing')).toHaveTextContent(
       'Pick which Google location is yours.',
     );
@@ -99,6 +101,15 @@ describe('GetFoundOnlineCard', () => {
     expect(done).toHaveTextContent(/Last checked/);
     // A passed check offers a re-check: it is still a way into Phone settings.
     expect(done.querySelector('button')).not.toBeNull();
+  });
+
+  it('sends the website item to the Website card in Settings', async () => {
+    AH.fetcher.mockResolvedValueOnce(jsonResponse({ data: OPEN }));
+    renderCard();
+    const item = await screen.findByTestId('get-found-online-item-website');
+    expect(item).toHaveTextContent('Add your website, or let us make you one.');
+    fireEvent.click(item.querySelector('button')!);
+    expect(await screen.findByTestId('location')).toHaveTextContent('/settings?open=website');
   });
 
   it('keeps every tap target at least 44px tall (min-h-11)', async () => {

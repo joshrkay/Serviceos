@@ -12,6 +12,7 @@ const NOTHING: GetFoundOnlineFacts = {
   google: null,
   googleReviewUrl: null,
   callForwarding: null,
+  websiteUrl: null,
   dismissedAt: null,
 };
 const FORWARDING_PASSED = {
@@ -21,6 +22,7 @@ const FORWARDING_PASSED = {
 };
 const CONNECTED = { locationState: 'connected' as const, pollingPaused: false };
 const REVIEW = 'https://g.page/r/review-999';
+const SITE = 'https://joes-plumbing.sites.example.com';
 
 function statuses(facts: GetFoundOnlineFacts) {
   return Object.fromEntries(
@@ -34,6 +36,7 @@ describe('deriveGetFoundOnlineChecklist', () => {
       google_listing: ['current', 'not_connected'],
       review_link: ['pending', 'missing'],
       call_forwarding: ['pending', 'not_set_up'],
+      website: ['pending', 'missing'],
     });
     expect(deriveGetFoundOnlineChecklist(NOTHING)).toMatchObject({ allDone: false, visible: true });
   });
@@ -51,6 +54,7 @@ describe('deriveGetFoundOnlineChecklist', () => {
       google_listing: ['waiting', 'no_location'],
       review_link: ['current', 'missing'],
       call_forwarding: ['pending', 'not_set_up'],
+      website: ['pending', 'missing'],
     });
   });
 
@@ -61,6 +65,7 @@ describe('deriveGetFoundOnlineChecklist', () => {
       google_listing: ['error', 'polling_paused'],
       review_link: ['done', undefined],
       call_forwarding: ['current', 'not_set_up'],
+      website: ['pending', 'missing'],
     });
   });
 
@@ -73,12 +78,21 @@ describe('deriveGetFoundOnlineChecklist', () => {
     });
   });
 
+  it('a website URL counts, whether the owner typed their own or publishing filled it in', () => {
+    expect(statuses({ ...NOTHING, websiteUrl: SITE })).toMatchObject({ website: ['done', undefined] });
+    expect(statuses({ ...NOTHING, websiteUrl: 'https://joesplumbing.com' })).toMatchObject({
+      website: ['done', undefined],
+    });
+    expect(statuses({ ...NOTHING, websiteUrl: '  ' })).toMatchObject({ website: ['pending', 'missing'] });
+  });
+
   it('everything done: visible until dismissed', () => {
     const done = {
       ...NOTHING,
       google: CONNECTED,
       googleReviewUrl: REVIEW,
       callForwarding: FORWARDING_PASSED,
+      websiteUrl: SITE,
     };
     expect(deriveGetFoundOnlineChecklist(done)).toMatchObject({ allDone: true, visible: true });
     expect(
@@ -91,6 +105,7 @@ describe('deriveGetFoundOnlineChecklist', () => {
       google: null,
       googleReviewUrl: REVIEW,
       callForwarding: FORWARDING_PASSED,
+      websiteUrl: SITE,
       dismissedAt: new Date('2026-10-22T00:00:00Z'),
     });
     expect(reopened.visible).toBe(true);

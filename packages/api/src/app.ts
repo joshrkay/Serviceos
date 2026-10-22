@@ -1,6 +1,6 @@
 // Must precede every .use() call — see the module comment (#1555).
 import './bootstrap/stamp-mount-paths';
-import express from 'express';
+import express, { type RequestHandler } from 'express';
 import cors from 'cors';
 import helmet from 'helmet';
 import rateLimit, { ipKeyGenerator } from 'express-rate-limit';
@@ -421,6 +421,10 @@ import {
   PgCallForwardingRepository,
 } from './onboarding/call-forwarding';
 import { ForwardingCheckService, PgForwardingCheckRepository } from './onboarding/forwarding-check';
+import { createTenantSiteRouter } from './routes/tenant-site';
+import { InMemoryTenantSiteRepository, PgTenantSiteRepository } from './tenant-site/tenant-site';
+import { createTenantSiteHostMiddleware } from './tenant-site/host-middleware';
+import { loadTenantSiteView } from './tenant-site/view';
 import {
   InMemoryGetFoundOnlineDismissalRepository,
   PgGetFoundOnlineDismissalRepository,
@@ -852,6 +856,17 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // <repoRoot>/packages/web/dist in both dev (__dirname=.../api/src) and the
   // built image (__dirname=.../api/dist/src). See web-static-path.ts.
   const frontendPath = resolveWebDistDir(__dirname);
+
+  // D-044 / #1768 — hosted tenant sites, served by Host header
+  // (`<slug>.<TENANT_SITE_BASE_DOMAIN>`) AHEAD of the SPA static files and
+  // catch-all. Off entirely when the base domain is unset; any other host
+  // (the app domain included) falls straight through. The handler is bound
+  // once the repositories exist, further down.
+  let tenantSiteHost: RequestHandler | undefined;
+  if (config.TENANT_SITE_BASE_DOMAIN) {
+    app.use((req, res, next) => (tenantSiteHost ? tenantSiteHost(req, res, next) : next()));
+  }
+
   app.use(express.static(frontendPath));
 
   // CORS — use explicit origin(s) in prod/staging (validated by config),
@@ -5975,6 +5990,39 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       apiBaseUrl: config.publicOrigins.api,
       isEnabledForTenant: webchatIsEnabledForTenant,
       globallyKilled: webchatGloballyKilled,
+    }),
+  );
+
+  const tenantSiteRepo = pool ? new PgTenantSiteRepository(pool) : new InMemoryTenantSiteRepository();
+  const tenantSiteViewDeps = {
+    settingsRepo,
+    packRegistry: canonicalPackRegistry,
+    pool,
+    webOrigin: config.publicOrigins.web,
+  };
+  if (config.TENANT_SITE_BASE_DOMAIN) {
+    tenantSiteHost = createTenantSiteHostMiddleware({
+      baseDomain: config.TENANT_SITE_BASE_DOMAIN,
+      siteRepo: tenantSiteRepo,
+      loadView: (tenantId) => loadTenantSiteView(tenantSiteViewDeps, tenantId, null),
+      // Unauthenticated, DB-backed: cap per IP like the other public routes.
+      limiter: rateLimit({
+        windowMs: 60 * 1000,
+        max: 120,
+        standardHeaders: true,
+        legacyHeaders: false,
+        store: createRateLimitStore(redisUrl, 'tenant-site:'),
+      }),
+    });
+  }
+  app.use(
+    '/api/tenant-site',
+    createTenantSiteRouter({
+      baseDomain: config.TENANT_SITE_BASE_DOMAIN,
+      siteRepo: tenantSiteRepo,
+      settingsRepo,
+      viewDeps: tenantSiteViewDeps,
+      auditRepo,
     }),
   );
 

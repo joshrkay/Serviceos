@@ -639,6 +639,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['332_call_forwarding_setup', '6945ad7041594cebcefdf2b4e200e2782ca5b2909463fba99e0f8dfb45716fd9'],
   ['333_call_forwarding_checks', '2c09f0495368fa186b98ae2c7789caaf94b35b59d34306b2aab9a15df74dc908'],
   // #1735 — outbound drip campaigns (sequences + enrollments, then the step log).
+  // D-044 / #1768 — tenant_sites (slug + publish state); tenant_settings.website_url.
+  ['334_tenant_sites', 'f10aa81fd421a954237c87ccaef0ab6671f66140f65b6df8eee6dbc001187acf'],
   ['336_drip_campaigns', '1fe4cc16ff49abe22ff155e2dafcdcd2dbaba4738be80da6fa3e0ed1b2b1b0fe'],
   ['337_drip_step_events', '057b5b4a518bf9d808c6de88105796b966b11b812ff2de170e00ddce85081fa7'],
   ['340_webchat_config', '5548e267e2d1c0702755ec671dbd1d85d50da4666e79e48eb5bec26a9a75696e'],

@@ -219,6 +219,22 @@ The dispatch board's feasibility composer (overlap + travel-time + skill checks)
 | `TRAVEL_TIME_CACHE_TTL_SECONDS` | `300` | TTL for Google Distance Matrix responses cached in-process. |
 | `TRAVEL_TIME_CACHE_MAX_ENTRIES` | `1000` | Hard cap on the in-process LRU cache; prevents unbounded memory growth on multi-tenant deploys. |
 
+## Hosted tenant sites (D-044)
+
+"Get found online" can host a one-page site per business at `<slug>.<TENANT_SITE_BASE_DOMAIN>`.
+The feature is **off until `TENANT_SITE_BASE_DOMAIN` is set** (a bare hostname such as
+`sites.example.com`; boot fails if it is malformed or contains `WEB_URL`/`PUBLIC_API_URL`).
+To switch it on, ops must:
+
+1. Buy a domain that is separate from the app's (a flagged tenant page must not touch the app's
+   login or mail reputation).
+2. Point a wildcard DNS record (`*.sites.example.com`) at the deploy, with a wildcard TLS
+   certificate on the Railway custom domain.
+3. Set `TENANT_SITE_BASE_DOMAIN` on the `web` (and `voice`) service and redeploy.
+
+The Express app answers those hosts ahead of the SPA; every other host, the app domain included,
+is untouched. Until then the owner's Settings → Website card only offers "I have a website".
+
 ## Observability sink validation (post-deploy)
 
 After each deploy in `dev`, `staging`, and `production`, validate that redaction processors are active on every sink.

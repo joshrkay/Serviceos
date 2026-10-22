@@ -9,7 +9,7 @@ import { useNavigate } from 'react-router';
 import { CheckCircle2, Circle, Clock, AlertCircle, ChevronRight } from 'lucide-react';
 import { useApiClient } from '../../lib/apiClient';
 
-type ItemId = 'google_listing' | 'review_link' | 'call_forwarding';
+type ItemId = 'google_listing' | 'review_link' | 'call_forwarding' | 'website';
 type ItemStatus = 'done' | 'current' | 'pending' | 'waiting' | 'error';
 type ItemReason =
   | 'not_connected'
@@ -38,20 +38,29 @@ const TITLES: Record<ItemId, string> = {
   google_listing: 'Show up on Google',
   review_link: 'Send happy customers to your Google reviews',
   call_forwarding: 'Calls reach the AI',
+  website: 'Have a website',
 };
 
 const DONE_DETAIL: Record<ItemId, string> = {
   google_listing: 'Your Google Business Profile is connected.',
   review_link: 'After each job, 4★ and up customers are sent to your review link.',
   call_forwarding: 'Your business number forwards to Rivet.',
+  website: 'Customers who search for you have a site to land on.',
 };
 
-const REASON_DETAIL: Record<ItemReason, string> = {
+/** Shown when an item is open for the plain reason that it is not done yet. */
+const MISSING_DETAIL: Record<ItemId, string> = {
+  google_listing: 'Connect your Google Business Profile so customers find you on Google Maps.',
+  review_link: 'Add your Google review link so happy customers can review you.',
+  call_forwarding: 'Forward your business number to Rivet so the AI answers your calls.',
+  website: 'Add your website, or let us make you one.',
+};
+
+const REASON_DETAIL: Record<Exclude<ItemReason, 'missing'>, string> = {
   not_connected: 'Connect your Google Business Profile so customers find you on Google Maps.',
   needs_pick: 'Pick which Google location is yours.',
   no_location: 'Waiting on Google to verify your Business Profile.',
   polling_paused: 'Google stopped accepting the connection. Reconnect it.',
-  missing: 'Add your Google review link so happy customers can review you.',
   not_set_up: 'Forward your business number to Rivet so the AI answers your calls.',
   not_checked: 'Forwarding is set up. Test it to make sure calls reach the AI.',
 };
@@ -61,6 +70,7 @@ const ACTIONS: Record<ItemId, string> = {
   google_listing: '/settings?open=google-business',
   review_link: '/settings?open=review-links',
   call_forwarding: '/settings/phone',
+  website: '/settings?open=website',
 };
 
 function doneDetail(item: ChecklistItem): string {
@@ -145,7 +155,9 @@ export function GetFoundOnlineCard() {
       <ul className="mt-2 divide-y divide-border">
         {checklist.items.map((item) => {
           const detail =
-            item.status === 'done' ? doneDetail(item) : REASON_DETAIL[item.reason ?? 'missing'];
+            item.status === 'done' ? doneDetail(item) : item.reason && item.reason !== 'missing'
+                ? REASON_DETAIL[item.reason]
+                : MISSING_DETAIL[item.id];
           const body = (
             <>
               <StatusIcon status={item.status} />

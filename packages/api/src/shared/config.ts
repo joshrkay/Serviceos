@@ -72,6 +72,19 @@ const configSchema = z.object({
   WEB_URL: z.string().url().optional(),
   PUBLIC_API_URL: z.string().url().optional(),
   MARKETING_SITE_URL: z.string().url().optional(),
+  // D-044 / #1768 — the separate domain reserved for hosted tenant sites
+  // (`<slug>.<this>`), never the app's own domain. A bare lowercase hostname,
+  // no scheme/port/path. Unset ⇒ the tenant-site feature is off: nothing is
+  // served by Host and owners cannot publish (ops has not bought it yet).
+  TENANT_SITE_BASE_DOMAIN: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .regex(
+      /^(?=.{4,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/,
+      'must be a bare hostname such as sites.example.com (no scheme, port or path)',
+    )
+    .optional(),
   // DEPRECATED alias for WEB_URL. It never fills the API role: half the old
   // call sites read it as the API host, which is how prod ended up emitting
   // invitation links to the API domain. Setting it adds a boot warning.
@@ -311,6 +324,27 @@ function resolvePublicOrigins(
   };
 }
 
+/**
+ * The tenant-site domain exists so a flagged tenant page cannot hurt the app's
+ * login or mail reputation (D-044), so it must not be, or contain, the app or
+ * API host.
+ */
+function assertTenantSiteDomainSeparate(config: AppConfig): void {
+  const base = config.TENANT_SITE_BASE_DOMAIN;
+  if (!base) return;
+  for (const [name, origin] of [
+    ['WEB_URL', config.publicOrigins.web],
+    ['PUBLIC_API_URL', config.publicOrigins.api],
+  ] as const) {
+    const host = new URL(origin).hostname;
+    if (host === base || host.endsWith(`.${base}`)) {
+      throw new Error(
+        `Configuration validation failed:\n  TENANT_SITE_BASE_DOMAIN: ${base} must be a separate domain from ${name} (${host}); tenant sites never share the app's domain`,
+      );
+    }
+  }
+}
+
 let cachedConfig: AppConfig | null = null;
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): AppConfig {
@@ -335,6 +369,12 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   }
 
   cachedConfig = { ...result.data, ...resolvePublicOrigins(result.data) };
+  try {
+    assertTenantSiteDomainSeparate(cachedConfig);
+  } catch (err) {
+    cachedConfig = null;
+    throw err;
+  }
 
   // WS1 — prod/staging default the consent gate to enforcement. The zod default
   // is 'off' (safe for dev/test), but in production a send must fail closed

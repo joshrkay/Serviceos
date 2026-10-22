@@ -502,24 +502,28 @@ export const createCatalogItemSchema = z.object({
 
 export const updateCatalogItemSchema = createCatalogItemSchema.partial();
 
-// Public review-link field (Settings → Reviews). Trims the input FIRST so a
+// Public https link field (review links, website). Trims the input FIRST so a
 // whitespace-only value ('   ') normalizes to null (cleared) instead of
 // failing validation; a non-empty value must be a valid URL.
-const reviewUrlField = z
-  .preprocess(
-    (v) => (typeof v === 'string' ? v.trim() : v),
-    z.union([
-      // https only — these values are rendered as clickable hrefs on the
-      // public feedback page, so reject javascript:/data:/http: schemes.
-      z.string().url().refine((u) => /^https:\/\//i.test(u), {
-        message: 'Review URL must be an https:// link',
-      }),
-      z.literal(''),
-      z.null(),
-    ]),
-  )
-  .optional()
-  .transform((v) => (v === '' ? null : v));
+const httpsUrlField = (label: string) =>
+  z
+    .preprocess(
+      (v) => (typeof v === 'string' ? v.trim() : v),
+      z.union([
+        // https only — these values are rendered as clickable hrefs on public
+        // pages, so reject javascript:/data:/http: schemes.
+        z.string().url().max(2000).refine((u) => /^https:\/\//i.test(u), {
+          message: `${label} must be an https:// link`,
+        }),
+        z.literal(''),
+        z.null(),
+      ]),
+    )
+    .optional()
+    .transform((v) => (v === '' ? null : v));
+
+// Public review-link field (Settings → Reviews).
+const reviewUrlField = httpsUrlField('Review URL');
 
 // Polly voice id (e.g. "Polly.Mia-Neural"). Constrained so a stored value
 // can never inject XML metacharacters into the `<Say voice="...">` TwiML.
@@ -686,6 +690,9 @@ export const updateSettingsSchema = z.object({
   // normalizes to null so a cleared field reads back as "not configured".
   googleReviewUrl: reviewUrlField,
   yelpReviewUrl: reviewUrlField,
+  // D-044 / #1768 — the owner's own website, or the published tenant site.
+  // Migration 334. Null clears.
+  websiteUrl: httpsUrlField('Website'),
   // P11-002 — tenant language stack. Persisted to tenant_settings and
   // consumed by the voice agent + customer-facing comms.
   defaultLanguage: z.enum(['en', 'es']).optional(),

@@ -79,6 +79,7 @@ export async function loadGetFoundOnlineFacts(
       : null,
     googleReviewUrl: settings?.googleReviewUrl ?? null,
     callForwarding: forwarding,
+    websiteUrl: settings?.websiteUrl ?? null,
     dismissedAt,
   };
 }
