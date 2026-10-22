@@ -106,11 +106,11 @@ describe('Postgres integration — voice gate usage caps', () => {
 
   it('forwards a paid Starter call once overage reaches the $79 default cap', async () => {
     const tenantId = await liveTenant({ status: 'active', planId: 'starter' });
-    // 83 minutes: 63 over x $1.25 = $78.75 — still under the cap.
-    await useSeconds(tenantId, 83 * 60);
+    // 123 minutes: 63 over x $1.25 = $78.75 — still under the cap.
+    await useSeconds(tenantId, 123 * 60);
     expect(await check(tenantId)).toEqual({ allowed: true });
 
-    // 84 minutes: 64 over x $1.25 = $80.00 — cap reached.
+    // 124 minutes: 64 over x $1.25 = $80.00 — cap reached.
     await useSeconds(tenantId, 60);
     expect(await check(tenantId)).toEqual({
       allowed: false,
@@ -134,9 +134,9 @@ describe('Postgres integration — voice gate usage caps', () => {
     const caps = new PgOverageCapStore(pool);
     const raised = await liveTenant({ status: 'active', planId: 'starter' });
     await caps.set(raised, 20_000);
-    await useSeconds(raised, 84 * 60); // $80.00 of overage — past the default cap
+    await useSeconds(raised, 124 * 60); // $80.00 of overage — past the default cap
     expect(await check(raised)).toEqual({ allowed: true });
-    await useSeconds(raised, 116 * 60); // 200 min: $225.00 — past the raised cap
+    await useSeconds(raised, 96 * 60); // 220 min: $200.00 — reaches the raised cap
     expect(await check(raised)).toMatchObject({ allowed: false, reason: 'overage_cap' });
 
     const removed = await liveTenant({ status: 'active', planId: 'starter' });
@@ -150,7 +150,7 @@ describe('Postgres integration — voice gate usage caps', () => {
     const tenantId = await liveTenant({ status: 'active', planId: 'starter' });
     await caps.set(tenantId, 0);
 
-    await useSeconds(tenantId, 19 * 60);
+    await useSeconds(tenantId, 59 * 60);
     expect(await check(tenantId)).toEqual({ allowed: true });
 
     await useSeconds(tenantId, 60);
