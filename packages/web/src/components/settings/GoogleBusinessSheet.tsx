@@ -19,9 +19,20 @@ interface GoogleBusinessIntegrationView {
   status: string;
   accountId: string | null;
   locationId: string | null;
+  locationTitle: string | null;
+  placeId: string | null;
+  reviewUrl: string | null;
+  locationStatus: 'connected' | 'needs_selection' | 'no_location';
   updatedAt: string;
   lastSuccessfulPollAt: string | null;
   backoffUntil: string | null;
+}
+
+interface GoogleLocationOption {
+  locationId: string;
+  title: string | null;
+  placeId: string | null;
+  reviewUrl: string | null;
 }
 
 interface GoogleBusinessSheetProps {
@@ -34,6 +45,10 @@ export function GoogleBusinessSheet({ onClose }: GoogleBusinessSheetProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  // Location picker: shown straight after connect when the account has
+  // several locations, and on demand from "Change location".
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [options, setOptions] = useState<GoogleLocationOption[] | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -44,7 +59,10 @@ export function GoogleBusinessSheet({ onClose }: GoogleBusinessSheetProps) {
         const json = (await res.json()) as {
           data?: GoogleBusinessIntegrationView | null;
         };
-        if (!cancelled) setIntegration(json?.data ?? null);
+        if (!cancelled) {
+          setIntegration(json?.data ?? null);
+          if (json?.data?.locationStatus === 'needs_selection') void openPicker();
+        }
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : 'Could not load');
       } finally {
@@ -85,6 +103,50 @@ export function GoogleBusinessSheet({ onClose }: GoogleBusinessSheetProps) {
     }
   }
 
+  async function openPicker() {
+    setPickerOpen(true);
+    setOptions(null);
+    setError('');
+    try {
+      const res = await apiFetch('/api/googlebusiness-integrations/google/locations');
+      if (!res.ok) throw new Error(`Could not load your locations (${res.status})`);
+      const json = (await res.json()) as { data?: GoogleLocationOption[] };
+      setOptions(json.data ?? []);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Could not load your locations';
+      setError(msg);
+      setPickerOpen(false);
+    }
+  }
+
+  async function pickLocation(locationId: string) {
+    setBusy(true);
+    setError('');
+    try {
+      const res = await apiFetch('/api/googlebusiness-integrations/google/location', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ locationId }),
+      });
+      if (!res.ok) throw new Error(`Could not save the location (${res.status})`);
+      const json = (await res.json()) as {
+        data: Pick<
+          GoogleBusinessIntegrationView,
+          'locationId' | 'locationTitle' | 'placeId' | 'reviewUrl' | 'locationStatus'
+        >;
+      };
+      setIntegration((prev) => (prev ? { ...prev, ...json.data } : prev));
+      setPickerOpen(false);
+      toast.success('Google location saved');
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Could not save the location';
+      setError(msg);
+      toast.error(msg);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function disconnect() {
     if (!integration) return;
     setBusy(true);
@@ -106,6 +168,7 @@ export function GoogleBusinessSheet({ onClose }: GoogleBusinessSheetProps) {
   }
 
   const isConnected = integration !== null;
+  const locationStatus = integration?.locationStatus ?? 'connected';
   // Backoff in the future ⇒ polling is paused (usually broken
   // credentials after the operator revoked access on Google's side).
   const needsAttention =
@@ -165,6 +228,42 @@ export function GoogleBusinessSheet({ onClose }: GoogleBusinessSheetProps) {
                 </p>
               </div>
             </div>
+          ) : isConnected && pickerOpen ? (
+            <div data-testid="googlebusiness-picker" className="space-y-2">
+              <p className="text-sm text-slate-900">Which business location is yours?</p>
+              {options === null ? (
+                <p className="text-sm text-slate-500">Loading your locations…</p>
+              ) : options.length === 0 ? (
+                <p className="text-sm text-slate-500">No locations found on this Google account.</p>
+              ) : (
+                <ul className="space-y-2">
+                  {options.map((o) => (
+                    <li key={o.locationId}>
+                      <button
+                        type="button"
+                        disabled={busy}
+                        onClick={() => void pickLocation(o.locationId)}
+                        data-testid={`googlebusiness-pick-${o.locationId}`}
+                        className="flex min-h-11 w-full items-center rounded-xl border border-slate-200 px-4 py-2 text-left text-sm text-slate-900 hover:bg-slate-50 disabled:opacity-60"
+                      >
+                        {o.title ?? `Location ${o.locationId}`}
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          ) : isConnected && locationStatus === 'no_location' ? (
+            <div
+              data-testid="googlebusiness-no-location"
+              className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3"
+            >
+              <p className="text-sm text-amber-900">No business profile found</p>
+              <p className="text-xs text-amber-800 mt-0.5">
+                Google is connected, but this account has no business location
+                yet. Create and verify your profile on Google, then reconnect.
+              </p>
+            </div>
           ) : isConnected ? (
             <div
               data-testid="googlebusiness-connected"
@@ -174,9 +273,11 @@ export function GoogleBusinessSheet({ onClose }: GoogleBusinessSheetProps) {
                 <span className="font-medium">Google Business connected</span>
               </p>
               <p className="text-xs text-emerald-800 mt-0.5">
-                {integration!.locationId
-                  ? `Business location: ${integration!.locationId}`
-                  : 'No business location found on this account yet.'}
+                {integration!.locationTitle
+                  ? `Business location: ${integration!.locationTitle}`
+                  : integration!.locationId
+                    ? `Business location: ${integration!.locationId}`
+                    : 'No business location chosen yet.'}
               </p>
               {integration!.lastSuccessfulPollAt && (
                 <p className="text-xs text-emerald-800 mt-0.5">
@@ -203,15 +304,39 @@ export function GoogleBusinessSheet({ onClose }: GoogleBusinessSheetProps) {
 
         <div className="flex items-center justify-end gap-2 border-t border-slate-100 px-5 py-4 sticky bottom-0 bg-white">
           {isConnected && !needsAttention ? (
+            <>
+            {locationStatus !== 'no_location' && !pickerOpen && (
+              <button
+                type="button"
+                onClick={() => void openPicker()}
+                disabled={busy}
+                data-testid="googlebusiness-change-location"
+                className="min-h-11 rounded-xl border border-slate-200 bg-white px-4 py-2 text-sm text-slate-700 hover:bg-slate-50 disabled:opacity-60"
+              >
+                Change location
+              </button>
+            )}
             <button
               type="button"
               onClick={disconnect}
               disabled={busy}
               data-testid="googlebusiness-disconnect"
-              className="rounded-xl border border-red-200 bg-white px-4 py-2 text-sm text-red-700 hover:bg-red-50 disabled:opacity-60"
+              className="min-h-11 rounded-xl border border-red-200 bg-white px-4 py-2 text-sm text-red-700 hover:bg-red-50 disabled:opacity-60"
             >
               {busy ? 'Disconnecting…' : 'Disconnect'}
             </button>
+            {locationStatus === 'no_location' && (
+              <button
+                type="button"
+                onClick={connect}
+                disabled={busy}
+                data-testid="googlebusiness-connect"
+                className="min-h-11 rounded-xl bg-slate-900 px-4 py-2 text-sm text-white hover:bg-slate-700 disabled:opacity-60"
+              >
+                {busy ? 'Redirecting…' : 'Reconnect Google Business'}
+              </button>
+            )}
+            </>
           ) : (
             <>
               {needsAttention && (

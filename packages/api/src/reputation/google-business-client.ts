@@ -472,18 +472,45 @@ const listAccountsResponseSchema = z
   .object({ accounts: z.array(namedResourceSchema).optional() })
   .passthrough();
 
-const listLocationsResponseSchema = z
-  .object({ locations: z.array(namedResourceSchema).optional() })
+/**
+ * Business Information API v1 — the surface that exposes a location's
+ * title, place ID and the `newReviewUri` write-a-review link. (The v4
+ * location listing carries none of them.)
+ */
+export const GOOGLE_BUSINESS_INFORMATION_HOST =
+  'https://mybusinessbusinessinformation.googleapis.com';
+
+const listLocationDetailsResponseSchema = z
+  .object({
+    locations: z
+      .array(
+        z
+          .object({
+            name: z.string().min(1),
+            title: z.string().optional(),
+            metadata: z
+              .object({
+                placeId: z.string().optional(),
+                newReviewUri: z.string().optional(),
+              })
+              .passthrough()
+              .optional(),
+          })
+          .passthrough(),
+      )
+      .optional(),
+    nextPageToken: z.string().optional(),
+  })
   .passthrough();
 
-async function getNamedResources(
+/** Shared GET + error taxonomy for the discovery calls. */
+async function googleGetJson<S extends z.ZodTypeAny>(
   url: string,
   accessToken: string,
   op: string,
-  schema: typeof listAccountsResponseSchema | typeof listLocationsResponseSchema,
-  key: 'accounts' | 'locations',
+  schema: S,
   fetchFn: GoogleFetch,
-): Promise<string[]> {
+): Promise<z.infer<S>> {
   const res = await fetchFn(url, {
     headers: {
       Authorization: `Bearer ${accessToken}`,
@@ -514,8 +541,7 @@ async function getNamedResources(
       { cause: parsed.error },
     );
   }
-  const rows = (parsed.data as Record<string, { name: string }[] | undefined>)[key];
-  return (rows ?? []).map((r) => r.name);
+  return parsed.data;
 }
 
 /** List account resource names (`accounts/{id}`) visible to the token. */
@@ -523,28 +549,70 @@ export async function listAccounts(
   accessToken: string,
   fetchFn: GoogleFetch = boundedGoogleFetch,
 ): Promise<string[]> {
-  return getNamedResources(
+  const data = await googleGetJson(
     `${GOOGLE_BUSINESS_REVIEWS_HOST}/v4/accounts`,
     accessToken,
     'listAccounts',
     listAccountsResponseSchema,
-    'accounts',
     fetchFn,
   );
+  return (data.accounts ?? []).map((a) => a.name);
 }
 
-/** List location resource names (`accounts/{a}/locations/{l}`) under an account. */
-export async function listLocations(
+export interface GoogleLocationDetail {
+  /** Bare location id (the trailing segment of the resource name). */
+  locationId: string;
+  title: string | null;
+  placeId: string | null;
+  /** Google's "write a review" link — `newReviewUri`, else built from the place ID. */
+  reviewUrl: string | null;
+}
+
+/** Hard cap on pages walked — a tenant with 500+ locations is not an SMB. */
+const MAX_LOCATION_PAGES = 5;
+
+/**
+ * List the locations under an account, with the metadata the connect
+ * flow stores (place ID + review link). Walks `nextPageToken` up to
+ * {@link MAX_LOCATION_PAGES} pages of 100.
+ */
+export async function listLocationDetails(
   accessToken: string,
   accountId: string,
   fetchFn: GoogleFetch = boundedGoogleFetch,
-): Promise<string[]> {
-  return getNamedResources(
-    `${GOOGLE_BUSINESS_REVIEWS_HOST}/v4/accounts/${accountId}/locations`,
-    accessToken,
-    'listLocations',
-    listLocationsResponseSchema,
-    'locations',
-    fetchFn,
-  );
+): Promise<GoogleLocationDetail[]> {
+  const out: GoogleLocationDetail[] = [];
+  let pageToken: string | undefined;
+  for (let page = 0; page < MAX_LOCATION_PAGES; page++) {
+    const url = new URL(
+      `${GOOGLE_BUSINESS_INFORMATION_HOST}/v1/accounts/${accountId}/locations`,
+    );
+    url.searchParams.set('readMask', 'name,title,metadata');
+    url.searchParams.set('pageSize', '100');
+    if (pageToken) url.searchParams.set('pageToken', pageToken);
+    const data = await googleGetJson(
+      url.toString(),
+      accessToken,
+      'listLocations',
+      listLocationDetailsResponseSchema,
+      fetchFn,
+    );
+    for (const loc of data.locations ?? []) {
+      const locationId = loc.name.slice(loc.name.lastIndexOf('/') + 1);
+      if (!locationId) continue;
+      out.push({
+        locationId,
+        title: loc.title ?? null,
+        placeId: loc.metadata?.placeId ?? null,
+        reviewUrl:
+          loc.metadata?.newReviewUri ??
+          (loc.metadata?.placeId
+            ? `https://search.google.com/local/writereview?placeid=${encodeURIComponent(loc.metadata.placeId)}`
+            : null),
+      });
+    }
+    if (!data.nextPageToken) break;
+    pageToken = data.nextPageToken;
+  }
+  return out;
 }

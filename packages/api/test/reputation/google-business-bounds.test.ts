@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   exchangeAuthorizationCode,
   listAccounts,
-  listLocations,
+  listLocationDetails,
   listReviews,
   refreshAccessToken,
   replyToReview,
@@ -30,7 +30,7 @@ describe('Google Business Profile client — bounded when no fetch is injected',
     { name: 'reviews page', run: () => listReviews('tok', 'acc', 'loc') },
     { name: 'review reply', run: () => replyToReview('tok', 'acc', 'loc', 'rev', 'Thanks!') },
     { name: 'account discovery', run: () => listAccounts('tok') },
-    { name: 'location discovery', run: () => listLocations('tok', 'acc') },
+    { name: 'location discovery', run: () => listLocationDetails('tok', 'acc') },
   ])('$name times out at 10 s like a network failure', async ({ run }) => {
     const fetchMock = hangingFetch();
     vi.stubGlobal('fetch', fetchMock);

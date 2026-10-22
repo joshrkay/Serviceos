@@ -278,7 +278,7 @@ import {
   refreshAccessToken,
   replyToReview,
   listAccounts,
-  listLocations,
+  listLocationDetails,
 } from '../../src/reputation/google-business-client';
 
 describe('GoogleBusinessAuthError (401 detection)', () => {
@@ -360,7 +360,7 @@ describe('refreshAccessToken', () => {
   });
 });
 
-describe('listAccounts / listLocations (connect-flow discovery)', () => {
+describe('listAccounts / listLocationDetails (connect-flow discovery)', () => {
   it('returns account resource names', async () => {
     const fetchFn = async (input: string | URL | Request): Promise<Response> => {
       expect(String(input)).toContain('/v4/accounts');
@@ -374,16 +374,63 @@ describe('listAccounts / listLocations (connect-flow discovery)', () => {
     ]);
   });
 
-  it('returns location resource names for an account', async () => {
+  it('returns location details (id, title, place ID, review link)', async () => {
     const fetchFn = async (input: string | URL | Request): Promise<Response> => {
-      expect(String(input)).toContain('/v4/accounts/123/locations');
+      const url = String(input);
+      expect(url).toContain(
+        'mybusinessbusinessinformation.googleapis.com/v1/accounts/123/locations',
+      );
+      expect(url).toContain('readMask=name%2Ctitle%2Cmetadata');
       return makeResponse(200, {
-        locations: [{ name: 'accounts/123/locations/999' }],
+        locations: [
+          {
+            name: 'locations/999',
+            title: 'Acme HVAC',
+            metadata: {
+              placeId: 'ChIJabc',
+              newReviewUri: 'https://search.google.com/local/writereview?placeid=ChIJabc',
+            },
+          },
+          { name: 'locations/1000' },
+          { name: 'locations/1001', metadata: { placeId: 'ChIJxyz' } },
+        ],
       });
     };
-    expect(await listLocations('at', '123', fetchFn)).toEqual([
-      'accounts/123/locations/999',
+    expect(await listLocationDetails('at', '123', fetchFn)).toEqual([
+      {
+        locationId: '999',
+        title: 'Acme HVAC',
+        placeId: 'ChIJabc',
+        reviewUrl: 'https://search.google.com/local/writereview?placeid=ChIJabc',
+      },
+      { locationId: '1000', title: null, placeId: null, reviewUrl: null },
+      {
+        locationId: '1001',
+        title: null,
+        placeId: 'ChIJxyz',
+        reviewUrl: 'https://search.google.com/local/writereview?placeid=ChIJxyz',
+      },
     ]);
+  });
+
+  it('walks nextPageToken for location details', async () => {
+    const urls: string[] = [];
+    const fetchFn = async (input: string | URL | Request): Promise<Response> => {
+      urls.push(String(input));
+      return urls.length === 1
+        ? makeResponse(200, { locations: [{ name: 'locations/1' }], nextPageToken: 'p2' })
+        : makeResponse(200, { locations: [{ name: 'locations/2' }] });
+    };
+    const out = await listLocationDetails('at', '123', fetchFn);
+    expect(out.map((l) => l.locationId)).toEqual(['1', '2']);
+    expect(urls[1]).toContain('pageToken=p2');
+  });
+
+  it('listLocationDetails throws GoogleBusinessAuthError on 401', async () => {
+    const fetchFn = async (): Promise<Response> => makeResponse(401, {});
+    await expect(listLocationDetails('x', '123', fetchFn)).rejects.toThrow(
+      GoogleBusinessAuthError,
+    );
   });
 
   it('listAccounts throws GoogleBusinessAuthError on 401', async () => {

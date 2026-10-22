@@ -3722,6 +3722,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     googleConfig: googleBusinessOAuthConfig,
     appBaseUrl: config.publicOrigins.web,
     auditRepo,
+    // Fills googleReviewUrl from the connected listing (never over a
+    // hand-entered value).
+    settingsRepo,
     // Surfaces lastSuccessfulPollAt / backoffUntil on GET / so a broken
     // credential (failed refresh) degrades visibly in Settings.
     ...(googleReviewsPollStateRepo
