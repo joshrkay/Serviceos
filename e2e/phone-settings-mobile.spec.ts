@@ -29,6 +29,7 @@ const LINE = {
 async function mockPhoneApi(page: Page): Promise<{ changed: () => string | null }> {
   let changedTo: string | null = null;
   await mockTextingRegistration(page);
+  await mockCallForwarding(page);
   await page.route(
     (url) => url.pathname.startsWith('/api/onboarding/phone'),
     async (route) => {
@@ -67,6 +68,48 @@ async function mockPhoneApi(page: Page): Promise<{ changed: () => string | null 
     },
   );
   return { changed: () => changedTo };
+}
+
+// D-044 / #1765 — the call-forwarding panel. Stateful so the carrier pick
+// shows its codes; never touches the dev tenant's settings.
+async function mockCallForwarding(page: Page): Promise<void> {
+  let setup = { carrier: null as string | null, mode: 'missed' };
+  await page.route(
+    (url) => url.pathname === '/api/get-found-online/forwarding/check',
+    async (route) => {
+      const started = route.request().method() === 'POST';
+      await route.fulfill({
+        status: started ? 202 : 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          data: started
+            ? {
+                status: 'timed_out',
+                checkedAt: null,
+                expiresAt: null,
+                guidance:
+                  'The test call did not come back. Make sure you let your phone ring out without answering, then check that you dialed the forwarding code from your business phone and heard a confirmation. Then test again.',
+              }
+            : null,
+        }),
+      });
+    },
+  );
+  await page.route(
+    (url) => url.pathname === '/api/get-found-online/forwarding',
+    async (route) => {
+      if (route.request().method() === 'PUT') {
+        setup = route.request().postDataJSON() as typeof setup;
+      }
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          data: { ...setup, checkPassedAt: null, rivetNumber: LINE.phoneNumber },
+        }),
+      });
+    },
+  );
 }
 
 // #1564 — the texting-registration panel mounted on this page. Answered by
@@ -168,6 +211,33 @@ test.describe('Settings → Phone — mobile layout', () => {
         expect(box!.x + box!.width, label).toBeLessThanOrEqual(320);
       }
       await expectGloveTarget(page, /Submit for registration/);
+      expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
+    });
+
+    test('D-044 / #1765 — call forwarding: carrier + mode picker and codes fit 320px with ≥44px targets', async ({ page }) => {
+      await mockPhoneApi(page);
+      await openPage(page);
+      await expect(page.getByTestId('call-forwarding-panel')).toBeVisible();
+      for (const name of ['Verizon', 'AT&T', 'T-Mobile', 'Other']) {
+        await expectGloveTarget(page, name);
+      }
+      await page.getByRole('button', { name: 'T-Mobile' }).click();
+      await expect(page.getByTestId('call-forwarding-codes')).toContainText('**004*15125550123#');
+      await expectGloveTarget(page, /All calls/);
+      await expectGloveTarget(page, /Missed calls only/);
+      for (const link of await page.getByTestId('call-forwarding-codes').getByRole('link').all()) {
+        await link.scrollIntoViewIfNeeded();
+        const box = await link.boundingBox();
+        expect(Math.round(box!.height)).toBeGreaterThanOrEqual(44);
+        expect(box!.x + box!.width).toBeLessThanOrEqual(320);
+      }
+      await expectGloveTarget(page, /^Test it$/);
+      await page.getByRole('button', { name: /^Test it$/ }).click();
+      await expect(page.getByTestId('call-forwarding-check-result')).toContainText('did not come back');
+      await expectGloveTarget(page, /^Test again$|^Test it$/);
+      expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
+      await page.getByRole('button', { name: 'Other' }).click();
+      await expect(page.getByTestId('call-forwarding-generic')).toBeVisible();
       expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
     });
   });

@@ -56,6 +56,49 @@ describe('createCredentialResolver', () => {
     await resolver.close();
   });
 
+  it('carries the pool ssl setting onto the LISTEN client (Codex review, #1744)', async () => {
+    // A bare connectionString would leave the listener on pg defaults (no
+    // certificate verification) while every pooled connection verifies.
+    const { createCredentialResolver } = await import('../../src/integrations/credentials');
+    const ssl = { rejectUnauthorized: true, ca: 'CA' };
+    const pool = {
+      options: { connectionString: 'postgres://pgbouncer/app', ssl },
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+    } as any;
+    const directPool = {
+      options: { connectionString: 'postgres://direct/app', ssl },
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+    } as any;
+
+    const listener = new FakeListener();
+    const createListener = vi.fn(() => listener as any);
+    const resolver = createCredentialResolver({ pool, directPool, createListener });
+
+    expect(createListener).toHaveBeenCalledWith({ connectionString: 'postgres://direct/app', ssl });
+    await resolver.close();
+  });
+
+  it('builds the LISTEN client from host/port fields, ssl included, when there is no DSN', async () => {
+    const { createCredentialResolver } = await import('../../src/integrations/credentials');
+    const pool = {
+      options: { host: 'db', port: 5432, user: 'u', password: 'p', database: 'app', ssl: false },
+      query: vi.fn().mockResolvedValue({ rows: [] }),
+    } as any;
+
+    const createListener = vi.fn(() => new FakeListener() as any);
+    const resolver = createCredentialResolver({ pool, createListener });
+
+    expect(createListener).toHaveBeenCalledWith({
+      host: 'db',
+      port: 5432,
+      user: 'u',
+      password: 'p',
+      database: 'app',
+      ssl: false,
+    });
+    await resolver.close();
+  });
+
   it('reconnects and re-listens after listener error', async () => {
     const { createCredentialResolver } = await import('../../src/integrations/credentials');
     const pool = {

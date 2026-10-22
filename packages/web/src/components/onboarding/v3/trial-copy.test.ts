@@ -9,12 +9,12 @@ describe('planOption', () => {
     expect(planOption(PLANS[0])).toEqual({
       key: 'starter',
       label: 'Starter, $79 a month',
-      detail: 'Includes 2 users and 20 minutes of answered calls, then $1.25 a minute.',
+      detail: 'Includes 2 users and 60 minutes of answered calls, then $1.25 a minute.',
     });
     expect(planOption(PLANS[1])).toEqual({
       key: 'growth',
       label: 'Growth, $199 a month',
-      detail: 'Includes 5 users and 60 minutes of answered calls, then $1.25 a minute.',
+      detail: 'Includes 5 users and 200 minutes of answered calls, then $1.25 a minute.',
     });
   });
 
@@ -38,7 +38,7 @@ describe('planOption overage', () => {
   });
 
   it('leaves the clause out when extra minutes cost nothing, rather than promising "$0 a minute"', () => {
-    expect(planOption({ ...PLANS[0], overageCentsPerAiMinute: 0 }).detail).toBe('Includes 2 users and 20 minutes of answered calls.');
+    expect(planOption({ ...PLANS[0], overageCentsPerAiMinute: 0 }).detail).toBe('Includes 2 users and 60 minutes of answered calls.');
   });
 });
 

@@ -10,7 +10,7 @@
  * surfaces as the tagged `UnauthorizedError`, a null token as an AbortError —
  * both are park signals the controller handles internally).
  */
-import { useAuth } from '@clerk/clerk-expo';
+import { useAuth } from '@clerk/expo';
 import { useEffect } from 'react';
 import { AppState } from 'react-native';
 import { createApiFetch } from '../lib/apiFetch';

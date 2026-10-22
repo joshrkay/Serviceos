@@ -1,7 +1,7 @@
 import { z } from 'zod';
 // #1561 — zod-3 issue wording for every contract message (side effect).
 import './zod-messages';
-import { accountTypeSchema, catalogUnitSchema } from '@ai-service-os/shared';
+import { accountTypeSchema, catalogUnitSchema, skillTagsSchema } from '@ai-service-os/shared';
 import { CUSTOMER_SOURCES } from '../customers/customer';
 import { AFTER_HOURS_VOICE_MODES, EMERGENCY_TARGETS, PAYMENT_COLLECTION_MODES } from '../settings/settings';
 
@@ -259,6 +259,54 @@ export const createJobSchema = z.object({
 });
 
 /**
+ * Body for `PUT /api/jobs/:id` — the generic job edit. `.strict()` so an
+ * unknown key is a 400, never a silent write: the repository's `update` maps
+ * 19 keys to columns (deposit cents, money_state, status, customer_id, the
+ * Stripe payment-link URL…) and used to receive `req.body` verbatim, which
+ * let any `jobs:update` holder — technicians included, who are deliberately
+ * denied `invoices:*` — set paid deposits or close a job without the governed
+ * transition. Status moves go through `POST /api/jobs/:id/transition`;
+ * technician assignment through `/reassign` or appointment assignments.
+ */
+export const updateJobSchema = z
+  .object({
+    summary: z.string().min(1).max(500).optional(),
+    problemDescription: z.string().max(5000).optional(),
+    priority: z.enum(['low', 'normal', 'high', 'urgent']).optional(),
+    // Dispatch FR-2 phase 2 — the route additionally requires `jobs:assign`
+    // for this key, since it decides who may be dispatched.
+    requiredSkills: skillTagsSchema.optional(),
+  })
+  .strict();
+
+export type UpdateJobBody = z.infer<typeof updateJobSchema>;
+
+/**
+ * Body for `PUT /api/appointments/:id`. `.strict()` for the same reason as
+ * {@link updateJobSchema} (audit T4-F07): the repository also writes `jobId`,
+ * `holdPendingApproval`, `holdExpiryAt` and `idempotencyKey` when present, and
+ * none of those is a client-editable field. `running_late` is the virtual
+ * status the route turns into a delay notification rather than persisting;
+ * `delayMinutes` only means anything alongside it.
+ */
+export const updateAppointmentSchema = z
+  .object({
+    scheduledStart: z.string().datetime().optional(),
+    scheduledEnd: z.string().datetime().optional(),
+    arrivalWindowStart: z.string().datetime().optional(),
+    arrivalWindowEnd: z.string().datetime().optional(),
+    timezone: z.string().min(1).optional(),
+    notes: z.string().max(5000).optional(),
+    status: z
+      .enum(['scheduled', 'confirmed', 'in_progress', 'completed', 'canceled', 'no_show', 'running_late'])
+      .optional(),
+    delayMinutes: z.number().int().positive().optional(),
+  })
+  .strict();
+
+export type UpdateAppointmentBody = z.infer<typeof updateAppointmentSchema>;
+
+/**
  * Body for `POST /api/jobs/:id/schedule` — initial schedule OR reschedule of
  * an existing job (idempotent upsert of the canonical `job-schedule:` visit).
  */
@@ -425,12 +473,22 @@ export const delayAcknowledgmentSchema = z.object({
 
 export type DelayAcknowledgment = z.infer<typeof delayAcknowledgmentSchema>;
 
+/** One cap for note content on create AND update, so a note the API accepts can always be edited again. */
+export const NOTE_CONTENT_MAX_CHARS = 20_000;
+
 export const createNoteSchema = z.object({
   entityType: z.enum(['customer', 'location', 'job', 'estimate', 'invoice']),
   entityId: z.string().min(1),
-  content: z.string().min(1),
+  content: z.string().min(1).max(NOTE_CONTENT_MAX_CHARS),
   isPinned: z.boolean().optional(),
 });
+
+/** Body for `PUT /api/notes/:id` — content only, and it must be a string. */
+export const updateNoteSchema = z
+  .object({
+    content: z.string().min(1).max(NOTE_CONTENT_MAX_CHARS),
+  })
+  .strict();
 
 export const createCatalogItemSchema = z.object({
   name: z.string().trim().min(1),
@@ -444,24 +502,28 @@ export const createCatalogItemSchema = z.object({
 
 export const updateCatalogItemSchema = createCatalogItemSchema.partial();
 
-// Public review-link field (Settings → Reviews). Trims the input FIRST so a
+// Public https link field (review links, website). Trims the input FIRST so a
 // whitespace-only value ('   ') normalizes to null (cleared) instead of
 // failing validation; a non-empty value must be a valid URL.
-const reviewUrlField = z
-  .preprocess(
-    (v) => (typeof v === 'string' ? v.trim() : v),
-    z.union([
-      // https only — these values are rendered as clickable hrefs on the
-      // public feedback page, so reject javascript:/data:/http: schemes.
-      z.string().url().refine((u) => /^https:\/\//i.test(u), {
-        message: 'Review URL must be an https:// link',
-      }),
-      z.literal(''),
-      z.null(),
-    ]),
-  )
-  .optional()
-  .transform((v) => (v === '' ? null : v));
+const httpsUrlField = (label: string) =>
+  z
+    .preprocess(
+      (v) => (typeof v === 'string' ? v.trim() : v),
+      z.union([
+        // https only — these values are rendered as clickable hrefs on public
+        // pages, so reject javascript:/data:/http: schemes.
+        z.string().url().max(2000).refine((u) => /^https:\/\//i.test(u), {
+          message: `${label} must be an https:// link`,
+        }),
+        z.literal(''),
+        z.null(),
+      ]),
+    )
+    .optional()
+    .transform((v) => (v === '' ? null : v));
+
+// Public review-link field (Settings → Reviews).
+const reviewUrlField = httpsUrlField('Review URL');
 
 // Polly voice id (e.g. "Polly.Mia-Neural"). Constrained so a stored value
 // can never inject XML metacharacters into the `<Say voice="...">` TwiML.
@@ -545,6 +607,8 @@ export const updateSettingsSchema = z.object({
   // Tier 4 — Quick-settings toggles persistence.
   autoApplyInternalUpdates: z.boolean().optional(),
   autoSendAppointmentReminders: z.boolean().optional(),
+  // #1738 — "text new leads right away" (web form / portal; LSA has its own switch).
+  speedToLeadEnabled: z.boolean().optional(),
   notifyTechniciansBySms: z.boolean().optional(),
   // P20-001 — opt into auto-drafting an invoice (as a proposal) on job completion.
   autoInvoiceOnCompletion: z.boolean().optional(),
@@ -628,6 +692,9 @@ export const updateSettingsSchema = z.object({
   // normalizes to null so a cleared field reads back as "not configured".
   googleReviewUrl: reviewUrlField,
   yelpReviewUrl: reviewUrlField,
+  // D-044 / #1768 — the owner's own website, or the published tenant site.
+  // Migration 334. Null clears.
+  websiteUrl: httpsUrlField('Website'),
   // P11-002 — tenant language stack. Persisted to tenant_settings and
   // consumed by the voice agent + customer-facing comms.
   defaultLanguage: z.enum(['en', 'es']).optional(),

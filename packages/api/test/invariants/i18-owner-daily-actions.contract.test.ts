@@ -132,7 +132,13 @@ const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 16;
 // phone/retry now require owner — previously open to any member).
 // "Pick, don't build" S4: +1 onboarding (PUT /api/onboarding/draft/metro).
 // "Pick, don't build" S4: +2 onboarding (POST /api/onboarding/draft/undo, /reset).
-const OWNER_ONLY_ROUTES = 81;
+// D-044 (#1762, #1763): +4 occasional (Google listing picker GET/PUT, get-found-online GET + dismiss).
+// D-045: +2 occasional (PUT/DELETE /api/settings/text-wording/:purpose — owner's text wording).
+// D-044 (#1752): +4 occasional (/api/get-found presence-path, forwarding-mode, item skip PUT/DELETE).
+// #1790 (merged 2026-10-22 with this contract red): +33 occasional — call forwarding
+// setup/check, hosted tenant site (publish, about, address, domain), drip campaigns,
+// webchat settings/token, LSA integration, voice call-score corrections.
+const OWNER_ONLY_ROUTES = 124;
 
 // ── Derivation ──────────────────────────────────────────────────────────────
 
@@ -758,6 +764,9 @@ describe('I18: owner daily actions ↔ code contract', () => {
       // only when it is tagged life-safety/operator — a message attribute, not a
       // caller role.
       "packages/api/src/notifications/gated-message-delivery.ts :: message.recipientClass === 'owner' &&",
+      // Recipient KIND on an outbound text (D-045) — who the message is to, not
+      // a caller role.
+      "packages/api/src/notifications/outbound-messaging.ts :: if (recipient.kind === 'owner') {",
       // Proposal-level gate for the `adopt_entity_alias` manual type (§5.2),
       // enforced in the approval path, not on an HTTP route.
       "packages/api/src/proposals/actions.ts :: if (proposal.proposalType === 'adopt_entity_alias' && actorRole !== 'owner') {",

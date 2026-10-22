@@ -40,18 +40,40 @@ import type { SideEffect } from '../../../src/ai/agents/customer-calling/types';
 
 function results(
   transcript: string,
-  flags: { is_final: boolean; speech_final?: boolean; confidence?: number },
+  flags: {
+    is_final: boolean;
+    speech_final?: boolean;
+    confidence?: number;
+    /** U1 — stream-clock timing as Deepgram sends it (seconds). */
+    start?: number;
+    duration?: number;
+    wordEnds?: number[];
+  },
 ): string {
   return JSON.stringify({
     type: 'Results',
     is_final: flags.is_final,
     speech_final: flags.speech_final ?? false,
-    channel: { alternatives: [{ transcript, confidence: flags.confidence ?? 0.95 }] },
+    ...(flags.start !== undefined ? { start: flags.start } : {}),
+    ...(flags.duration !== undefined ? { duration: flags.duration } : {}),
+    channel: {
+      alternatives: [
+        {
+          transcript,
+          confidence: flags.confidence ?? 0.95,
+          ...(flags.wordEnds ? { words: flags.wordEnds.map((end) => ({ end })) } : {}),
+        },
+      ],
+    },
   });
 }
 
-function utteranceEnd(): string {
-  return JSON.stringify({ type: 'UtteranceEnd', channel: [0, 1], last_word_end: 2.4 });
+function utteranceEnd(lastWordEnd: number | undefined = 2.4): string {
+  return JSON.stringify({
+    type: 'UtteranceEnd',
+    channel: [0, 1],
+    ...(lastWordEnd !== undefined ? { last_word_end: lastWordEnd } : {}),
+  });
 }
 
 class FakeTwilioWs implements WsLike {
@@ -135,6 +157,43 @@ async function drain(socket: ServerSocket, events: StreamingTranscriptEvent[]): 
 }
 
 const finals = (events: StreamingTranscriptEvent[]) => events.filter((e) => e.type === 'final');
+
+describe('U1 — the final carries when the caller\'s last word ended (stream clock, ms)', () => {
+  it('uses the last words[].end of the sentence\'s last timed segment', async () => {
+    const { socket, events } = await openRealSession();
+    socket.send(results('my furnace', { is_final: true, speech_final: false, start: 0.5, duration: 0.9, wordEnds: [0.8, 1.35] }));
+    socket.send(results('stopped', { is_final: true, speech_final: true, start: 1.4, duration: 0.6, wordEnds: [1.92] }));
+    await drain(socket, events);
+    expect(finals(events)).toHaveLength(1);
+    expect(finals(events)[0].lastWordEndMs).toBe(1920);
+  });
+
+  it('falls back to start + duration when the segment has no word timing', async () => {
+    const { socket, events } = await openRealSession();
+    socket.send(results('is anyone there', { is_final: true, speech_final: true, start: 3.0, duration: 1.25 }));
+    await drain(socket, events);
+    expect(finals(events)[0].lastWordEndMs).toBe(4250);
+  });
+
+  it('an UtteranceEnd frame\'s last_word_end wins over the segments\' own timing', async () => {
+    const { socket, events } = await openRealSession();
+    socket.send(results('I need someone', { is_final: true, speech_final: false, start: 0, duration: 1.0, wordEnds: [0.9] }));
+    socket.send(utteranceEnd(2.4));
+    await drain(socket, events);
+    expect(finals(events)[0].lastWordEndMs).toBe(2400);
+  });
+
+  it('a final whose segments carried no timing has no lastWordEndMs, and timing never leaks into the next sentence', async () => {
+    const { socket, events } = await openRealSession();
+    socket.send(results('first', { is_final: true, speech_final: true, start: 1, duration: 1 }));
+    socket.send(results('second', { is_final: true, speech_final: true }));
+    await drain(socket, events);
+    const f = finals(events);
+    expect(f).toHaveLength(2);
+    expect(f[0].lastWordEndMs).toBe(2000);
+    expect(f[1].lastWordEndMs).toBeUndefined();
+  });
+});
 
 describe('LCR-03 — Deepgram provider: one final per caller sentence', () => {
   it('joins is_final segments and emits ONE final when speech_final arrives', async () => {

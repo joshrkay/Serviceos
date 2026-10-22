@@ -24,6 +24,7 @@ import { InMemorySettingsRepository } from '../../src/settings/settings';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryDncRepository } from '../../src/compliance/dnc';
 import { createLogger } from '../../src/logging/logger';
+import { withOutbound } from '../helpers/outbound-messaging';
 
 const TENANT = '11111111-1111-4111-8111-111111115282';
 const CUSTOMER = '33333333-3333-4333-8333-333333335282';
@@ -63,7 +64,7 @@ async function sweepFor(customer: { email?: string; primaryPhone?: string; smsCo
     updatedAt: NOW,
   });
   const delivery = new InMemoryDeliveryProvider();
-  const sendService = new SendService({
+  const sendService = new SendService(withOutbound({
     delivery: new GatedMessageDelivery({
       base: delivery,
       dnc: new InMemoryDncRepository(),
@@ -77,7 +78,8 @@ async function sweepFor(customer: { email?: string; primaryPhone?: string; smsCo
     settingsRepo,
     dispatchRepo: new InMemoryDispatchRepository(),
     publicBaseUrl: 'https://app.example.com',
-  });
+    ensureInvoicePayLink: async () => undefined,
+  }));
   const auditRepo = new InMemoryAuditRepository();
   const result = await runEstimateReminderSweep({
     estimateRepo,

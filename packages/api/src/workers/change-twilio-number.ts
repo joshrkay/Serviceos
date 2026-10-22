@@ -135,13 +135,32 @@ export async function changeTenantNumber(input: {
   // 2 + 3 — attach, then repoint. Failure here rolls the new number back.
   try {
     await attachNumberToMessagingService(subaccountSid, authToken, pd.messagingServiceSid, newSid);
+    // #1750 (D-044) — one statement repoints the line AND voids the
+    // call-routing proof (the forwarding check proved forwarding to the old
+    // number, about to be released; the generation bump stops a check still in
+    // flight from stamping the new one). Atomic, so a retry that finds the
+    // line already repointed never leaves stale proof behind.
     await tenantQuery(
       pool,
       tenantId,
-      `UPDATE tenant_integrations
-       SET provider_data = provider_data || $1::jsonb, updated_at = NOW()
-       WHERE tenant_id = $2 AND provider = 'twilio'`,
-      [JSON.stringify({ phoneNumberSid: newSid, phoneE164: changeTo, numberAttached: true }), tenantId],
+      `WITH repoint AS (
+         UPDATE tenant_integrations
+            SET provider_data = provider_data || $1::jsonb, updated_at = NOW()
+          WHERE tenant_id = $2 AND provider = 'twilio'
+         RETURNING tenant_id
+       )
+       UPDATE tenant_settings
+          SET forwarding_verified_at = NULL, forwarding_generation = forwarding_generation + 1, updated_at = NOW()
+        WHERE tenant_id IN (SELECT tenant_id FROM repoint)`,
+      [
+        JSON.stringify({
+          phoneNumberSid: newSid,
+          phoneE164: changeTo,
+          numberAttached: true,
+          phoneE164ChangedAt: new Date().toISOString(),
+        }),
+        tenantId,
+      ],
     );
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);

@@ -121,12 +121,12 @@ describe("Postgres integration — AI minute overage settlement", () => {
     });
   }
 
-  it("invoices a Starter period with 60 AI minutes as one $50.00 overage item", async () => {
-    await recordTwoMinuteCalls(30);
+  it("invoices a Starter period with 100 AI minutes as one $50.00 overage item", async () => {
+    await recordTwoMinuteCalls(50);
 
     const result = await settle();
 
-    expect(result).toMatchObject({ billableMinutes: 60, overageMinutes: 40, customerChargeCents: 5_000 });
+    expect(result).toMatchObject({ billableMinutes: 100, overageMinutes: 40, customerChargeCents: 5_000 });
     expect(stripe.items()).toEqual([
       { id: "ii_1", amount: 5_000, customer: `cus_${tenant.tenantId.slice(0, 8)}` },
     ]);
@@ -142,7 +142,7 @@ describe("Postgres integration — AI minute overage settlement", () => {
   });
 
   it("re-delivering a settled period's invoice webhook never calls Stripe again", async () => {
-    await recordTwoMinuteCalls(11);
+    await recordTwoMinuteCalls(31);
 
     const first = await settle();
     const again = await settle();
@@ -160,7 +160,7 @@ describe("Postgres integration — AI minute overage settlement", () => {
   it("absorbs a single transient Stripe failure in-process and charges exactly once", async () => {
     vi.spyOn(Math, "random").mockReturnValue(0);
     try {
-      await recordTwoMinuteCalls(11);
+      await recordTwoMinuteCalls(31);
       stripe.failNextRequests(1);
 
       const result = await settle();
@@ -178,7 +178,7 @@ describe("Postgres integration — AI minute overage settlement", () => {
   it("rejects after 3 failed attempts; a later redelivery charges exactly once, at the original amount", async () => {
     vi.spyOn(Math, "random").mockReturnValue(0);
     try {
-      await recordTwoMinuteCalls(11);
+      await recordTwoMinuteCalls(31);
       stripe.failNextRequests(3);
 
       await expect(settle()).rejects.toThrow(/Stripe AI minute overage invoice item failed \(503\)/);
@@ -202,7 +202,7 @@ describe("Postgres integration — AI minute overage settlement", () => {
   });
 
   it("prices the period on the plan the invoice carries (upgraded to Growth: no overage)", async () => {
-    await recordTwoMinuteCalls(30);
+    await recordTwoMinuteCalls(50);
 
     const result = await settle(GROWTH_PRICE);
 
@@ -211,14 +211,14 @@ describe("Postgres integration — AI minute overage settlement", () => {
   });
 
   it("refuses to settle against an unknown subscription price", async () => {
-    await recordTwoMinuteCalls(30);
+    await recordTwoMinuteCalls(50);
 
     await expect(settle("price_unknown")).rejects.toThrow(/Unknown subscription price/);
     expect(stripe.requests()).toBe(0);
   });
 
   it("RLS prevents another tenant from reading settlements", async () => {
-    await recordTwoMinuteCalls(30);
+    await recordTwoMinuteCalls(50);
     await settle();
     const other = await createTestTenant(pool);
     await pool.query(`DO $$ BEGIN
@@ -242,8 +242,8 @@ describe("Postgres integration — AI minute overage settlement", () => {
   });
 
   it("charges past the default cap when the owner raised it, and everything when they removed it", async () => {
-    // 100 calls x 2 min = 200 minutes on Starter: 180 over x $1.25 = $225.
-    await recordTwoMinuteCalls(100);
+    // 150 calls x 2 min = 300 minutes on Starter: 240 over x $1.25 = $300.
+    await recordTwoMinuteCalls(150);
     const caps = new PgOverageCapStore(pool);
     await pool.query(
       `INSERT INTO tenant_settings (tenant_id, business_name) VALUES ($1, 'Cap Plumbing')
@@ -252,22 +252,22 @@ describe("Postgres integration — AI minute overage settlement", () => {
     );
 
     await caps.set(tenant.tenantId, 20_000);
-    expect(await settle()).toMatchObject({ overageMinutes: 180, customerChargeCents: 20_000 });
+    expect(await settle()).toMatchObject({ overageMinutes: 240, customerChargeCents: 20_000 });
 
     periodIndex += 1;
     period = {
       start: new Date(Date.UTC(2026, periodIndex, 1)),
       end: new Date(Date.UTC(2026, periodIndex + 1, 1)),
     };
-    await recordTwoMinuteCalls(100);
+    await recordTwoMinuteCalls(150);
     await caps.set(tenant.tenantId, null);
-    expect(await settle()).toMatchObject({ overageMinutes: 180, customerChargeCents: 22_500 });
+    expect(await settle()).toMatchObject({ overageMinutes: 240, customerChargeCents: 30_000 });
   });
 
   it("records minute_overage_invoiced once, only when an invoice item is created", async () => {
     const posthog = capturePostHog();
     try {
-      await recordTwoMinuteCalls(30); // 60 min: 40 over = $50.00
+      await recordTwoMinuteCalls(50); // 100 min: 40 over = $50.00
       await settle();
       await settle();
 

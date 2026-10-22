@@ -936,6 +936,35 @@ describe('P0-006 — Secrets/config framework', () => {
     });
   });
 
+  describe('U1 — reply-gap SLO knobs (D-043)', () => {
+    it('defaults: 1500ms P95, 1% unacked ceiling, 30-reply sample floor', () => {
+      const c = loadConfig({ NODE_ENV: 'dev' });
+      expect(c.SLO_REPLY_GAP_P95_MS).toBe(1500);
+      expect(c.SLO_REPLY_UNACKED_RATE_MAX).toBe(0.01);
+      expect(c.SLO_REPLY_GAP_MIN_SAMPLE).toBe(30);
+    });
+
+    it('coerces string overrides to numbers', () => {
+      const c = loadConfig({
+        NODE_ENV: 'dev',
+        SLO_REPLY_GAP_P95_MS: '1200',
+        SLO_REPLY_UNACKED_RATE_MAX: '0.05',
+        SLO_REPLY_GAP_MIN_SAMPLE: '60',
+      });
+      expect(c.SLO_REPLY_GAP_P95_MS).toBe(1200);
+      expect(c.SLO_REPLY_UNACKED_RATE_MAX).toBe(0.05);
+      expect(c.SLO_REPLY_GAP_MIN_SAMPLE).toBe(60);
+    });
+
+    it('rejects a non-positive threshold, a rate above 1, and a non-integer floor', () => {
+      expect(() => loadConfig({ NODE_ENV: 'dev', SLO_REPLY_GAP_P95_MS: '0' })).toThrow();
+      resetConfig();
+      expect(() => loadConfig({ NODE_ENV: 'dev', SLO_REPLY_UNACKED_RATE_MAX: '1.5' })).toThrow();
+      resetConfig();
+      expect(() => loadConfig({ NODE_ENV: 'dev', SLO_REPLY_GAP_MIN_SAMPLE: '2.5' })).toThrow();
+    });
+  });
+
   describe('U5 — VOICE_MAX_CALL_DURATION_MS', () => {
     it('defaults to 15 minutes when unset', () => {
       const c = loadConfig({ NODE_ENV: 'dev' });
@@ -1074,6 +1103,11 @@ describe('P0-026 — validateEnvSchema (Zod startup validation)', () => {
     expect(() =>
       validateEnvSchema({ NODE_ENV: 'development', CORS_ORIGIN: 'true' })
     ).not.toThrow();
+  });
+
+  it('validateEnvSchema — STT_PROVIDER=fixture is forbidden in production, allowed in dev', () => {
+    expect(() => validateEnvSchema({ ...fullProdEnv, STT_PROVIDER: 'fixture' })).toThrow(/STT_PROVIDER/);
+    expect(() => validateEnvSchema({ NODE_ENV: 'dev', DATABASE_URL: '', STT_PROVIDER: 'fixture' })).not.toThrow();
   });
 
   it('validateEnvSchema — DEV_AUTH_BYPASS=true is forbidden in production', () => {

@@ -41,6 +41,29 @@ import { randomUUID } from 'crypto';
 
 export type CallTurnSpeaker = 'agent' | 'caller';
 
+/**
+ * U1 (voice parity) — which phone transport produced a caller turn's timing
+ * stamps. `null` on rows written before the stamps existed, on agent turns,
+ * and on in-app sessions (no transport clock to anchor to).
+ */
+export const CALL_TURN_TRANSPORTS = ['gather', 'realtime'] as const;
+export type CallTurnTransport = (typeof CALL_TURN_TRANSPORTS)[number];
+
+/**
+ * U1 — why a reply's first REAL frame was enqueued but never acknowledged by
+ * Twilio: the mark behind it came back as a `clear` echo (barge-in flushed
+ * the buffer), no ack arrived within the 5 s window, or the stream closed
+ * first. Such a turn keeps `first_audio_at` / `reply_gap_ms` null — nothing is
+ * estimated — but is COUNTED, so repeated playout failures cannot make the
+ * reply-gap percentile look healthier.
+ */
+export type ReplyUnackedReason = 'clear_echo' | 'ack_timeout' | 'stream_closed';
+export const REPLY_UNACKED_REASONS: ReadonlyArray<ReplyUnackedReason> = [
+  'clear_echo',
+  'ack_timeout',
+  'stream_closed',
+];
+
 export interface CallTranscriptTurn {
   id: string;
   tenantId: string;
@@ -59,6 +82,22 @@ export interface CallTranscriptTurn {
   startedAt: Date;
   completedAt?: Date;
   createdAt: Date;
+  /**
+   * U1 reply-gap stamps (caller turns only; see migration 326). Written in two
+   * steps: `recordTurn` carries what is known when the caller's text is
+   * appended (STT-final), `markReplyAudio` adds what is known only once the
+   * reply's audio played. `replyGapMs = firstAudioAt − lastWordAt`;
+   * `endpointDelayMs = sttFinalAt − lastWordAt`.
+   */
+  lastWordAt?: Date;
+  sttFinalAt?: Date;
+  firstAudioEnqueuedAt?: Date;
+  firstAudioAt?: Date;
+  firstAudibleAt?: Date;
+  replyGapMs?: number;
+  endpointDelayMs?: number;
+  replyUnackedReason?: ReplyUnackedReason;
+  transport?: CallTurnTransport;
 }
 
 export interface RecordTurnInput {
@@ -73,6 +112,47 @@ export interface RecordTurnInput {
   /** Defaults to NOW() at the database. Pass for replay/backfill. */
   startedAt?: Date;
   completedAt?: Date;
+  /**
+   * U1 — timing known at append time for a CALLER turn: when the caller
+   * stopped speaking (Deepgram word timing anchored to wall clock; realtime
+   * only), when the recogniser finalised (realtime: the `final` event; Gather:
+   * the webhook receipt), their difference, and the transport. On a conflict
+   * (interim → final replacement) a provided value wins and an absent one
+   * keeps what the row already has.
+   */
+  lastWordAt?: Date;
+  sttFinalAt?: Date;
+  endpointDelayMs?: number;
+  transport?: CallTurnTransport;
+}
+
+/**
+ * U1 — the second write of a caller turn's reply timing, keyed on the row's id
+ * when known, else on the mid-call upsert key
+ * `(tenant_id, call_sid, session_id, turn_index)`. Every stamp is
+ * `COALESCE`d onto the row, so a filler's `firstAudibleAt` is never overwritten
+ * by the later real frame and a repeated stamp is a no-op. Returns the number
+ * of rows updated: 0 means the row is gone and the caller counts a lost stamp
+ * rather than inserting one.
+ */
+export interface MarkReplyAudioInput {
+  tenantId: string;
+  /**
+   * The row's primary key, as `recordTurn` returned it. When set the UPDATE
+   * matches on it (plus tenant) and ignores the mid-call key: `attachRecording`
+   * renumbers `turn_index` at end of call, so a stamp that lands after it must
+   * not chase the stale index. Absent only when the insert never resolved an
+   * id; then the (callSid, sessionId, turnIndex) key is used.
+   */
+  id?: string;
+  callSid: string;
+  sessionId: string;
+  turnIndex: number;
+  firstAudibleAt?: Date;
+  firstAudioEnqueuedAt?: Date;
+  firstAudioAt?: Date;
+  replyGapMs?: number;
+  replyUnackedReason?: ReplyUnackedReason;
 }
 
 export interface CallTranscriptTurnRepository {
@@ -83,6 +163,9 @@ export interface CallTranscriptTurnRepository {
    * replacement).
    */
   recordTurn(input: RecordTurnInput): Promise<CallTranscriptTurn>;
+
+  /** U1 — see {@link MarkReplyAudioInput}. Never inserts. */
+  markReplyAudio(input: MarkReplyAudioInput): Promise<number>;
 
   /**
    * Return all turns for a recording in ascending turn_index order.
@@ -126,6 +209,27 @@ export function validateRecordTurnInput(input: RecordTurnInput): void {
   }
   if (input.text.length === 0) {
     throw new Error('call_transcript_turns: text must be non-empty');
+  }
+  if (input.transport !== undefined && !CALL_TURN_TRANSPORTS.includes(input.transport)) {
+    throw new Error(`call_transcript_turns: transport must be 'gather' or 'realtime' (got ${input.transport})`);
+  }
+}
+
+export function validateMarkReplyAudioInput(input: MarkReplyAudioInput): void {
+  if (!input.tenantId) throw new Error('call_transcript_turns: tenantId is required');
+  if (!input.callSid || !input.sessionId) {
+    throw new Error('call_transcript_turns: markReplyAudio needs callSid and sessionId');
+  }
+  if (!Number.isInteger(input.turnIndex) || input.turnIndex < 0) {
+    throw new Error('call_transcript_turns: turnIndex must be a non-negative integer');
+  }
+  if (
+    input.replyUnackedReason !== undefined &&
+    !REPLY_UNACKED_REASONS.includes(input.replyUnackedReason)
+  ) {
+    throw new Error(
+      `call_transcript_turns: unknown replyUnackedReason ${String(input.replyUnackedReason)}`,
+    );
   }
 }
 
@@ -221,10 +325,41 @@ export class InMemoryCallTranscriptTurnRepository implements CallTranscriptTurnR
       startedAt,
       completedAt: input.completedAt,
       createdAt: existing ? existing.createdAt : this.nextCreatedAt(),
+      // U1 — a provided stamp wins, an absent one keeps the row's (Pg COALESCE).
+      lastWordAt: input.lastWordAt ?? existing?.lastWordAt,
+      sttFinalAt: input.sttFinalAt ?? existing?.sttFinalAt,
+      endpointDelayMs: input.endpointDelayMs ?? existing?.endpointDelayMs,
+      transport: input.transport ?? existing?.transport,
+      firstAudioEnqueuedAt: existing?.firstAudioEnqueuedAt,
+      firstAudioAt: existing?.firstAudioAt,
+      firstAudibleAt: existing?.firstAudibleAt,
+      replyGapMs: existing?.replyGapMs,
+      replyUnackedReason: existing?.replyUnackedReason,
     };
     if (existing) this.rows[existingIdx] = turn;
     else this.rows.push(turn);
     return { ...turn };
+  }
+
+  async markReplyAudio(input: MarkReplyAudioInput): Promise<number> {
+    validateMarkReplyAudioInput(input);
+    const row = this.rows.find((r) =>
+      input.id
+        ? r.tenantId === input.tenantId && r.id === input.id
+        : r.tenantId === input.tenantId &&
+          r.callSid === input.callSid &&
+          r.sessionId === input.sessionId &&
+          r.turnIndex === input.turnIndex,
+    );
+    if (!row) return 0;
+    // COALESCE: the first stamp of each column stands (a filler's
+    // first_audible_at survives the real frame; a repeat is a no-op).
+    row.firstAudibleAt = row.firstAudibleAt ?? input.firstAudibleAt;
+    row.firstAudioEnqueuedAt = row.firstAudioEnqueuedAt ?? input.firstAudioEnqueuedAt;
+    row.firstAudioAt = row.firstAudioAt ?? input.firstAudioAt;
+    row.replyGapMs = row.replyGapMs ?? input.replyGapMs;
+    row.replyUnackedReason = row.replyUnackedReason ?? input.replyUnackedReason;
+    return 1;
   }
 
   async listByRecording(

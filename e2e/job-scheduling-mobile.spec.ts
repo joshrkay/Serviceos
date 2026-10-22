@@ -108,4 +108,37 @@ test.describe('job scheduling — mobile viewport', () => {
     }));
     await expectNoHorizontalOverflow(scrollWidth, clientWidth);
   });
+
+  test('the Required skills editor on a job fits 320px with ≥44px controls (Dispatch FR-2)', async ({ page }) => {
+    await page.goto('/jobs');
+    if (/\/login/.test(page.url())) test.skip(true, 'Not authenticated in this run');
+    await dismissWhatsNewModal(page);
+
+    const firstJob = page.getByRole('button', { name: /JOB-/ }).first();
+    if (!(await firstJob.count())) test.skip(true, 'No jobs seeded to open');
+    await firstJob.click();
+
+    // The shell can hold the detail view twice in the DOM (one hidden), as
+    // with the Schedule label above, so scope to the visible card.
+    const card = page.getByTestId('job-required-skills').filter({ visible: true }).first();
+    await expect(card).toBeVisible();
+    const edit = card.getByTestId('job-required-skills-edit');
+    if (!(await edit.count())) test.skip(true, 'Signed-in role cannot edit required skills');
+    await edit.click();
+
+    await card.getByTestId('job-required-skills-input').fill('epa 608 universal certification');
+    await card.getByRole('button', { name: 'Add' }).click();
+    await expect(card.getByText('epa_608_universal_certification')).toBeVisible();
+
+    const editor = card.getByTestId('job-required-skills-editor');
+    for (const control of await editor.locator('button, input').all()) {
+      const box = await control.boundingBox();
+      expect(box?.height ?? 0).toBeGreaterThanOrEqual(44);
+    }
+    const { scrollWidth, clientWidth } = await page.evaluate(() => ({
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+    }));
+    await expectNoHorizontalOverflow(scrollWidth, clientWidth);
+  });
 });

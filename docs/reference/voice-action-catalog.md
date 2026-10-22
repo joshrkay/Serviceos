@@ -1332,6 +1332,8 @@ migration).
 | `onboarding_team_member` | capture |
 | `onboarding_tenant_settings` | capture |
 | `onboarding_voice_policy` | capture |
+| `update_google_listing_website` | manual |
+| `update_tenant_site_about` | manual |
 <!-- END generated: handler-no-onramp -->
 
 Notes per type (prose — the list above is the generated fact):
@@ -1672,7 +1674,7 @@ either `speakable` or `lookups`.
     { "intent": "update_brand_voice", "proposalType": "update_brand_voice", "actionClass": "manual" }
   ],
   "lookups": ["lookup_account_summary","lookup_agreements","lookup_appointments","lookup_availability","lookup_balance","lookup_catalog","lookup_crew_schedule","lookup_customer","lookup_day_overview","lookup_digest","lookup_estimates","lookup_invoices","lookup_job_profit","lookup_jobs","lookup_leads","lookup_materials","lookup_my_day","lookup_next_job","lookup_pending_items","lookup_revenue","lookup_timesheets"],
-  "handlerNoOnramp": ["adopt_entity_alias","callback","create_booking","onboarding_estimate_template","onboarding_schedule","onboarding_service_category","onboarding_team_member","onboarding_tenant_settings","onboarding_voice_policy"],
+  "handlerNoOnramp": ["adopt_entity_alias","callback","create_booking","onboarding_estimate_template","onboarding_schedule","onboarding_service_category","onboarding_team_member","onboarding_tenant_settings","onboarding_voice_policy","update_google_listing_website","update_tenant_site_about"],
   "gated": ["approve_proposal","reject_proposal","edit_proposal"]
 }
 ```

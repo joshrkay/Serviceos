@@ -256,6 +256,10 @@ const AI_PLANE_REPOS: ReadonlyArray<{ receiver: string; why: string }> = [
     receiver: 'smsEventRepo',
     why: 'RV-225 — records a voice edit request in the proposal approval-rail event store so it blocks approval exactly like an SMS EDIT. Approval-rail bookkeeping on the proposal, not an operational entity.',
   },
+  {
+    receiver: 'callSummaryRepo',
+    why: 'A2 — summarizeSession persists its own end-of-call summary (call_summaries: summary text, detected intent, quality score) through the tenant RLS context instead of a raw pool.query. An AI output artifact (call-quality analytics, purged with the recording), never an operational entity.',
+  },
 ];
 
 /**

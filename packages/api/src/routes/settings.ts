@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import type { Queue } from '../queues/queue';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission, requireRole } from '../middleware/auth';
 import { updateSettingsSchema } from '../shared/contracts';
@@ -11,6 +12,7 @@ import { PackActivationRepository } from '../settings/pack-activation';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { resolveCanonicalUser, type UserRepository } from '../users/user';
 import { requireActiveTenantMember } from '../users/tenant-member';
+import { hasPermission, isValidRole } from '../auth/rbac';
 import { z } from 'zod';
 import {
   getSettings,
@@ -338,6 +340,12 @@ export function createSettingsRouter(
    * user id (or 500 on the FK for an id naming nobody).
    */
   memberDeps?: { userRepo: Pick<UserRepository, 'findById'> },
+  /**
+   * S5a-5 (U8) — the app queue. A PUT that switches payment_collection_mode
+   * to "Collect on the spot" enqueues the pay-link cleanup in the settings
+   * write's own (request) transaction; `updateSettings` attaches the hook.
+   */
+  paymentModeDeps?: { queue: Queue },
 ): Router {
   const router = Router();
 
@@ -530,12 +538,28 @@ export function createSettingsRouter(
         }
 
         if (parsed.backupSupervisorUserId && memberDeps) {
-          await requireActiveTenantMember(
+          const backup = await requireActiveTenantMember(
             memberDeps.userRepo,
             req.auth!.tenantId,
             parsed.backupSupervisorUserId,
             'backupSupervisorUserId',
           );
+          // B1 — the backup's mobile is an approval phone (SMS replies, the
+          // voice owner line, one-tap links), and it approves with the
+          // backup's own role. A role without proposals:approve would be an
+          // approval phone that can approve nothing.
+          // B1 follow-up — the rule is about who is being MADE the backup. A
+          // backup named before B1 (e.g. a technician) and sent back
+          // unchanged with another field is accepted: it already carries no
+          // approval authority, and refusing it blocked every save.
+          const stored = await getSettings(req.auth!.tenantId, settingsRepo);
+          const unchanged = stored?.backupSupervisorUserId === parsed.backupSupervisorUserId;
+          if (!unchanged && (!isValidRole(backup.role) || !hasPermission(backup.role, 'proposals:approve'))) {
+            throw new ValidationError(
+              "That team member can't approve work, so they can't be your backup.",
+              { field: 'backupSupervisorUserId' },
+            );
+          }
         }
 
         if (parsed.terminologyPreferences) {
@@ -576,6 +600,7 @@ export function createSettingsRouter(
         // racing a rotation in another tab.
         const result = await updateSettings(req.auth!.tenantId, parsed, settingsRepo, {
           preserveVoiceApprovalPin: true,
+          ...(paymentModeDeps ? { paymentModeQueue: paymentModeDeps.queue } : {}),
         });
         if (!result) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Settings not found' });

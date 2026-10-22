@@ -380,6 +380,16 @@ export interface StreamingTranscriptEvent {
   transcript: string;
   confidence: number;
   isFinal: boolean;
+  /**
+   * U1 (voice parity) — `final` only: when the caller's LAST word ended, in
+   * milliseconds on the provider's own stream clock (Deepgram counts from the
+   * first sample it received). The adapter anchors that clock to wall time at
+   * the first sample it forwards, so the reply gap is measured from the moment
+   * the caller stopped speaking rather than from the recogniser's endpoint.
+   * Absent when the provider sent no timing for the sentence; the turn then
+   * keeps `last_word_at` null rather than guessing.
+   */
+  lastWordEndMs?: number;
 }
 
 export type StreamingTranscriptCallback = (event: StreamingTranscriptEvent) => void;
@@ -454,6 +464,31 @@ function isNova3ModelFamily(model: string): boolean {
  */
 function stripKeytermWeightSuffix(term: string): string {
   return term.replace(/:\d+$/, '');
+}
+
+/**
+ * U1 — the end (ms, stream clock) of a Deepgram `Results` segment's last word:
+ * the last `words[].end` when word timing is present, else `start + duration`
+ * (the segment's audio span). `null` when the frame carried neither.
+ */
+export function segmentLastWordEndMs(
+  start: number | undefined,
+  duration: number | undefined,
+  words: ReadonlyArray<{ end?: number }> | undefined,
+): number | null {
+  const lastWord = words && words.length > 0 ? words[words.length - 1]?.end : undefined;
+  if (typeof lastWord === 'number' && Number.isFinite(lastWord)) {
+    return Math.round(lastWord * 1000);
+  }
+  if (
+    typeof start === 'number' &&
+    Number.isFinite(start) &&
+    typeof duration === 'number' &&
+    Number.isFinite(duration)
+  ) {
+    return Math.round((start + duration) * 1000);
+  }
+  return null;
 }
 
 export class DeepgramStreamingProvider implements StreamingTranscriptionProvider {
@@ -609,6 +644,12 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
     // latch and the interim emergency scan still see a phrase that spans a
     // segment boundary. Mirrors packages/web useDeepgramDictation.
     const segments: Array<{ transcript: string; confidence: number }> = [];
+    // U1 — the end of the sentence's last word on Deepgram's stream clock
+    // (seconds → ms). Each `is_final` segment's `words[].end` (or, failing
+    // that, `start + duration`) advances it; an `UtteranceEnd` frame's own
+    // `last_word_end` wins when present. Null until some segment carried
+    // timing, so a final with no timing leaves `last_word_at` null.
+    let sentenceLastWordEndMs: number | null = null;
     // Set by finish()/destroy(): nothing is emitted after teardown (Deepgram
     // still sends its remaining results in answer to CloseStream).
     let ended = false;
@@ -616,12 +657,23 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
       [...segments.map((seg) => seg.transcript), ...(live ? [live] : [])].join(' ');
     const weakestConfidence = (): number =>
       Math.min(...segments.map((seg) => seg.confidence));
-    const flushSentence = (): void => {
+    const flushSentence = (lastWordEndSec?: number): void => {
       if (segments.length === 0) return;
       const transcript = sentenceSoFar();
       const confidence = weakestConfidence();
       segments.length = 0;
-      onEvent({ type: 'final', transcript, confidence, isFinal: true });
+      const lastWordEndMs =
+        typeof lastWordEndSec === 'number' && Number.isFinite(lastWordEndSec)
+          ? Math.round(lastWordEndSec * 1000)
+          : sentenceLastWordEndMs;
+      sentenceLastWordEndMs = null;
+      onEvent({
+        type: 'final',
+        transcript,
+        confidence,
+        isFinal: true,
+        ...(lastWordEndMs !== null ? { lastWordEndMs } : {}),
+      });
     };
 
     ws.addEventListener('message', (msg) => {
@@ -629,12 +681,23 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
       try {
         const data = JSON.parse(msg.data as string) as {
           type?: string;
-          channel?: { alternatives?: Array<{ transcript: string; confidence?: number }> };
+          channel?: {
+            alternatives?: Array<{
+              transcript: string;
+              confidence?: number;
+              words?: Array<{ end?: number }>;
+            }>;
+          };
           is_final?: boolean;
           speech_final?: boolean;
+          /** Segment start / length in seconds on the stream clock. */
+          start?: number;
+          duration?: number;
+          /** UtteranceEnd only: seconds, the end of the last word Deepgram heard. */
+          last_word_end?: number;
         };
         if (data.type === 'UtteranceEnd') {
-          flushSentence();
+          flushSentence(data.last_word_end);
           return;
         }
         if (data.type !== 'Results') return;
@@ -643,6 +706,10 @@ export class DeepgramStreamingProvider implements StreamingTranscriptionProvider
         if (data.is_final) {
           if (text !== '') {
             segments.push({ transcript: text, confidence: alt?.confidence ?? 1 });
+            const segmentEndMs = segmentLastWordEndMs(data.start, data.duration, alt?.words);
+            if (segmentEndMs !== null) {
+              sentenceLastWordEndMs = Math.max(sentenceLastWordEndMs ?? 0, segmentEndMs);
+            }
             if (!data.speech_final) {
               onEvent({
                 type: 'partial',

@@ -56,6 +56,9 @@ beforeEach(() => {
   savedEnv.DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
   savedEnv.VOICE_STREAM_TOKEN_MINTS_PER_MIN = process.env.VOICE_STREAM_TOKEN_MINTS_PER_MIN;
   savedEnv.REDIS_URL = process.env.REDIS_URL;
+  savedEnv.STT_PROVIDER = process.env.STT_PROVIDER;
+  savedEnv.NODE_ENV = process.env.NODE_ENV;
+  delete process.env.STT_PROVIDER;
   process.env.DEEPGRAM_API_KEY = 'dg-key-test';
   delete process.env.REDIS_URL; // limiter uses a fresh per-app MemoryStore
   // Deepgram's /v1/auth/grant — never hit for real in unit tests.
@@ -95,6 +98,29 @@ describe('UB-B1 — POST /api/voice/stream-token mint hardening', () => {
     expect(mint.tenantId).toBe(TENANT_A);
     expect(mint.actorId).toBe('user-1');
     expect(mint.metadata).toMatchObject({ model: 'nova-3', expiresInSeconds: 30 });
+  });
+
+  it('STT_PROVIDER=fixture: the route mints the fixture token without Deepgram, audited like a real mint', async () => {
+    process.env.STT_PROVIDER = 'fixture';
+    process.env.NODE_ENV = 'test';
+    const auditRepo = new InMemoryAuditRepository();
+    const res = await request(buildApp(auditRepo)).post('/api/voice/stream-token');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ token: 'fixture-stt-token', expiresIn: 30, model: 'fixture' });
+    expect(fetch).not.toHaveBeenCalled();
+    const mint = auditRepo.getAll().find((e) => e.eventType === 'voice.stream_token_minted')!;
+    expect(mint.metadata).toMatchObject({ model: 'fixture' });
+  });
+
+  it('STT_PROVIDER=fixture in production answers 503 not-configured, never a fixture token', async () => {
+    process.env.STT_PROVIDER = 'fixture';
+    process.env.NODE_ENV = 'production';
+    const res = await request(buildApp(new InMemoryAuditRepository())).post('/api/voice/stream-token');
+
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe('NOT_CONFIGURED');
+    expect(JSON.stringify(res.body)).not.toContain('fixture-stt-token');
   });
 
   it('A2: threads a valid ?language= query param onto the mint audit metadata', async () => {

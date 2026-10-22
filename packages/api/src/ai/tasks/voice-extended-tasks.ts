@@ -387,8 +387,12 @@ export class CancelAppointmentTaskHandler implements TaskHandler {
         customerId: context.customerId,
         jobRepo: this.jobRepo,
       }));
+    // Both sources are repo lookups, so the id is stamped verified and the
+    // drafting scrub keeps it (reschedule's shape above).
+    let verifiedIds: Record<string, string> | undefined;
     if (resolvedId) {
       payload.appointmentId = resolvedId;
+      verifiedIds = { appointmentId: resolvedId };
     } else if (ee.appointmentReference) {
       payload.appointmentReference = ee.appointmentReference;
       missing.push('appointmentId');
@@ -403,7 +407,11 @@ export class CancelAppointmentTaskHandler implements TaskHandler {
     }
 
     return {
-      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      proposal: createProposal(
+        inputFor(context, this.taskType, payload, missing, {
+          ...(verifiedIds ? { sourceContext: { verifiedIds } } : {}),
+        }),
+      ),
       taskType: this.taskType,
     };
   }
@@ -694,8 +702,9 @@ export class SendInvoiceTaskHandler implements TaskHandler {
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {
-      // #1524 — no channel named is 'auto' (email on file, else a text to the
-      // phone), never a silent 'email' a phone-only customer can't receive.
+      // #1524 / D-045 — no channel named is 'auto' (a text when the customer
+      // can be texted, else their email), never a silent 'email' a
+      // phone-only customer can't receive.
       channel: ee.sendChannel ?? 'auto',
     };
     const missing: string[] = [];
@@ -1019,8 +1028,9 @@ export class SendEstimateNudgeTaskHandler implements TaskHandler {
   async handle(context: TaskContext): Promise<TaskResult> {
     const ee = entitiesFrom(context);
     const payload: Record<string, unknown> = {
-      // #1528 — no channel named is 'auto' (email on file, else a text to the
-      // phone), the same rule as send_invoice / send_estimate — never a fixed
+      // #1528 / D-045 — no channel named is 'auto' (a text when the customer
+      // can be texted, else their email), the same rule as send_invoice /
+      // send_estimate — never a fixed
       // text an email-only customer can't receive.
       channel: ee.sendChannel ?? 'auto',
     };

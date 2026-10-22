@@ -314,54 +314,54 @@ describe('Postgres integration — atomic credit guards (P0-3 / P0-6)', () => {
     expect(applied!.amountPaidCents).toBe(5000);
   });
 
-  it('setPaymentLinkIfPayable persists only on a payable, unchanged, link-free invoice', async () => {
+  it('attachPaymentLink persists only on a payable, unchanged, link-free invoice', async () => {
     // Applies on the exact state the link was priced at…
     const open = await createOpenInvoice(10000);
-    const attached = await invoiceRepo.setPaymentLinkIfPayable(
+    const attached = await invoiceRepo.attachPaymentLink(
       tenant.tenantId,
       open.id,
       { linkId: 'plink_mint_ok', linkUrl: 'https://pay.stripe.com/ok' },
       10000,
       new Date(),
     );
-    expect(attached!.stripePaymentLinkId).toBe('plink_mint_ok');
+    expect(attached.ok && attached.invoice.stripePaymentLinkId).toBe('plink_mint_ok');
 
     // …not on a second mint (link already present)…
     expect(
-      await invoiceRepo.setPaymentLinkIfPayable(
+      await invoiceRepo.attachPaymentLink(
         tenant.tenantId,
         open.id,
         { linkId: 'plink_mint_dup', linkUrl: 'https://pay.stripe.com/dup' },
         10000,
         new Date(),
       ),
-    ).toBeNull();
+    ).toEqual({ ok: false, reason: 'not_payable' });
 
     // …not when the balance moved since pricing…
     const repriced = await createOpenInvoice(10000);
     await invoiceRepo.incrementAmountPaidAtomic(tenant.tenantId, repriced.id, 4000, new Date());
     expect(
-      await invoiceRepo.setPaymentLinkIfPayable(
+      await invoiceRepo.attachPaymentLink(
         tenant.tenantId,
         repriced.id,
         { linkId: 'plink_mint_stale', linkUrl: 'https://pay.stripe.com/stale' },
         10000,
         new Date(),
       ),
-    ).toBeNull();
+    ).toEqual({ ok: false, reason: 'not_payable' });
 
     // …and never on a voided invoice.
     const voided = await createOpenInvoice(10000);
     await invoiceRepo.update(tenant.tenantId, voided.id, { status: 'void', updatedAt: new Date() });
     expect(
-      await invoiceRepo.setPaymentLinkIfPayable(
+      await invoiceRepo.attachPaymentLink(
         tenant.tenantId,
         voided.id,
         { linkId: 'plink_mint_void', linkUrl: 'https://pay.stripe.com/void' },
         10000,
         new Date(),
       ),
-    ).toBeNull();
+    ).toEqual({ ok: false, reason: 'not_payable' });
     const reloaded = await invoiceRepo.findById(tenant.tenantId, voided.id);
     expect(reloaded!.stripePaymentLinkId).toBeUndefined();
   });

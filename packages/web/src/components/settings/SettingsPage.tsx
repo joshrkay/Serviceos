@@ -8,6 +8,8 @@ import {
   MapPin, Check, Store, RefreshCw, TrendingUp, Mail, BookOpen, Star, Phone,
   Calendar, ClipboardList, SlidersHorizontal, Megaphone, ScrollText,
   MessageSquareQuote,
+  MessageSquareText,
+  MessageCircle,
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { QuickBooksIntegrationSheet } from './QuickBooksIntegrationSheet';
@@ -16,6 +18,8 @@ import { SuppliersSheet } from '../jobs/SuppliersSheet';
 import { apiFetch } from '../../utils/api-fetch';
 import { AiMinutesCard } from './AiMinutesCard';
 import { CallQualityCard } from './CallQualityCard';
+import { WebsiteCard } from './WebsiteCard';
+import { CallReviewCard } from './CallReviewCard';
 import { useMe } from '../../hooks/useMe';
 import { SupervisorBackupSection } from './SupervisorBackupSection';
 import { BusinessProfileSheet } from './BusinessProfileSheet';
@@ -24,9 +28,11 @@ import { TerminologySheet } from './TerminologySheet';
 import { JobFormTemplatesSheet } from './JobFormTemplatesSheet';
 import { JobCustomFieldsSheet } from './JobCustomFieldsSheet';
 import { MarketingCampaignsSheet } from './MarketingCampaignsSheet';
+import { DripCampaignsSheet } from './DripCampaignsSheet';
 import { CustomerGroupsSheet } from './CustomerGroupsSheet';
 import { StandingInstructionsSheet } from './StandingInstructionsSheet';
 import { BrandVoiceSheet } from './BrandVoiceSheet';
+import { TextWordingSheet } from './TextWordingSheet';
 import { AIApprovalRulesSheet } from './AIApprovalRulesSheet';
 import { DepositRulesSheet } from './DepositRulesSheet';
 import { DiscountPolicySheet } from './DiscountPolicySheet';
@@ -36,11 +42,13 @@ import { DunningLateFeeSheet } from './DunningLateFeeSheet';
 import { TeamMembersSheet } from './TeamMembersSheet';
 import { CalendarSyncSheet } from './CalendarSyncSheet';
 import { GoogleBusinessSheet } from './GoogleBusinessSheet';
+import { LsaLeadsSheet } from './LsaLeadsSheet';
 import { PaymentMethodsSheet } from './PaymentMethodsSheet';
 import { VerticalPacksSheet } from './VerticalPacksSheet';
 import { CallRoutingSheet } from './CallRoutingSheet';
 import { OperatorHoursSheet } from './OperatorHoursSheet';
 import { DncListSheet } from './DncListSheet';
+import { WebChatSheet } from './WebChatSheet';
 import {
   fetchLanguageSettings,
   updateLanguageSettings,
@@ -102,6 +110,8 @@ const SETTINGS_TOGGLE_FIELDS = {
   reviewRequest: 'sendReviewRequest',
   weeklyFeedback: 'weeklyFeedbackEnabled',
   autonomousClose: 'autonomousCloseEnabled',
+  // #1738 — instant reply text for new website-form / portal leads.
+  speedToLead: 'speedToLeadEnabled',
 } as const;
 
 type SettingsToggleField = keyof typeof SETTINGS_TOGGLE_FIELDS;
@@ -203,6 +213,8 @@ export function SettingsPage() {
   const [techAssignmentSms, setTechAssignmentSms] = useState(true);
   const [weeklyFeedback, setWeeklyFeedback] = useState(true);
   const [autonomousClose, setAutonomousClose] = useState(false);
+  // #1738 — speed_to_lead_enabled is NOT NULL DEFAULT FALSE (opt-in).
+  const [speedToLead, setSpeedToLead] = useState(false);
   // The cap is money: held as integer CENTS (the repo invariant) and edited as
   // a dollars string so a half-typed value never round-trips through a float.
   const [closeCapCents, setCloseCapCents] = useState<number | null>(null);
@@ -263,6 +275,7 @@ export function SettingsPage() {
           serviceAreaRadius?: number | null;
           serviceAreaZips?: string[] | null;
           sendThankYouSms?: boolean;
+          speedToLeadEnabled?: boolean;
           sendReviewRequest?: boolean;
           notifyTechniciansBySms?: boolean;
           weeklyFeedbackEnabled?: boolean;
@@ -292,6 +305,7 @@ export function SettingsPage() {
         }
         // #1011 — hydrate the five owner toggles.
         if (typeof data.sendThankYouSms === 'boolean') setThankYouSms(data.sendThankYouSms);
+        if (typeof data.speedToLeadEnabled === 'boolean') setSpeedToLead(data.speedToLeadEnabled);
         if (typeof data.sendReviewRequest === 'boolean') setReviewRequest(data.sendReviewRequest);
         if (typeof data.notifyTechniciansBySms === 'boolean') {
           setTechAssignmentSms(data.notifyTechniciansBySms);
@@ -437,6 +451,7 @@ export function SettingsPage() {
     techAssignmentSms: setTechAssignmentSms,
     weeklyFeedback: setWeeklyFeedback,
     autonomousClose: setAutonomousClose,
+    speedToLead: setSpeedToLead,
   };
 
   function toggleSetting(field: SettingsToggleField, value: boolean) {
@@ -595,9 +610,11 @@ export function SettingsPage() {
   const [jobFormsOpen, setJobFormsOpen] = useState(false);
   const [jobCustomFieldsOpen, setJobCustomFieldsOpen] = useState(false);
   const [marketingOpen, setMarketingOpen] = useState(false);
+  const [dripOpen, setDripOpen] = useState(false);
   const [customerGroupsOpen, setCustomerGroupsOpen] = useState(false);
   const [standingInstructionsOpen, setStandingInstructionsOpen] = useState(false);
   const [brandVoiceOpen, setBrandVoiceOpen] = useState(false);
+  const [textWordingOpen, setTextWordingOpen] = useState(false);
   const [aiRulesOpen, setAiRulesOpen] = useState(false);
   const [depositRulesOpen, setDepositRulesOpen] = useState(false);
   const [discountPolicyOpen, setDiscountPolicyOpen] = useState(false);
@@ -607,10 +624,12 @@ export function SettingsPage() {
   const [teamMembersOpen, setTeamMembersOpen] = useState(false);
   const [calendarSyncOpen, setCalendarSyncOpen] = useState(false);
   const [googleBusinessOpen, setGoogleBusinessOpen] = useState(false);
+  const [lsaOpen, setLsaOpen] = useState(false);
   const [paymentMethodsOpen, setPaymentMethodsOpen] = useState(false);
   const [verticalPacksOpen, setVerticalPacksOpen] = useState(false);
   const [callRoutingOpen, setCallRoutingOpen] = useState(false);
   const [dncListOpen, setDncListOpen] = useState(false);
+  const [webChatOpen, setWebChatOpen] = useState(false);
   const [operatorHoursOpen, setOperatorHoursOpen] = useState(false);
   // Calendar sync OAuth return: auto-open the sheet + toast when
   // the user lands back here from Google's OAuth redirect. The
@@ -633,6 +652,11 @@ export function SettingsPage() {
     // ?googlebusiness_error=<reason> when Google rejects / user declines.
     const googleBusinessConnected = params.get('googlebusiness_connected') === '1';
     const googleBusinessError = params.get('googlebusiness_error');
+    // D-044 — set when the connection worked but the review link didn't
+    // follow it ('failed') or was removed because the listing has none.
+    const googleBusinessReviewLink = params.get('googlebusiness_review_link');
+    // D-044 — the home "Get found online" checklist deep-links here.
+    const openTarget = params.get('open');
 
     let needsUrlUpdate = false;
     if (isConnected || connectionError) {
@@ -646,9 +670,44 @@ export function SettingsPage() {
       setGoogleBusinessOpen(true);
       if (googleBusinessConnected) {
         toast.success('Google Business connected');
+        if (googleBusinessReviewLink === 'failed') {
+          toast.error(
+            "Your Google review link couldn't be updated. Add it under Public review links.",
+          );
+        } else if (googleBusinessReviewLink === 'cleared') {
+          toast.error(
+            'Google has no review link for this location yet, so the old one was removed.',
+          );
+        }
       } else if (googleBusinessError) {
         toast.error(`Google Business connection failed: ${googleBusinessError}`);
       }
+      needsUrlUpdate = true;
+    }
+    if (openTarget === 'google-business') {
+      setGoogleBusinessOpen(true);
+      needsUrlUpdate = true;
+    } else if (openTarget === 'review-links') {
+      // The Reviews section renders on first paint; focus once it's laid out.
+      window.setTimeout(() => {
+        const input = document.getElementById('google-review-url');
+        input?.scrollIntoView({ block: 'center' });
+        input?.focus();
+      }, 0);
+      needsUrlUpdate = true;
+    } else if (openTarget === 'website') {
+      // The card mounts once /api/me resolves; wait for it, then focus.
+      let tries = 0;
+      const focusWebsite = () => {
+        const input = document.getElementById('website-url');
+        if (input) {
+          input.scrollIntoView({ block: 'center' });
+          input.focus();
+        } else if (tries++ < 20) {
+          window.setTimeout(focusWebsite, 150);
+        }
+      };
+      window.setTimeout(focusWebsite, 0);
       needsUrlUpdate = true;
     }
     if (stripeReturned) {
@@ -674,6 +733,8 @@ export function SettingsPage() {
       params.delete('quickbooks_error');
       params.delete('googlebusiness_connected');
       params.delete('googlebusiness_error');
+      params.delete('googlebusiness_review_link');
+      params.delete('open');
       const next = `${window.location.pathname}${params.toString() ? `?${params}` : ''}`;
       window.history.replaceState(null, '', next);
     }
@@ -956,8 +1017,22 @@ export function SettingsPage() {
     {
       title: 'Customer experience',
       items: [
+        // D-045 — the owner's own wording for estimate, invoice, portal-link and
+        // thank-you texts. Owner-only, like its settings:update save.
+        ...(me?.role === 'owner'
+          ? [{ icon: MessageSquareText, label: 'Text wording', description: 'Your own words, in English and Spanish, for the estimate, invoice, portal-link and thank-you texts', action: () => setTextWordingOpen(true) }]
+          : []),
+        // #1737 — embeddable website chat (off by default). Owner-only, like its save.
+        ...(me?.role === 'owner'
+          ? [{ icon: MessageCircle, label: 'Web chat', description: 'Put your AI on your website — snippet, allowed sites, daily limits', action: () => setWebChatOpen(true) }]
+          : []),
         { icon: Star, label: 'Feedback & reviews', description: 'Average rating, distribution, and recent comments', action: () => navigate('/settings/feedback') },
         { icon: Megaphone, label: 'Email campaigns', description: 'Send promos & announcements to customer segments', action: () => setMarketingOpen(true) },
+        // #1735 — owner-only multi-step text/call/email follow-ups. The sheet
+        // explains itself when the tenant flag is off.
+        ...(me?.role === 'owner'
+          ? [{ icon: Megaphone, label: 'Follow-up campaigns', description: 'Automatic text, call and email follow-ups for lapsed customers and unsold estimates', action: () => setDripOpen(true) }]
+          : []),
       ],
     },
     {
@@ -1031,6 +1106,16 @@ export function SettingsPage() {
           description: 'Monitor reviews & draft replies for your approval',
           action: () => setGoogleBusinessOpen(true),
         },
+        ...(me?.role === 'owner'
+          ? [
+              {
+                icon: Megaphone,
+                label: 'Google Local Services leads',
+                description: 'Bring in leads from your Local Services Ads',
+                action: () => setLsaOpen(true),
+              },
+            ]
+          : []),
         {
           icon: Link,
           label: 'QuickBooks',
@@ -1361,6 +1446,11 @@ export function SettingsPage() {
               value: thankYouSms, onChange: (v: boolean) => toggleSetting('thankYouSms', v),
             },
             {
+              label: 'Text new leads right away',
+              description: 'When someone asks for work on your website form or customer portal and ticks "text me", send them a thank-you text straight away',
+              value: speedToLead, onChange: (v: boolean) => toggleSetting('speedToLead', v),
+            },
+            {
               label: 'Review request after every job',
               description: 'Ask the customer for a public review a day after the job is marked done',
               value: reviewRequest, onChange: (v: boolean) => toggleSetting('reviewRequest', v),
@@ -1556,6 +1646,10 @@ export function SettingsPage() {
           </div>
         </div>
 
+        {/* D-044 / #1768 — the owner's website, or the one we host. The API is
+            owner-only, so only owners mount it. */}
+        {me?.role === 'owner' && <WebsiteCard />}
+
         {/* AI answering minutes — usage against the plan bundle, and the
             owner's overage cap (the API enforces owner-only too). */}
         <div className="mb-4">
@@ -1569,6 +1663,14 @@ export function SettingsPage() {
         {me?.role === 'owner' && (
           <div className="mb-4">
             <CallQualityCard />
+          </div>
+        )}
+
+        {/* #1736 — call review: opt-in per-call scoring, flagged moments and
+            "correct this call". Owner-only API (tenant:manage), same gating. */}
+        {me?.role === 'owner' && (
+          <div className="mb-4">
+            <CallReviewCard />
           </div>
         )}
 
@@ -1743,9 +1845,11 @@ export function SettingsPage() {
       {marketingOpen && (
         <MarketingCampaignsSheet onClose={() => setMarketingOpen(false)} />
       )}
+      {dripOpen && <DripCampaignsSheet onClose={() => setDripOpen(false)} />}
       {customerGroupsOpen && (
         <CustomerGroupsSheet onClose={() => setCustomerGroupsOpen(false)} />
       )}
+      {textWordingOpen && me?.role === 'owner' && <TextWordingSheet onClose={() => setTextWordingOpen(false)} />}
       {brandVoiceOpen && me?.brand_voice_configurator_enabled && (
         <BrandVoiceSheet onClose={() => setBrandVoiceOpen(false)} />
       )}
@@ -1794,8 +1898,12 @@ export function SettingsPage() {
 
       {/* Calendar sync sheet — Google OAuth connect/disconnect (PR 1). */}
       {googleBusinessOpen && (
-        <GoogleBusinessSheet onClose={() => setGoogleBusinessOpen(false)} />
+        <GoogleBusinessSheet
+          onClose={() => setGoogleBusinessOpen(false)}
+          onReviewUrlChange={(url) => setGoogleReviewUrl(url ?? '')}
+        />
       )}
+      {lsaOpen && me?.role === 'owner' && <LsaLeadsSheet onClose={() => setLsaOpen(false)} />}
       {calendarSyncOpen && (
         <CalendarSyncSheet onClose={() => setCalendarSyncOpen(false)} />
       )}
@@ -1823,6 +1931,7 @@ export function SettingsPage() {
         open={dncListOpen}
         onOpenChange={setDncListOpen}
       />
+      <WebChatSheet open={webChatOpen} onOpenChange={setWebChatOpen} />
 
       {/* #877 — confirm-gates for the two live-action rows. */}
       <ConfirmDialog

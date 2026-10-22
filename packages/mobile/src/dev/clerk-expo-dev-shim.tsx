@@ -1,8 +1,8 @@
 /**
- * DEV/TEST-ONLY drop-in replacement for `@clerk/clerk-expo` (PRD 3.3, #1015).
+ * DEV/TEST-ONLY drop-in replacement for `@clerk/expo` (PRD 3.3, #1015).
  *
  * The mobile twin of packages/web/src/dev/clerk-dev-shim.tsx. It is only in
- * the bundle when Metro aliases `@clerk/clerk-expo` here, which
+ * the bundle when Metro aliases `@clerk/expo` here, which
  * scripts/dev-auth-guard.cjs allows solely for `EXPO_PUBLIC_AUTH_MODE=dev` in a
  * non-production build (see metro.config.js). Its purpose is to let the
  * Maestro device flows (packages/mobile/.maestro/) reach signed-in screens on
@@ -14,7 +14,7 @@
  * refuses the bypass outside NODE_ENV=dev, and this module refuses to load in
  * a release bundle (`__DEV__ === false`).
  */
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import type { ReactNode } from 'react';
 
 declare const __DEV__: boolean;

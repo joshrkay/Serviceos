@@ -584,6 +584,8 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       ['post', '/api/conversations/3f1c9a52-0000-4000-8000-000000000002/suggest-reply'],
       ['post', '/api/estimates/suggest'],
       ['post', '/api/onboarding/conversation/turn'],
+      // A1 — the "which Bob?" pick re-drafts through the task handler's LLM call.
+      ['post', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity'],
     ] as const)('%s %s holds no request transaction', async (method, path) => {
       const seen = await probe(method, path);
       expect(seen).toEqual({ connects: 0, began: false, storeAtHandler: undefined });
@@ -603,13 +605,101 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       ['post', '/api/estimates/3f1c9a52-0000-4000-8000-000000000003/send'],
       ['post', '/api/estimates/suggest/extra'],
       ['post', '/api/onboarding/pack'],
+      // A1 — approval and the other proposal mutations keep the request
+      // transaction (approve's row lock is held to commit).
+      ['post', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/approve'],
+      ['post', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-line'],
+      ['get', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity'],
+      ['post', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity/extra'],
       // A nested router sharing the suffix does not inherit the bypass.
       ['post', '/api/admin/voice/sessions'],
       ['post', '/api/leads/estimates/suggest'],
+      ['post', '/api/admin/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity'],
     ] as const)('%s %s still opens the transaction', async (method, path) => {
       const seen = await probe(method, path);
       expect(seen.connects).toBe(1);
       expect(seen.began).toBe(true);
+    });
+
+    // A-R4 — Express routing is not strict and not case-sensitive, so
+    // `/resolve-entity/` and `/Resolve-Entity` reach the same handler as
+    // `/resolve-entity`. If the bypass missed those forms, the request would
+    // run inside the request transaction AND (resolve-entity) its runner would
+    // take a second pooled connection inside it.
+    it.each([
+      ['post', '/api/assistant/chat/'],
+      ['post', '/api/voice/quality/grade'],
+      ['post', '/api/voice/quality/grade/'],
+      ['post', '/api/voice/sessions/'],
+      ['post', '/api/voice/sessions/3f1c9a52-0000-4000-8000-000000000001/input/'],
+      ['delete', '/api/voice/sessions/3f1c9a52-0000-4000-8000-000000000001/'],
+      ['post', '/api/conversations/3f1c9a52-0000-4000-8000-000000000002/suggest-reply/'],
+      ['post', '/api/estimates/suggest/'],
+      ['post', '/api/onboarding/conversation/turn/'],
+      ['post', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity/'],
+      ['post', '/api/Proposals/3f1c9a52-0000-4000-8000-000000000004/Resolve-Entity'],
+      ['post', '/api/ASSISTANT/CHAT/'],
+    ] as const)('%s %s (trailing slash / letter case) holds no request transaction', async (method, path) => {
+      const seen = await probe(method, path);
+      expect(seen).toEqual({ connects: 0, began: false, storeAtHandler: undefined });
+    });
+
+    it.each([
+      // The optional slash is one slash at the very end, nothing more.
+      ['get', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity/'],
+      ['post', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity//'],
+      ['post', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity/extra/'],
+      ['post', '/api/proposals/resolve-entity/'],
+      ['post', '/api/voice/sessions//'],
+      ['put', '/api/voice/sessions/3f1c9a52-0000-4000-8000-000000000001/'],
+      ['post', '/api/voice/sessions/3f1c9a52-0000-4000-8000-000000000001/input/extra/'],
+      ['post', '/api/estimates/suggest/extra/'],
+      ['get', '/api/assistant/chat/'],
+      ['post', '/api/assistant/chat/extra'],
+      ['post', '/api/assistant/chat/extra/'],
+      ['post', '/api/voice/quality/grade/extra/'],
+      // Nested routers sharing a suffix inherit nothing, with or without it.
+      ['post', '/api/admin/assistant/chat'],
+      ['post', '/api/admin/assistant/chat/'],
+      ['post', '/api/admin/voice/quality/grade'],
+      ['post', '/api/admin/voice/quality/grade/'],
+      ['post', '/api/admin/voice/sessions/'],
+      ['post', '/api/admin/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity/'],
+    ] as const)('%s %s still opens the transaction', async (method, path) => {
+      const seen = await probe(method, path);
+      expect(seen.connects).toBe(1);
+      expect(seen.began).toBe(true);
+    });
+
+    it.each([
+      '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity/',
+      '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/Resolve-Entity',
+    ])('Express routes POST %s to the resolve-entity handler, and it runs with no request transaction', async (path) => {
+      const { pool, calls } = makeMockPool();
+      let reachedWith: string | undefined;
+      let storeAtHandler: unknown = 'unset';
+      const app = express();
+      app.use(express.json());
+      app.use((req, _res, next) => {
+        (req as AuthenticatedRequest).auth = { userId: 'u1', sessionId: 's1', tenantId: TENANT_A, role: 'owner' };
+        next();
+      });
+      app.use('/api', withTenantTransaction(pool));
+      const proposals = express.Router();
+      proposals.post('/:id/resolve-entity', (req, res) => {
+        reachedWith = req.params.id;
+        storeAtHandler = currentTenantContext();
+        res.json({ ok: true });
+      });
+      app.use('/api/proposals', proposals);
+
+      const response = await request(app).post(path).send({ candidateId: 'c1' });
+
+      expect(response.status).toBe(200);
+      expect(reachedWith).toBe('3f1c9a52-0000-4000-8000-000000000004');
+      expect(storeAtHandler).toBeUndefined();
+      expect((pool.connect as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
+      expect(calls.some((c) => /^\s*BEGIN/i.test(c.sql))).toBe(false);
     });
   });
 

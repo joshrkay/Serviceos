@@ -159,6 +159,8 @@ export const TASK_TYPES = [
   'voice_quality_judge',
   'voice_quality_perceived_completion',
   'voice_quality_reprompt_judge',
+  // #1736 — post-call rubric scoring of a production call.
+  'voice_call_scoring',
   'review_classify',
   'proposal_sms_edit',
   // ── Standard: moderate generation / customer-facing writing where output
@@ -177,6 +179,10 @@ export const TASK_TYPES = [
   // B1.18 — spoken brand-voice instruction → structured config
   // (ai/tasks/brand-voice-task.ts).
   'update_brand_voice',
+  // D-044 / #1769 — drafts the hosted tenant site's "about" copy from tenant
+  // settings (ai/tasks/tenant-site-about-task.ts); public words under the
+  // business's name, so the writing tier, not lightweight.
+  'tenant_site_about',
   // ── Complex: high-stakes structured generation — financial documents,
   //    multi-line estimates/invoices, and MMS-to-quote (vision-capable tier).
   'draft_estimate',
@@ -211,6 +217,7 @@ const DEFAULT_TASK_TIER_MAPPING: Record<TaskType, ModelTier> = {
   voice_quality_judge: 'lightweight',
   voice_quality_perceived_completion: 'lightweight',
   voice_quality_reprompt_judge: 'lightweight',
+  voice_call_scoring: 'lightweight',
   review_classify: 'lightweight',
   proposal_sms_edit: 'lightweight',
   // Standard
@@ -243,6 +250,7 @@ const DEFAULT_TASK_TIER_MAPPING: Record<TaskType, ModelTier> = {
   // extract_* tasks above: complex's temperature 0.5 is too high for strict
   // structured extraction.
   update_brand_voice: 'standard',
+  tenant_site_about: 'standard',
   // Complex
   draft_estimate: 'complex',
   update_estimate: 'complex',

@@ -14,7 +14,9 @@ import {
 import type { TaskHandler, TaskContext } from '../../src/ai/tasks/task-handlers';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import { createExecutionHandlerRegistry } from '../../src/proposals/execution/handlers';
-import { ForbiddenError, NotFoundError, ValidationError } from '../../src/shared/errors';
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../../src/shared/errors';
+import type { TenantTransactionRunner } from '../../src/db/tenant-transaction';
+import type { EntityAliasCandidateCapture } from '../../src/learning/entity-aliases/candidate-service';
 
 const TENANT = 't-resolve-entity';
 const PROPOSAL = 'p-resolve-entity';
@@ -362,6 +364,46 @@ describe('U8/U1 — resolveProposalEntity re-draft', () => {
     expect(ev!.metadata).toMatchObject({
       fromProposalType: 'voice_clarification',
       toProposalType: 'draft_invoice',
+    });
+  });
+
+  // B3 — the row's payload is now the RE-DRAFT run's output, so the row must
+  // name that run (proposals.ai_run_id) and carry its confidence factors and
+  // explanation, not the clarification's.
+  it('the re-draft links the row to the run that authored the re-drafted payload', async () => {
+    await repo.create(ambiguousWithIntent({ aiRunId: 'run-clarification' }));
+    const update = vi.spyOn(repo, 'update');
+    const factors = { catalogMatch: 0.9 } as unknown as Proposal['confidenceFactors'];
+    const handler: TaskHandler = {
+      taskType: 'draft_invoice',
+      handle: async (ctx) => ({
+        taskType: 'draft_invoice',
+        proposal: createProposal({
+          tenantId: ctx.tenantId,
+          proposalType: 'draft_invoice',
+          payload: {
+            customerId: (ctx.existingEntities as Record<string, unknown>).customerId,
+            lineItems: [{ description: 'Water heater', quantity: 1, unitPrice: 45000 }],
+          },
+          summary: 'Invoice Bob Jones for the water heater',
+          explanation: 'Billed the water heater install',
+          confidenceScore: 0.88,
+          confidenceFactors: factors,
+          aiRunId: 'run-redraft',
+          createdBy: ctx.userId,
+        }),
+      }),
+    };
+
+    const result = await call(CUST_B, factoryOf(handler));
+
+    expect(result.aiRunId).toBe('run-redraft');
+    expect(result.confidenceFactors).toEqual(factors);
+    expect(result.explanation).toBe('Billed the water heater install');
+    expect(update.mock.calls.at(-1)?.[2]).toMatchObject({
+      aiRunId: 'run-redraft',
+      confidenceFactors: factors,
+      explanation: 'Billed the water heater install',
     });
   });
 
@@ -1144,5 +1186,334 @@ describe('B2 — resolveProposalEntity on a typed money proposal (gate + candida
 
     expect(result.status).toBe('ready_for_review');
     expect((result.payload as Record<string, unknown>).invoiceId).toBe(INV_A);
+  });
+});
+
+// ── A1 — writes commit together, in a transaction opened AFTER the LLM call ─
+//
+// POST /api/proposals/:id/resolve-entity runs outside the request transaction
+// (an LLM_LONG_CALL_ROUTE: the re-draft awaits the drafting handler's LLM
+// call). Each path's writes therefore go through ONE run of the injected
+// TenantTransactionRunner — and the handler (the LLM call) runs before it,
+// never inside it. The alias capture is failure-soft, so it runs after the
+// commit: inside the transaction a failed statement would poison the
+// resolution's writes, and before it an alias review would exist for a pick
+// whose writes rolled back.
+describe('A1 — resolveProposalEntity commits each path in one short transaction', () => {
+  const CUST_A = '11111111-1111-4111-8111-111111111111';
+  const CUST_B = '22222222-2222-4222-8222-222222222222';
+  const JOB_A = '33333333-3333-4333-8333-333333333333';
+  const JOB_B = '44444444-4444-4444-8444-444444444444';
+  const TENANT_UUID = '55555555-5555-4555-8555-555555555555';
+
+  let repo: InMemoryProposalRepository;
+  let auditRepo: InMemoryAuditRepository;
+  let events: string[];
+  let active: boolean;
+  let runner: TenantTransactionRunner;
+
+  beforeEach(() => {
+    repo = new InMemoryProposalRepository();
+    auditRepo = new InMemoryAuditRepository();
+    events = [];
+    active = false;
+    runner = {
+      async run(tenantId, fn) {
+        events.push(`BEGIN ${tenantId}`);
+        active = true;
+        try {
+          const result = await fn({ lock: async () => undefined, savepoint: (work) => work() });
+          events.push('COMMIT');
+          return result;
+        } catch (err) {
+          events.push('ROLLBACK');
+          throw err;
+        } finally {
+          active = false;
+        }
+      },
+    };
+    // Every write records whether it ran inside the runner's transaction.
+    for (const [name, target] of [
+      ['findByIdsForUpdate', repo],
+      ['update', repo],
+      ['updateStatus', repo],
+      ['create', auditRepo],
+    ] as const) {
+      const original = (target as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>)[name].bind(target);
+      vi.spyOn(target as unknown as Record<string, (...a: unknown[]) => Promise<unknown>>, name).mockImplementation(
+        async (...args: unknown[]) => {
+          events.push(`${name}${active ? ' (in tx)' : ' (NO TX)'}`);
+          return original(...args);
+        },
+      );
+    }
+  });
+
+  function clarification(sourceContext: Record<string, unknown> = {}): Proposal {
+    return {
+      id: PROPOSAL,
+      tenantId: TENANT_UUID,
+      proposalType: 'voice_clarification',
+      status: 'draft',
+      summary: 'Which customer? "Bob" matched 2 records',
+      createdBy: OWNER,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      payload: {
+        transcript: 'invoice Bob for the water heater',
+        reason: 'ambiguous_entity',
+        entityReference: 'Bob',
+        entityCandidates: [
+          { id: CUST_A, label: 'Bob Smith', score: 0.82 },
+          { id: CUST_B, label: 'Bob Jones', score: 0.81 },
+        ],
+      },
+      sourceContext: {
+        source: 'voice',
+        transcript: 'invoice Bob for the water heater',
+        entityKind: 'customer',
+        entityReference: 'Bob',
+        entityCandidates: [
+          { id: CUST_A, kind: 'customer', label: 'Bob Smith', score: 0.82 },
+          { id: CUST_B, kind: 'customer', label: 'Bob Jones', score: 0.81 },
+        ],
+        ...sourceContext,
+      },
+    } as Proposal;
+  }
+
+  const ORIGINAL_INTENT = {
+    originalIntent: { intentType: 'create_invoice', extractedEntities: { customerName: 'Bob' } },
+  };
+
+  /** A re-draft handler standing in for the LLM call: records whether a transaction was open. */
+  function draftingHandler(): TaskHandler {
+    return {
+      taskType: 'draft_invoice',
+      handle: vi.fn(async (ctx: TaskContext) => {
+        events.push(`LLM${active ? ' (in tx)' : ' (no tx)'}`);
+        return {
+          taskType: 'draft_invoice',
+          proposal: createProposal({
+            tenantId: ctx.tenantId,
+            proposalType: 'draft_invoice',
+            payload: {
+              customerId: CUST_B,
+              lineItems: [{ description: 'Water heater service', quantity: 1, unitPriceCents: 45000 }],
+            },
+            summary: 'Invoice Bob Jones',
+            createdBy: ctx.userId,
+          }),
+        };
+      }),
+    };
+  }
+
+  const capture = (): EntityAliasCandidateCapture => ({
+    capture: vi.fn(async () => {
+      events.push(`capture${active ? ' (in tx)' : ' (after commit)'}`);
+      return [];
+    }),
+  });
+
+  const resolve = (deps: Partial<Parameters<typeof resolveProposalEntity>[1]> = {}) =>
+    resolveProposalEntity(
+      { tenantId: TENANT_UUID, proposalId: PROPOSAL, candidateId: CUST_B, actorId: OWNER, actorRole: 'owner' },
+      { proposalRepo: repo, auditRepo, transactionRunner: runner, ...deps },
+    );
+
+  it('re-draft: the LLM call runs with no transaction open; every write after it lands in ONE transaction', async () => {
+    await repo.create(clarification(ORIGINAL_INTENT));
+    const handler = draftingHandler();
+
+    const result = await resolve({
+      redraftHandlerFactory: () => handler,
+      entityAliasCandidateCapture: capture(),
+    });
+
+    expect(result.proposalType).toBe('draft_invoice');
+    expect(result.status).toBe('ready_for_review');
+    expect(events).toEqual([
+      'LLM (no tx)',
+      `BEGIN ${TENANT_UUID}`,
+      'update (in tx)',
+      'updateStatus (in tx)',
+      'create (in tx)',
+      'COMMIT',
+      'capture (after commit)',
+    ]);
+  });
+
+  it('re-draft: a failure in the second post-LLM write rolls the transaction back and skips the audit and capture', async () => {
+    await repo.create(clarification(ORIGINAL_INTENT));
+    vi.mocked(repo.updateStatus).mockImplementationOnce(async () => {
+      events.push('updateStatus (in tx) -> fails');
+      throw new Error('injected status-write failure');
+    });
+    const aliasCapture = capture();
+
+    await expect(
+      resolve({ redraftHandlerFactory: () => draftingHandler(), entityAliasCandidateCapture: aliasCapture }),
+    ).rejects.toThrow('injected status-write failure');
+
+    expect(events).toEqual([
+      'LLM (no tx)',
+      `BEGIN ${TENANT_UUID}`,
+      'update (in tx)',
+      'updateStatus (in tx) -> fails',
+      'ROLLBACK',
+    ]);
+    expect(aliasCapture.capture).not.toHaveBeenCalled();
+  });
+
+  it('annotate-only: the payload patch, the promotion and the audit commit together, capture after', async () => {
+    await repo.create(clarification());
+
+    const result = await resolve({ entityAliasCandidateCapture: capture() });
+
+    expect((result.payload as Record<string, unknown>).customerId).toBe(CUST_B);
+    expect(result.status).toBe('ready_for_review');
+    expect(events).toEqual([
+      `BEGIN ${TENANT_UUID}`,
+      'findByIdsForUpdate (in tx)',
+      'update (in tx)',
+      'updateStatus (in tx)',
+      'create (in tx)',
+      'COMMIT',
+      'capture (after commit)',
+    ]);
+  });
+
+  it('next ambiguity: the advance and its audit commit together, and the alias capture moves after the commit', async () => {
+    await repo.create(
+      clarification({
+        ...ORIGINAL_INTENT,
+        pendingEntityAmbiguities: [
+          {
+            entityKind: 'job',
+            reference: 'Rodriguez job',
+            candidates: [
+              { id: JOB_A, kind: 'job', label: 'Rodriguez — kitchen', score: 0.8 },
+              { id: JOB_B, kind: 'job', label: 'Rodriguez — bath', score: 0.79 },
+            ],
+          },
+        ],
+      }),
+    );
+    const handler = draftingHandler();
+
+    const result = await resolve({
+      redraftHandlerFactory: () => handler,
+      entityAliasCandidateCapture: capture(),
+    });
+
+    expect(result.proposalType).toBe('voice_clarification');
+    expect(handler.handle).not.toHaveBeenCalled();
+    expect(events).toEqual([
+      `BEGIN ${TENANT_UUID}`,
+      'findByIdsForUpdate (in tx)',
+      'update (in tx)',
+      'create (in tx)',
+      'COMMIT',
+      'capture (after commit)',
+    ]);
+  });
+
+  it('next ambiguity: a failed advance write leaves no alias review behind for the unapplied pick', async () => {
+    await repo.create(
+      clarification({
+        pendingEntityAmbiguities: [
+          {
+            entityKind: 'job',
+            reference: 'Rodriguez job',
+            candidates: [{ id: JOB_A, kind: 'job', label: 'Rodriguez — kitchen', score: 0.8 }],
+          },
+        ],
+      }),
+    );
+    vi.mocked(auditRepo.create).mockImplementationOnce(async () => {
+      throw new Error('injected audit failure');
+    });
+    const aliasCapture = capture();
+
+    await expect(resolve({ entityAliasCandidateCapture: aliasCapture })).rejects.toThrow('injected audit failure');
+
+    expect(events.at(-1)).toBe('ROLLBACK');
+    expect(aliasCapture.capture).not.toHaveBeenCalled();
+  });
+  // A-R3 — the annotate-only and next-ambiguity paths write no status (or, for
+  // a ready_for_review row, none at all), so nothing re-checked the status the
+  // pick read before its transaction. Each now locks the row and re-checks it
+  // first thing inside the transaction: an approve/reject that landed in the
+  // gap wins, and the pick rolls back without writing.
+  describe('A-R3 — a pick loses to an approve/reject that lands before its transaction', () => {
+    /** The pick's read returns its snapshot; then `status` lands, as a
+     *  concurrent request would (through the unspied repo method, so the
+     *  pick's own event log stays its own). */
+    function landsAfterTheRead(status: 'approved' | 'rejected' | 'ready_for_review') {
+      const realFindById = repo.findById.bind(repo);
+      vi.spyOn(repo, 'findById').mockImplementationOnce(async (tenantId, id) => {
+        const snapshot = await realFindById(tenantId, id);
+        await InMemoryProposalRepository.prototype.updateStatus.call(repo, tenantId, id, status, {});
+        return snapshot;
+      });
+    }
+
+    it.each(['approved', 'rejected'] as const)(
+      'annotate-only on a ready_for_review row: %s wins, nothing is patched or audited',
+      async (status) => {
+        await repo.create({ ...clarification(), status: 'ready_for_review' });
+        const before = await repo.findById(TENANT_UUID, PROPOSAL);
+        landsAfterTheRead(status);
+        const aliasCapture = capture();
+
+        const err = await resolve({ entityAliasCandidateCapture: aliasCapture }).catch((e: unknown) => e);
+
+        expect(err).toBeInstanceOf(ConflictError);
+        expect((err as Error).message).not.toMatch(/proposal|\bAI\b|agent/i);
+        expect(events).toEqual([`BEGIN ${TENANT_UUID}`, 'findByIdsForUpdate (in tx)', 'ROLLBACK']);
+        const after = await repo.findById(TENANT_UUID, PROPOSAL);
+        expect(after!.status).toBe(status);
+        expect(after!.payload).toEqual(before!.payload);
+        expect(after!.sourceContext).toEqual(before!.sourceContext);
+        expect(await auditRepo.findByEntity(TENANT_UUID, 'proposal', PROPOSAL)).toEqual([]);
+        expect(aliasCapture.capture).not.toHaveBeenCalled();
+      },
+    );
+
+    it('next ambiguity on a draft row: a reject wins and the row is not advanced', async () => {
+      await repo.create(
+        clarification({
+          pendingEntityAmbiguities: [
+            {
+              entityKind: 'job',
+              reference: 'Rodriguez job',
+              candidates: [{ id: JOB_A, kind: 'job', label: 'Rodriguez — kitchen', score: 0.8 }],
+            },
+          ],
+        }),
+      );
+      const before = await repo.findById(TENANT_UUID, PROPOSAL);
+      landsAfterTheRead('rejected');
+
+      await expect(resolve()).rejects.toBeInstanceOf(ConflictError);
+
+      expect(events).toEqual([`BEGIN ${TENANT_UUID}`, 'findByIdsForUpdate (in tx)', 'ROLLBACK']);
+      const after = await repo.findById(TENANT_UUID, PROPOSAL);
+      expect(after!.status).toBe('rejected');
+      expect(after!.payload).toEqual(before!.payload);
+      expect(after!.sourceContext).toEqual(before!.sourceContext);
+    });
+
+    it('a row that moved from draft to ready_for_review in the gap is still patched (both are open for a pick)', async () => {
+      await repo.create(clarification());
+      landsAfterTheRead('ready_for_review');
+
+      const result = await resolve();
+
+      expect(result.status).toBe('ready_for_review');
+      expect((result.payload as Record<string, unknown>).customerId).toBe(CUST_B);
+    });
   });
 });

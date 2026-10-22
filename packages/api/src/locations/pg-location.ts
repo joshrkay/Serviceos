@@ -21,6 +21,9 @@ function mapRow(row: Record<string, unknown>): ServiceLocation {
     isPrimary: row.is_primary as boolean,
     addressType: (row.address_type as ServiceLocation['addressType']) ?? 'service',
     serviceTypes: (row.service_types as string[] | null) ?? [],
+    geocodeStatus: (row.geocode_status as ServiceLocation['geocodeStatus']) ?? 'pending',
+    geocodeAttempts: row.geocode_attempts != null ? Number(row.geocode_attempts) : 0,
+    geocodedAt: row.geocoded_at ? new Date(row.geocoded_at as string) : undefined,
     isArchived: row.is_archived as boolean,
     archivedAt: row.archived_at ? new Date(row.archived_at as string) : undefined,
     createdAt: new Date(row.created_at as string),
@@ -40,8 +43,8 @@ export class PgLocationRepository extends PgBaseRepository implements LocationRe
           id, tenant_id, customer_id, label, street1, street2, city, state,
           postal_code, country, latitude, longitude, access_notes,
           is_primary, address_type, is_archived, archived_at, created_at, updated_at,
-          service_types
-        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20)
+          service_types, geocode_status
+        ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21)
         RETURNING *`,
         [
           location.id,
@@ -64,6 +67,7 @@ export class PgLocationRepository extends PgBaseRepository implements LocationRe
           location.createdAt,
           location.updatedAt,
           location.serviceTypes ?? [],
+          location.geocodeStatus ?? 'pending',
         ]
       );
       return mapRow(result.rows[0]);
@@ -117,6 +121,9 @@ export class PgLocationRepository extends PgBaseRepository implements LocationRe
         isPrimary: 'is_primary',
         addressType: 'address_type',
         serviceTypes: 'service_types',
+        geocodeStatus: 'geocode_status',
+        geocodeAttempts: 'geocode_attempts',
+        geocodedAt: 'geocoded_at',
         isArchived: 'is_archived',
         archivedAt: 'archived_at',
         updatedAt: 'updated_at',

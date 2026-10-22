@@ -1,6 +1,7 @@
 ---
 title: "Avoca.ai vs. Serviceos — Competitive Analysis & Voice-AI Quality Playbook"
 date: 2026-06-21
+updated: 2026-10-19
 status: research
 author: deep-research workflow
 tags: [competitive-analysis, voice-ai, avoca, trades, training-methodology]
@@ -26,6 +27,8 @@ tags: [competitive-analysis, voice-ai, avoca, trades, training-methodology]
   first-hand page read. The high-stakes facts (funding, training framing) were
   re-verified across multiple independent sources and are high-confidence; product
   micro-claims should be re-confirmed on the live page before external quoting.
+  **2026-10-19:** the live `avoca.ai` homepage *was* readable; see §1b for the
+  claims re-confirmed first-hand and a refreshed parity table against `origin/main`.
 - **Confidence tags:** ✅ verified (multi-source/primary) · 🟡 described-but-vague
   (vendor framing) · 🔴 single-source/adversarial (competitor marketing) · ⚪ not
   publicly disclosed.
@@ -68,6 +71,63 @@ tags: [competitive-analysis, voice-ai, avoca, trades, training-methodology]
    the differentiator, ship the **FSM integrations** that make you swappable for Avoca,
    and add a **human-handoff backstop** — your proposal/audit gate is a structurally
    *better* answer to the "AI breaks at the handoff" problem if you finish wiring it.
+
+---
+
+## 1b. 2026-10-19 refresh — live homepage vs. `origin/main`
+
+First-hand read of `https://www.avoca.ai/` (2026-10-19) compared against Serviceos
+`origin/main` @ `ff2308c7c`. Serviceos findings are **grep-level** (file/route existence),
+not a behavioral audit — the ⚠️ row in particular is lightly checked. Where this section
+disagrees with §5/§6 below, **this section is newer**.
+
+**Target segment for prioritization:** small independent HVAC and plumbing shops
+(owner-operator to ~20 techs, few or no dedicated CSRs) — the segment §7/§8 identify as
+underserved by Avoca's enterprise pricing.
+
+| Avoca claim (live homepage) | Serviceos `origin/main` | Evidence | Small-shop priority | Tracking |
+|---|---|---|---|---|
+| AI answers calls, books 24/7 ("2s wait") | ✅ Twilio/Vapi inbound, voice booking | `packages/api/src/voice/`, `ai/voice-turn/` | core | — |
+| Answers texts | ✅ inbound SMS → conversation replies | `conversations/reply-service.ts` | core | — |
+| Emergency escalation | ✅ escalate-to-human skill + escalation context | `ai/skills/escalate-to-human.ts`, `ai/agents/customer-calling/escalation-*` | core (no-heat / burst-pipe calls) | — |
+| "CRM Synced" | ✅ n/a — Serviceos *is* the CRM | — | — | — |
+| Simple Scheduler (self-service booking) | ✅ public booking page + portal booking | `routes/public-booking.ts`, `web/src/components/customer/BookingPage.tsx` | core | — |
+| Speed-to-lead "<15s" | ❌ **built but not wired** — `sendSpeedToLeadResponse` is called only from tests; `createLead` just pushes the owner; setting defaults off and the settings PUT strips it | `leads/speed-to-lead.ts:109`, `leads/lead-service.ts`, `settings/pg-settings.ts:164` | high | #1738 |
+| Google LSA direct integration | ❌ no code | — | **high** — LSA is a primary paid lead source for small HVAC/plumbing | #1738 |
+| Outbound multi-channel SMS + call drips | ❌ one-shot segmented **email** campaigns only | `marketing/campaign.ts` | **high** — seasonal tune-ups, maintenance-plan renewals, unsold estimates fill slow weeks | #1735 |
+| Web Chat on the customer's site | ❌ `webchat` channel value only; no widget or public route | `db/schema.ts:1800`, `voice/voice-session.ts:9` | medium | #1737 |
+| Live call scoring + CSR coaching | 🟡 **sampled** live grading exists (#1602: nightly, 20% of eligible inbound calls, ≤20/day/tenant, LLM-judged subset of rubric); no owner review/correction UI, no corrections→corpus loop, no coaching | `voice/quality/grade-voice-session.ts`, `workers/voice-quality-grading-worker.ts` | medium — few human CSRs to coach; the value is the owner reviewing/correcting **AI** calls (the flywheel) | #1736 |
+| ServiceTitan (Certified App) / Housecall Pro / FieldRoutes | ❌ ServiceTitan appears only in code comments | — | low — ServiceTitan skews larger operators; Serviceos is the FSM for this segment (HCP/Jobber matter as migration sources) | §8 Tier 2 #4 |
+| Human-in-the-loop / Responder | ⚠️ warm transfer exists in code; Avoca's backstop is a managed human team (a service, not software) | voice-parity Feature 7 | medium — transfer to owner's cell is the realistic backstop | — |
+
+**Suggested order for this segment:** LSA leads (#1738) → outbound drips (#1735) →
+AI-call review/correction loop (#1736, owner-facing, not CSR coaching) → web chat (#1737).
+
+**Changes vs. the June analysis:**
+- Speed-to-lead: the SMS first-response module exists (Story 15.2) but is **not called
+  from any production path** and cannot be enabled via settings — still effectively absent.
+  The outbound **dialer + drip** half of Nurture is also missing (#1735).
+- Human backstop is better than "on-call dial only": warm transfer with a context SMS
+  before connect (see `voice-feature-parity-tracker.md` row 11). No managed CSR queue.
+- Live homepage now says **"1,000+"** service businesses (June: 800+) and lists **13
+  verticals** (adds energy/fuel delivery, junk removal, movers, dealership auto repair).
+- Homepage result stats rendered as "0%" / "0x" in the fetch — likely client-side
+  counters that never loaded; not usable as figures.
+
+### Workflow quality review (2026-10-19, `origin/main` @ `ff2308c7c`)
+
+Read-only code review of the workflows marked ✅ above, judged against Avoca's claims for the
+small-shop segment. Code reading only — nothing was run.
+
+| Workflow | Verdict vs. Avoca | Main reasons |
+|---|---|---|
+| Inbound call → booking | **Weaker** | Default is capture → owner approves (`autonomous_booking_enabled` defaults FALSE, `db/schema.ts:5848`). Autonomous lane also needs an existing job, a verified repeat caller and English. Holds check only the **customer's** conflicts, never tech availability (`ai/scheduling/place-hold.ts:327-333`), so overlapping holds are possible for a 1–3 tech shop. Layer-2 latency gate only runs on `release/*` pushes, and none exist. Strengths: honest spoken outcomes, conservative 18-gate lane, real-PG booking + tech double-assign proofs, production latency SLO. |
+| Emergency + escalation | **Stronger** on detection/life-safety, **weaker** on a live human | Keyword layer before the LLM + LLM intents, E1/E2/E3 tiers, Spanish, 911/evacuate script, E1 never books, multi-channel owner alert. Gaps: phrasings like "my pipe burst", "AC not working", "water heater leaking" rely on the LLM. Vulnerability/seasonal rules are not on in production. Page-retry ladder only for keyword-detected E2s. Re-dial after no-answer drops context. E1 script is unreviewed placeholder copy. No managed human backstop. |
+| SMS + speed-to-lead | **Weaker** | Inbound capture, STOP/DNC/consent and dropped-call recovery are solid with real-PG tests. But no autonomous SMS replies (owner-drafted only), speed-to-lead is unwired, no plain missed-call text-back, delivery status callbacks ignored, no pre-10DLC fallback. **Bug candidate:** plain START handler (`app.ts:3846`, `overwrite: true`, keywords START/UNSTOP/YES) appears to replace the YES opt-in + owner-approval composite registered earlier (~`app.ts:1960`). That would break owner "YES" approvals by SMS. |
+| Self-service booking | **Weaker** | Safe: timezone refusal, server re-validation, advisory-lock race protection, real-PG + e2e tests. But every booking is pending owner approval. Public page treats the whole shop as one calendar (no tech) and shows ≤6 slots. ZIP allowlist only. `frame-ancestors 'none'` blocks embedding. Errors collapse to "Something went wrong". |
+
+**Still unknown:** Avoca's actual runtime behavior (latency, call handling, scoring
+quality) — would need recorded test calls to their demo line.
 
 ---
 
@@ -181,12 +241,12 @@ ships the closed correction loop first and gets call volume.
 | Customer web portal (estimate approval, pay, booking, feedback) | ✅ wired | mobile-enforced (≥44px, 320px) |
 | Async workers + webhook base | ✅ wired | pg-boss; dedup'd webhook handler |
 | Google Calendar | 🟡 one-way (system→cal) | reverse sync stubbed |
-| **Outbound calling / callback AI** | 🔴 stubbed | `callback` proposal is capture-class, operator-initiated; **no autonomous dialer** |
+| **Outbound calling / callback AI** | 🔴 stubbed | `callback` proposal is capture-class, operator-initiated; **no autonomous dialer** · *2026-10-19: still no dialer/drip (#1735); speed-to-lead module exists but is unwired — §1b* |
 | **Voicemail-to-action** | 🔴 dormant | recorded, not converted to proposal |
 | **QuickBooks/Xero sync** | 🔴 dormant | provisioning done; sync gated off |
 | **Third-party FSM/CRM (ServiceTitan/HCP/Jobber)** | 🔴 none | internal CRM only |
-| **Conversation coaching / QA scoring** | 🔴 stubbed | FSM + voice-quality graders exist; business logic incomplete |
-| **Human live-agent backstop** | 🔴 partial | on-call dial only; no managed CSR queue |
+| **Conversation coaching / QA scoring** | 🔴 stubbed | FSM + voice-quality graders exist; business logic incomplete · *2026-10-19: sampled live grading exists (#1602); no owner review/correction loop (#1736)* |
+| **Human live-agent backstop** | 🟡 partial | *2026-10-19:* warm transfer + context SMS (voice-parity Feature 7); no managed CSR queue |
 
 ---
 
@@ -199,11 +259,13 @@ ships the closed correction loop first and gets call volume.
 | **Pricing/quote accuracy** | knowledge-base price list (no hard grounding claim) | ✅ **hard catalog grounding, never guesses** | **Serviceos advantage** |
 | **Human-approval / audit gate** | auto-books autonomously | ✅ **never-auto-execute, confidence-gated, audited, 5s undo** | **Serviceos advantage (trust/compliance)** |
 | Ambiguity handling | implied | ✅ **explicit entity resolver → one-tap clarification** | **Serviceos advantage** |
-| Outbound / speed-to-lead / nurture | ✅ Nurture, <15s, drip | 🔴 stubbed | **Avoca** |
-| QA / call scoring / coaching | ✅ Coach (AI+human, rubric) | 🔴 graders exist, not productized | **Avoca (you have the parts)** |
+| Outbound / speed-to-lead / nurture | ✅ Nurture, <15s, drip | 🔴 speed-to-lead module unwired; no dialer/drip (#1735) | **Avoca** |
+| QA / call scoring / coaching | ✅ Coach (AI+human, rubric) | 🟡 sampled live grading (#1602); no owner review/correction (#1736) | **Avoca (you have the parts)** |
 | **Closed-loop correction flywheel** | ✅ corrections feed back | 🔴 transcripts captured, no loop | **Avoca — strategic gap** |
-| Human backstop on hard calls | ✅ managed CSR team | 🔴 on-call dial only | **Avoca** |
+| Human backstop on hard calls | ✅ managed CSR team | 🟡 warm transfer w/ context; no managed team | **Avoca** |
 | Multilingual / code-switching | ✅ | ⚪ unverified | **Avoca (assume gap)** |
+| Google LSA leads | ✅ direct integration | 🔴 none (#1738) | **Avoca** |
+| Web chat | ✅ Web Chat | 🔴 channel enum only (#1737) | **Avoca** |
 | Vertical specialization | ✅ per-trade KBs/pages | 🟡 generic FSM model | **Avoca** |
 | Accounting (QBO/Xero) | via CRM | 🔴 dormant | **Tie (both incomplete)** |
 | Compliance posture | SOC 2 Type 2 | ✅ RLS/audit/DNC; cert unstated | **Tie / verify** |
@@ -288,7 +350,8 @@ backstop + FSM depth), not a secret model. Out-execute on the quality primitives
 ---
 
 ## 9. Open items to verify before external use
-- Re-confirm Avoca product micro-claims on live pages (all were 403-blocked).
+- ~~Re-confirm Avoca product micro-claims on live pages (all were 403-blocked).~~ Homepage
+  re-confirmed 2026-10-19 (§1b); sub-pages (`/coach`, `/inbound`, integrations) not re-read.
 - 🔴 CraftFlow booking benchmark + "robotic" claim (single adversarial source).
 - 🔴 ~$1–3k/mo pricing (third-party estimate).
 - ⚪ Avoca's ASR/TTS/LLM stack & fine-tune-vs-RAG (undisclosed — do not assert).
@@ -325,3 +388,4 @@ backstop + FSM depth), not a secret model. Out-execute on the quality primitives
 - Retell AI buyer checklist: https://www.retellai.com/blog/best-voice-ai-solutions-for-home-service-contractors
 
 **Serviceos:** source-code audit of `/packages` (api/web/shared) — file references inline in §5.
+2026-10-19 refresh: live read of https://www.avoca.ai/ + grep of `origin/main` @ `ff2308c7c` (§1b).

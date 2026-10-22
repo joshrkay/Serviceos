@@ -1,4 +1,4 @@
-import { useAuth } from '@clerk/clerk-expo';
+import { useAuth } from '@clerk/expo';
 import { useCallback } from 'react';
 import { useApiClient } from '../lib/useApiClient';
 import { getExpoPushToken } from './nativePushDeps';

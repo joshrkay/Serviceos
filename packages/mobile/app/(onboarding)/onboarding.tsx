@@ -1,4 +1,4 @@
-import { useAuth } from '@clerk/clerk-expo';
+import { useAuth } from '@clerk/expo';
 import { useRouter } from 'expo-router';
 import { Pressable, Text, View } from 'react-native';
 import { skipSetupGateForSession } from '../../src/hooks/useOnboardingStatus';
@@ -24,11 +24,11 @@ export default function Onboarding() {
       <View className="flex-1 items-center justify-center">
         <Pressable
           accessibilityRole="button"
-          accessibilityLabel="Hold to speak"
-          onPress={() => router.push('/voice')}
+          accessibilityLabel="Start setup by voice"
+          onPress={() => router.push('/setup-voice')}
           className="h-44 w-44 items-center justify-center rounded-full bg-primary"
         >
-          <Text className="text-lg font-semibold text-primaryForeground">Tap mic</Text>
+          <Text className="text-lg font-semibold text-primaryForeground">Start</Text>
         </Pressable>
         <Text className="mt-4 text-center text-base text-mutedForeground">
           Voice-first onboarding — speak naturally about your trade, service area, and crew.

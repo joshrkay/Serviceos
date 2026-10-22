@@ -1,7 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
-import type { OnboardingOptionKey } from '@ai-service-os/shared';
 import { trackFunnel, type FunnelContext } from '../lib/analytics';
-import { matchOption, type MatchableOptions } from '../lib/option-matcher';
+import { interpretUtterance, unclearReply, type Utterance, type UtteranceScreen } from '../lib/onboarding-utterance';
 import { apiFetch } from '../utils/api-fetch';
 import { dictationSupported, useDeepgramDictation } from './useDeepgramDictation';
 import { useTTS } from './useTTS';
@@ -30,7 +29,7 @@ import { useTTS } from './useTTS';
  * mine" tap after the audio is unlocked (or inside a tap on the mic, for an
  * owner who came back to a turn), and kept for the whole pass, so there is one
  * permission prompt. Each turn opens its own Deepgram socket with a fresh 30 s
- * token (`useRivetListening`) and closes it when the turn goes, so no socket
+ * token (`useRivetTurnListener`) and closes it when the turn goes, so no socket
  * outlives its token. A refused microphone, a browser that cannot listen, or
  * no transcription on the server (503) leaves every turn to the cards, with no
  * banner. `v3_voice_input` records which, once per mount.
@@ -51,7 +50,7 @@ const CANNOT_LISTEN: ReadonlySet<VoiceInputState> = new Set(['denied', 'unsuppor
 export interface SpeakOptions {
   /** The turn this line belongs to: a choice key, or 'ready' / 'readback' / 'trial' / 'number'. */
   turn: string;
-  /** The whole turn's lines (question, then the two option lines): fetched together as one batch. */
+  /** The whole turn's lines (its narration, `narrateTurn`): fetched together as one batch. */
   with?: readonly string[];
 }
 
@@ -60,6 +59,12 @@ export interface RivetVoice {
   unlock: (gesture: RivetVoiceGesture) => void;
   /** Say one line, interrupting whatever Rivet was saying. Resolves when it is done (or given up). */
   speak: (text: string, opts: SpeakOptions) => Promise<void>;
+  /**
+   * Say several lines in order with a short pause between them, interrupting whatever Rivet was
+   * saying. Anything that interrupts one line (`stop`, the owner talking, another `speak`) ends
+   * the rest. Resolves when the last line is done (or the sequence was cut off).
+   */
+  speakAll: (lines: readonly string[], opts: SpeakOptions) => Promise<void>;
   /** Fetch a turn's lines ahead of time, after anything already being fetched. */
   prefetch: (lines: readonly string[]) => void;
   /** Stop speaking. */
@@ -85,8 +90,10 @@ type Held = { clip: Clip } | { failed: TtsFallbackReason };
 
 /** A 44-byte WAV with no samples: what the unlock plays inside the tap. */
 const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
-/** One turn, as the batch route bounds it. */
-const BATCH_MAX_ITEMS = 3;
+/** One turn, as the batch route bounds it (packages/api/src/ai/tts/tts-batch.ts). */
+const BATCH_MAX_ITEMS = 4;
+/** Between two lines of one narration: a breath, so the options don't run together. */
+const LINE_GAP_MS = 250;
 /** Per-viewer convenience: the hashes of clips already heard, so a reload replays them for free. */
 const HASH_INDEX_KEY = 'rivet-voice:clip-hashes';
 const HASH_INDEX_MAX = 64;
@@ -386,6 +393,23 @@ export function useRivetVoice(opts: { funnel: FunnelContext }): RivetVoice {
     halt();
   }, [halt]);
 
+  const speakAll = useCallback(
+    async (lines: readonly string[], opts: SpeakOptions) => {
+      const spoken = lines.map((l) => l.trim()).filter(Boolean);
+      for (let i = 0; i < spoken.length; i += 1) {
+        // speak() takes the next generation as it starts; anything newer means this line was cut off.
+        const mine = generation.current + 1;
+        await speak(spoken[i], opts);
+        if (generation.current !== mine) return;
+        if (i + 1 < spoken.length) {
+          await new Promise((resolve) => setTimeout(resolve, LINE_GAP_MS));
+          if (generation.current !== mine) return;
+        }
+      }
+    },
+    [speak],
+  );
+
   const recordInput = useCallback((event: VoiceInputEvent) => {
     if (inputEventsSent.current.has(event)) return;
     inputEventsSent.current.add(event);
@@ -464,8 +488,8 @@ export function useRivetVoice(opts: { funnel: FunnelContext }): RivetVoice {
 
   const speaking = audioPlaying || ttsSpeaking;
   return useMemo(
-    () => ({ unlock, speak, prefetch: fetchBatch, stop, speaking, openMic, input, stream, keytermsOff, noteInput }),
-    [unlock, speak, fetchBatch, stop, speaking, openMic, input, stream, keytermsOff, noteInput],
+    () => ({ unlock, speak, speakAll, prefetch: fetchBatch, stop, speaking, openMic, input, stream, keytermsOff, noteInput }),
+    [unlock, speak, speakAll, fetchBatch, stop, speaking, openMic, input, stream, keytermsOff, noteInput],
   );
 }
 
@@ -503,10 +527,36 @@ export function useRivetLine(turn: string, text: string | null | undefined, with
   }, [speak, stop, turn, text, linesKey]);
 }
 
+/**
+ * Say a turn's narration (several lines, one batch request) when the screen shows it, and again when
+ * it changes; stop when the screen goes.
+ */
+export function useRivetNarration(turn: string, lines: readonly string[]): void {
+  const voice = useContext(RivetVoiceContext);
+  const speakAll = voice?.speakAll;
+  const stop = voice?.stop;
+  const linesKey = lines.join('\n');
+  useEffect(() => {
+    if (!speakAll || !stop || !linesKey) return;
+    const all = linesKey.split('\n');
+    void speakAll(all, { turn, with: all });
+    return stop;
+  }, [speakAll, stop, turn, linesKey]);
+}
+
 /** Deepgram's trailing silence that ends an utterance (the spec's 1.2 s). */
 const UTTERANCE_END_MS = 1200;
 /** Quiet this long once Rivet is done, and the turn stops listening ("Take your time"). */
 const QUIET_MS = 6000;
+
+/** The last answer that meant nothing on this screen: what was heard, and what Rivet said back. */
+export interface RivetMiss {
+  transcript: string;
+  /** `unclearReply`: shown in the transcript card and said aloud. */
+  reply: string;
+  /** Misses in a row on this turn, this one included. */
+  count: number;
+}
 
 export interface RivetListening {
   /** The mic belongs on this turn: the shell can listen, and nothing has ruled it out. */
@@ -517,42 +567,55 @@ export interface RivetListening {
   partial: string;
   /** The owner was quiet for 6 s after Rivet finished: the turn stopped listening. Once per turn. */
   quiet: boolean;
+  /** The last answer was unclear (cleared by the next one that wasn't). */
+  missed: RivetMiss | null;
   /** The mic tap: stop listening, or listen again (asking for the microphone if it never was). */
   toggle: () => void;
 }
 
-export interface RivetListeningOptions {
-  /** The turn listening (a choice key). */
+export interface RivetTurnListenerOptions {
+  /** The turn listening (a choice key, or the screen's name). */
   turn: string;
-  /** The turn's two options as rendered: matched against, and sent to Deepgram as keyterms. */
-  options: MatchableOptions;
+  /** What this screen listens for: its cards, help, commands, free answers. Its words are sent to Deepgram as keyterms. */
+  screen: UtteranceScreen;
   /** False while the owner is typing or an answer is being saved: the socket is closed. */
   enabled: boolean;
-  /** A spoken answer named one of the two cards. */
-  onMatch: (key: OnboardingOptionKey, transcript: string) => void;
-  /** A spoken answer matched neither card: no guess, the owner taps or says it again. */
-  onNoMatch: (transcript: string) => void;
+  /**
+   * Every finished utterance, already sorted (`interpretUtterance`). An `unclear` one has
+   * also been answered: Rivet says what he heard and what the screen accepts (`missed`).
+   */
+  onResult: (utterance: Utterance) => void;
+}
+
+/** What Deepgram is told to listen for on a screen: the card labels, "first"/"second", its command phrases and its own words. */
+function screenKeyterms(screen: UtteranceScreen): string[] {
+  const terms = screen.options ? [screen.options[0].label, screen.options[1].label, 'first', 'second'] : [];
+  for (const command of screen.commands ?? []) terms.push(...command.phrases);
+  terms.push(...(screen.keyterms ?? []));
+  return terms;
 }
 
 /**
- * One turn listening, on the shell's microphone: a Deepgram socket opened when the
- * turn is up (fresh token, English, the two labels plus "first"/"second" boosted) and
- * closed when it goes. The owner talking over Rivet stops him at once (barge-in, the
- * useConversationVoice rule). Each finished utterance is matched to a card on the
- * client (`matchOption`) before any server call. A socket that drops mid-turn is
- * reopened once with a new token on the same microphone; a socket refused at open
- * with the boost is reopened once without it, and the boost stays off for the pass.
+ * One screen listening, on the shell's microphone: a Deepgram socket opened when the
+ * screen is up (fresh token, English, the screen's words boosted) and closed when it
+ * goes. The owner talking over Rivet stops him at once (barge-in, the
+ * useConversationVoice rule). Each finished utterance is sorted on the client
+ * (`interpretUtterance`) before any server call. An unclear one is never silent:
+ * Rivet says what he heard and what the screen accepts, with an example from the
+ * second miss. A socket that drops mid-turn is reopened once with a new token on
+ * the same microphone; a socket refused at open with the boost is reopened once
+ * without it, and the boost stays off for the pass.
  */
-export function useRivetListening(voice: RivetVoice | null, opts: RivetListeningOptions): RivetListening {
-  const { turn, options, enabled } = opts;
+export function useRivetTurnListener(voice: RivetVoice | null, opts: RivetTurnListenerOptions): RivetListening {
+  const { turn, screen, enabled } = opts;
   const voiceRef = useRef(voice);
   voiceRef.current = voice;
-  const onMatchRef = useRef(opts.onMatch);
-  const onNoMatchRef = useRef(opts.onNoMatch);
-  onMatchRef.current = opts.onMatch;
-  onNoMatchRef.current = opts.onNoMatch;
-  const optionsRef = useRef(options);
-  optionsRef.current = options;
+  const onResultRef = useRef(opts.onResult);
+  onResultRef.current = opts.onResult;
+  const screenRef = useRef(screen);
+  screenRef.current = screen;
+  const [missed, setMissed] = useState<RivetMiss | null>(null);
+  const missesRef = useRef(0);
 
   const supported = dictationSupported();
   const input = voice?.input ?? 'off';
@@ -575,7 +638,7 @@ export function useRivetListening(voice: RivetVoice | null, opts: RivetListening
     if (input === 'asking') setWanted(true);
   }, [input]);
 
-  const keyterms = voice?.keytermsOff ? undefined : [options[0].label, options[1].label, 'first', 'second'];
+  const keyterms = voice?.keytermsOff ? undefined : screenKeyterms(screen);
 
   const dictation = useDeepgramDictation({
     stream: voice?.stream ?? undefined,
@@ -591,9 +654,17 @@ export function useRivetListening(voice: RivetVoice | null, opts: RivetListening
     onUtteranceEnd: (text) => {
       if (!enabledRef.current) return;
       setHeardWords((n) => n + 1);
-      const match = matchOption(text, optionsRef.current);
-      if (match) onMatchRef.current(match.key, text);
-      else onNoMatchRef.current(text);
+      const utterance = interpretUtterance(text, screenRef.current);
+      if (utterance.kind === 'unclear') {
+        missesRef.current += 1;
+        const reply = unclearReply(utterance.transcript, missesRef.current, screenRef.current);
+        setMissed({ transcript: utterance.transcript, reply, count: missesRef.current });
+        void voiceRef.current?.speak(reply, { turn });
+      } else {
+        missesRef.current = 0;
+        setMissed(null);
+      }
+      onResultRef.current(utterance);
     },
     onClose: ({ opened }) => {
       const v = voiceRef.current;
@@ -618,6 +689,8 @@ export function useRivetListening(voice: RivetVoice | null, opts: RivetListening
   startRef.current = dictation.start;
 
   const live = available && enabled && wanted && input === 'on' && voice.stream !== null;
+  const liveRef = useRef(live);
+  liveRef.current = live;
   useEffect(() => {
     if (!live || starting.current) return;
     starting.current = true;
@@ -626,7 +699,12 @@ export function useRivetListening(voice: RivetVoice | null, opts: RivetListening
       .current()
       .then((outcome) => {
         if (outcome === 'unavailable') voiceRef.current?.noteInput('unavailable');
-        else if (outcome !== 'connecting') setWanted(false);
+        // Cancelled: the turn paused (an answer saving, the owner typing) while this start was asking for
+        // its token. Not a refusal: if the turn is listening again by now, start over.
+        else if (outcome === 'cancelled') {
+          starting.current = false;
+          if (liveRef.current) setAttempt((n) => n + 1);
+        } else if (outcome !== 'connecting') setWanted(false);
       })
       .finally(() => {
         starting.current = false;
@@ -661,5 +739,5 @@ export function useRivetListening(voice: RivetVoice | null, opts: RivetListening
     setAttempt((n) => n + 1);
   }, [live, isRecording]);
 
-  return { available, listening: isRecording && live, partial: live ? dictation.partial : '', quiet, toggle };
+  return { available, listening: isRecording && live, partial: live ? dictation.partial : '', quiet, missed, toggle };
 }

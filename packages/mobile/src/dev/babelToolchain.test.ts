@@ -10,9 +10,10 @@ import { describe, expect, it } from 'vitest';
  * babel.config.js loads `nativewind/babel`, which is react-native-css-interop's
  * Babel preset. From css-interop 0.2.0 that preset lists
  * "react-native-worklets/plugin" (Reanimated 4's plugin); 0.1.x lists
- * "react-native-reanimated/plugin" (Reanimated 3's). This app is Expo SDK 52 on
- * Reanimated 3, so the installed css-interop must be 0.1.x — or the worklets
- * package must be present. Read from the lockfile the CI install uses, since
+ * "react-native-reanimated/plugin" (Reanimated 3's). This app is Expo SDK 57 on
+ * Reanimated 4, so the installed css-interop is 0.2.x and the worklets package
+ * must be present (the 0.1.x branch below is kept so a downgrade also fails
+ * loudly). Read from the lockfile the CI install uses, since
  * this lane runs without the mobile node_modules.
  */
 const LOCK = path.resolve(__dirname, '../../package-lock.json');

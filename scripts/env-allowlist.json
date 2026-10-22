@@ -18,6 +18,7 @@
   ],
   "optional": [
     { "name": "ANTHROPIC_API_KEY", "reason": "Local-dev fallback key for the real-LLM path-smoke CLI only (ai/voice-quality/path-smoke/provider.ts:90, reached from scripts/agent-path-smoke.ts and the voice-eval --live runners via packages/voice-eval/live-support.ts). Never read on a boot or request path; unset = the smoke / live eval use the production AI_PROVIDER_API_KEY. Production does not use Anthropic." },
+    { "name": "PAYMENT_LINK_PROVIDER", "reason": "Hermetic e2e only (e2e/onboarding-v3.config.ts). payments/payment-link-provider.ts forces the mock pay-link provider when it is the literal 'mock' and refuses to boot with it in production/staging; unset = the real Stripe provider, the current production behaviour." },
     { "name": "AI_CACHE_ENABLED", "reason": "Opt-in response cache. gateway/factory.ts:209 requires the literal 'true'; unset = caching off, the current production behaviour." },
     { "name": "AI_COMPLETION_PROBE_TIMEOUT_MS", "reason": "Readiness-probe timeout. gateway/readiness.ts:76 derives max(classify-intent deadline, 10s) when unset." },
     { "name": "AI_LIGHTWEIGHT_DEADLINE_MS", "reason": "Tuning constant. config/ai-routing.ts:100 defaults to 1500ms." },
@@ -63,6 +64,7 @@
     { "name": "SHADOW_LLM_API_KEY", "reason": "Only read after SHADOW_LLM_ENABLED==='true'; a missing key also short-circuits back to the primary gateway (factory.ts:428)." },
     { "name": "SHADOW_LLM_BASE_URL", "reason": "Only read on the opt-in shadow path (factory.ts:432)." },
     { "name": "SHADOW_LLM_SAMPLING_RATE", "reason": "Only read on the opt-in shadow path (factory.ts:433)." },
+    { "name": "STT_PROVIDER", "reason": "Dev/test only. The single accepted value 'fixture' makes POST /api/voice/stream-token mint a fake token for the scripted-speech e2e lane (deepgram-token.ts); prodEnvSchema refuses it at boot and the mint refuses it again in production. Unset = real Deepgram, the production behaviour." },
     { "name": "STORAGE_ENABLED", "reason": "Opt-OUT flag: config.ts:287 reads `!== 'false'`, so unset means storage is ENABLED. Setting it is how you turn storage off." },
     { "name": "TELEPHONY_ENABLED", "reason": "Opt-OUT flag: config.ts:285 reads `!== 'false'`, so unset means telephony is ENABLED." },
     { "name": "TCPA_CONSENT_ENFORCEMENT", "reason": "config.ts:57 defaults to 'off' - a DELIBERATE off-by-default documented in the schema comment (the DNC opt-out check still applies). Raising it to 'warn'/'block' is an explicit operator decision, not a missing value." },
@@ -74,7 +76,11 @@
     { "name": "VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK", "reason": "Voice-quality TEST harness only (ai/voice-quality/cassette-gateway.ts:130). Must stay unset - pr-checks.yml documents that setting it re-introduces the stale-response hazard." },
     { "name": "VOICE_QUALITY_CASSETTE_MODE", "reason": "Voice-quality TEST harness only (cassette-gateway.ts:152); replay is the default." },
     { "name": "WEBHOOK_SIGNING_SECRET", "reason": "Fallback alias only: voice-approval-pin.ts:42 uses `TENANT_ENCRYPTION_KEY ?? WEBHOOK_SIGNING_SECRET`, and TENANT_ENCRYPTION_KEY is in the production contract." },
-    { "name": "WORKER_DEBUG_BOUNDED", "reason": "Debug logging flag (queues/queue.ts:84); unset = quiet." }
+    { "name": "WORKER_DEBUG_BOUNDED", "reason": "Debug logging flag (queues/queue.ts:84); unset = quiet." },
+    { "name": "FORWARDING_CHECKS_PER_10_MIN", "reason": "Rate limit for POST /api/get-found-online/forwarding/check (routes/get-found-online.ts:206), parsed with Number() and floored at 1; unset = 5 checks per tenant per 10 minutes, the intended production default. Raise only for load testing." },
+    { "name": "LSA_DISPOSITION_REPORTING_ENABLED", "reason": "Opt-in switch for reporting lead dispositions back to Google Local Services Ads (lsa/disposition-reporter.ts:40). Anything but the literal 'true' = the no-op reporter; LSA leads still land in the inbox. Turn on once the LSA integration is verified for a tenant." },
+    { "name": "WEBCHAT_DISABLED", "reason": "Global kill switch for the public webchat widget (app.ts:5388). Only the literal 'true' disables it; unset = webchat follows the per-tenant feature flag, the normal production state." },
+    { "name": "WEBCHAT_TURNSTILE_SECRET", "reason": "Cloudflare Turnstile secret for the webchat bot check (app.ts:5423). Unset = no bot verifier is attached and webchat sessions are rate-limited only; set it before enabling the webchat flag for real tenants." }
   ],
   "unreviewed": [
     { "name": "GOOGLE_MAPS_API_KEY", "reason": "UNSURE - almost certainly SHOULD be set. scheduling/travel-time/factory.ts:6 silently returns HaversineFallbackProvider when unset, so every travel-time estimate degrades to straight-line distance with no error. Named in the July 2026 Railway sweep." },

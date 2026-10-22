@@ -614,13 +614,50 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['317_demo_calls', '1f2e2793272ab397224a1feb5307f583c121d5c138d06ed7fb533d6c698045de'],
   // PRIV-3 — voice_recordings.pci_detected + audio_purged_at (card number said on the call).
   ['314_voice_recordings_card_number_detected', '648f2696cce7ed17700f8b2d3b826ce8eb61987af91f7cbeed58c82ce01b0ce3'],
+  // S5a (U8) — durable per-link cleanup claim + live-payment-link partial index.
+  ['325_invoices_cleanup_claimed_at', 'e8643fd8984b82bdf4a081da109d699b96467a1ce71d6e8f249ca6d7bf3f5735'],
   // PRIV-2 — voice_recordings.twilio_deleted_at + twilio_delete_attempted_at (Twilio copy deleted).
   ['315_voice_recordings_twilio_copy_deleted', '02163cc28f90807433f2526555aaee5cc60ab3c36c5b5c60833c81084a73d1b9'],
   // PRIV-1 — ai_runs.content_purged_at + partial due-index (prompt/reply content purged past retention).
   ['316_ai_runs_content_purged_at', '9d5dedac62a55a87f961fb97814dc3e899ccc3a09a15c57ec9548ead00001b7a'],
   // PRIV-1 (review round 2) — partial index on held voice_recordings (ai_runs purge legal-hold probe).
+  ['318_seeded_price_baseline', '19a3806bcb2f0be4cc31345f6c06d8a2b2a780da20afc3535c4243d7907ca628'],
   ['321_voice_recordings_legal_hold_index', 'd76d4dfc8b243cbb41c97635409f9d53c076d1f5b59110141a9f767e4a9c9952'],
   ['324_seeded_price_baseline', '19a3806bcb2f0be4cc31345f6c06d8a2b2a780da20afc3535c4243d7907ca628'],
+  // U1 reply-gap — call_transcript_turns.transport / reply timing columns + 2 NOT VALID CHECKs + partial index.
+  ['326_call_transcript_turns_reply_timing', 'bad452623ef0091588b40ccd2f8408de9935ee9ceb5d1fdae8386ef11acfe65b'],
+  // Dispatch FR-2 phase 1 — service_locations geocode status/attempts/geocoded_at + 1 NOT VALID CHECK + partial index.
+  ['327_service_locations_geocode_status', '8de7949551f27df07e557b82ce08edab52d318b0034fe46fce0230330c248c78'],
+  // Dispatch FR-2 phase 2 — users.skills + jobs.required_skills (TEXT[], no CHECK).
+  ['328_skill_tags', '7b58a5e30ea28966566996c314b41b155333fe55ce687e8463eabf92ad7261ea'],
+  // D-045 — message_dispatches outcome columns (scheduled/blocked) + 3 NOT VALID CHECKs + 3 partial indexes.
+  ['329_message_dispatch_outcomes', '928d38a17d9f73b2175b5a0d71557b8fbb15719bec0f0415d007b15731ef3ea4'],
+  // D-045 — customer_text_wording (owner's own wording per customer text), RLS, inline CHECKs only.
+  ['330_customer_text_wording', 'cb3931893bf7d7fdf018c8fb546cd0d0b15fbf8823a4ce1dbfd67e86195df1b7'],
+  // D-044 / #1763 — tenant_settings.get_found_online_dismissed_at, google_review_url_derived; review_poll_state.backoff_reason, auth_generation.
+  ['331_get_found_online', 'eb7e83e23154cb56342b21f1b83c90733349f649215af5206885b77bb3a639ca'],
+  // 332–345: #1790 (merged 2026-10-22 without snapshot entries).
+  ['332_call_forwarding_setup', '6945ad7041594cebcefdf2b4e200e2782ca5b2909463fba99e0f8dfb45716fd9'],
+  ['333_call_forwarding_checks', '2c09f0495368fa186b98ae2c7789caaf94b35b59d34306b2aab9a15df74dc908'],
+  ['334_tenant_sites', 'f10aa81fd421a954237c87ccaef0ab6671f66140f65b6df8eee6dbc001187acf'],
+  ['335_tenant_site_about', 'b3c66b33c14583d1ab4fa21bd92b2653c63dc71dc05fc3c3e53aec89f0ad9169'],
+  ['336_drip_campaigns', '1fe4cc16ff49abe22ff155e2dafcdcd2dbaba4738be80da6fa3e0ed1b2b1b0fe'],
+  ['337_drip_step_events', '057b5b4a518bf9d808c6de88105796b966b11b812ff2de170e00ddce85081fa7'],
+  ['338_voice_call_scores', '702882a409905c228a8c0a194d0d02ede967dccb0326d021f32b86cdba6bd067'],
+  ['339_voice_call_corrections', '0f422ab95d29478ba4c9ce2a0f24fd88b92b4b106db100ef87a845722ef00eca'],
+  ['340_webchat_config', '5548e267e2d1c0702755ec671dbd1d85d50da4666e79e48eb5bec26a9a75696e'],
+  ['341_webchat_usage_daily', '5f6bd3060cdf445b80e622cfbb9737ce2503b63143d71be36a7840889728bb2f'],
+  ['342_lsa_integrations', '516ec1d299c0f53b81e5a37994d5610f144902fec44740cc4ccbecd7cc4ea6ea'],
+  ['343_lsa_leads', '9d80fb938d2a14f160d186a73f49a98992f63b8f2e4edd52c4d0e4c0ad1c31ab'],
+  ['344_tenant_site_custom_domain', '3b9af9d91eb11ceedf0781fb84c7b7f15e6d867213f0ed3a5da8a3c0321f4dc1'],
+  ['345_tenant_site_custom_domain_due', '9cd0e3cfb2d3236e9bab93c8d8bf5851b81d4a37e1f8239b09c1a90485234182'],
+  // 346–349: the four migrations #1790's merge dropped (were 332–335), re-added under free numbers; SQL and hashes unchanged.
+  ['346_assignment_overlap_accepted', 'eb06c6a9b4dc679fa9532a486a8941a19abcceb6e95875e0fb9d930b94eef471'],
+  ['347_customer_text_wording_per_language', '8e523289f2ee6272d8c9c1acb7902f6ecde0cc82aea93bb9588b58aec866b8f2'],
+  ['348_tenant_settings_get_found', 'a55ccb06da1509baa49df4ff5d76102e8f9ea2115ae2a3f28516b78e7966755c'],
+  ['349_assignment_overlap_accepted_with', '9ce17e738283dccfdb696047dec16aba693948ccdd5c6309942ed5eb6a65b51a'],
+  // #1735 membership renewals drip target — deliberate snapshot update for a new migration.
+  ['350_drip_membership_renewals', '536ef8dff6092437cfed38d2ad2b1db3436232b65347acabec26ac0b2107a85d'],
 ];
 
 function hashMigration(value: string): string {

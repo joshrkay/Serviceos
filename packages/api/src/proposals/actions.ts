@@ -2,6 +2,7 @@ import { Proposal, ProposalRepository, ProposalStatus, missingFieldsFor, actionC
 import { transitionProposal, isInUndoWindow, UNDO_WINDOW_MS } from './lifecycle';
 import { isProposalExpired } from '../workers/proposal-expiry-worker';
 import { validateProposalPayload } from './contracts';
+import { withoutOverlapConsent, editRetargetsReassign } from './contracts/reassignment';
 import { Role, hasPermission } from '../auth/rbac';
 import { AppError, ConflictError, ForbiddenError, ValidationError, NotFoundError } from '../shared/errors';
 import { AppointmentRepository, updateAppointment } from '../appointments/appointment';
@@ -72,6 +73,12 @@ const CONFIG_WRITING_PROPOSAL_TYPES: ReadonlySet<string> = new Set([
   'update_brand_voice',
   'update_catalog_item',
   'add_catalog_item',
+  // D-044 / #1769 — approving writes the public about copy of the hosted site;
+  // publishing the site itself needs settings:update, so this does too.
+  'update_tenant_site_about',
+  // D-044 / #1771 — approving changes the public Google listing (website and
+  // booking link); it needs the same settings:update as the site itself.
+  'update_google_listing_website',
   // PI-2 — a standing instruction is injected as "OWNER STANDING
   // INSTRUCTIONS" into every drafting prompt and composeBrandVoiceMessage,
   // including the dropped-call recovery SMS that goes to customers unreviewed.
@@ -456,6 +463,16 @@ export async function approveProposal(
 /** The parent is agreed to: the executor will run it before this step. */
 const PARENT_AGREED_STATUSES: ReadonlySet<Proposal['status']> = new Set(['approved', 'executing']);
 
+/**
+ * B4 follow-up — why the linked-step gate held a tap (`details.linkedStepReason`
+ * beside `missingFields: ['linkedStep']`), so a surface that cannot show the
+ * message (the one-tap page) can say the right next step:
+ *   'approve_parent_first' — the earlier step is not approved yet;
+ *   'issue_invoice_first'  — the earlier step drafts the invoice this sends;
+ *   'parent_did_not_run'   — the earlier step was rejected / failed / missing.
+ */
+export type LinkedStepHoldReason = 'approve_parent_first' | 'issue_invoice_first' | 'parent_did_not_run';
+
 async function linkedStepGate(
   proposalRepo: ProposalRepository,
   tenantId: string,
@@ -476,7 +493,11 @@ async function linkedStepGate(
     if (proposal.proposalType === 'send_invoice' && parent.proposalType === 'draft_invoice') {
       throw new ValidationError(
         `Cannot approve proposal: the invoice linked ${step} creates will be a draft — once it exists, issue it, then approve the send`,
-        { missingFields: ['linkedStep'], parentProposalId: parent.id },
+        {
+          missingFields: ['linkedStep'],
+          parentProposalId: parent.id,
+          linkedStepReason: 'issue_invoice_first' satisfies LinkedStepHoldReason,
+        },
       );
     }
     return proposal;
@@ -485,7 +506,13 @@ async function linkedStepGate(
     resolution.reason === 'parent_pending'
       ? `Cannot approve proposal: it acts on what linked ${step} creates, which does not exist yet — approve ${step} first; this one unlocks once it has run`
       : `Cannot approve proposal: linked ${step}, which it depends on, did not run — there is nothing for this one to act on`,
-    { missingFields: ['linkedStep'], parentProposalId: resolution.parentId },
+    {
+      missingFields: ['linkedStep'],
+      parentProposalId: resolution.parentId,
+      linkedStepReason: (resolution.reason === 'parent_pending'
+        ? 'approve_parent_first'
+        : 'parent_did_not_run') satisfies LinkedStepHoldReason,
+    },
   );
 }
 
@@ -804,12 +831,16 @@ export async function rejectProposal(
 
   const transitioned = transitionProposal(proposal, 'rejected', actorId);
 
-  const updated = await proposalRepo.updateStatus(tenantId, proposalId, 'rejected', {
+  // Conditional on the status just read: an approval that commits between the
+  // read and this write must win, not be overwritten by the rejection.
+  const updated = await proposalRepo.updateStatusIf(tenantId, proposalId, [proposal.status], 'rejected', {
     rejectionReason: reason,
     rejectionDetails: details,
   });
   if (!updated) {
-    throw new NotFoundError('Proposal', proposalId);
+    throw new ConflictError('The proposal changed before it could be rejected. Reload it and try again.', {
+      proposalId,
+    });
   }
 
   // D2-1c — audit-log the rejection. Built inline (vs. logProposalEvent)
@@ -896,15 +927,23 @@ export async function editProposal(
     throw new ValidationError(`Cannot edit proposal in '${proposal.status}' status`);
   }
 
-  const updatedPayload = { ...proposal.payload, ...edits };
+  // FR-2 phase 3c — overlap consent on a reassign is server-pinned at
+  // creation (the dispatch board's explicit "Book anyway"). An edit can
+  // neither add it nor carry it onto a different appointment/technician.
+  const isReassign = proposal.proposalType === 'reassign_appointment';
+  const safeEdits = isReassign ? withoutOverlapConsent(edits) : edits;
+  let updatedPayload: Record<string, unknown> = { ...proposal.payload, ...safeEdits };
+  if (isReassign && editRetargetsReassign(proposal.payload, safeEdits)) {
+    updatedPayload = withoutOverlapConsent(updatedPayload);
+  }
 
   const validation = validateProposalPayload(proposal.proposalType, updatedPayload);
   if (!validation.valid) {
     throw new ValidationError('Invalid payload after edit', { errors: validation.errors });
   }
 
-  const editedFields = Object.keys(edits).filter(
-    (key) => JSON.stringify(proposal.payload[key]) !== JSON.stringify(edits[key])
+  const editedFields = Object.keys(safeEdits).filter(
+    (key) => JSON.stringify(proposal.payload[key]) !== JSON.stringify(safeEdits[key])
   );
 
   // B1 — clear-on-fill: lift only the missingFields entries this edit

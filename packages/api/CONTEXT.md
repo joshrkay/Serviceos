@@ -32,6 +32,10 @@ terms float.
   the backup supervisor's mobile (`ownerSession`). Transport-level
   recognition, not identity proof; it gates voice approval (RV-071) and is one
   input to actor resolution, but it does not authorise lookups by itself.
+  Recognition is not authority either: every phone-identified approval (the
+  owner line, SMS replies, a one-tap link sent to the backup) acts as
+  `resolveApproverRole` says — the owner phone as the owner, the backup as
+  their own role and user, a role without `proposals:approve` as nobody (B1).
 - **Capability** — one thing a tradesperson can do by speaking: an intent plus
   whatever answers or executes it. The catalog lists them; the map (#833) is
   about making their surface coverage structural.
@@ -73,6 +77,25 @@ terms float.
   changes a proposal, an outcome or billing. The 7-day graded pass rate is the
   production counterpart of the Layer 2 launch gate (SLO
   `voice_graded_pass_rate_7d`).
+- **Reply gap** (U1, D-043) — what the caller waited: from their last word to
+  the first REAL (non-filler) reply frame Twilio acked, stored per caller turn
+  as `call_transcript_turns.reply_gap_ms`. Measured on the realtime transport
+  only; Gather turns carry none
+  (`telephony/media-streams/mediastream-adapter.ts`, `voice/quality/latency-summary.ts`).
+- **Last word (anchor)** — the instant the caller stopped speaking, from
+  Deepgram's own word timing converted to wall clock at the first sample
+  forwarded to that Deepgram session (not the stream's `start` frame). With no
+  word timing the sample falls back to the STT-final anchor and is kept out of
+  `reply_gap_ms` (`voice_reply_gap_ms{anchor}` labels the two populations).
+- **Unacked reply** — a reply whose first real frame was enqueued but whose
+  mark Twilio never acked: `clear_echo`, `ack_timeout` or `stream_closed`
+  (`REPLY_UNACKED_REASONS`). It keeps `reply_gap_ms` null and is counted, so
+  the unacked rate sits beside the percentile it would otherwise flatter.
+- **Replica trigger** — the concurrency at which one API process's p95
+  time-to-first-audio crosses 800 ms, measured by
+  `loadtest/voice-realtime-concurrency.ts`. Call state lives in one process's
+  memory, so reaching it means a larger instance or a shared session store,
+  not another replica (D-043, `docs/runbooks/voice-capacity.md`).
 
 ## The evidence ladder (D-031, D-032)
 
@@ -109,3 +132,58 @@ Terms for how the product states what it can prove about itself. The PRD's
 - **Unlit-able** — a capability no surface can switch on at all, as opposed
   to one that is merely off by default or lacks an owner-facing control. It
   caps at 4 regardless of how well it is tested.
+
+## Getting found online (D-044)
+
+- **Tenant site** — the one-page public website we host for a tenant, built
+  from tenant settings, on a subdomain of the domain reserved for tenant sites.
+  _Avoid_: landing page, microsite, website builder.
+- **Connected domain** — a domain the owner already owns and points at their
+  tenant site. We verify it and serve HTTPS; we never sell or renew it.
+  _Avoid_: custom domain purchase.
+- **Google listing** — the one Google Business Profile location a tenant has
+  connected. Its review link is read from it; the website and booking link
+  are written to it, only through an owner-approved card.
+  _Avoid_: GBP account (an account can hold many locations).
+- **Forwarding mode** — how the owner's existing number reaches the AI:
+  *missed calls only* (default) or *all calls*. Porting is not a mode.
+- **Forwarding check** — a call from our line to the owner's business number
+  that passes when it arrives back on our number.
+- **Get found online checklist** — the derived home-page checklist of
+  web-presence setup. Separate from onboarding steps, which gate activation.
+- **Presence path** — the owner's one answer to "do you have a website?":
+  *own website*, *Google only*, or *neither*. It decides which checklist items
+  show. _Avoid_: website status.
+
+## Outbound messaging and drafting (D-045)
+
+- **Outbound messaging** — the one module every customer or owner text goes
+  through. A sender names the recipient and the message purpose; the module
+  decides consent, quiet hours, duplicates and channel, and records the
+  outcome. Lives in `src/notifications/outbound-messaging.ts`; files not yet
+  moved onto it are listed in
+  `test/notifications/outbound-messaging-migration-guard.test.ts`.
+  _Avoid_: notification service, SMS sender.
+- **Message purpose** — why a message goes out, which decides when it may:
+  *transactional* (invoice, estimate, confirmation) and *reply* (to someone
+  who just contacted us) send now; *automated nudge* (thank-you, review
+  request, reminder) and *marketing* wait for the customer's daytime window,
+  and marketing also needs marketing consent.
+- **Send outcome** — what outbound messaging returns and records for every
+  message: *sent*, *scheduled* (with the time), or *blocked* (with the
+  reason). Never silent; the record links the customer and, when there is
+  one, the job and the invoice or estimate.
+- **Message record** — the one `message_dispatches` row per customer
+  message, keyed by its dedupe key. A later outcome replaces a scheduled or
+  blocked one; a sent row is never overwritten. "Did this go out?"
+  (`findByEntity`) sees only rows that reached a provider.
+  _Avoid_: dispatch log entry (it now also holds texts that never went).
+- **Status-write gate** — the lifecycle check every proposal status write
+  runs inside the repository (`proposals/lifecycle.ts#assertStatusWrite`).
+  A move the transition table does not list is refused; a caller cannot
+  route around it by writing the status directly.
+- **Draft outcome** — what drafting a proposal returns to a surface: a
+  *proposal*, a *clarification* question, or a *refusal* with a reason. The
+  surface only decides how to say it.
+  Lives in `src/ai/drafting/draft-proposal.ts` (`draftProposal`); chat and
+  voice memos draft through it so far.

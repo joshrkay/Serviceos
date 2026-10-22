@@ -1,4 +1,5 @@
 import { test, expect, type Page, type Request } from '@playwright/test';
+import { fakeDeepgram } from './helpers/fake-deepgram';
 
 /**
  * Rivet's voice in the "pick, don't build" onboarding shell (slice S3, plan
@@ -11,23 +12,46 @@ import { test, expect, type Page, type Request } from '@playwright/test';
  * real and the browser really plays the clip. Proven: once Ready's line is done
  * the element is paused, and after "Make it mine" an audio/mpeg clip reaches
  * `playing` within 5 s (time to first heard is recorded); each choice turn's
- * lines go out as one request of at most three clips, the next turn is asked
- * for while the current one is up and never two ahead, a full pass is 21 clips;
+ * narration (the question, each option with why and what callers hear, then
+ * which one most shops pick: voice-only onboarding PR 2) goes out as one
+ * request of at most four clips, the next turn is asked for while the current
+ * one is up and never two ahead, a full pass is 22 clips (the closing line is
+ * shared, so it is fetched once);
  * a 429 from the per-user clip budget (a fast pass in a fresh process) never
  * blocks a tap. On WebKit (iOS Safari's engine, project onboarding-v3-webkit,
  * E2E_V3_WEBKIT=1): an owner who reloads on Ready hears nothing until a tap,
- * the tap unlocks playback, and the browser can record audio/mp4 (what the
- * live transcription stream is sent from iOS).
+ * and the tap unlocks playback. Playwright's WebKit build does not enforce
+ * iOS's gesture rule for playback (and on Linux has no MediaRecorder at all),
+ * so that test emulates the rule at `play()` — refused until the first pointer
+ * or key event on the page — and proves the shell's own behaviour under it.
+ * That iOS really refuses, and really records audio/mp4 for the live
+ * transcription stream, is a device run (the web verify skill, owner action).
  *
- * Listening (S3-5): the lane has no transcription key, so whether the browser
- * refuses the microphone (Chromium's --deny-permission-prompts) or grants it
- * (the fake device) and the real POST /api/voice/stream-token answers 503, the
- * turn has no mic, no alert, the greeting keeps only "Tap one to hear it." (the
- * listening half is never promised where nothing listens), every turn is
- * answered by tap, and the funnel records `answer_mode: 'tap'` once per turn.
- * A live transcription run (audio/mp4 accepted by the stream, the transcript
- * card on a phone) needs a Deepgram key and a microphone: a device run through
- * the web verify skill (owner action).
+ * Listening (S3-5): whether the browser refuses the microphone (Chromium's
+ * --deny-permission-prompts) or grants it (the fake device) and the token route
+ * answers 503 (no transcription), the turn has no mic, no alert, the greeting
+ * keeps only "Tap one to hear it." (the listening half is never promised where
+ * nothing listens), every turn is answered by tap, and the funnel records
+ * `answer_mode: 'tap'` once per turn.
+ *
+ * Scripted speech (voice-only onboarding, build plan PR 1): the lane's API runs
+ * with STT_PROVIDER=fixture, so the real token route mints a fixture token, and
+ * e2e/helpers/fake-deepgram.ts intercepts the browser's Deepgram socket and
+ * plays transcripts back in Deepgram's message shape. Proven: a spoken answer
+ * picks the card and moves on (`answer_mode: 'voice'`), and a miss is shown and
+ * said aloud; and fifteen everyday and edge answers (ordinals, fillers, prices, card
+ * words, a full pass by voice, misses, negation, ambiguity, unfinished words,
+ * the same words twice, tap then speak) each save exactly what was meant, or
+ * nothing. Questions (build plan PR 3): "what does that mean?", "give me an
+ * example", "what do most shops do?" and "say that again" are answered in the
+ * transcript card and aloud, save nothing, and the next answer still picks;
+ * "what does the first one mean?" is a question, never a pick. The opening questions
+ * (build plan PR 4): "Answer out loud" on the first screen, then the name, the trade and the cell
+ * said out loud fill the form and "show me my shop" reaches Ready with nothing typed; a trade not
+ * caught, two trades, a seven-digit cell and a refused microphone are each said back, never guessed.
+ * That real speech is recognised (audio/mp4 accepted by the stream,
+ * the transcript card on a phone) needs a Deepgram key and a microphone: a
+ * device run through the web verify skill (owner action).
  *
  * Browser-specific tests carry a tag the config filters per project, never a
  * run-time skip (scripts/release/verify.mjs fails a run with any skip).
@@ -166,6 +190,32 @@ async function watchVoiceAndFunnel(page: Page): Promise<void> {
   });
 }
 
+/**
+ * iOS Safari's autoplay rule, for an engine that does not apply it: `play()` is refused with
+ * NotAllowedError until the owner's first pointer or key event on this page (a reload starts
+ * over). Installed after `watchVoiceAndFunnel`, so a refused play never reaches its watcher.
+ */
+async function requireGestureForPlayback(page: Page): Promise<void> {
+  await page.addInitScript(() => {
+    let activated = false;
+    const activate = () => {
+      activated = true;
+    };
+    for (const type of ['pointerdown', 'mousedown', 'touchstart', 'keydown']) {
+      window.addEventListener(type, activate, { capture: true, passive: true });
+    }
+    const play = HTMLMediaElement.prototype.play;
+    HTMLMediaElement.prototype.play = function gatedPlay(this: HTMLMediaElement) {
+      if (!activated) {
+        return Promise.reject(
+          new DOMException('The request is not allowed by the user agent or the platform in the current context.', 'NotAllowedError'),
+        );
+      }
+      return play.call(this);
+    };
+  });
+}
+
 const v3Events = (page: Page, event: string) =>
   page.evaluate((name) => (window as unknown as Watched).__v3Events.filter((e) => e.event === name).map((e) => e.props), event);
 const audioPlays = (page: Page) => page.evaluate(() => [...(window as unknown as Watched).__audio.plays]);
@@ -216,7 +266,7 @@ for (const vp of viewports) {
   test.describe(`v3 voice at ${vp.name}`, () => {
     test.use({ viewport: { width: vp.width, height: vp.height } });
 
-    test('Rivet is heard after "Make it mine", every turn speaks through one request of at most three clips, and all seven are answered by tap', async ({
+    test('Rivet is heard after "Make it mine", every turn is narrated through one request of at most four clips, and all seven are answered by tap', async ({
       page,
     }) => {
       test.setTimeout(120_000);
@@ -241,6 +291,13 @@ for (const vp of viewports) {
       await firstTurn;
       await expect.poll(() => voice.find((c) => c.path === '/api/voice/tts')?.items).toEqual(['Walsh Plumbing is already set up.']);
       expect(batches(voice).map((c) => c.items[0])).toEqual([QUESTIONS[0]]);
+      // The greeting's narration: the question, both greetings with why, then the usual pick.
+      expect(batches(voice)[0].items).toEqual([
+        QUESTIONS[0],
+        expect.stringMatching(/^First: Walsh Plumbing, how can I help\? Short\./),
+        expect.stringMatching(/^Second: Thanks for calling Walsh Plumbing\. What's going on today\? A few more words\./),
+        'Most shops pick the first. Which one?',
+      ]);
       // Ready's line is said and done: before "Make it mine" the element is paused.
       await expect.poll(() => everyElementPaused(page)).toBe(true);
 
@@ -253,8 +310,8 @@ for (const vp of viewports) {
         // The turn's heading is Rivet's question.
         await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[i] })).toBeVisible();
         if (i === 0) {
-          // The greeting tells the owner a tap plays the option. Nothing listens in this keyless lane,
-          // so the line never says to say "first" or "second".
+          // The greeting tells the owner a tap plays the option. Nothing listens here (the microphone is
+          // refused), so the line never says to say "first" or "second".
           await expect(page.getByText('Tap one to hear it.', { exact: true })).toBeVisible();
           await expect(page.getByText(/say "first"/i)).toHaveCount(0);
         }
@@ -284,8 +341,8 @@ for (const vp of viewports) {
 
       const turnBatches = batches(voice);
       expect(turnBatches).toHaveLength(7);
-      expect(turnBatches.every((c) => c.items.length <= 3)).toBe(true);
-      expect(turnBatches.flatMap((c) => c.items)).toHaveLength(21);
+      expect(turnBatches.every((c) => c.items.length <= 4)).toBe(true);
+      expect(turnBatches.flatMap((c) => c.items)).toHaveLength(22);
       // The real routes answered with clips, or with the per-user clip budget's 429 on a fast pass.
       await expect.poll(() => voice.every((c) => c.status !== undefined)).toBe(true);
       for (const call of voice) expect([200, 429], `${call.path} answered ${call.status}`).toContain(call.status);
@@ -303,12 +360,11 @@ for (const vp of viewports) {
 test.describe('v3 voice on WebKit (iOS Safari) at 390x844', () => {
   test.use({ viewport: { width: 390, height: 844 } });
 
-  test('an owner who reloads on Ready hears nothing until a tap, the tap unlocks Rivet, and the browser records audio/mp4', { tag: '@webkit' }, async ({
-    page,
-  }) => {
+  test('an owner who reloads on Ready hears nothing until a tap, and the tap unlocks Rivet', { tag: '@webkit' }, async ({ page }) => {
     test.setTimeout(90_000);
     await signInAsFreshOwner(page, 'webkit_reload');
     await watchVoiceAndFunnel(page);
+    await requireGestureForPlayback(page);
     await startShop(page);
 
     // A returning owner lands on Ready with no tap on this page: Ready's line is refused by autoplay,
@@ -323,9 +379,6 @@ test.describe('v3 voice on WebKit (iOS Safari) at 390x844', () => {
     await makeItMineAndHearRivet(page);
     await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[0] })).toBeVisible();
     await expect(page.getByRole('alert')).toHaveCount(0);
-
-    // What iOS sends the live transcription stream; a WebKit that drops it fails the lane.
-    expect(await page.evaluate(() => typeof MediaRecorder !== 'undefined' && MediaRecorder.isTypeSupported('audio/mp4'))).toBe(true);
   });
 });
 
@@ -384,9 +437,14 @@ test.describe('v3 listening, microphone granted, no transcription on the server 
   // permission is what lets the page open it.
   test.use({ viewport: { width: 320, height: 568 }, permissions: ['microphone'] });
 
-  test('the real token route answers 503, the mic goes away with no alert, and every turn is still a tap', { tag: '@chromium' }, async ({ page }) => {
+  test('the token route answers 503, the mic goes away with no alert, and every turn is still a tap', { tag: '@chromium' }, async ({ page }) => {
     test.setTimeout(90_000);
     await signInAsFreshOwner(page, 'no_transcription');
+    // The lane's API mints fixture tokens (STT_PROVIDER=fixture); this owner's server has no transcription,
+    // answered exactly as the route answers with no key (pinned in voice-stream-token.route.test.ts).
+    await page.route('**/api/voice/stream-token**', (route) =>
+      route.fulfill({ status: 503, json: { error: 'NOT_CONFIGURED', message: 'Live transcription is not configured' } }),
+    );
     await watchVoiceAndFunnel(page);
     const mints = recordTokenMints(page);
     await startShop(page);
@@ -398,5 +456,519 @@ test.describe('v3 listening, microphone granted, no transcription on the server 
     expect(mints.map((m) => m.status)).toEqual([503]);
     expect(await v3Events(page, 'v3_voice_input')).toEqual([expect.objectContaining({ state: 'unavailable' })]);
     expect((await v3Events(page, 'v3_choice_made')).map((c) => c.answer_mode)).toEqual(CHOICE_KEYS.map(() => 'tap'));
+  });
+});
+
+test.describe('v3 listening with scripted speech (voice-only onboarding PR 1) at 320x568', () => {
+  test.use({ viewport: { width: 320, height: 568 }, permissions: ['microphone'] });
+
+  test('a spoken answer picks the card and moves on; a miss is shown and said aloud', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    await signInAsFreshOwner(page, 'scripted_speech');
+    await watchVoiceAndFunnel(page);
+    const voice = recordVoice(page);
+    const mints = recordTokenMints(page);
+    const deepgram = await fakeDeepgram(page);
+    await startShop(page);
+    await page.getByRole('button', { name: 'Make it mine, 7 choices' }).click();
+
+    // The greeting turn listens: the real token route minted (the fixture provider), the socket opened.
+    await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[0] })).toBeVisible();
+    const mic = page.getByRole('button', { name: 'Answer out loud' });
+    await expect(mic).toHaveAttribute('aria-pressed', 'true');
+    expect(mints.map((m) => m.status)).toEqual([200]);
+    expect(new URL(deepgram.urls[0]).searchParams.getAll('keyterm')).toEqual(expect.arrayContaining(['first', 'second']));
+    await expectScreenFits(page);
+
+    // A miss: what was heard and how to answer, on screen and said aloud. Nothing is picked.
+    deepgram.say('banana');
+    const missLine = 'I heard “banana”. Tap one, or say first or second.';
+    await expect(page.getByTestId('rivet-transcript')).toHaveText(missLine);
+    await expect.poll(() => voice.filter((c) => c.path === '/api/voice/tts').flatMap((c) => c.items)).toContain(missLine);
+    await expect(page.getByRole('radio', { checked: true })).toHaveCount(0);
+    await expectScreenFits(page);
+
+    // A spoken answer picks the second card and answers at once.
+    const saved = page.waitForResponse((r) => r.url().includes('/api/onboarding/draft/choices/') && r.request().method() === 'PUT');
+    deepgram.say('the second one');
+    expect((await saved).status()).toBe(200);
+    await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[1] })).toBeVisible();
+
+    // The next turn opens its own socket with a fresh token, and "first" answers it.
+    await expect(mic).toHaveAttribute('aria-pressed', 'true');
+    await expect.poll(() => deepgram.urls.length).toBe(2);
+    // A start cancelled while the answer saved may have minted one more: every mint is the real route's 200.
+    expect(mints.length).toBeGreaterThanOrEqual(2);
+    expect(mints.every((m) => m.status === 200)).toBe(true);
+    const savedSecond = page.waitForResponse((r) => r.url().includes('/api/onboarding/draft/choices/') && r.request().method() === 'PUT');
+    deepgram.say('first');
+    expect((await savedSecond).status()).toBe(200);
+    await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[2] })).toBeVisible();
+
+    const choices = await v3Events(page, 'v3_choice_made');
+    expect(choices.map((c) => [c.choice_key, c.answer_mode])).toEqual([
+      ['greeting', 'voice'],
+      ['trip_fee_and_rate', 'voice'],
+    ]);
+    await expect(page.getByRole('alert')).toHaveCount(0);
+  });
+});
+
+/**
+ * Fifteen spoken answers an owner really gives, everyday and edge, each in a fresh shop on the real
+ * stack with scripted speech. A spoken answer is proven by what was saved (the PUT the real API took),
+ * never by the screen alone; a non-answer by nothing being saved.
+ */
+test.describe('v3 spoken answers, everyday and edge (voice-only onboarding PR 1) at 320x568', () => {
+  test.use({ viewport: { width: 320, height: 568 }, permissions: ['microphone'] });
+
+  interface Saved {
+    key: string;
+    option?: string;
+    status?: number;
+  }
+
+  /** Every choice the shell saved, with the option it sent and what the API answered. */
+  function recordSaves(page: Page): Saved[] {
+    const saves: Saved[] = [];
+    const byRequest = new Map<Request, Saved>();
+    page.on('request', (req) => {
+      const m = /\/api\/onboarding\/draft\/choices\/([a-z_]+)$/.exec(new URL(req.url()).pathname);
+      if (!m || req.method() !== 'PUT') return;
+      const body = (req.postDataJSON() ?? {}) as { choice?: { option?: string } };
+      const save: Saved = { key: m[1]!, option: body.choice?.option };
+      saves.push(save);
+      byRequest.set(req, save);
+    });
+    page.on('response', (res) => {
+      const save = byRequest.get(res.request());
+      if (save) save.status = res.status();
+    });
+    return saves;
+  }
+
+  /** A fresh shop on the greeting turn with the mic live and the fake socket open. */
+  async function listeningOnGreeting(page: Page, label: string) {
+    await signInAsFreshOwner(page, `variation_${label}`);
+    await watchVoiceAndFunnel(page);
+    const saves = recordSaves(page);
+    const deepgram = await fakeDeepgram(page);
+    await startShop(page);
+    await page.getByRole('button', { name: 'Make it mine, 7 choices' }).click();
+    await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[0] })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Answer out loud' })).toHaveAttribute('aria-pressed', 'true');
+    await expect.poll(() => deepgram.urls.length).toBe(1);
+    return { saves, deepgram };
+  }
+
+  /** Waits for turn `n` (0-based) to be up and listening on its own socket. */
+  async function onTurn(page: Page, deepgram: Awaited<ReturnType<typeof fakeDeepgram>>, n: number): Promise<void> {
+    await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[n] })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Answer out loud' })).toHaveAttribute('aria-pressed', 'true');
+    await expect.poll(() => deepgram.urls.length).toBeGreaterThanOrEqual(n + 1);
+  }
+
+  const saved = (saves: Saved[]) => saves.map((s) => [s.key, s.option]);
+
+  /** Nothing was saved and nothing is picked: the owner is still on `question`, asked again. */
+  async function expectNothingPicked(page: Page, saves: Saved[], question: string): Promise<void> {
+    // Long enough for a save to have gone out had the shell taken the words as an answer.
+    await page.waitForTimeout(1_500);
+    expect(saves).toEqual([]);
+    await expect(page.getByRole('heading', { level: 1, name: question })).toBeVisible();
+    await expect(page.getByRole('radio', { checked: true })).toHaveCount(0);
+  }
+
+  const pickCases = [
+    { name: '1. "first" picks the first card', says: 'first', option: 'a' },
+    { name: '2. "second" picks the second card', says: 'second', option: 'b' },
+    { name: '3. "Number two." (capitals and a full stop) picks the second card', says: 'Number two.', option: 'b' },
+    { name: '4. "Um, uh, the first one please" (fillers) picks the first card', says: 'Um, uh, the first one please', option: 'a' },
+  ] as const;
+  for (const c of pickCases) {
+    test(c.name, { tag: '@chromium' }, async ({ page }) => {
+      test.setTimeout(90_000);
+      const { saves, deepgram } = await listeningOnGreeting(page, c.option + c.says.length);
+      deepgram.say(c.says);
+      await expect.poll(() => saved(saves)).toEqual([['greeting', c.option]]);
+      await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[1] })).toBeVisible();
+      expect(saves[0]!.status).toBe(200);
+      expect((await v3Events(page, 'v3_choice_made')).map((e) => e.answer_mode)).toEqual(['voice']);
+    });
+  }
+
+  const priceCases = [
+    { name: '5. Saying the price, "eighty-nine", picks the $89 card', says: 'eighty-nine', option: 'a' },
+    { name: '6. "a hundred and twenty nine dollars" picks the $129 card', says: 'a hundred and twenty nine dollars', option: 'b' },
+  ] as const;
+  for (const c of priceCases) {
+    test(c.name, { tag: '@chromium' }, async ({ page }) => {
+      test.setTimeout(90_000);
+      const { saves, deepgram } = await listeningOnGreeting(page, `price_${c.option}`);
+      deepgram.say('first');
+      await onTurn(page, deepgram, 1);
+      deepgram.say(c.says);
+      await expect.poll(() => saved(saves)).toEqual([
+        ['greeting', 'a'],
+        ['trip_fee_and_rate', c.option],
+      ]);
+      await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[2] })).toBeVisible();
+    });
+  }
+
+  test('7. Words from a card, "hold it for me", pick that card', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    const { saves, deepgram } = await listeningOnGreeting(page, 'label');
+    deepgram.say('first');
+    await onTurn(page, deepgram, 1);
+    deepgram.say('first');
+    await onTurn(page, deepgram, 2);
+    deepgram.say('hold it for me');
+    await expect.poll(() => saved(saves).at(-1)).toEqual(['booking_posture', 'b']);
+    await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[3] })).toBeVisible();
+  });
+
+  test('8. All seven turns answered by voice reach the read-back, every one saved as said', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(150_000);
+    const { saves, deepgram } = await listeningOnGreeting(page, 'all_seven');
+    const answers = ['first', 'second', 'the first one', 'second', 'first', 'the second', 'first'] as const;
+    for (let n = 0; n < answers.length; n += 1) {
+      await onTurn(page, deepgram, n);
+      deepgram.say(answers[n]!);
+      await expect.poll(() => saves.length).toBe(n + 1);
+    }
+    await expect(page.getByRole('heading', { level: 1, name: READBACK_HEADING })).toBeVisible();
+    expect(saved(saves)).toEqual(CHOICE_KEYS.map((k, i) => [k, /second/.test(answers[i]!) ? 'b' : 'a']));
+    expect(saves.every((s) => s.status === 200)).toBe(true);
+    expect((await v3Events(page, 'v3_choice_made')).map((e) => e.answer_mode)).toEqual(CHOICE_KEYS.map(() => 'voice'));
+    await expect(page.getByRole('alert')).toHaveCount(0);
+    await expectScreenFits(page);
+  });
+
+  test('9. Tap, then speak, then tap: each turn records how it was answered', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    const { saves, deepgram } = await listeningOnGreeting(page, 'mixed');
+    await page.getByRole('radio').nth(1).click();
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    await onTurn(page, deepgram, 1);
+    deepgram.say('first');
+    await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[2] })).toBeVisible();
+    await page.getByRole('radio').nth(0).click();
+    await page.getByRole('button', { name: 'Next', exact: true }).click();
+    await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[3] })).toBeVisible();
+    expect(saved(saves)).toEqual([
+      ['greeting', 'b'],
+      ['trip_fee_and_rate', 'a'],
+      ['booking_posture', 'a'],
+    ]);
+    expect((await v3Events(page, 'v3_choice_made')).map((e) => e.answer_mode)).toEqual(['tap', 'voice', 'tap']);
+  });
+
+  test('10. Two misses: the second adds an example; then "first" answers and the miss card goes', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    const { saves, deepgram } = await listeningOnGreeting(page, 'two_misses');
+    const transcript = page.getByTestId('rivet-transcript');
+    deepgram.say('banana');
+    await expect(transcript).toHaveText('I heard “banana”. Tap one, or say first or second.');
+    deepgram.say('purple monkey');
+    await expect(transcript).toHaveText(
+      'I heard “purple monkey”. Tap one, or say first or second. For example, say “first”, or ask “what does that mean?”',
+    );
+    expect(saves).toEqual([]);
+    deepgram.say('first');
+    await expect.poll(() => saved(saves)).toEqual([['greeting', 'a']]);
+    await onTurn(page, deepgram, 1);
+    await expect(page.getByText(/I heard “/)).toHaveCount(0);
+  });
+
+  test('11. "Not the first one" is never taken as the first card', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    const { saves, deepgram } = await listeningOnGreeting(page, 'negation');
+    deepgram.say('not the first one');
+    await expect(page.getByTestId('rivet-transcript')).toContainText('I heard “not the first one”.');
+    await expectNothingPicked(page, saves, QUESTIONS[0]);
+  });
+
+  test('12. "Either one, first or second" picks neither: no guess is made', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    const { saves, deepgram } = await listeningOnGreeting(page, 'ambiguous');
+    deepgram.say('either one, first or second');
+    await expect(page.getByTestId('rivet-transcript')).toContainText('I heard “either one, first or second”.');
+    await expectNothingPicked(page, saves, QUESTIONS[0]);
+  });
+
+  test('13. Words heard mid-sentence that never finish ("the sec") answer nothing', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    const { saves, deepgram } = await listeningOnGreeting(page, 'interim');
+    deepgram.interim('the sec');
+    await expectNothingPicked(page, saves, QUESTIONS[0]);
+    await expect(page.getByText(/I heard “/)).toHaveCount(0);
+  });
+
+  test('14. The same answer heard twice saves once and never answers the next turn', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    const { saves, deepgram } = await listeningOnGreeting(page, 'double');
+    deepgram.say('first');
+    deepgram.say('first');
+    await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[1] })).toBeVisible();
+    await page.waitForTimeout(1_500);
+    expect(saved(saves)).toEqual([['greeting', 'a']]);
+    await expect(page.getByRole('radio', { checked: true })).toHaveCount(0);
+  });
+
+  test('15. Tapping a card then saying the other one: the spoken answer wins, said once', { tag: '@chromium' }, async ({ page }) => {
+    // A tap only selects (and plays what callers hear); Next or a spoken answer is what answers.
+    test.setTimeout(90_000);
+    const { saves, deepgram } = await listeningOnGreeting(page, 'tap_then_say');
+    await page.getByRole('radio').nth(0).click();
+    await expect(page.getByRole('radio', { checked: true })).toHaveCount(1);
+    expect(saves).toEqual([]);
+    deepgram.say('no, the second one');
+    await expect.poll(() => saved(saves)).toEqual([['greeting', 'b']]);
+    await onTurn(page, deepgram, 1);
+    // A late copy of those words on the turn just left answers nothing here.
+    deepgram.sayOn(0, 'second');
+    await page.waitForTimeout(1_500);
+    expect(saved(saves)).toEqual([['greeting', 'b']]);
+    expect((await v3Events(page, 'v3_choice_made')).map((e) => e.answer_mode)).toEqual(['voice']);
+  });
+
+  // Build plan PR 3: the owner asks Rivet about a choice, out loud. He answers in the card and
+  // aloud, asks "Which one?" again, saves nothing, and the next answer still picks.
+  // Copy from packages/api/src/onboarding/choices/registry/common.ts.
+  const GREETING_EXPLAIN =
+    "This is the first thing a caller hears when I pick up your phone. It's in your business's name, so pick the one that sounds like you.";
+  const GREETING_EXAMPLE =
+    'Someone calls on their lunch break with a problem. The first gets them talking about it right away. The second sounds warmer and takes a breath longer.';
+
+  /** Every line Rivet was asked to say, in the batches the shell sent. */
+  function recordSpoken(page: Page): string[] {
+    const spoken: string[] = [];
+    page.on('request', (req) => {
+      if (new URL(req.url()).pathname !== '/api/voice/tts/batch' || req.method() !== 'POST') return;
+      spoken.push(...(((req.postDataJSON() ?? {}) as { items?: string[] }).items ?? []));
+    });
+    return spoken;
+  }
+
+  const helpCases = [
+    { name: '16. "What does that mean?" is explained, then asked again', says: 'what does that mean', answer: `${GREETING_EXPLAIN} Which one?`, spoken: GREETING_EXPLAIN },
+    { name: '17. "Give me an example" tells one real call', says: 'can you give me an example', answer: `${GREETING_EXAMPLE} Which one?`, spoken: GREETING_EXAMPLE },
+    {
+      name: '18. "What do most shops do?" names the usual pick and why',
+      says: 'what do most shops do',
+      answer: /^Most shops pick the first: .+, how can I help\? Short\. Gets to the problem fast\. Callers in a hurry like it\. Which one\?$/,
+      spoken: 'Most shops pick the first:',
+    },
+  ] as const;
+  for (const c of helpCases) {
+    test(c.name, { tag: '@chromium' }, async ({ page }) => {
+      test.setTimeout(90_000);
+      const spoken = recordSpoken(page);
+      const { saves, deepgram } = await listeningOnGreeting(page, `help_${c.says.length}`);
+      deepgram.say(c.says);
+      await expect(page.getByTestId('rivet-transcript')).toHaveText(c.answer);
+      await expect.poll(() => spoken.some((line) => line.startsWith(c.spoken))).toBe(true);
+      await expectNothingPicked(page, saves, QUESTIONS[0]);
+      // Still listening on the same socket: the answer comes after the question.
+      deepgram.say('second');
+      await expect.poll(() => saved(saves)).toEqual([['greeting', 'b']]);
+      await onTurn(page, deepgram, 1);
+    });
+  }
+
+  test('19. "Say that again" says the turn again, then "first" answers', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    const { saves, deepgram } = await listeningOnGreeting(page, 'repeat');
+    const plays = () => page.evaluate(() => (window as unknown as Watched).__audio.plays.length);
+    await expect.poll(plays).toBeGreaterThan(0);
+    const before = await plays();
+    deepgram.say('sorry, can you say that again');
+    await expect(page.getByTestId('rivet-transcript')).toHaveText('Saying it again.');
+    await expect.poll(plays).toBeGreaterThan(before);
+    await expectNothingPicked(page, saves, QUESTIONS[0]);
+    deepgram.say('first');
+    await expect.poll(() => saved(saves)).toEqual([['greeting', 'a']]);
+  });
+
+  test('20. "What does the first one mean?" is a question, not a pick, on a later turn too', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    const { saves, deepgram } = await listeningOnGreeting(page, 'question_not_pick');
+    deepgram.say('first');
+    await onTurn(page, deepgram, 1);
+    deepgram.say('first');
+    await onTurn(page, deepgram, 2);
+    deepgram.say('what does the first one mean');
+    await expect(page.getByTestId('rivet-transcript')).toContainText('Booking it means I put the job on your calendar');
+    await page.waitForTimeout(1_500);
+    expect(saved(saves)).toEqual([
+      ['greeting', 'a'],
+      ['trip_fee_and_rate', 'a'],
+    ]);
+    deepgram.say('hold it for me');
+    await expect.poll(() => saved(saves).at(-1)).toEqual(['booking_posture', 'b']);
+  });
+});
+
+/**
+ * The opening questions out loud (voice-only onboarding, build plan PR 4): on "What should I answer
+ * as?", "Answer out loud" asks for the microphone and Rivet asks the name, the trade and the cell one
+ * at a time; each answer fills the form, and "show me my shop" sends it. Proven by what the real API
+ * took (the draft POST) and by Ready opening, with nothing typed.
+ */
+test.describe('v3 opening questions out loud (voice-only onboarding PR 4) at 320x568', () => {
+  test.use({ viewport: { width: 320, height: 568 }, permissions: ['microphone'] });
+
+  interface DraftPost {
+    body: { businessName?: string; packId?: string; phone?: string };
+    status?: number;
+  }
+
+  function recordDraftPosts(page: Page): DraftPost[] {
+    const posts: DraftPost[] = [];
+    const byRequest = new Map<Request, DraftPost>();
+    page.on('request', (req) => {
+      if (new URL(req.url()).pathname !== '/api/onboarding/draft' || req.method() !== 'POST') return;
+      const post: DraftPost = { body: (req.postDataJSON() ?? {}) as DraftPost['body'] };
+      posts.push(post);
+      byRequest.set(req, post);
+    });
+    page.on('response', (res) => {
+      const post = byRequest.get(res.request());
+      if (post) post.status = res.status();
+    });
+    return posts;
+  }
+
+  /** A fresh owner on the first screen, after "Answer out loud", with the fake socket open. */
+  async function answeringOutLoud(page: Page, label: string) {
+    await signInAsFreshOwner(page, `intro_${label}`);
+    await watchVoiceAndFunnel(page);
+    const voice = recordVoice(page);
+    const posts = recordDraftPosts(page);
+    const deepgram = await fakeDeepgram(page);
+    await openOnboarding(page);
+    const mic = page.getByRole('button', { name: 'Answer out loud' });
+    await expectScreenFits(page);
+    await mic.click();
+    await expect(mic).toHaveAttribute('aria-pressed', 'true');
+    await expect.poll(() => deepgram.urls.length).toBe(1);
+    expect(new URL(deepgram.urls[0]!).searchParams.getAll('keyterm')).toEqual(expect.arrayContaining(['HVAC', 'show me my shop']));
+    const transcript = page.getByTestId('rivet-transcript');
+    await expect(transcript).toHaveText("What's your business called?");
+    return { voice, posts, deepgram, transcript };
+  }
+
+  const spoken = (voice: VoiceCall[]) => batches(voice).flatMap((c) => c.items);
+
+  test('21. Name, trade and cell said out loud fill the form, and "show me my shop" reaches Ready with nothing typed', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    const { voice, posts, deepgram, transcript } = await answeringOutLoud(page, 'happy');
+    await expect.poll(() => spoken(voice)).toContain("What's your business called?");
+
+    deepgram.say("It's Walsh");
+    // A pause inside the name: the rest is still the name, never the trade.
+    deepgram.say('Plumbing.');
+    await expect(page.getByLabel('Business name')).toHaveValue('Walsh Plumbing');
+    await expect(transcript).toContainText("What's your trade: plumbing, HVAC, electrical, or something else?");
+    await expect(page.getByRole('button', { name: 'Plumbing' })).toHaveAttribute('aria-pressed', 'false');
+
+    deepgram.say('plumbing');
+    await expect(page.getByRole('button', { name: 'Plumbing' })).toHaveAttribute('aria-pressed', 'true');
+    await expect(transcript).toHaveText("Got it, plumbing. What's your cell number, with the area code?");
+
+    deepgram.say('216-555-0142');
+    await expect(page.getByLabel('Your cell')).toHaveValue('(216) 555-0142');
+    const readBack = 'Walsh Plumbing, plumbing, and your cell is 2 1 6, 5 5 5, 0 1 4 2.';
+    await expect(transcript).toContainText(readBack);
+    await expect.poll(() => spoken(voice)).toContain(readBack);
+    await expectScreenFits(page);
+    expect(posts).toEqual([]);
+
+    deepgram.say('show me my shop');
+    await expect(page.getByRole('heading', { level: 1, name: 'Walsh Plumbing is already set up.' })).toBeVisible();
+    expect(posts).toHaveLength(1);
+    expect(posts[0]!.body).toMatchObject({ businessName: 'Walsh Plumbing', packId: 'plumbing', phone: '(216) 555-0142' });
+    expect(posts[0]!.status).toBe(201);
+
+    // The microphone is still held: the first choice turn listens without asking again.
+    await page.getByRole('button', { name: 'Make it mine, 7 choices' }).click();
+    await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[0] })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Answer out loud' })).toHaveAttribute('aria-pressed', 'true');
+    await expect(page.getByRole('alert')).toHaveCount(0);
+  });
+
+  test('22. A trade not caught, two trades, and a seven-digit cell are each said back; nothing is guessed or sent', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    const { voice, posts, deepgram, transcript } = await answeringOutLoud(page, 'misses');
+    deepgram.say('Lakeside');
+    await expect(page.getByLabel('Business name')).toHaveValue('Lakeside');
+    // The name is read back once the owner has finished (a pause inside a name does not end it).
+    await expect(transcript).toContainText("I've got Lakeside.");
+
+    deepgram.say('banana');
+    const tradeMiss = "I didn't catch the trade. Plumbing, HVAC, electrical, or something else?";
+    await expect(transcript).toHaveText(tradeMiss);
+    await expect.poll(() => spoken(voice)).toContain(tradeMiss);
+
+    deepgram.say('plumbing, heating and air');
+    await expect(transcript).toHaveText('I heard plumbing and HVAC. Which one do you do most?');
+    for (const chip of ['Plumbing', 'HVAC', 'Electrical', 'Something else']) {
+      await expect(page.getByRole('button', { name: chip })).toHaveAttribute('aria-pressed', 'false');
+    }
+    deepgram.say('mostly heating and cooling');
+    await expect(page.getByRole('button', { name: 'HVAC' })).toHaveAttribute('aria-pressed', 'true');
+
+    deepgram.say('555-0142');
+    const notUs = "That doesn't look like a US cell number. Include the area code, 10 digits.";
+    await expect(page.getByLabel('Your cell')).toHaveValue('5550142');
+    await expect(page.getByLabel('Your cell')).toHaveAttribute('aria-invalid', 'true');
+    await expect(transcript).toHaveText(notUs);
+    await expect.poll(() => spoken(voice)).toContain(notUs);
+    await expectScreenFits(page);
+
+    // Not complete: "show me my shop" asks for what is missing instead of sending.
+    deepgram.say('show me my shop');
+    await expect(transcript).toHaveText("What's your cell number, with the area code?");
+    await page.waitForTimeout(1_000);
+    expect(posts).toEqual([]);
+
+    deepgram.say('two one six, five five five, oh one four two');
+    await expect(page.getByLabel('Your cell')).toHaveValue('(216) 555-0142');
+    deepgram.say('looks good');
+    await expect(page.getByRole('heading', { level: 1, name: 'Lakeside is already set up.' })).toBeVisible();
+    expect(posts.map((p) => p.body)).toEqual([expect.objectContaining({ businessName: 'Lakeside', packId: 'hvac', phone: '(216) 555-0142' })]);
+  });
+
+  test('23. "Spell it" fixes a misheard name letter by letter', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    const { deepgram, transcript } = await answeringOutLoud(page, 'spell');
+    deepgram.say('Welsh Plumbing');
+    await expect(page.getByLabel('Business name')).toHaveValue('Welsh Plumbing');
+    await expect(transcript).toContainText("I've got Welsh Plumbing.");
+    deepgram.say('spell it');
+    await expect(transcript).toHaveText('Go ahead and spell it, letter by letter.');
+    deepgram.say('W-A-L-S-H plumbing');
+    await expect(page.getByLabel('Business name')).toHaveValue('Walsh Plumbing');
+    await expect(transcript).toContainText("I've got Walsh Plumbing.");
+  });
+});
+
+test.describe('v3 opening questions, microphone refused (voice-only onboarding PR 4) at 320x568', () => {
+  test.use({ viewport: { width: 320, height: 568 } });
+
+  test('24. "Answer out loud" with the microphone refused says so, and the form still sends by typing', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    await signInAsFreshOwner(page, 'intro_denied');
+    await openOnboarding(page);
+    await page.getByRole('button', { name: 'Answer out loud' }).click();
+    await expect(page.getByTestId('rivet-transcript')).toHaveText("I can't hear you on this device, so type your answers below.");
+    await expect(page.getByRole('button', { name: 'Answer out loud' })).toHaveCount(0);
+    await expectScreenFits(page);
+    await page.getByLabel('Business name').fill('Walsh Plumbing');
+    await page.getByRole('button', { name: 'Plumbing' }).click();
+    await page.getByLabel('Your cell').fill('(216) 555-0142');
+    await page.getByRole('button', { name: 'Show me my shop' }).click();
+    await expect(page.getByRole('heading', { level: 1, name: 'Walsh Plumbing is already set up.' })).toBeVisible();
   });
 });

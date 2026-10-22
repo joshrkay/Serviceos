@@ -12,6 +12,8 @@ const configSchema = z.object({
     }),
   PORT: z.coerce.number().int().positive().default(3000),
   DATABASE_URL: z.string().min(1).optional(),
+  /** PEM CA certificate for Postgres TLS; when set, server certs are verified (T4-F13). */
+  DB_SSL_CA: z.string().min(1).optional(),
   DB_HOST: z.string().default('localhost'),
   DB_PORT: z.coerce.number().int().positive().default(5432),
   DB_NAME: z.string().optional(),
@@ -19,6 +21,8 @@ const configSchema = z.object({
   DB_PASSWORD: z.string().optional(),
   CLERK_SECRET_KEY: z.string().min(1).optional(),
   CLERK_PUBLISHABLE_KEY: z.string().min(1).optional(),
+  /** Comma-separated `azp` allowlist for Clerk session tokens; unset = not enforced. */
+  CLERK_AUTHORIZED_PARTIES: z.string().min(1).optional(),
   CLERK_WEBHOOK_SECRET: z.string().optional(),
   CLERK_JWKS_URL: z.string().url().optional(),
   // P0-033 — gate for the legacy HMAC-SHA256 dev path in `verifyClerkSession`.
@@ -68,6 +72,19 @@ const configSchema = z.object({
   WEB_URL: z.string().url().optional(),
   PUBLIC_API_URL: z.string().url().optional(),
   MARKETING_SITE_URL: z.string().url().optional(),
+  // D-044 / #1768 — the separate domain reserved for hosted tenant sites
+  // (`<slug>.<this>`), never the app's own domain. A bare lowercase hostname,
+  // no scheme/port/path. Unset ⇒ the tenant-site feature is off: nothing is
+  // served by Host and owners cannot publish (ops has not bought it yet).
+  TENANT_SITE_BASE_DOMAIN: z
+    .string()
+    .trim()
+    .toLowerCase()
+    .regex(
+      /^(?=.{4,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/,
+      'must be a bare hostname such as sites.example.com (no scheme, port or path)',
+    )
+    .optional(),
   // DEPRECATED alias for WEB_URL. It never fills the API role: half the old
   // call sites read it as the API host, which is how prod ended up emitting
   // invitation links to the API domain. Setting it adds a boot warning.
@@ -164,6 +181,15 @@ const configSchema = z.object({
   SLO_TURN_LATENCY_P95_MS: z.coerce.number().positive().default(3500),
   // WS26 — minimum recorded turns before the turn-latency rule can breach.
   SLO_TURN_LATENCY_MIN_SAMPLE: z.coerce.number().int().positive().default(30),
+  // Voice parity U1 (D-043) — reply gap: caller's last word → first reply frame
+  // Twilio acked (voice_reply_gap_ms{anchor="last_word"}), P95 breach threshold
+  // (ms). Runs beside the STT-final-anchored SLO_TURN_LATENCY_P95_MS rule.
+  SLO_REPLY_GAP_P95_MS: z.coerce.number().positive().default(1500),
+  // U1 — max share of replies whose first real frame was enqueued but never
+  // acked (voice_reply_unacked_total over acked + unacked), 0..1.
+  SLO_REPLY_UNACKED_RATE_MAX: z.coerce.number().min(0).max(1).default(0.01),
+  // U1 — minimum recorded replies before either reply-gap rule can breach.
+  SLO_REPLY_GAP_MIN_SAMPLE: z.coerce.number().int().positive().default(30),
   // #1602 — minimum 7-day PRODUCTION graded pass rate (voice_session_grades,
   // cross-tenant). Default 0.85 = the Layer 2 launch gate the CI harness enforces.
   SLO_VOICE_GRADED_PASS_MIN: z.coerce.number().min(0).max(1).default(0.85),
@@ -298,6 +324,27 @@ function resolvePublicOrigins(
   };
 }
 
+/**
+ * The tenant-site domain exists so a flagged tenant page cannot hurt the app's
+ * login or mail reputation (D-044), so it must not be, or contain, the app or
+ * API host.
+ */
+function assertTenantSiteDomainSeparate(config: AppConfig): void {
+  const base = config.TENANT_SITE_BASE_DOMAIN;
+  if (!base) return;
+  for (const [name, origin] of [
+    ['WEB_URL', config.publicOrigins.web],
+    ['PUBLIC_API_URL', config.publicOrigins.api],
+  ] as const) {
+    const host = new URL(origin).hostname;
+    if (host === base || host.endsWith(`.${base}`)) {
+      throw new Error(
+        `Configuration validation failed:\n  TENANT_SITE_BASE_DOMAIN: ${base} must be a separate domain from ${name} (${host}); tenant sites never share the app's domain`,
+      );
+    }
+  }
+}
+
 let cachedConfig: AppConfig | null = null;
 
 export function loadConfig(env: Record<string, string | undefined> = process.env): AppConfig {
@@ -322,6 +369,12 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   }
 
   cachedConfig = { ...result.data, ...resolvePublicOrigins(result.data) };
+  try {
+    assertTenantSiteDomainSeparate(cachedConfig);
+  } catch (err) {
+    cachedConfig = null;
+    throw err;
+  }
 
   // WS1 — prod/staging default the consent gate to enforcement. The zod default
   // is 'off' (safe for dev/test), but in production a send must fail closed
@@ -866,6 +919,16 @@ const prodEnvSchema = z
       .refine((v) => v !== 'true', {
         message:
           "DEV_AUTH_BYPASS=true is forbidden in production. Unset or set to 'false' before starting.",
+      }),
+    // The e2e lane's scripted transcription (voice/deepgram-token.ts): a
+    // production browser would get a token no real Deepgram accepts, and
+    // every spoken answer would fail. Refused at boot, like TTS_PROVIDER=fixture.
+    STT_PROVIDER: z
+      .string()
+      .optional()
+      .refine((v) => v !== 'fixture', {
+        message:
+          "STT_PROVIDER=fixture is forbidden in production: it hands browsers a token Deepgram refuses. Unset it.",
       }),
   });
 

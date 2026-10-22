@@ -279,6 +279,8 @@ import {
   replyToReview,
   listAccounts,
   listLocations,
+  discoverLocations,
+  writeReviewUrlForPlace,
 } from '../../src/reputation/google-business-client';
 
 describe('GoogleBusinessAuthError (401 detection)', () => {
@@ -361,29 +363,101 @@ describe('refreshAccessToken', () => {
 });
 
 describe('listAccounts / listLocations (connect-flow discovery)', () => {
-  it('returns account resource names', async () => {
+  it('returns account ids from the Account Management API, following pages', async () => {
+    const urls: string[] = [];
     const fetchFn = async (input: string | URL | Request): Promise<Response> => {
-      expect(String(input)).toContain('/v4/accounts');
-      return makeResponse(200, {
-        accounts: [{ name: 'accounts/123' }, { name: 'accounts/456' }],
-      });
+      const url = String(input);
+      urls.push(url);
+      expect(url).toContain('mybusinessaccountmanagement.googleapis.com/v1/accounts');
+      return url.includes('pageToken=p2')
+        ? makeResponse(200, { accounts: [{ name: 'accounts/456' }] })
+        : makeResponse(200, { accounts: [{ name: 'accounts/123' }], nextPageToken: 'p2' });
     };
-    expect(await listAccounts('at', fetchFn)).toEqual([
-      'accounts/123',
-      'accounts/456',
-    ]);
+    expect(await listAccounts('at', fetchFn)).toEqual(['123', '456']);
+    expect(urls).toHaveLength(2);
   });
 
-  it('returns location resource names for an account', async () => {
+  it('returns locations with title, address, place id and review link', async () => {
     const fetchFn = async (input: string | URL | Request): Promise<Response> => {
-      expect(String(input)).toContain('/v4/accounts/123/locations');
+      const url = new URL(String(input));
+      expect(url.host).toBe('mybusinessbusinessinformation.googleapis.com');
+      expect(url.pathname).toBe('/v1/accounts/123/locations');
+      expect(url.searchParams.get('readMask')).toBe('name,title,storefrontAddress,metadata');
       return makeResponse(200, {
-        locations: [{ name: 'accounts/123/locations/999' }],
+        locations: [
+          {
+            name: 'locations/999',
+            title: 'Acme Plumbing',
+            storefrontAddress: {
+              addressLines: ['1 Main St'],
+              locality: 'Austin',
+              administrativeArea: 'TX',
+            },
+            metadata: { placeId: 'ChIJ1', newReviewUri: 'https://g.page/r/abc/review' },
+          },
+          // Service-area business: no storefront, no newReviewUri yet.
+          { name: 'locations/888', title: 'Acme North', metadata: { placeId: 'ChIJ2' } },
+          // Unverified: no place id, so no review link.
+          { name: 'locations/777' },
+        ],
       });
     };
     expect(await listLocations('at', '123', fetchFn)).toEqual([
-      'accounts/123/locations/999',
+      {
+        accountId: '123',
+        locationId: '999',
+        title: 'Acme Plumbing',
+        address: '1 Main St, Austin, TX',
+        placeId: 'ChIJ1',
+        reviewUrl: 'https://g.page/r/abc/review',
+      },
+      {
+        accountId: '123',
+        locationId: '888',
+        title: 'Acme North',
+        address: null,
+        placeId: 'ChIJ2',
+        reviewUrl: writeReviewUrlForPlace('ChIJ2'),
+      },
+      {
+        accountId: '123',
+        locationId: '777',
+        title: 'Untitled location',
+        address: null,
+        placeId: null,
+        reviewUrl: null,
+      },
     ]);
+  });
+
+  it('writeReviewUrlForPlace builds Google\'s review-form deep link', () => {
+    expect(writeReviewUrlForPlace('ChIJ a&b')).toBe(
+      'https://search.google.com/local/writereview?placeid=ChIJ%20a%26b',
+    );
+  });
+
+  it('discoverLocations collects locations across every account', async () => {
+    const fetchFn = async (input: string | URL | Request): Promise<Response> => {
+      const url = String(input);
+      if (url.includes('mybusinessaccountmanagement')) {
+        return makeResponse(200, { accounts: [{ name: 'accounts/1' }, { name: 'accounts/2' }] });
+      }
+      const account = url.match(/accounts\/(\d+)\/locations/)![1];
+      return makeResponse(200, { locations: [{ name: `locations/${account}0`, title: `Shop ${account}` }] });
+    };
+    const found = await discoverLocations('at', fetchFn);
+    expect(found.map((l) => [l.accountId, l.locationId, l.title])).toEqual([
+      ['1', '10', 'Shop 1'],
+      ['2', '20', 'Shop 2'],
+    ]);
+  });
+
+  it('listLocations surfaces schema drift as GoogleBusinessApiError', async () => {
+    const fetchFn = async (): Promise<Response> =>
+      makeResponse(200, { locations: [{ title: 'no name' }] });
+    await expect(listLocations('at', '123', fetchFn)).rejects.toThrow(
+      GoogleBusinessApiError,
+    );
   });
 
   it('listAccounts throws GoogleBusinessAuthError on 401', async () => {

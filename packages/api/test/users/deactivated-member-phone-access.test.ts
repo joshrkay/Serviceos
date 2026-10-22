@@ -1,14 +1,14 @@
 /**
  * #1402 §13 — a deactivated teammate's phone loses its powers: it is no
  * longer dialed on escalation and no longer counts as an approver phone.
- * Seams: createUserPhoneDispatcherResolver and resolveApproverPhones.
+ * Seams: createUserPhoneDispatcherResolver and resolveApproverRole.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
 import { InMemoryUserRepository } from '../../src/users/user';
 import { InMemorySettingsRepository, createSettings, updateSettings } from '../../src/settings/settings';
 import { createUserPhoneDispatcherResolver } from '../../src/telephony/dispatcher-phone-resolver';
-import { resolveApproverPhones } from '../../src/proposals/approver-identity';
+import { resolveApproverRole } from '../../src/proposals/approver-identity';
 
 const TENANT = 'tenant-deactivated-phone';
 
@@ -37,8 +37,9 @@ describe('deactivated member phone access (#1402 §13)', () => {
     await createSettings({ tenantId: TENANT, businessName: 'Co', ownerPhone: '+15125550100' }, settingsRepo);
     await updateSettings(TENANT, { backupSupervisorUserId: techId }, settingsRepo);
 
-    const phones = await resolveApproverPhones({ settingsRepo, userRepo: users }, TENANT);
+    const deps = { settingsRepo, userRepo: users };
 
-    expect(phones).toEqual(['+15125550100']);
+    await expect(resolveApproverRole(deps, TENANT, '+15125550111')).resolves.toBeNull();
+    await expect(resolveApproverRole(deps, TENANT, '+15125550100')).resolves.toMatchObject({ role: 'owner' });
   });
 });

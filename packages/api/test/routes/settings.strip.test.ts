@@ -204,9 +204,14 @@ describe('PUT /api/settings — owner-toggle keys reach the write map (#1011)', 
     expect(stored?.e1ReviewedScript).toBeUndefined();
   });
 
-  it('PERMANENT GUARD: speed-to-lead, the numbering counters and aiModel stay out (D9/D10/D11)', async () => {
+  it('speedToLeadEnabled round-trips (#1738: E5 decided "wire"; the visitor still has to tick the consent box)', async () => {
+    const res = await request(app).put('/api/settings').send({ speedToLeadEnabled: true });
+    expect(res.status).toBe(200);
+    expect((await getSettings(TENANT_ID, settingsRepo))?.speedToLeadEnabled).toBe(true);
+  });
+
+  it('PERMANENT GUARD: the speed-to-lead template, the numbering counters and aiModel stay out (D9/D10/D11)', async () => {
     const res = await request(app).put('/api/settings').send({
-      speedToLeadEnabled: true,
       speedToLeadTemplate: 'hi',
       nextEstimateNumber: 9999,
       nextInvoiceNumber: 9999,
@@ -216,7 +221,6 @@ describe('PUT /api/settings — owner-toggle keys reach the write map (#1011)', 
 
     expect(res.status).toBe(200);
     const stored = await getSettings(TENANT_ID, settingsRepo);
-    expect(stored?.speedToLeadEnabled).toBeUndefined();
     expect(stored?.speedToLeadTemplate).toBeUndefined();
     expect(stored?.aiModel).toBeUndefined();
     // Seeded by createSettings; the generic PUT must not be able to move them.

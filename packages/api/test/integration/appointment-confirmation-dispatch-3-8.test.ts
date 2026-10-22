@@ -99,6 +99,7 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
   let dispatchRepo: PgDispatchRepository;
   let tenantA: SeededTenant;
   let tenantB: SeededTenant;
+  const usedPhones = new Set<string>();
 
   async function seedTenant(
     label: string,
@@ -106,7 +107,13 @@ describe('Postgres integration — §8.3 row 3.8 customer confirmation on approv
   ): Promise<SeededTenant> {
     const tenant = await createTestTenant(pool);
     const customerId = crypto.randomUUID();
-    const phone = `+1602555${Math.floor(1000 + Math.random() * 8999)}`;
+    // Distinct per seeded tenant: two tenants drawing the same random number
+    // made the cross-tenant recipient check fail about once in 9,000 runs.
+    let phone: string;
+    do {
+      phone = `+1602555${Math.floor(1000 + Math.random() * 8999)}`;
+    } while (usedPhones.has(phone));
+    usedPhones.add(phone);
     const email = `${label.toLowerCase()}-${customerId.slice(0, 8)}@example.com`;
     await customerRepo.create({
       id: customerId,
