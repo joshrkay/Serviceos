@@ -12,8 +12,8 @@
  *   - no users row for (tenant, Clerk subject) → null;
  *   - a DB error → rejects (the error is preserved).
  * Either way memoCreator.mode() (workers/voice-action-router.ts) resolves
- * undefined — logging the error — and resolveAutoApproveThreshold applies the
- * documented fallback: the strictest defined tenant override. A real row's
+ * the tenant's strictest mode (strictestMode: the highest of each mode's
+ * override or built-in default), logging the error. A real row's
  * 'supervisor' (the column's NOT NULL default) is the member's real mode.
  *
  * `getService` is read at call time: app.ts builds the UserModeService after

@@ -6,7 +6,7 @@ import { Proposal, ProposalRepository, createProposal, CreateProposalInput, Prop
 import { assertValidProposalPayload } from '../proposals/contracts';
 import { INTENT_TO_PROPOSAL_TYPE } from '../proposals/voice-intent-map';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
-import { routeUnsupervisedProposal, confidenceMetaBlocksAutoApprove } from '../proposals/auto-approve';
+import { routeUnsupervisedProposal, confidenceMetaBlocksAutoApprove, strictestMode } from '../proposals/auto-approve';
 import {
   AUTO_APPROVE_DIRECT_PERMISSION,
   holdIfCallerCannotApprove,
@@ -505,8 +505,9 @@ export interface VoiceActionRouterDeps {
    * OVAS-04 — the memo creator's `users.current_mode`, threaded as the
    * proposal's supervisorMode so the per-mode thresholds and the tenant's
    * per-mode override apply to memos exactly as they do to chat (which reads
-   * req.auth.mode). Absent / null / a throw → no mode; the resolver then
-   * applies the strictest defined override (never the bare legacy 0.9).
+   * req.auth.mode). null or a throw → the tenant's strictest mode
+   * (strictestMode: each mode's override or built-in default, highest wins),
+   * never the bare legacy 0.9. Absent → no mode (wiring without a lookup).
    */
   resolveMemberMode?: (tenantId: string, userId: string) => Promise<Mode | null>;
   /**
@@ -1834,7 +1835,7 @@ async function processSegment(
   const memoCreator = memoCreatorResolver(deps, tenantId, recordingId, log);
   const supervisorMode =
     AUTO_APPROVE_DIRECT_PERMISSION[handler.taskType] !== undefined
-      ? await memoCreator.mode()
+      ? await memoCreator.mode(tenantThresholdOverride)
       : undefined;
 
   const context: TaskContext = {
@@ -2043,8 +2044,15 @@ export function holdIfUnsupervised(proposal: Proposal, supervisorPresent: boolea
  */
 interface MemoCreator {
   role(): Promise<string | null>;
-  /** OVAS-04 — users.current_mode; undefined when unresolvable. */
-  mode(): Promise<Mode | undefined>;
+  /**
+   * OVAS-04 — users.current_mode. A lookup that ran but could not name a mode
+   * (no creator on the recording, no users row, a failed read) resolves to
+   * the tenant's strictest mode: an undefined mode would fall back to the
+   * legacy 0.9, below the built-in 'tech' default, so the memo could
+   * auto-approve under a stricter real mode. Undefined only when no mode
+   * lookup is wired.
+   */
+  mode(tenantOverride?: Partial<Record<Mode, number>>): Promise<Mode | undefined>;
 }
 
 function memoCreatorResolver(
@@ -2082,17 +2090,18 @@ function memoCreatorResolver(
         return null;
       }
     },
-    async mode() {
+    async mode(tenantOverride) {
+      if (!deps.resolveMemberMode) return undefined;
       const userId = await id();
-      if (!userId || !deps.resolveMemberMode) return undefined;
+      if (!userId) return strictestMode(tenantOverride);
       try {
-        return (await deps.resolveMemberMode(tenantId, userId)) ?? undefined;
+        return (await deps.resolveMemberMode(tenantId, userId)) ?? strictestMode(tenantOverride);
       } catch (err) {
         log.warn('voice-action-router: memo creator mode lookup failed — strictest tenant rule applies', {
           recordingId,
           error: err instanceof Error ? err.message : String(err),
         });
-        return undefined;
+        return strictestMode(tenantOverride);
       }
     },
   };

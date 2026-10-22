@@ -101,6 +101,24 @@ export const DEFAULT_AUTO_APPROVE_THRESHOLDS: Record<Mode, number> = {
  */
 export const LEGACY_AUTO_APPROVE_THRESHOLD = 0.9;
 
+/**
+ * The mode whose effective threshold (the tenant's override for it, else the
+ * built-in default) is highest — the strictest rule the tenant could apply to
+ * any member. For a caller that tried to read a member's mode and could not
+ * (the voice-memo creator whose users row is missing or whose lookup failed):
+ * resolving with this mode fails closed, where an undefined mode would fall
+ * back to the legacy 0.9, below the built-in 'tech' default of 0.95.
+ */
+export function strictestMode(tenantOverride?: Partial<Record<Mode, number>>): Mode {
+  const effective = (mode: Mode): number => {
+    const override = tenantOverride?.[mode];
+    return typeof override === 'number' ? override : DEFAULT_AUTO_APPROVE_THRESHOLDS[mode];
+  };
+  return (Object.keys(DEFAULT_AUTO_APPROVE_THRESHOLDS) as Mode[]).reduce((strictest, mode) =>
+    effective(mode) > effective(strictest) ? mode : strictest,
+  );
+}
+
 export interface ResolveThresholdInput {
   /**
    * The current_mode of the user-on-record for the originating session.
