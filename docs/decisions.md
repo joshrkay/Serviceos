@@ -1897,3 +1897,64 @@ site sees the item reopen rather than a stale tick. Forwarding is the exception:
 the carrier sends us nothing, so the forwarding check is a point-in-time proof. The forwarding item
 shows the date of the last passing check, reopens when the owner changes carrier or forwarding mode
 in the app, and offers a re-check; detecting carrier-side changes is not promised.
+
+## D-045 — Outbound messaging decides its own policy; invoices go by text with a pay link; proposal status moves only through the lifecycle
+
+**Date:** 2026-10-21
+**Status:** Accepted (owner decisions 2026-10-21, grilled in the "Backend architecture review" project thread)
+
+**Context.** The architecture review found two rules enforced by caller discipline. Outbound
+texts pass one consent gate (`notifications/gated-message-delivery.ts`), but each of about 40
+senders chooses its own policy inputs: an `owner`/`customer` tag that skips every check when
+wrong, a consent snapshot it looked up itself, and an opt-in quiet-hours flag only 2 senders
+set. Invoices and estimates go by email first whenever an email is on file (#1524), and when
+the pay link cannot be made the invoice quietly goes out view-only. Separately, about 20
+callers write a proposal's status directly, and the repository checks no transition.
+
+**Decision.**
+
+1. **Outbound messaging owns the policy.** A sender names a recipient (a customer by id, the
+   owner or team, or a reply to a number that just contacted us) and a **message purpose**
+   (transactional, reply, automated nudge, marketing). The module looks up consent itself,
+   derives quiet-hours handling from the purpose, holds a nudge and sends it when the
+   customer's daytime window opens, and requires a duplicate key built from the purpose and
+   the record the message is about.
+2. **Every message has a send outcome.** *Sent*, *scheduled* (with the time) or *blocked*
+   (with the reason). A send a person triggered shows the reason on screen; an automated
+   one records it. One record per message replaces the invoice/estimate-only dispatch log
+   and links the customer and, when there is one, the job and the invoice or estimate. That
+   record drives a status bubble on the job and the customer; blocked messages also reach
+   the owner's inbox.
+3. **Invoices and estimates go by text first.** When the customer has a textable number and
+   has not opted out, the send is a text with the link; email is the fallback. An invoice
+   text carries a **pay link** unless the owner chose *collect on the spot*. If the pay link
+   cannot be made, the invoice is not sent without it: an owner-pressed send is refused with
+   the reason, and an automatic one is held, retried once, then put on the owner's to-do
+   list. This supersedes #1524's email-first default and S5a-1's fail-open view-only send.
+4. **Wording.** Each purpose has a default message: the owner's saved template for it if
+   there is one, otherwise the built-in text. Any single send may add an owner note on top.
+5. **Email stays as it is for now.** Customer emails outside invoice and estimate sends
+   (campaigns, some replies, review follow-ups) are left alone and tracked as known
+   exceptions until an email-consent decision is made (D-017 says a grant never crosses
+   channels, so an SMS grant is not email consent).
+6. **Migration is gradual.** Senders move one file at a time; a guard test lists today's
+   direct callers of the raw sender and the list may only shrink.
+7. **Proposal status moves only through the lifecycle.** The repository runs the transition
+   table on every status write (the **status-write gate**). Four moves the code already made
+   are allowed there as system-only writes, kept out of the table that approve, reject and
+   undo consult: ready_for_review → draft (supervisor hold), approved → executing (execution
+   claim), executing → approved (chain dependent released), approved → rejected (a caller
+   revoking their own unexecuted booking; the generic reject endpoint still cannot reach an
+   approved proposal).
+8. **Drafting has one entry point and three outcomes.** Every surface drafts through one
+   module that returns a proposal, a clarification, or a refusal with a reason, and runs the
+   made-up-id scrub that only chat ran before. Owners keep editing drafts before approval in
+   the app and the portal; an edit re-runs the same checks.
+
+**Not decided (deferred by the owner).** An auto-send trust ramp (auto-approving customer
+messages after N approvals above a confidence bar) was raised and deliberately set aside.
+Customer messages and money still never auto-approve (D-004, D-033).
+
+**Alternatives rejected.** Leaving policy at the call site with a lint rule (the tag still
+lies when wrong); gating email now (needs the email-consent decision first); a big-bang
+rewrite of all senders.

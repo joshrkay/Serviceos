@@ -1,4 +1,4 @@
-import { Proposal, ProposalStatus } from './proposal';
+import type { Proposal, ProposalStatus } from './proposal';
 import { ConflictError, ForbiddenError } from '../shared/errors';
 
 /**
@@ -34,6 +34,24 @@ const VALID_TRANSITIONS: Record<ProposalStatus, ProposalStatus[]> = {
   // Terminal: an undone proposal cannot be resurrected. If the
   // operator changes their mind again, they draft a new proposal.
   undone: [],
+};
+
+/**
+ * Moves the system makes through the repository but that no user-facing
+ * action may make, so they stay out of VALID_TRANSITIONS (which
+ * `transitionProposal`, and through it approve/reject/undo, consults).
+ */
+const SYSTEM_STATUS_WRITES: Partial<Record<ProposalStatus, ProposalStatus[]>> = {
+  // A supervisor hold pulls a queued card back out of review
+  // (ai/supervisor/reviewer.ts) so no one-tap link or approval text goes out.
+  ready_for_review: ['draft'],
+  // → executing: the execution sweep's claim. → rejected: a caller revoking
+  // their own still-unexecuted booking mid-call (E1, voice-turn processor);
+  // the generic reject endpoint must not reach an approved proposal.
+  approved: ['executing', 'rejected'],
+  // The executor releases a claimed chain dependent whose parent has not
+  // executed yet, so the next sweep tick retries it.
+  executing: ['approved'],
 };
 
 const TERMINAL_STATUSES: ProposalStatus[] = ['expired', 'executed', 'undone'];
@@ -128,6 +146,17 @@ export function undoRemainingMs(
 export function canTransition(from: ProposalStatus, to: ProposalStatus): boolean {
   const allowed = VALID_TRANSITIONS[from];
   return allowed !== undefined && allowed.includes(to);
+}
+
+/**
+ * The status-write gate. Every repository status write runs it, so a caller
+ * cannot move a proposal along an edge neither table above lists. A write
+ * to the status the row already has is a re-stamp, not a move, and passes.
+ */
+export function assertStatusWrite(from: ProposalStatus, to: ProposalStatus): void {
+  if (from === to || canTransition(from, to)) return;
+  if (SYSTEM_STATUS_WRITES[from]?.includes(to)) return;
+  throw new ConflictError(`Cannot transition proposal from '${from}' to '${to}'`);
 }
 
 export function isTerminalStatus(status: ProposalStatus): boolean {

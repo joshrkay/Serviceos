@@ -79,6 +79,7 @@ import {
   InMemoryCatalogItemRepository,
   createCatalogItem,
 } from '../../src/catalog/catalog-item';
+import { markApproved } from '../helpers/proposal-status';
 
 const TENANT = '11111111-1111-4111-8111-111111111111';
 const APPROVER = '22222222-2222-4222-8222-222222222222';
@@ -313,7 +314,7 @@ async function approveAndExecute(w: Wiring, proposal: Proposal) {
   if (approved.status !== 'approved') approved = transitionProposal(approved, 'approved', APPROVER);
   // Backdate past the undo window so the executor runs immediately.
   approved = { ...approved, approvedAt: new Date(Date.now() - UNDO_WINDOW_MS - 100) };
-  await w.proposalRepo.update(TENANT, proposal.id, approved);
+  await markApproved(w.proposalRepo, TENANT, approved);
   const { result } = await w.executor.execute(approved, {
     tenantId: TENANT,
     executedBy: APPROVER,

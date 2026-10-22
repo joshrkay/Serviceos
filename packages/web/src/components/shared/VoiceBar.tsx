@@ -1,9 +1,11 @@
 import { useState, useEffect, useRef, useCallback, useImperativeHandle, forwardRef } from 'react';
 import { Mic, X, Send, Sparkles } from 'lucide-react';
-import { useNavigate } from 'react-router';
+import { useLocation, useNavigate } from 'react-router';
 import { apiFetch } from '../../utils/api-fetch';
 import { matchVoiceCommand } from '../../hooks/useVoiceCommands';
 import { useTTS } from '../../hooks/useTTS';
+import { dictationSupported, useDeepgramDictation } from '../../hooks/useDeepgramDictation';
+import { assistantHandoffUrl, pageContextFromPath, type PageContext } from '../../lib/page-context';
 import { pickExamples } from './voice-examples';
 
 type BarPhase = 'idle' | 'listening' | 'transcribing' | 'transcript' | 'sending';
@@ -133,6 +135,7 @@ interface VoiceBarProps {
 
 export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function VoiceBar({ variant = 'mobile' }, ref) {
   const navigate = useNavigate();
+  const { pathname } = useLocation();
   const [phase, setPhase] = useState<BarPhase>('idle');
   const [transcript, setTranscript] = useState('');
   const [error, setError] = useState<string | null>(null);
@@ -142,6 +145,35 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
   const streamRef = useRef<MediaStream | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const { speak } = useTTS({ rate: 1.05 });
+
+  // Live words while you talk: the same Deepgram stream conversation mode
+  // uses. When the browser or the server cannot stream, the bar falls back to
+  // recording the clip and transcribing it after you stop.
+  const captureModeRef = useRef<'stream' | 'batch' | null>(null);
+  // Bumped by every start, stop and cancel. A start still waiting on its
+  // stream token or the mic checks it afterwards, so an attempt the user
+  // already stopped can never open the mic later.
+  const attemptRef = useRef(0);
+  // The record on screen when the mic opened: moving to another page while
+  // talking must not attach what you said to that page's record.
+  const pageAtStartRef = useRef<PageContext | null>(null);
+  const streamFinalRef = useRef<string | null>(null);
+  const dictation = useDeepgramDictation({
+    onFinal: (text) => { streamFinalRef.current = text; },
+    onClose: ({ opened }) => {
+      if (captureModeRef.current !== 'stream') return;
+      captureModeRef.current = null;
+      if (!opened) {
+        // Refused before it opened: record the old way instead.
+        void startBatchRecording();
+        return;
+      }
+      settleStreamedTranscript(liveTextRef.current, 'The live connection dropped. Please retry.');
+    },
+  });
+  const liveText = dictation.partial;
+  const liveTextRef = useRef('');
+  liveTextRef.current = liveText;
 
   // U7 — rotating "Try: …" discoverability hint (idle state). A few examples
   // are drawn once per mount and cycled with a short fade; users who prefer
@@ -165,10 +197,6 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
     return () => window.clearInterval(interval);
   }, [reducedMotion, phase, examples.length]);
 
-  // Expose imperative handle so parent (Shell) can trigger via keyboard shortcut
-  useImperativeHandle(ref, () => ({
-    activate: () => { if (phase === 'idle') startListening(); },
-  }), [phase]);
   const stoppingRef = useRef(false);
 
   const stopStream = useCallback(() => {
@@ -207,9 +235,39 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
     return (completed.transcript || '').trim();
   }, []);
 
+  const settleStreamedTranscript = useCallback((text: string, emptyMessage: string) => {
+    const trimmed = text.trim();
+    if (trimmed) {
+      setTranscript(trimmed);
+      setPhase('transcript');
+    } else {
+      setError(emptyMessage);
+      setCanRetry(true);
+      setPhase('idle');
+    }
+  }, []);
+
   const stopListening = useCallback(async () => {
+    attemptRef.current += 1;
+    if (captureModeRef.current === 'stream') {
+      captureModeRef.current = null;
+      dictation.stop();
+      settleStreamedTranscript(
+        streamFinalRef.current ?? liveTextRef.current,
+        "I didn't catch anything. Please retry.",
+      );
+      return;
+    }
+    if (stoppingRef.current) return;
     const recorder = mediaRecorderRef.current;
-    if (!recorder || recorder.state !== 'recording' || stoppingRef.current) return;
+    if (!recorder || recorder.state !== 'recording') {
+      // Done before the fallback recorder opened the microphone: that start is
+      // discarded, so say nothing was captured rather than stay on "Listening…".
+      setError('No audio captured. Please retry.');
+      setCanRetry(true);
+      setPhase('idle');
+      return;
+    }
 
     stoppingRef.current = true;
     setPhase('transcribing');
@@ -251,22 +309,26 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
       };
       recorder.stop();
     });
-  }, [stopStream, uploadAndTranscribe]);
+  }, [stopStream, uploadAndTranscribe, dictation, settleStreamedTranscript]);
 
-  const startListening = useCallback(async () => {
-    setError(null);
-    setCanRetry(false);
-    setTranscript('');
-
+  const startBatchRecording = useCallback(async () => {
+    const attempt = attemptRef.current;
     const mimeType = getSupportedAudioMimeType();
     if (!mimeType) {
+      // A live start that fell back here already shows the listening controls.
+      captureModeRef.current = null;
       setError('This browser does not support a compatible recording format.');
       setCanRetry(true);
+      setPhase('idle');
       return;
     }
 
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (attemptRef.current !== attempt) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       streamRef.current = stream;
       const recorder = new MediaRecorder(stream, { mimeType });
       mediaRecorderRef.current = recorder;
@@ -285,14 +347,54 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
       };
 
       recorder.start(1000);
+      captureModeRef.current = 'batch';
       setPhase('listening');
     } catch {
+      // A cancelled attempt's late rejection must not reset a retry.
+      if (attemptRef.current !== attempt) return;
       setError('Microphone permission is required to record voice messages.');
       setCanRetry(true);
       setPhase('idle');
       stopStream();
     }
   }, [stopStream]);
+
+  const startListening = useCallback(async () => {
+    setError(null);
+    setCanRetry(false);
+    setTranscript('');
+    attemptRef.current += 1;
+    const attempt = attemptRef.current;
+    pageAtStartRef.current = pageContextFromPath(pathname);
+
+    if (dictationSupported()) {
+      captureModeRef.current = 'stream';
+      streamFinalRef.current = null;
+      setPhase('listening');
+      const started = await dictation.start();
+      // Stopped or cancelled while the stream was starting: the hook has
+      // already released what that start opened.
+      if (attemptRef.current !== attempt || started === 'cancelled') return;
+      if (started === 'connecting') return;
+      captureModeRef.current = null;
+      if (started === 'denied') {
+        setError('Microphone permission is required to record voice messages.');
+        setCanRetry(true);
+        setPhase('idle');
+        return;
+      }
+      // No live transcription here (not configured, refused, or failed):
+      // record the clip and transcribe it after.
+    }
+    await startBatchRecording();
+  }, [dictation, startBatchRecording, pathname]);
+
+  // Expose imperative handle so parent (Shell) can trigger via keyboard
+  // shortcut. Rebuilt with startListening so the shortcut reads the page the
+  // operator is on now, not the one the bar first rendered on.
+  useImperativeHandle(ref, () => ({
+    activate: () => { if (phase === 'idle') startListening(); },
+  }), [phase, startListening]);
 
   useEffect(() => {
     if (phase !== 'listening') return;
@@ -315,6 +417,8 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
   }, [phase]);
 
   useEffect(() => () => {
+    // Leaving the page also cancels a start still waiting on its token or mic.
+    attemptRef.current += 1;
     const recorder = mediaRecorderRef.current;
     if (recorder?.state === 'recording') recorder.stop();
     stopStream();
@@ -322,6 +426,7 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
 
   function handleSend() {
     if (!transcript.trim()) return;
+    const pageContext = pageAtStartRef.current;
 
     // Check for voice navigation commands first
     const command = matchVoiceCommand(transcript.trim());
@@ -339,7 +444,7 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
     // Fall through to assistant
     setPhase('sending');
     setTimeout(() => {
-      navigate(`/assistant?q=${encodeURIComponent(transcript.trim())}`);
+      navigate(assistantHandoffUrl(transcript.trim(), pageContext, { spoken: true }));
       setPhase('idle');
       setTranscript('');
       setError(null);
@@ -348,6 +453,11 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
   }
 
   function handleCancel() {
+    attemptRef.current += 1;
+    if (captureModeRef.current === 'stream') {
+      captureModeRef.current = null;
+      dictation.stop();
+    }
     const recorder = mediaRecorderRef.current;
     if (recorder && recorder.state === 'recording') {
       recorder.stop();
@@ -375,7 +485,7 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
         <div className="mb-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700">
           {error}
           {canRetry && (
-            <button onClick={startListening} className="ml-2 underline text-red-800">Retry</button>
+            <button onClick={startListening} className="ml-2 min-h-11 px-2 underline text-red-800">Retry</button>
           )}
         </div>
       )}
@@ -422,20 +532,30 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
             <span className="size-2.5 rounded-full bg-white" style={{ animation: 'liveDot 1s ease-in-out infinite' }} />
           </span>
           <div className="flex-1 flex items-center gap-3 min-w-0">
-            <span className="text-sm text-blue-700 shrink-0">Listening…</span>
-            <div className="flex-1"><Waveform /></div>
+            {liveText ? (
+              <span data-testid="voice-live-text" aria-live="polite" className="flex-1 min-w-0 text-sm text-blue-900 break-words line-clamp-2">
+                {liveText}
+              </span>
+            ) : (
+              <>
+                <span className="text-sm text-blue-700 shrink-0">Listening…</span>
+                <div className="flex-1"><Waveform /></div>
+              </>
+            )}
           </div>
           <button
             onClick={() => { void stopListening(); }}
-            className="shrink-0 flex size-7 items-center justify-center rounded-full bg-blue-600 text-white hover:bg-blue-700 transition-colors"
+            aria-label="Done talking"
+            className="shrink-0 flex size-11 items-center justify-center rounded-full bg-blue-600 text-white hover:bg-blue-700 transition-colors"
           >
-            <Send size={13} />
+            <Send size={15} />
           </button>
           <button
             onClick={handleCancel}
-            className="shrink-0 flex size-6 items-center justify-center rounded-full bg-blue-100 hover:bg-blue-200 transition-colors"
+            aria-label="Cancel"
+            className="shrink-0 flex size-11 items-center justify-center rounded-full bg-blue-100 hover:bg-blue-200 transition-colors"
           >
-            <X size={13} className="text-blue-600" />
+            <X size={15} className="text-blue-600" />
           </button>
           <style>{`
             @keyframes liveDot {
@@ -480,20 +600,23 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
               value={transcript}
               onChange={e => setTranscript(e.target.value)}
               onKeyDown={e => { if (e.key === 'Enter') handleSend(); if (e.key === 'Escape') handleCancel(); }}
-              className="flex-1 text-sm text-slate-900 outline-none bg-transparent min-w-0"
+              aria-label="What you said"
+              className="flex-1 min-h-11 text-sm text-slate-900 outline-none bg-transparent min-w-0"
             />
             <button
               onClick={handleCancel}
-              className="shrink-0 p-1 rounded-full text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
+              aria-label="Discard"
+              className="shrink-0 flex size-11 items-center justify-center rounded-full text-slate-400 hover:text-slate-600 hover:bg-slate-100 transition-colors"
             >
-              <X size={14} />
+              <X size={15} />
             </button>
             <button
               onClick={handleSend}
               disabled={!transcript.trim()}
-              className="shrink-0 flex size-7 items-center justify-center rounded-full bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 transition-colors"
+              aria-label="Send"
+              className="shrink-0 flex size-11 items-center justify-center rounded-full bg-blue-600 text-white hover:bg-blue-700 disabled:opacity-40 transition-colors"
             >
-              <Send size={13} />
+              <Send size={15} />
             </button>
           </div>
           <p className="text-xs text-slate-400 pl-1">Edit if needed, then tap <span className="text-blue-500">send</span></p>

@@ -16,17 +16,15 @@ const TENANT = 'tenant-1';
 const LIVE: ProposalStatus[] = ['draft', 'ready_for_review', 'approved'];
 
 async function seed(repo: InMemoryProposalRepository, status?: ProposalStatus) {
-  const proposal = await repo.create(
-    createProposal({
-      tenantId: TENANT,
-      proposalType: 'create_appointment',
-      payload: {},
-      summary: 'Book a visit',
-      createdBy: 'voice',
-    }),
-  );
-  if (status) await repo.updateStatus(TENANT, proposal.id, status);
-  return proposal;
+  // Seeded in its status: the status-write gate refuses e.g. draft → executed.
+  const drafted = createProposal({
+    tenantId: TENANT,
+    proposalType: 'create_appointment',
+    payload: {},
+    summary: 'Book a visit',
+    createdBy: 'voice',
+  });
+  return repo.create(status ? { ...drafted, status } : drafted);
 }
 
 describe('ProposalRepository.updateStatusIf', () => {

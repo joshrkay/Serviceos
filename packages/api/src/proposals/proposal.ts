@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid';
 import { ConflictError } from '../shared/errors';
+import { assertStatusWrite } from './lifecycle';
 import {
   confidenceMetaBlocksAutoApprove,
   resolveAutoApproveThreshold,
@@ -1167,7 +1168,7 @@ export interface ProposalRepository {
   update(
     tenantId: string,
     id: string,
-    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt'>>
+    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt' | 'status'>>
   ): Promise<Proposal | null>;
 
   /**
@@ -1678,6 +1679,7 @@ export class InMemoryProposalRepository implements ProposalRepository {
   ): Promise<Proposal | null> {
     const proposal = this.proposals.get(id);
     if (!proposal || proposal.tenantId !== tenantId) return null;
+    assertStatusWrite(proposal.status, status);
 
     proposal.status = status;
     proposal.updatedAt = new Date();
@@ -1722,6 +1724,7 @@ export class InMemoryProposalRepository implements ProposalRepository {
     // Same precondition the pg impl folds into its WHERE clause: the row must
     // exist, belong to this tenant, and still sit in one of `fromStatuses`.
     // Single-threaded here, so the check + write are trivially atomic.
+    for (const from of fromStatuses) assertStatusWrite(from, to);
     const proposal = this.proposals.get(id);
     if (!proposal || proposal.tenantId !== tenantId) return null;
     if (!fromStatuses.includes(proposal.status)) return null;
@@ -1746,12 +1749,15 @@ export class InMemoryProposalRepository implements ProposalRepository {
   async update(
     tenantId: string,
     id: string,
-    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt'>>
+    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt' | 'status'>>
   ): Promise<Proposal | null> {
     const proposal = this.proposals.get(id);
     if (!proposal || proposal.tenantId !== tenantId) return null;
 
-    Object.assign(proposal, updates, { updatedAt: new Date() });
+    // Parity with the pg repo, which has no status column in its field map:
+    // status moves only through updateStatus and its gate.
+    const { status: _ignored, ...fields } = updates as Partial<Proposal>;
+    Object.assign(proposal, fields, { updatedAt: new Date() });
     this.proposals.set(id, proposal);
     return { ...proposal };
   }
