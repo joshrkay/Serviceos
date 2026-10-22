@@ -4,14 +4,14 @@
  * The Gather adapter and the Layer 1 text-mode driver each resolved "is this
  * caller-ID an approver line?" on their own. The contract (RV-070, the SMS
  * approval transport's trust model via `proposals/approver-identity.ts`):
- *   - true when the caller-ID normalises to `tenant_settings.owner_phone`
- *     or the backup supervisor's mobile (the latter only when a userRepo is
- *     wired to read it);
+ *   - an approver when the caller-ID normalises to `tenant_settings.owner_phone`
+ *     (the owner) or the backup supervisor's mobile (their own role — only
+ *     when a userRepo is wired to read it);
  *   - best effort and FAIL-CLOSED: no settings repo, no caller-ID, or a
- *     failed lookup is never an owner session.
+ *     failed lookup is never an owner session (null).
  */
 import { describe, it, expect } from 'vitest';
-import { resolveOwnerSession } from '../../../../src/ai/voice-turn/shared/owner-session';
+import { resolveOwnerLineApprover } from '../../../../src/ai/voice-turn/shared/owner-session';
 import type { SettingsRepository, TenantSettings } from '../../../../src/settings/settings';
 import type { UserRepository } from '../../../../src/users/user';
 
@@ -36,34 +36,35 @@ function users(): UserRepository {
   } as unknown as UserRepository;
 }
 
-describe('resolveOwnerSession (shared)', () => {
+describe('resolveOwnerLineApprover (shared)', () => {
   it('recognises the owner phone across normalisation variants', async () => {
     const deps = { settingsRepo: settings() };
-    await expect(resolveOwnerSession(deps, TENANT, OWNER_PHONE)).resolves.toBe(true);
-    await expect(resolveOwnerSession(deps, TENANT, '(512) 555-0100')).resolves.toBe(true);
+    const owner = { role: 'owner', via: 'owner_phone' };
+    await expect(resolveOwnerLineApprover(deps, TENANT, OWNER_PHONE)).resolves.toEqual(owner);
+    await expect(resolveOwnerLineApprover(deps, TENANT, '(512) 555-0100')).resolves.toEqual(owner);
   });
 
   it('a customer phone is not an owner line', async () => {
-    await expect(resolveOwnerSession({ settingsRepo: settings() }, TENANT, CUSTOMER_PHONE)).resolves.toBe(false);
+    await expect(resolveOwnerLineApprover({ settingsRepo: settings() }, TENANT, CUSTOMER_PHONE)).resolves.toBeNull();
   });
 
   it('recognises the backup supervisor mobile only when a userRepo is wired', async () => {
     const withBackup = settings({ backupSupervisorUserId: BACKUP_USER_ID });
     await expect(
-      resolveOwnerSession({ settingsRepo: withBackup, userRepo: users() }, TENANT, BACKUP_MOBILE),
-    ).resolves.toBe(true);
-    await expect(resolveOwnerSession({ settingsRepo: withBackup }, TENANT, BACKUP_MOBILE)).resolves.toBe(false);
+      resolveOwnerLineApprover({ settingsRepo: withBackup, userRepo: users() }, TENANT, BACKUP_MOBILE),
+    ).resolves.toEqual({ role: 'dispatcher', userId: BACKUP_USER_ID, via: 'backup_supervisor' });
+    await expect(resolveOwnerLineApprover({ settingsRepo: withBackup }, TENANT, BACKUP_MOBILE)).resolves.toBeNull();
   });
 
   it('fails closed: no settings repo, no caller-ID, or a failed lookup is never an owner', async () => {
-    await expect(resolveOwnerSession({}, TENANT, OWNER_PHONE)).resolves.toBe(false);
-    await expect(resolveOwnerSession({ settingsRepo: settings() }, TENANT, undefined)).resolves.toBe(false);
-    await expect(resolveOwnerSession({ settingsRepo: settings() }, TENANT, '')).resolves.toBe(false);
+    await expect(resolveOwnerLineApprover({}, TENANT, OWNER_PHONE)).resolves.toBeNull();
+    await expect(resolveOwnerLineApprover({ settingsRepo: settings() }, TENANT, undefined)).resolves.toBeNull();
+    await expect(resolveOwnerLineApprover({ settingsRepo: settings() }, TENANT, '')).resolves.toBeNull();
     const broken = {
       findByTenant: async () => {
         throw new Error('pg down');
       },
     } as unknown as SettingsRepository;
-    await expect(resolveOwnerSession({ settingsRepo: broken }, TENANT, OWNER_PHONE)).resolves.toBe(false);
+    await expect(resolveOwnerLineApprover({ settingsRepo: broken }, TENANT, OWNER_PHONE)).resolves.toBeNull();
   });
 });
