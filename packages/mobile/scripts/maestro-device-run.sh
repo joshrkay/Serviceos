@@ -55,7 +55,7 @@ trap on_exit EXIT
 # asks for ONCE, up front: a Babel/transform error then fails here in seconds
 # with Metro's own message, instead of as a red box behind a 2-minute Maestro
 # wait (run 36765536371). It also warms Metro's cache for the first launch.
-BUNDLE_URL='http://localhost:8081/.expo/.virtual-metro-entry.bundle?platform=android&dev=true&lazy=true&minify=false&app=com.serviceos.app&modulesOnly=false&runModule=true&excludeSource=true&sourcePaths=url-server'
+BUNDLE_URL='http://localhost:8081/.expo/.virtual-metro-entry.bundle?platform=android&dev=true&lazy=true&minify=false&app=com.therivetapp.app&modulesOnly=false&runModule=true&excludeSource=true&sourcePaths=url-server'
 check_bundle() {
   local code
   log "requesting the Android dev bundle from Metro"
@@ -126,18 +126,18 @@ TECH_IDENTITY_B64="$(printf '%s' '{"sub":"dev_tech","role":"technician"}' | base
 # bare reset also removes any identity file left by the technician flow.
 reset_app() {
   local identity="${1:-owner}"
-  adb shell am force-stop com.serviceos.app
-  adb shell pm clear com.serviceos.app >/dev/null
-  adb shell "run-as com.serviceos.app sh -c 'mkdir -p shared_prefs && echo $PREFS_B64 | base64 -d > shared_prefs/com.serviceos.app_preferences.xml'"
+  adb shell am force-stop com.therivetapp.app
+  adb shell pm clear com.therivetapp.app >/dev/null
+  adb shell "run-as com.therivetapp.app sh -c 'mkdir -p shared_prefs && echo $PREFS_B64 | base64 -d > shared_prefs/com.therivetapp.app_preferences.xml'"
   if [ "$identity" = "technician" ]; then
-    adb shell "run-as com.serviceos.app sh -c 'mkdir -p files && echo $TECH_IDENTITY_B64 | base64 -d > files/dev-auth.json'"
+    adb shell "run-as com.therivetapp.app sh -c 'mkdir -p files && echo $TECH_IDENTITY_B64 | base64 -d > files/dev-auth.json'"
   fi
-  adb shell pm grant com.serviceos.app android.permission.RECORD_AUDIO || true
+  adb shell pm grant com.therivetapp.app android.permission.RECORD_AUDIO || true
 }
 
 # --- on-device reads (debuggable build → run-as) ----------------------------
-journal() { adb exec-out run-as com.serviceos.app cat files/offline-queue.json 2>/dev/null || echo '{"items":[]}'; }
-audio_files() { adb exec-out run-as com.serviceos.app ls files/offline-audio/ 2>/dev/null | tr -d '\r' | grep -v '^$' || true; }
+journal() { adb exec-out run-as com.therivetapp.app cat files/offline-queue.json 2>/dev/null || echo '{"items":[]}'; }
+audio_files() { adb exec-out run-as com.therivetapp.app ls files/offline-audio/ 2>/dev/null | tr -d '\r' | grep -v '^$' || true; }
 # Emits "<count of not-done items>|<idempotencyKey of the first>|<audio basename of the first>"
 journal_summary() {
   # shellcheck disable=SC2016 # JS template literal, not shell expansion

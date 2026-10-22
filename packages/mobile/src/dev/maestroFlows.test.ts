@@ -54,7 +54,7 @@ describe('Maestro device flows — static contract', () => {
     );
     for (const f of files) {
       const flow = loadFlow(f);
-      expect(flow.config.appId, f).toBe('com.serviceos.app');
+      expect(flow.config.appId, f).toBe('com.therivetapp.app');
       expect(Array.isArray(flow.commands) && flow.commands.length > 0, f).toBe(true);
     }
   });
@@ -107,7 +107,7 @@ describe('Maestro device flows — static contract', () => {
   it('#1603: a technician signs in, opens the Assistant, asks for the next job, and the self-scoped answer is on screen before the screenshot', () => {
     expect(allFlowFiles()).toContain('tech-assistant-next-job.yaml');
     const { config, commands } = loadFlow('tech-assistant-next-job.yaml');
-    expect(config.appId).toBe('com.serviceos.app');
+    expect(config.appId).toBe('com.therivetapp.app');
     const at = (pred: (c: Record<string, unknown>) => boolean) =>
       commands.findIndex((c) => typeof c === 'object' && pred(c));
     // Same dev-auth sign-in as every flow (the harness pre-writes the
@@ -216,7 +216,7 @@ describe('scripts/maestro-device-run.sh — the CI device harness', () => {
     expect(resets[0]).toBeLessThan(flow33);
     expect(resets[1]).toBeGreaterThan(flow33);
     expect(resets[1]).toBeLessThan(a);
-    expect(src).toContain('pm clear com.serviceos.app');
+    expect(src).toContain('pm clear com.therivetapp.app');
     expect(src).toContain('debug_http_host');
     // …so no flow may clear state itself.
     for (const f of allFlowFiles()) {
@@ -227,8 +227,8 @@ describe('scripts/maestro-device-run.sh — the CI device harness', () => {
       }
     }
     // The journal is read from the real app sandbox, not re-derived.
-    expect(src).toContain('run-as com.serviceos.app cat files/offline-queue.json');
-    expect(src).toContain('run-as com.serviceos.app ls files/offline-audio/');
+    expect(src).toContain('run-as com.therivetapp.app cat files/offline-queue.json');
+    expect(src).toContain('run-as com.therivetapp.app ls files/offline-audio/');
     // "one row" is read from the real Postgres the API wrote to.
     expect(src).toMatch(/FROM voice_recordings WHERE idempotency_key/);
   });

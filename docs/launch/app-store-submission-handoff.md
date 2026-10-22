@@ -22,10 +22,10 @@ must not take autonomously).
 ## Human checklist (in order)
 
 1. **Merge PR #738** (all CI green, incl. the new integration test).
-2. **Artwork (A-5).** Replace the four blank placeholder PNGs in
-   `packages/mobile/assets/` (`icon.png` 1024², `adaptive-icon.png` 1024²,
-   `splash.png` 1284×2778, `notification-icon.png` 96²) with real Rivet
-   marks. Apple rejects blank icons on sight.
+2. **Artwork (A-5).** ~~Replace the four blank placeholder PNGs~~ Done
+   2026-10-21: `packages/mobile/assets/*.png` are the marketing-site "R."
+   mark rendered by `packages/mobile/scripts/generate-brand-assets.py`.
+   Designer artwork, if any, is a drop-in replacement.
 3. **EAS + Apple credentials (A-6).** In `packages/mobile`:
    `eas init` (fills `extra.eas.projectId`), then fill
    `eas.json → submit.production` (`appleId`, `ascAppId`, `appleTeamId`;
@@ -37,19 +37,16 @@ must not take autonomously).
    (`packages/api/scripts/seed.ts` against prod `DATABASE_URL`, or manual).
    Passwords go only in App Store Connect / Play confidential fields.
    Also confirm in the Clerk dashboard: session lifetime + bot protection
-   won't lock a reviewer out mid-review. NOTE: the demo emails use
-   `@rivet.ai` — confirm that domain actually receives mail OR switch the
-   docs (`packages/mobile/store/app-review-notes.md`) to a real domain;
-   with the new OTP step (A-1 fix), Client-Trust challenges EMAIL A REAL
-   CODE, so the reviewer accounts' inboxes must exist or Clerk's
-   client-trust must be relaxed for the instance. This is the one remaining
-   sign-in risk — verify by signing in from a device Clerk has never seen.
-5. **Privacy URL (A-4 residual).** Confirm `https://therivetapp.com/privacy`
-   (and `/terms`, `/download`) resolve 200 and render the real policy —
-   unverifiable from the sandbox (egress-blocked). If `rivet.ai` is meant
-   to be canonical instead, revert the doc change and set up redirects.
-   Also confirm the real support email (docs currently say
-   `support@rivet.ai`).
+   won't lock a reviewer out mid-review. The demo emails are
+   `info+reviewer-supervisor@` / `info+reviewer-technician@therivetapp.com`
+   (plus-addressed into the real `info@therivetapp.com` inbox, decided
+   2026-10-21): the OTP step (A-1 fix) emails a real code there. Verify by
+   signing in from a device Clerk has never seen.
+5. **Privacy URL (A-4 residual).** Verified 2026-10-21: `/privacy` and
+   `/terms` return 200; `/download` returned 404, so the listing's support
+   URL is now `https://therivetapp.com/contact` (a `/support` page in the
+   Rivet-Marketing repo can replace it later). Support email is
+   `info@therivetapp.com`.
 6. **App Privacy questionnaire.** Answers derived from code are in
    `packages/mobile/store/app-store-listing.md` (contact info, user content
    incl. voice audio + photos, foreground-only precise location, payment
@@ -59,7 +56,8 @@ must not take autonomously).
 8. **Build + submit**: `eas build --profile production --platform ios`,
    then `eas submit`. Paste `packages/mobile/store/app-review-notes.md`
    into App Review Information (it now covers click-to-call and account
-   deletion).
+   deletion). The store identifier is `com.therivetapp.app` on both
+   platforms and v1 ships without Tap to Pay (D-046).
 
 ## What shipped in PR #738 (for reference)
 

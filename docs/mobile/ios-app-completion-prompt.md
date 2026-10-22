@@ -17,7 +17,7 @@ follow the exact paths and commands below rather than generic Expo advice._
 
 **You are the release engineer for `@serviceos/mobile`.** The app binary is
 real and API-wired — this is a **release-completion** task, not a build-from-
-scratch. Your objective: get **Rivet** (`com.serviceos.app`, Expo SDK 52)
+scratch. Your objective: get **Rivet** (`com.therivetapp.app`, Expo SDK 57)
 onto **TestFlight**, verified against both personas, and then **submitted and
 approved on the App Store**.
 
@@ -47,7 +47,7 @@ Confirmed present in this branch:
   feature code under `packages/mobile/src/**` (voice, proposals, push,
   payments, messaging, location, jobs, calls).
 - ✅ `app.json`: `expo.name: "Rivet"`, `ios.bundleIdentifier:
-  "com.serviceos.app"`, `version: "1.0.0"`, `newArchEnabled: true`,
+  "com.therivetapp.app"`, `version: "1.0.0"`,
   `supportsTablet: false`, all iOS `infoPlist` permission strings (mic,
   camera, location, Bluetooth, notifications, local network) branded "Rivet".
 - ✅ Config plugins wired: expo-router, expo-audio, expo-camera,
@@ -168,7 +168,7 @@ Run from `packages/mobile`.
    ```
    npx eas-cli credentials        # or accept the prompts during `eas build`
    ```
-   - [ ] Distribution cert + provisioning profile for `com.serviceos.app`
+   - [ ] Distribution cert + provisioning profile for `com.therivetapp.app`
          exist (EAS-managed is fine).
    - [ ] **Push key (APNs):** an EAS-managed APNs key is registered (required
          for production push to work end-to-end).
@@ -206,7 +206,7 @@ APNs credentials exist.
 ## Phase 4 — App Store Connect app record
 
 1. [ ] **Create the app** in App Store Connect:
-       - Platform iOS, **Bundle ID `com.serviceos.app`** (register it under
+       - Platform iOS, **Bundle ID `com.therivetapp.app`** (register it under
          Certificates, Identifiers & Profiles first if it doesn't exist),
          a unique **SKU**, primary language.
        - Copy the generated **ASC app id** back into `eas.json`
@@ -248,7 +248,7 @@ npx eas-cli submit --platform ios --profile production
 
 ## Phase 6 — TestFlight verification (dual persona, physical device)
 
-Install the TestFlight build on a **physical iPhone** (push + Tap to Pay are
+Install the TestFlight build on a **physical iPhone** (push + Terminal readers are
 limited/unsupported on Simulator). Exercise **both** demo accounts.
 
 - [ ] **Supervisor:** voice → proposal → **approve** (with 5s undo); Money
@@ -262,7 +262,7 @@ limited/unsupported on Simulator). Exercise **both** demo accounts.
       Bluetooth, notifications).
 - [ ] **Push end-to-end:** trigger a real approval/dispatch push from the
       backend → confirm receipt on device.
-- [ ] (Optional) **Stripe Terminal / Tap to Pay:** grant location + Bluetooth,
+- [ ] (Optional) **Stripe Terminal (smart reader; Tap to Pay is out of v1, D-046):** grant location + Bluetooth,
       run the reader flow. Deny-path still leaves core flows working.
 
 **Gate 6:** every dual-persona box passes on a real device; push confirmed.

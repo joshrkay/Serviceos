@@ -89,7 +89,7 @@ describe('useVoiceCapture', () => {
     // Uri.fromFile from 0.4.x). expo-file-system needs a URI, so the size
     // check read nothing and every clip was "No audio captured" (Maestro run
     // 36777031223 — the recorder had encoded 395 audio frames).
-    h.recorder.uri = '/data/user/0/com.serviceos.app/cache/Audio/recording-1.m4a';
+    h.recorder.uri = '/data/user/0/com.therivetapp.app/cache/Audio/recording-1.m4a';
     const { result } = renderHook(() => useVoiceCapture());
 
     await act(async () => {
@@ -98,11 +98,11 @@ describe('useVoiceCapture', () => {
     });
 
     expect(h.getInfo).toHaveBeenCalledWith(
-      'file:///data/user/0/com.serviceos.app/cache/Audio/recording-1.m4a',
+      'file:///data/user/0/com.therivetapp.app/cache/Audio/recording-1.m4a',
     );
     expect(h.upload).toHaveBeenCalledWith(
       expect.objectContaining({
-        fileUri: 'file:///data/user/0/com.serviceos.app/cache/Audio/recording-1.m4a',
+        fileUri: 'file:///data/user/0/com.therivetapp.app/cache/Audio/recording-1.m4a',
       }),
       expect.anything(),
       undefined,

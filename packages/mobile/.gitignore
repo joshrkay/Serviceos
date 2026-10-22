@@ -16,3 +16,7 @@ android/
 # hand-authored declaration files this app needs committed.
 !nativewind-env.d.ts
 !src/theme/tokens.d.ts
+
+# Google Play service-account key, written by the EAS build workflow from a
+# secret (eas.json submit.production.android.serviceAccountKeyPath). Never commit.
+play-service-account.json

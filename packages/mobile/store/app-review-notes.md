@@ -3,7 +3,7 @@
 Paste into App Store Connect → App Review Information (Notes) and mirror
 the same guidance in Google Play Console → App content / testing notes.
 
-Binary: Expo app in `packages/mobile` (`com.serviceos.app`). One app
+Binary: Expo app in `packages/mobile` (`com.therivetapp.app`). One app
 serves **supervisor** and **technician** personas (see decision D-021).
 
 ---
@@ -33,8 +33,12 @@ commit passwords to git).
 
 | Persona | Suggested email | Role / mode | What they see |
 |---|---|---|---|
-| Supervisor | `reviewer-supervisor@rivet.ai` | owner or dispatcher | Voice actions, Approvals inbox, Money dashboard, Messages |
-| Technician | `reviewer-technician@rivet.ai` | technician | Today (assigned jobs), en route / running late, voice notes, job photos, foreground GPS while Today is open |
+| Supervisor | `info+reviewer-supervisor@therivetapp.com` | owner or dispatcher | Voice actions, Approvals inbox, Money dashboard, Messages |
+| Technician | `info+reviewer-technician@therivetapp.com` | technician | Today (assigned jobs), en route / running late, voice notes, job photos, foreground GPS while Today is open |
+
+Both addresses plus-address the real `info@therivetapp.com` inbox: sign-in
+on a device Clerk has not seen emails a one-time code, and the review contact
+reads it there. Do not relax Clerk's client-trust challenge for review.
 
 Both accounts should share the same tenant so supervisor approvals and
 technician field updates are visible end-to-end.
@@ -43,7 +47,7 @@ technician field updates are visible end-to-end.
 
 ## Device / OS requirements
 
-- **iOS:** physical iPhone recommended (push + Tap to Pay / Terminal are
+- **iOS:** physical iPhone recommended (push and Terminal readers are
   limited or unsupported on Simulator). Portrait phone; tablets not
   supported (`supportsTablet: false`).
 - **Android:** API 26+ (`minSdkVersion` 26). Physical device for Bluetooth
@@ -52,9 +56,13 @@ technician field updates are visible end-to-end.
   banner. Voice recordings and capture-class approvals captured offline are
   **queued on-device** and flush automatically on reconnect (the banner shows
   "N actions waiting"); other actions still require a connection.
-- **Stripe Terminal / Tap to Pay:** optional for review. Location +
-  Bluetooth prompts are for Terminal and (on technician) field GPS. Deny
-  is OK if not testing payments; core voice/approvals/Today still work.
+- **Stripe Terminal:** optional for review. "Collect payment" on an invoice
+  connects a Stripe smart reader registered to the business's Terminal
+  location over the internet; the demo tenant has none, so expect a friendly
+  "could not connect" message and the pay-link fallback. Tap to Pay on
+  iPhone / Android is not part of this release. Location + Bluetooth prompts
+  are for Terminal readers and (on technician) field GPS. Deny is OK if not
+  testing payments; core voice/approvals/Today still work.
 
 ---
 
@@ -80,8 +88,9 @@ Confirm in App Store Connect and Play Console:
 5. Open **Money** — confirm today’s / month figures load.
 6. Grant **notifications** if prompted; optional: trigger a test push from
    the backend after `POST /api/devices` registration.
-7. If testing Terminal: grant **location** + **Bluetooth**, then follow
-   the in-app Tap to Pay / reader flow.
+7. If testing Terminal: open an invoice with a balance, tap **Collect
+   payment**, grant **location** if prompted, and observe the reader /
+   pay-link fallback described above.
 
 ## Feature walkthrough — technician
 

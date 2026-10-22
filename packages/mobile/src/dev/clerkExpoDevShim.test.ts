@@ -9,7 +9,7 @@ function decodeSegment(seg: string): Record<string, unknown> {
 // dev-auth identity file there (over `adb run-as`) and the shim reads it.
 const h = vi.hoisted(() => ({ getInfo: vi.fn(), read: vi.fn() }));
 vi.mock('expo-file-system/legacy', () => ({
-  documentDirectory: 'file:///data/user/0/com.serviceos.app/files/',
+  documentDirectory: 'file:///data/user/0/com.therivetapp.app/files/',
   getInfoAsync: h.getInfo,
   readAsStringAsync: h.read,
 }));
@@ -58,7 +58,7 @@ describe('clerk-expo dev shim — PRD 3.3 mobile dev-auth path', () => {
     // The API's dev-auth bypass keys the tenant on `sub` and honours `role`, so
     // a distinct sub + technician role lands in a technician-owned dev tenant.
     expect(decodeSegment(payload)).toEqual({ sub: 'dev_tech', sid: 'dev-session', role: 'technician' });
-    expect(h.read).toHaveBeenCalledWith('file:///data/user/0/com.serviceos.app/files/dev-auth.json');
+    expect(h.read).toHaveBeenCalledWith('file:///data/user/0/com.therivetapp.app/files/dev-auth.json');
   });
 
   it('refuses to load in a release bundle (__DEV__ === false), so it can never sign a production app in', async () => {

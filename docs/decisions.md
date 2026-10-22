@@ -1958,3 +1958,46 @@ Customer messages and money still never auto-approve (D-004, D-033).
 **Alternatives rejected.** Leaving policy at the call site with a lint rule (the tag still
 lies when wrong); gating email now (needs the email-consent decision first); a big-bang
 rewrite of all senders.
+
+## D-046 — Store identity is `com.therivetapp.app`; v1 ships without Tap to Pay
+
+**Date:** 2026-10-21
+**Status:** Accepted (owner decision 2026-10-21, store-readiness grilling session)
+
+**Context.** The Expo app (D-021) was configured as `com.serviceos.app` — the codebase's working
+name, not the product's — while every user-facing surface is Rivet at `therivetapp.com`. A store
+identifier is permanent once an App Store Connect record or a Play upload exists, so the only free
+moment to change it is before the first upload. Separately, the Stripe Terminal integration was
+wired for Tap to Pay only (`easyConnect({ discoveryMethod: 'tapToPay' })`, plugin
+`tapToPayCheck: true`). Tap to Pay on iPhone cannot ship to TestFlight or the App Store without
+Apple's proximity-reader *distribution* entitlement (a separate application and review), and Tap to
+Pay on Android needs Stripe's access grant plus Play Integrity. Neither exists yet, and the first
+store build should not wait on either. Bluetooth readers were never implemented (`easyConnect` has
+no Bluetooth discovery path), so "drop Tap to Pay, keep Bluetooth" was not an option.
+
+**Decision.**
+1. The iOS bundle identifier and the Android package name are both `com.therivetapp.app`, changed
+   before any store record exists. Everything that addresses the app by identifier (Maestro flows,
+   the device harness) follows.
+2. v1 ships **without Tap to Pay** on both platforms. In-person collect uses Stripe smart readers
+   registered to the tenant's Terminal location, discovered over the internet, which needs no
+   platform entitlement; the pay-link fallback stays. The Terminal config plugin remains linked
+   (`tapToPayCheck` removed) so the capability returns as a config-plus-discovery-method change
+   once the Apple entitlement and Stripe access are granted.
+3. The store toolchain is Expo SDK 57 (Xcode 26 / `targetSdk` 36), kept current with the stores'
+   minimums rather than pinned; this is maintenance, not a decision, and is recorded here only
+   because it is why the first upload became possible.
+
+**Consequences.** The App Store Connect record, push certificates and Play signing are created
+under the brand identifier and never need migration. Field technicians cannot tap a card on the
+phone in v1; they use a smart reader or the pay link. Permission copy no longer mentions Tap to Pay.
+Requesting the Apple entitlement and Stripe's Android access runs in parallel with the first
+release and does not gate it.
+
+**Alternatives rejected.**
+- *Keep `com.serviceos.app` (the listing docs' earlier "kept" note).* Rejected: it was only "kept"
+  because changing after release is disruptive, and there has been no release.
+- *Ship Tap to Pay and apply for the entitlement first.* Rejected: it gates the first upload on a
+  third-party review with an unknown lead time, for a capability no demo tenant can exercise.
+- *Build Bluetooth reader discovery for v1.* Rejected: new device-only UI (discover, list, select,
+  reconnect) that cannot be verified from CI, for a first release whose reviewers have no reader.

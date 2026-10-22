@@ -8,7 +8,7 @@
 # after (Maestro run 36767934585). Wait for onboarding, skip it ("Skip for now"
 # is honoured for the session — app/(onboarding)/onboarding.tsx), then wait for the
 # tab bar. The Clerk sign-in screen ("Check your email") must never appear.
-appId: com.serviceos.app
+appId: com.therivetapp.app
 ---
 - extendedWaitUntil:
     visible: "Skip for now"

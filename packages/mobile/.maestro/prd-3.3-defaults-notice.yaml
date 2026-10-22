@@ -4,7 +4,7 @@
 # the manual-booking slot step (app/appointments/new.tsx → SlotPicker) must
 # render the notice. The customer + job are seeded through the same API by
 # scripts/maestro-device-run.sh and passed in as env.
-appId: com.serviceos.app
+appId: com.therivetapp.app
 name: PRD 3.3 — defaults notice on the booking slot step
 tags:
   - prd-3.3
