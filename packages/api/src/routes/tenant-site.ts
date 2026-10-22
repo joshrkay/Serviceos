@@ -15,6 +15,11 @@ import { SLUG_PROBLEM_MESSAGES, normalizeSlug, slugProblem, suggestSlug } from '
 import { renderTenantSitePage } from '../tenant-site/render';
 import { loadTenantSiteView } from '../tenant-site/view';
 import type { TenantSiteViewDeps } from '../tenant-site/view';
+import { resolvePublicServiceTypes } from '../public-intake/public-business-info';
+import { createProposal, ProposalRepository } from '../proposals/proposal';
+import { rejectProposal } from '../proposals/actions';
+import type { TenantSiteAboutTask } from '../ai/tasks/tenant-site-about-task';
+import type { Role } from '../auth/rbac';
 
 /**
  * D-044 / #1768 — the owner's hosted-site controls (Settings → Website).
@@ -25,6 +30,9 @@ import type { TenantSiteViewDeps } from '../tenant-site/view';
  *   GET  /api/tenant-site/preview  — the page as it would render, as HTML text
  *   POST /api/tenant-site/publish
  *   POST /api/tenant-site/unpublish
+ *   GET  /api/tenant-site/about        — the approved about copy and any draft awaiting approval
+ *   POST /api/tenant-site/about/draft  — AI drafts the about copy as an `update_tenant_site_about`
+ *                                        proposal; approve / edit / reject use /api/proposals
  *
  * Owner-only (settings:update), like the Get found online checklist. Publish
  * and unpublish are audited, and they keep `websiteUrl` on tenant settings in
@@ -38,8 +46,13 @@ export interface TenantSiteRouteDeps {
   settingsRepo: Pick<SettingsRepository, 'findByTenant' | 'update'>;
   viewDeps: TenantSiteViewDeps;
   auditRepo: AuditRepository;
+  /** The about-copy draft goes through the LLM gateway (ai/tasks/tenant-site-about-task.ts). */
+  aboutTask: Pick<TenantSiteAboutTask, 'draft'>;
+  proposalRepo: ProposalRepository;
   now?: () => Date;
 }
+
+const PENDING_STATUSES = ['draft', 'ready_for_review'] as const;
 
 const addressSchema = z.object({ slug: z.string().max(200) });
 
@@ -163,9 +176,96 @@ export function createTenantSiteRouter(deps: TenantSiteRouteDeps): Router {
     '/preview',
     ...guard,
     asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
-      const view = await loadTenantSiteView(deps.viewDeps, req.auth!.tenantId, null);
+      const view = await loadTenantSiteView(deps.viewDeps, req.auth!.tenantId);
       if (!view) throw new ValidationError('Add your business name in Settings before previewing your site');
       res.json({ data: { html: renderTenantSitePage(view) } });
+    }),
+  );
+
+  async function pendingAboutProposals(tenantId: string) {
+    const lists = await Promise.all(PENDING_STATUSES.map((s) => deps.proposalRepo.findByStatus(tenantId, s)));
+    return lists
+      .flat()
+      .filter((p) => p.proposalType === 'update_tenant_site_about')
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime());
+  }
+
+  router.get(
+    '/about',
+    ...guard,
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const tenantId = req.auth!.tenantId;
+      const [settings, pending] = await Promise.all([
+        deps.settingsRepo.findByTenant(tenantId),
+        pendingAboutProposals(tenantId),
+      ]);
+      const latest = pending[0];
+      res.json({
+        data: {
+          current: settings?.siteAboutText?.trim() || null,
+          pending: latest
+            ? {
+                proposalId: latest.id,
+                aboutText: typeof latest.payload.aboutText === 'string' ? latest.payload.aboutText : '',
+              }
+            : null,
+        },
+      });
+    }),
+  );
+
+  router.post(
+    '/about/draft',
+    ...guard,
+    asyncRoute(async (req: AuthenticatedRequest, res: Response) => {
+      const tenantId = req.auth!.tenantId;
+      const settings = await deps.settingsRepo.findByTenant(tenantId);
+      if (!settings?.businessName?.trim()) {
+        throw new ValidationError('Add your business name in Settings before drafting your about text');
+      }
+      const services = (await resolvePublicServiceTypes(settings, deps.viewDeps.packRegistry)).map(
+        (s) => s.displayName,
+      );
+
+      // The model call goes through the LLM gateway (aboutTask); it only drafts.
+      const { aboutText } = await deps.aboutTask.draft({
+        tenantId,
+        businessName: settings.businessName.trim(),
+        services,
+        serviceArea: settings.serviceAreaText ?? null,
+        brandVoice: settings.brandVoice ?? null,
+      });
+
+      // One draft awaiting the owner at a time: a new draft replaces the old.
+      for (const stale of await pendingAboutProposals(tenantId)) {
+        await rejectProposal(
+          deps.proposalRepo,
+          tenantId,
+          stale.id,
+          req.auth!.userId,
+          req.auth!.role as Role,
+          'superseded',
+          'Replaced by a new draft',
+          undefined,
+          deps.auditRepo,
+        );
+      }
+
+      // No trust tier is passed: the proposal lands as a draft and only an
+      // explicit owner approval can run it (manual action class).
+      const proposal = createProposal({
+        tenantId,
+        proposalType: 'update_tenant_site_about',
+        payload: { aboutText },
+        summary: 'Add an "About us" section to your website',
+        explanation: 'Drafted from your business name, services and service area. Edit it before approving if you like.',
+        createdBy: req.auth!.userId,
+        targetEntityType: 'tenant_site',
+        targetEntityId: tenantId,
+      });
+      await deps.proposalRepo.create(proposal);
+      await audit(req, 'tenant_site.about_drafted', { proposalId: proposal.id, length: aboutText.length });
+      res.status(201).json({ data: { proposalId: proposal.id, aboutText } });
     }),
   );
 
@@ -180,7 +280,7 @@ export function createTenantSiteRouter(deps: TenantSiteRouteDeps): Router {
       if (await deps.siteRepo.isSlugTaken(existing.slug, tenantId)) {
         throw new ConflictError(SLUG_PROBLEM_MESSAGES.taken, { problem: 'taken' });
       }
-      const view = await loadTenantSiteView(deps.viewDeps, tenantId, null);
+      const view = await loadTenantSiteView(deps.viewDeps, tenantId);
       if (!view) throw new ValidationError('Add your business name in Settings before publishing your site');
 
       const at = now();

@@ -8321,6 +8321,13 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS website_url TEXT;
   `,
 
+  // D-044 / #1769 — the hosted tenant site's AI-drafted, owner-approved "about"
+  // copy. Written only by approving an update_tenant_site_about proposal.
+  '335_tenant_site_about': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS site_about_text TEXT;
+  `,
+
   // #1735 — outbound multi-step drip campaigns (SMS | call | email). A
   // sequence is an ordered list of steps (JSONB, validated by the Zod
   // contract in src/marketing/drip/sequence.ts); an enrollment is one target

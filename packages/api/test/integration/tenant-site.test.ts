@@ -9,6 +9,9 @@ import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgTenantSiteRepository, TenantSiteSlugTakenError } from '../../src/tenant-site/tenant-site';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
+import { PgAuditRepository } from '../../src/audit/pg-audit';
+import { createProposal } from '../../src/proposals/proposal';
+import { UpdateTenantSiteAboutExecutionHandler } from '../../src/proposals/execution/tenant-site-about-handler';
 
 describe('Postgres integration — tenant sites (D-044 / #1768)', () => {
   let pool: Pool;
@@ -85,5 +88,29 @@ describe('Postgres integration — tenant sites (D-044 / #1768)', () => {
     expect((await settingsRepo.findByTenant(tenantB))?.websiteUrl).toBeUndefined();
     await settingsRepo.update(tenantA, { websiteUrl: null });
     expect((await settingsRepo.findByTenant(tenantA))?.websiteUrl).toBeUndefined();
+  });
+
+  it('an approved about proposal writes tenant_settings.site_about_text (migration 335), and only for its tenant', async () => {
+    const settingsRepo = new PgSettingsRepository(pool);
+    await settingsRepo.upsertIdentityFields(tenantA, { businessName: 'Acme' });
+    await settingsRepo.upsertIdentityFields(tenantB, { businessName: 'Bravo' });
+    const handler = new UpdateTenantSiteAboutExecutionHandler(settingsRepo, new PgAuditRepository(pool));
+    const proposal = {
+      ...createProposal({
+        tenantId: tenantA,
+        proposalType: 'update_tenant_site_about',
+        payload: { aboutText: 'Acme fixes pipes in Austin.' },
+        summary: 'About',
+        createdBy: 'u',
+      }),
+      status: 'approved' as const,
+    };
+
+    expect(await handler.execute(proposal, { tenantId: tenantA, executedBy: 'owner-1', executedByRole: 'owner' })).toEqual({
+      success: true,
+      resultEntityId: tenantA,
+    });
+    expect((await settingsRepo.findByTenant(tenantA))?.siteAboutText).toBe('Acme fixes pipes in Austin.');
+    expect((await settingsRepo.findByTenant(tenantB))?.siteAboutText).toBeUndefined();
   });
 });

@@ -72,6 +72,9 @@ const CONFIG_WRITING_PROPOSAL_TYPES: ReadonlySet<string> = new Set([
   'update_brand_voice',
   'update_catalog_item',
   'add_catalog_item',
+  // D-044 / #1769 — approving writes the public about copy of the hosted site;
+  // publishing the site itself needs settings:update, so this does too.
+  'update_tenant_site_about',
   // PI-2 — a standing instruction is injected as "OWNER STANDING
   // INSTRUCTIONS" into every drafting prompt and composeBrandVoiceMessage,
   // including the dropped-call recovery SMS that goes to customers unreviewed.

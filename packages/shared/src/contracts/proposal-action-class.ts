@@ -133,6 +133,9 @@ export const MANUAL_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
   // poisons every outbound message. 'manual' makes non-auto-approval
   // structural at every trust tier instead of threshold-dependent.
   ProposalType.UPDATE_BRAND_VOICE,
+  // D-044 / #1769 — AI-drafted about copy for the hosted tenant site. Public
+  // words under the business's name: never auto-approved at any trust tier.
+  ProposalType.UPDATE_TENANT_SITE_ABOUT,
 ]);
 
 /** Mirrors the API's ActionClass union (packages/api/src/proposals/proposal.ts). */

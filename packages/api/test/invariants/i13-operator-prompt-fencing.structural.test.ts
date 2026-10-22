@@ -227,7 +227,10 @@ export function promptBuildersNamingCallerText(roots: readonly string[]): string
 // disposition-llm.ts), which own the judge prompts. It assembles no prompt of
 // its own; the caller transcript it reads from voice_sessions reaches the
 // model only through those graders' already-reviewed prompt builders.
-const PINNED_GATEWAY_SENDER_COUNT = 50;
+// 50 → 51 (#1769): ai/tasks/tenant-site-about-task.ts drafts the hosted tenant
+// site's about copy from tenant settings only (business name, services, service
+// area, brand voice) — all owner-entered. No caller text reaches its prompt.
+const PINNED_GATEWAY_SENDER_COUNT = 51;
 
 type Classification =
   | 'fenced'

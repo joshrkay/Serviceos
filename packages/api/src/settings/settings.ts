@@ -550,6 +550,13 @@ export interface TenantSettings {
    */
   websiteUrl?: string | null;
   /**
+   * D-044 / #1769 — the hosted tenant site's "about" copy: AI-drafted, set only
+   * when the owner approves the `update_tenant_site_about` proposal (absent from
+   * updateSettingsSchema, so no generic write reaches it). Absent = the site
+   * shows no about section. Migration 335.
+   */
+  siteAboutText?: string | null;
+  /**
    * P11-002 — tenant language stack (columns on tenant_settings:
    * default_language, auto_detect_language, tts_voice_en/es,
    * spanish_dispatcher_user_ids). Resolves EN/ES for the voice agent
@@ -785,6 +792,8 @@ export interface UpdateSettingsInput {
   googleReviewUrlDerived?: string | null;
   /** D-044 / #1768 — see TenantSettings.websiteUrl. */
   websiteUrl?: string | null;
+  /** D-044 / #1769 — see TenantSettings.siteAboutText. */
+  siteAboutText?: string | null;
   /** P11-002 — tenant language stack. */
   defaultLanguage?: Language;
   autoDetectLanguage?: boolean;

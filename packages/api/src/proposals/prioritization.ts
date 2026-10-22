@@ -67,6 +67,8 @@ const TYPE_PRIORITY: Record<ProposalType, number> = {
   // same-day relevance. Same low tier as notes and the other back-office
   // captures, and well below the CRM follow-ups.
   update_brand_voice: 5,
+  // D-044 / #1769 — the site's about copy is back-office config the owner approves at leisure.
+  update_tenant_site_about: 5,
   // Expense logging is informational — captured after the fact, never
   // gates any other work.
   log_expense: 5,

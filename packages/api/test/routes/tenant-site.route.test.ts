@@ -12,6 +12,13 @@ import { InMemorySettingsRepository } from '../../src/settings/settings';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryVerticalPackRegistry } from '../../src/shared/vertical-pack-registry';
 import { toErrorResponse } from '../../src/shared/errors';
+import { InMemoryProposalRepository } from '../../src/proposals/proposal';
+import { approveProposal, editProposal, rejectProposal } from '../../src/proposals/actions';
+import { UpdateTenantSiteAboutExecutionHandler } from '../../src/proposals/execution/tenant-site-about-handler';
+import { TenantSiteAboutTask } from '../../src/ai/tasks/tenant-site-about-task';
+import { createMockLLMGateway } from '../../src/ai/gateway/factory';
+import { loadTenantSiteView } from '../../src/tenant-site/view';
+import { renderTenantSitePage } from '../../src/tenant-site/render';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
 const TENANT = 'tenant-site-1';
@@ -22,8 +29,12 @@ describe('/api/tenant-site', () => {
   let siteRepo: InMemoryTenantSiteRepository;
   let settingsRepo: InMemorySettingsRepository;
   let auditRepo: InMemoryAuditRepository;
+  let proposalRepo: InMemoryProposalRepository;
+  let gateway: ReturnType<typeof createMockLLMGateway>;
 
   beforeEach(async () => {
+    proposalRepo = new InMemoryProposalRepository();
+    gateway = createMockLLMGateway("Joe's Plumbing keeps Austin's pipes flowing. Call us for a quote.");
     siteRepo = new InMemoryTenantSiteRepository();
     settingsRepo = new InMemorySettingsRepository();
     auditRepo = new InMemoryAuditRepository();
@@ -58,6 +69,8 @@ describe('/api/tenant-site', () => {
           webOrigin: 'https://app.example.test',
         },
         auditRepo,
+        aboutTask: new TenantSiteAboutTask(gateway.gateway),
+        proposalRepo,
       }),
     );
     a.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
@@ -189,6 +202,123 @@ describe('/api/tenant-site', () => {
       expect(res.status).toBe(200);
       expect(res.body.data.html).toContain('Joe&#39;s Plumbing');
       expect(await siteRepo.findByTenant(TENANT)).toBeNull();
+    });
+  });
+
+  describe('about copy (#1769)', () => {
+    const viewDeps = () => ({
+      settingsRepo,
+      packRegistry: new InMemoryVerticalPackRegistry(),
+      webOrigin: 'https://app.example.test',
+    });
+    const runApproved = async (id: string) => {
+      const proposal = (await proposalRepo.findById(TENANT, id))!;
+      return new UpdateTenantSiteAboutExecutionHandler(settingsRepo, auditRepo).execute(proposal, {
+        tenantId: TENANT,
+        executedBy: 'u1',
+        executedByRole: 'owner',
+      });
+    };
+
+    it('starts with no about copy and nothing pending', async () => {
+      const res = await request(app()).get('/api/tenant-site/about');
+      expect(res.body.data).toEqual({ current: null, pending: null });
+    });
+
+    it('drafts through the gateway into a manual proposal, writing nothing to the site', async () => {
+      const res = await request(app()).post('/api/tenant-site/about/draft');
+      expect(res.status).toBe(201);
+      expect(res.body.data.aboutText).toContain('keeps Austin');
+
+      const calls = gateway.provider.getCalls();
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.taskType).toBe('tenant_site_about');
+      expect(calls[0]!.messages.map((m) => m.content).join('\n')).toContain("Business name: Joe's Plumbing");
+
+      const proposal = (await proposalRepo.findById(TENANT, res.body.data.proposalId))!;
+      expect(proposal).toMatchObject({
+        proposalType: 'update_tenant_site_about',
+        status: 'draft',
+        payload: { aboutText: res.body.data.aboutText },
+      });
+      // Nothing is live until the owner approves.
+      expect((await settingsRepo.findByTenant(TENANT))?.siteAboutText).toBeFalsy();
+      expect((await request(app()).get('/api/tenant-site/about')).body.data).toEqual({
+        current: null,
+        pending: { proposalId: proposal.id, aboutText: res.body.data.aboutText },
+      });
+      expect(await events()).toEqual(['tenant_site.about_drafted']);
+    });
+
+    it('approving sets the about copy (after an owner edit) and the page shows it', async () => {
+      const draft = (await request(app()).post('/api/tenant-site/about/draft')).body.data;
+
+      await editProposal(
+        proposalRepo,
+        TENANT,
+        draft.proposalId,
+        'u1',
+        'owner',
+        { aboutText: 'Family-run plumbers in Austin.' },
+        auditRepo,
+      );
+      await approveProposal(proposalRepo, TENANT, draft.proposalId, 'u1', 'owner', auditRepo);
+      // Approval alone does not publish copy; the execution handler does.
+      expect((await settingsRepo.findByTenant(TENANT))?.siteAboutText).toBeFalsy();
+
+      expect(await runApproved(draft.proposalId)).toMatchObject({ success: true });
+      expect((await request(app()).get('/api/tenant-site/about')).body.data).toEqual({
+        current: 'Family-run plumbers in Austin.',
+        pending: null,
+      });
+      const view = (await loadTenantSiteView(viewDeps(), TENANT))!;
+      expect(renderTenantSitePage(view)).toContain('<h2>About us</h2><p>Family-run plumbers in Austin.</p>');
+      const original = (await proposalRepo.findById(TENANT, draft.proposalId))!.originalPayload;
+      expect(original?.aboutText).toContain('keeps Austin');
+    });
+
+    it('rejecting leaves the site without about copy, and the page still renders', async () => {
+      const draft = (await request(app()).post('/api/tenant-site/about/draft')).body.data;
+      await rejectProposal(
+        proposalRepo,
+        TENANT,
+        draft.proposalId,
+        'u1',
+        'owner',
+        'not_right',
+        undefined,
+        undefined,
+        auditRepo,
+      );
+
+      expect((await settingsRepo.findByTenant(TENANT))?.siteAboutText).toBeFalsy();
+      expect((await request(app()).get('/api/tenant-site/about')).body.data).toEqual({ current: null, pending: null });
+      const html = renderTenantSitePage((await loadTenantSiteView(viewDeps(), TENANT))!);
+      expect(html).not.toContain('About us');
+      expect(html).toContain('Get in touch');
+    });
+
+    it('a new draft replaces the one awaiting approval', async () => {
+      const first = (await request(app()).post('/api/tenant-site/about/draft')).body.data;
+      const second = (await request(app()).post('/api/tenant-site/about/draft')).body.data;
+      expect(second.proposalId).not.toBe(first.proposalId);
+      expect((await proposalRepo.findById(TENANT, first.proposalId))?.status).toBe('rejected');
+      expect((await request(app()).get('/api/tenant-site/about')).body.data.pending.proposalId).toBe(second.proposalId);
+    });
+
+    it('needs a business name to draft from', async () => {
+      const a = app('owner', { tenantId: 'tenant-without-settings' });
+      const res = await request(a).post('/api/tenant-site/about/draft');
+      expect(res.status).toBe(400);
+      expect(gateway.provider.getCalls()).toHaveLength(0);
+    });
+
+    it('is owner-only', async () => {
+      for (const role of ['dispatcher', 'technician'] as const) {
+        expect((await request(app(role)).post('/api/tenant-site/about/draft')).status).toBe(403);
+        expect((await request(app(role)).get('/api/tenant-site/about')).status).toBe(403);
+      }
+      expect(gateway.provider.getCalls()).toHaveLength(0);
     });
   });
 

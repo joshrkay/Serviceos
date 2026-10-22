@@ -425,6 +425,7 @@ import { createTenantSiteRouter } from './routes/tenant-site';
 import { InMemoryTenantSiteRepository, PgTenantSiteRepository } from './tenant-site/tenant-site';
 import { createTenantSiteHostMiddleware } from './tenant-site/host-middleware';
 import { loadTenantSiteView } from './tenant-site/view';
+import { TenantSiteAboutTask } from './ai/tasks/tenant-site-about-task';
 import {
   InMemoryGetFoundOnlineDismissalRepository,
   PgGetFoundOnlineDismissalRepository,
@@ -6004,7 +6005,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     tenantSiteHost = createTenantSiteHostMiddleware({
       baseDomain: config.TENANT_SITE_BASE_DOMAIN,
       siteRepo: tenantSiteRepo,
-      loadView: (tenantId) => loadTenantSiteView(tenantSiteViewDeps, tenantId, null),
+      loadView: (tenantId) => loadTenantSiteView(tenantSiteViewDeps, tenantId),
       // Unauthenticated, DB-backed: cap per IP like the other public routes.
       limiter: rateLimit({
         windowMs: 60 * 1000,
@@ -6023,6 +6024,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       settingsRepo,
       viewDeps: tenantSiteViewDeps,
       auditRepo,
+      // D-044 / #1769 — the about copy is drafted through the LLM gateway and
+      // arrives as an owner-approved proposal.
+      aboutTask: new TenantSiteAboutTask(llmGateway),
+      proposalRepo,
     }),
   );
 

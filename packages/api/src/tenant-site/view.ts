@@ -27,7 +27,6 @@ export function publicFormUrls(webOrigin: string, tenantId: string): { requestUr
 export async function loadTenantSiteView(
   deps: TenantSiteViewDeps,
   tenantId: string,
-  aboutText: string | null,
 ): Promise<TenantSiteView | null> {
   const settings = await deps.settingsRepo.findByTenant(tenantId);
   if (!settings?.businessName?.trim()) return null;
@@ -43,7 +42,8 @@ export async function loadTenantSiteView(
     serviceArea: settings.serviceAreaText?.trim() || null,
     hoursSummary: formatBusinessHoursSummary(settings.businessHours, settings.timezone),
     phone,
-    aboutText,
+    // The owner-approved about copy (#1769); none until they approve a draft.
+    aboutText: settings.siteAboutText?.trim() || null,
     ...publicFormUrls(deps.webOrigin, tenantId),
   };
 }

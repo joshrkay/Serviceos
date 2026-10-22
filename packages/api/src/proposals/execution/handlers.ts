@@ -138,6 +138,7 @@ import type { ClerkInvitationConfig } from '../../users/invite-team-member';
 import { EstimateTemplateRepository } from '../../templates/estimate-template';
 import { SeedPackDefaultsDeps } from '../../packs/seed-pack-defaults';
 import { UpdateBrandVoiceExecutionHandler } from './brand-voice-handler';
+import { UpdateTenantSiteAboutExecutionHandler } from './tenant-site-about-handler';
 import type { BrandVoiceRepository } from '../../tenants/brand/brand-voice';
 import { AddMaterialExecutionHandler } from './add-material-handler';
 import { AddCatalogItemExecutionHandler } from './add-catalog-item-handler';
@@ -1676,6 +1677,11 @@ export function createExecutionHandlerRegistry(deps?: {
     // sheet uses (never re-implemented here — see brand-voice-handler.ts).
     // manual action class, so it only ever runs after an explicit owner tap.
     new UpdateBrandVoiceExecutionHandler(deps?.brandVoiceRepo, requiredAuditRepo),
+    // D-044 / #1769 — update_tenant_site_about: sets the hosted site's about
+    // copy to the text the owner approved (manual action class — only ever runs
+    // after an explicit owner tap). Degrades to a failed execution without the
+    // settings repo (WS3), never a synthetic success.
+    new UpdateTenantSiteAboutExecutionHandler(deps?.settingsRepo, requiredAuditRepo),
     // Task 9 (2026-08-07 tradesperson plan) — add_material: writes a
     // material_items row (migration 272, Task 8's substrate) via the SAME
     // repo lookup_materials reads from. LogExpense-family posture:

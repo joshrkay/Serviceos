@@ -12,6 +12,12 @@ interface TenantSiteInfo {
   websiteUrl: string | null;
 }
 
+/** Mirrors GET /api/tenant-site/about (#1769). */
+interface AboutState {
+  current: string | null;
+  pending: { proposalId: string; aboutText: string } | null;
+}
+
 async function errorMessage(res: Response, fallback: string): Promise<string> {
   try {
     const body = (await res.json()) as { message?: string };
@@ -33,6 +39,21 @@ export function WebsiteCard() {
   const [slugProblem, setSlugProblem] = useState('');
   const [previewHtml, setPreviewHtml] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [about, setAbout] = useState<AboutState | null>(null);
+  const [aboutDraft, setAboutDraft] = useState('');
+  const [aboutNotice, setAboutNotice] = useState('');
+
+  const loadAbout = useCallback(async () => {
+    try {
+      const res = await apiFetch('/api/tenant-site/about');
+      if (!res?.ok) return;
+      const data = ((await res.json()) as { data: AboutState }).data;
+      setAbout(data);
+      setAboutDraft(data.pending?.aboutText ?? '');
+    } catch {
+      // A settings widget never breaks the page.
+    }
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -49,7 +70,8 @@ export function WebsiteCard() {
 
   useEffect(() => {
     void load();
-  }, [load]);
+    void loadAbout();
+  }, [load, loadAbout]);
 
   if (!info) return null;
   const published = info.site?.published ?? false;
@@ -114,6 +136,45 @@ export function WebsiteCard() {
       toast.error('Could not build the preview');
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function draftAbout() {
+    setAboutNotice('');
+    const ok = await call('/api/tenant-site/about/draft', { method: 'POST', body: '{}' }, 'Could not draft your about text');
+    if (ok) await loadAbout();
+  }
+
+  /** Edits (when changed) then approves; the site updates once it is executed. */
+  async function approveAbout() {
+    const pending = about?.pending;
+    if (!pending) return;
+    if (aboutDraft.trim() !== pending.aboutText.trim()) {
+      const edited = await call(
+        `/api/proposals/${pending.proposalId}`,
+        { method: 'PUT', body: JSON.stringify({ edits: { aboutText: aboutDraft.trim() } }) },
+        'Could not save your edit. It must be 1 to 1200 characters',
+      );
+      if (!edited) return;
+    }
+    const ok = await call(`/api/proposals/${pending.proposalId}/approve`, { method: 'POST', body: '{}' }, 'Could not approve your about text');
+    if (ok) {
+      setAboutNotice('Approved. It will show on your site in a few seconds.');
+      await loadAbout();
+    }
+  }
+
+  async function rejectAbout() {
+    const pending = about?.pending;
+    if (!pending) return;
+    const ok = await call(
+      `/api/proposals/${pending.proposalId}/reject`,
+      { method: 'POST', body: JSON.stringify({ reason: 'not_right' }) },
+      'Could not discard the draft',
+    );
+    if (ok) {
+      setAboutNotice('Draft discarded. Your site stays without an About section.');
+      await loadAbout();
     }
   }
 
@@ -252,6 +313,82 @@ export function WebsiteCard() {
                 >
                   Publish
                 </button>
+              )}
+            </div>
+
+            <div className="mt-5 border-t border-slate-100 pt-4" data-testid="website-about">
+              <p className="text-sm text-slate-800">About text</p>
+              <p className="text-xs text-slate-400 mt-0.5">
+                We draft it from your business name, services and area. Nothing goes on your site until you approve it.
+              </p>
+
+              {about?.pending ? (
+                <div className="mt-3">
+                  <label htmlFor="website-about-text" className="block text-sm text-slate-700">
+                    Draft (edit it if you like)
+                  </label>
+                  <textarea
+                    id="website-about-text"
+                    value={aboutDraft}
+                    onChange={(e) => setAboutDraft(e.target.value)}
+                    maxLength={1200}
+                    rows={6}
+                    className="mt-1.5 w-full min-h-11 rounded-xl border border-slate-200 px-4 py-2.5 text-sm text-slate-800 focus:outline-none focus:border-indigo-400 transition-colors"
+                  />
+                  <div className="mt-3 flex flex-wrap items-center justify-end gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void rejectAbout()}
+                      disabled={busy}
+                      className={`${buttonClass} border border-slate-200 text-slate-800 hover:bg-slate-50`}
+                    >
+                      Discard
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void draftAbout()}
+                      disabled={busy}
+                      className={`${buttonClass} border border-slate-200 text-slate-800 hover:bg-slate-50`}
+                    >
+                      Draft again
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void approveAbout()}
+                      disabled={busy || !aboutDraft.trim()}
+                      className={`${buttonClass} bg-slate-900 text-white hover:bg-slate-700`}
+                    >
+                      Approve
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="mt-3">
+                  {about?.current ? (
+                    <p className="text-sm text-slate-700 whitespace-pre-line break-words" data-testid="website-about-current">
+                      {about.current}
+                    </p>
+                  ) : (
+                    <p className="text-sm text-slate-500" data-testid="website-about-empty">
+                      No about text yet, so your site has no About section.
+                    </p>
+                  )}
+                  <div className="mt-3 flex justify-end">
+                    <button
+                      type="button"
+                      onClick={() => void draftAbout()}
+                      disabled={busy}
+                      className={`${buttonClass} border border-slate-200 text-slate-800 hover:bg-slate-50`}
+                    >
+                      {about?.current ? 'Draft a new one' : 'Draft with AI'}
+                    </button>
+                  </div>
+                </div>
+              )}
+              {aboutNotice && (
+                <p className="mt-2 text-sm text-slate-600" role="status">
+                  {aboutNotice}
+                </p>
               )}
             </div>
 

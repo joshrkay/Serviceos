@@ -266,6 +266,10 @@ export enum ProposalType {
   // money moves at creation, only shapes FUTURE drafts (which are
   // themselves reviewed), and it's reversible (archive the item).
   ADD_CATALOG_ITEM = 'add_catalog_item',
+  // D-044 / #1769 — the AI-drafted "about" copy for the owner's hosted tenant
+  // site. Manual-class: public-facing words never auto-approve, and nothing
+  // goes live until the owner approves (and may edit) the draft.
+  UPDATE_TENANT_SITE_ABOUT = 'update_tenant_site_about',
 }
 
 export enum RejectionCategory {

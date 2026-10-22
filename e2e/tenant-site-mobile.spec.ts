@@ -94,6 +94,15 @@ test.describe('Settings → Website card — mobile layout', () => {
 
   test.use({ viewport: { width: 320, height: 690 } });
 
+  test.beforeEach(async ({ request }) => {
+    // The about draft needs a business name to draw on.
+    const res = await request.put(`${apiUrl}/api/settings`, {
+      headers: { Authorization: `Bearer ${ownerToken()}`, 'Content-Type': 'application/json' },
+      data: { businessName: "Joe's Plumbing" },
+    });
+    expect(res.ok()).toBeTruthy();
+  });
+
   test('the card fits 320px with ≥44px fields and buttons', async ({ page }) => {
     await page.goto('/settings?open=website');
     await dismissWhatsNewModal(page);
@@ -113,6 +122,29 @@ test.describe('Settings → Website card — mobile layout', () => {
       expect(Math.round(box!.height)).toBeGreaterThanOrEqual(44);
       expect(box!.x).toBeGreaterThanOrEqual(0);
       expect(box!.x + box!.width).toBeLessThanOrEqual(320);
+    }
+  });
+
+  test('a drafted about text opens as an editable proposal that fits 320px', async ({ page }) => {
+    await page.goto('/settings?open=website');
+    await dismissWhatsNewModal(page);
+    const about = page.getByTestId('website-about');
+    await about.scrollIntoViewIfNeeded();
+    await expect(page.getByTestId('website-about-empty').or(page.getByTestId('website-about-current'))).toBeVisible({ timeout: 20_000 });
+
+    await page.getByRole('button', { name: /Draft (with AI|a new one)/ }).click();
+    const box = page.getByLabel(/Draft \(edit it/);
+    await expect(box).toBeVisible({ timeout: 20_000 });
+    await expect(box).not.toHaveValue('');
+    expect(await horizontalOverflow(page)).toBeLessThanOrEqual(0);
+
+    for (const control of [box, ...(await about.getByRole('button').all())]) {
+      await control.scrollIntoViewIfNeeded();
+      const rect = await control.boundingBox();
+      expect(rect).not.toBeNull();
+      expect(Math.round(rect!.height)).toBeGreaterThanOrEqual(44);
+      expect(rect!.x).toBeGreaterThanOrEqual(0);
+      expect(rect!.x + rect!.width).toBeLessThanOrEqual(320);
     }
   });
 });

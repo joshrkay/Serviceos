@@ -641,6 +641,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   // #1735 — outbound drip campaigns (sequences + enrollments, then the step log).
   // D-044 / #1768 — tenant_sites (slug + publish state); tenant_settings.website_url.
   ['334_tenant_sites', 'f10aa81fd421a954237c87ccaef0ab6671f66140f65b6df8eee6dbc001187acf'],
+  // D-044 / #1769 — tenant_settings.site_about_text (owner-approved about copy).
+  ['335_tenant_site_about', 'b3c66b33c14583d1ab4fa21bd92b2653c63dc71dc05fc3c3e53aec89f0ad9169'],
   ['336_drip_campaigns', '1fe4cc16ff49abe22ff155e2dafcdcd2dbaba4738be80da6fa3e0ed1b2b1b0fe'],
   ['337_drip_step_events', '057b5b4a518bf9d808c6de88105796b966b11b812ff2de170e00ddce85081fa7'],
   ['340_webchat_config', '5548e267e2d1c0702755ec671dbd1d85d50da4666e79e48eb5bec26a9a75696e'],
