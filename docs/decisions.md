@@ -1955,7 +1955,7 @@ callers write a proposal's status directly, and the repository checks no transit
    *As built (Settings → Text wording, migration 330):* the owner can word the estimate,
    invoice, customer-portal link and thank-you texts with `{{fill-ins}}` (owner only). Each
    text can be worded once per language (English and Spanish; Josh, 2026-10-22: "write
-   both", migration 333). A customer gets the owner's wording in the language they read
+   both", migration 347, originally numbered 333). A customer gets the owner's wording in the language they read
    when there is one, otherwise the built-in text in that language. Wording that
    can't be read or filled falls back to the built-in text with a logged warning, never a
    failed send or a raw `{{fill_in}}`; an invoice paid in person keeps the built-in

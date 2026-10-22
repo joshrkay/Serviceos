@@ -76,7 +76,11 @@
     { "name": "VOICE_QUALITY_ALLOW_CASSETTE_FALLBACK", "reason": "Voice-quality TEST harness only (ai/voice-quality/cassette-gateway.ts:130). Must stay unset - pr-checks.yml documents that setting it re-introduces the stale-response hazard." },
     { "name": "VOICE_QUALITY_CASSETTE_MODE", "reason": "Voice-quality TEST harness only (cassette-gateway.ts:152); replay is the default." },
     { "name": "WEBHOOK_SIGNING_SECRET", "reason": "Fallback alias only: voice-approval-pin.ts:42 uses `TENANT_ENCRYPTION_KEY ?? WEBHOOK_SIGNING_SECRET`, and TENANT_ENCRYPTION_KEY is in the production contract." },
-    { "name": "WORKER_DEBUG_BOUNDED", "reason": "Debug logging flag (queues/queue.ts:84); unset = quiet." }
+    { "name": "WORKER_DEBUG_BOUNDED", "reason": "Debug logging flag (queues/queue.ts:84); unset = quiet." },
+    { "name": "FORWARDING_CHECKS_PER_10_MIN", "reason": "Rate limit for POST /api/get-found-online/forwarding/check (routes/get-found-online.ts:206), parsed with Number() and floored at 1; unset = 5 checks per tenant per 10 minutes, the intended production default. Raise only for load testing." },
+    { "name": "LSA_DISPOSITION_REPORTING_ENABLED", "reason": "Opt-in switch for reporting lead dispositions back to Google Local Services Ads (lsa/disposition-reporter.ts:40). Anything but the literal 'true' = the no-op reporter; LSA leads still land in the inbox. Turn on once the LSA integration is verified for a tenant." },
+    { "name": "WEBCHAT_DISABLED", "reason": "Global kill switch for the public webchat widget (app.ts:5388). Only the literal 'true' disables it; unset = webchat follows the per-tenant feature flag, the normal production state." },
+    { "name": "WEBCHAT_TURNSTILE_SECRET", "reason": "Cloudflare Turnstile secret for the webchat bot check (app.ts:5423). Unset = no bot verifier is attached and webchat sessions are rate-limited only; set it before enabling the webchat flag for real tenants." }
   ],
   "unreviewed": [
     { "name": "GOOGLE_MAPS_API_KEY", "reason": "UNSURE - almost certainly SHOULD be set. scheduling/travel-time/factory.ts:6 silently returns HaversineFallbackProvider when unset, so every travel-time estimate degrades to straight-line distance with no error. Named in the July 2026 Railway sweep." },

@@ -636,15 +636,26 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['330_customer_text_wording', 'cb3931893bf7d7fdf018c8fb546cd0d0b15fbf8823a4ce1dbfd67e86195df1b7'],
   // D-044 / #1763 — tenant_settings.get_found_online_dismissed_at, google_review_url_derived; review_poll_state.backoff_reason, auth_generation.
   ['331_get_found_online', 'eb7e83e23154cb56342b21f1b83c90733349f649215af5206885b77bb3a639ca'],
-  // #1750 (D-044) — Get found online checklist facts on tenant_settings + 2 NOT VALID CHECKs (restored after the #1752 merge dropped it).
-  ['332_tenant_settings_get_found', 'a55ccb06da1509baa49df4ff5d76102e8f9ea2115ae2a3f28516b78e7966755c'],
-  ['332_assignment_overlap_accepted', 'eb06c6a9b4dc679fa9532a486a8941a19abcceb6e95875e0fb9d930b94eef471'],
-  // D-045 "write both" — customer_text_wording keyed by (tenant, purpose, language).
-  ['333_customer_text_wording_per_language', '8e523289f2ee6272d8c9c1acb7902f6ecde0cc82aea93bb9588b58aec866b8f2'],
-  // #1750 (D-044) — tenant_settings.presence_path, forwarding_mode (NOT VALID CHECKs), get_found_skipped_items.
-  ['334_tenant_settings_get_found', 'a55ccb06da1509baa49df4ff5d76102e8f9ea2115ae2a3f28516b78e7966755c'],
-  // Dispatch FR-2 phase 3c round 2 — appointment_assignments.overlap_accepted_with, consent-aware guard, backfill of rows 332 marked.
-  ['335_assignment_overlap_accepted_with', '9ce17e738283dccfdb696047dec16aba693948ccdd5c6309942ed5eb6a65b51a'],
+  // 332–345: #1790 (merged 2026-10-22 without snapshot entries).
+  ['332_call_forwarding_setup', '6945ad7041594cebcefdf2b4e200e2782ca5b2909463fba99e0f8dfb45716fd9'],
+  ['333_call_forwarding_checks', '2c09f0495368fa186b98ae2c7789caaf94b35b59d34306b2aab9a15df74dc908'],
+  ['334_tenant_sites', 'f10aa81fd421a954237c87ccaef0ab6671f66140f65b6df8eee6dbc001187acf'],
+  ['335_tenant_site_about', 'b3c66b33c14583d1ab4fa21bd92b2653c63dc71dc05fc3c3e53aec89f0ad9169'],
+  ['336_drip_campaigns', '1fe4cc16ff49abe22ff155e2dafcdcd2dbaba4738be80da6fa3e0ed1b2b1b0fe'],
+  ['337_drip_step_events', '057b5b4a518bf9d808c6de88105796b966b11b812ff2de170e00ddce85081fa7'],
+  ['338_voice_call_scores', '702882a409905c228a8c0a194d0d02ede967dccb0326d021f32b86cdba6bd067'],
+  ['339_voice_call_corrections', '0f422ab95d29478ba4c9ce2a0f24fd88b92b4b106db100ef87a845722ef00eca'],
+  ['340_webchat_config', '5548e267e2d1c0702755ec671dbd1d85d50da4666e79e48eb5bec26a9a75696e'],
+  ['341_webchat_usage_daily', '5f6bd3060cdf445b80e622cfbb9737ce2503b63143d71be36a7840889728bb2f'],
+  ['342_lsa_integrations', '516ec1d299c0f53b81e5a37994d5610f144902fec44740cc4ccbecd7cc4ea6ea'],
+  ['343_lsa_leads', '9d80fb938d2a14f160d186a73f49a98992f63b8f2e4edd52c4d0e4c0ad1c31ab'],
+  ['344_tenant_site_custom_domain', '3b9af9d91eb11ceedf0781fb84c7b7f15e6d867213f0ed3a5da8a3c0321f4dc1'],
+  ['345_tenant_site_custom_domain_due', '9cd0e3cfb2d3236e9bab93c8d8bf5851b81d4a37e1f8239b09c1a90485234182'],
+  // 346–349: the four migrations #1790's merge dropped (were 332–335), re-added under free numbers; SQL and hashes unchanged.
+  ['346_assignment_overlap_accepted', 'eb06c6a9b4dc679fa9532a486a8941a19abcceb6e95875e0fb9d930b94eef471'],
+  ['347_customer_text_wording_per_language', '8e523289f2ee6272d8c9c1acb7902f6ecde0cc82aea93bb9588b58aec866b8f2'],
+  ['348_tenant_settings_get_found', 'a55ccb06da1509baa49df4ff5d76102e8f9ea2115ae2a3f28516b78e7966755c'],
+  ['349_assignment_overlap_accepted_with', '9ce17e738283dccfdb696047dec16aba693948ccdd5c6309942ed5eb6a65b51a'],
 ];
 
 function hashMigration(value: string): string {

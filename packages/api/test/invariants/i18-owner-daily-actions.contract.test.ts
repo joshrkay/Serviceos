@@ -135,7 +135,10 @@ const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 16;
 // D-044 (#1762, #1763): +4 occasional (Google listing picker GET/PUT, get-found-online GET + dismiss).
 // D-045: +2 occasional (PUT/DELETE /api/settings/text-wording/:purpose — owner's text wording).
 // D-044 (#1752): +4 occasional (/api/get-found presence-path, forwarding-mode, item skip PUT/DELETE).
-const OWNER_ONLY_ROUTES = 91;
+// #1790 (merged 2026-10-22 with this contract red): +33 occasional — call forwarding
+// setup/check, hosted tenant site (publish, about, address, domain), drip campaigns,
+// webchat settings/token, LSA integration, voice call-score corrections.
+const OWNER_ONLY_ROUTES = 124;
 
 // ── Derivation ──────────────────────────────────────────────────────────────
 
