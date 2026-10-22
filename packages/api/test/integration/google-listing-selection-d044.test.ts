@@ -113,6 +113,14 @@ describe('D-044 Google listing selection (real Postgres)', () => {
         ])
       ).rows[0].google_review_url;
     expect(await read()).toBe('https://g.page/r/review-999');
+    // The provenance column survives a disconnect (integration row deleted).
+    expect(
+      (
+        await pool.query(`SELECT google_review_url_derived FROM tenant_settings WHERE tenant_id = $1`, [
+          tenantId,
+        ])
+      ).rows[0].google_review_url_derived,
+    ).toBe('https://g.page/r/review-999');
 
     await settingsRepo.update(tenantId, { googleReviewUrl: 'https://g.page/r/typed' });
     expect(

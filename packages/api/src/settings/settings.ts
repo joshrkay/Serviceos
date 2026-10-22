@@ -537,6 +537,13 @@ export interface TenantSettings {
   googleReviewUrl?: string | null;
   yelpReviewUrl?: string | null;
   /**
+   * D-044 — the review link the app last filled in from a connected
+   * Google listing. Lives here, not on the integration row, so a later
+   * listing can still replace it after a disconnect. Not owner-editable
+   * (absent from updateSettingsSchema). Migration 330.
+   */
+  googleReviewUrlDerived?: string | null;
+  /**
    * P11-002 — tenant language stack (columns on tenant_settings:
    * default_language, auto_detect_language, tts_voice_en/es,
    * spanish_dispatcher_user_ids). Resolves EN/ES for the voice agent
@@ -768,6 +775,8 @@ export interface UpdateSettingsInput {
   /** Public review links (4★+ feedback page); null clears the field. */
   googleReviewUrl?: string | null;
   yelpReviewUrl?: string | null;
+  /** D-044 — see TenantSettings.googleReviewUrlDerived. */
+  googleReviewUrlDerived?: string | null;
   /** P11-002 — tenant language stack. */
   defaultLanguage?: Language;
   autoDetectLanguage?: boolean;

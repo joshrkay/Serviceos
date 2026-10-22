@@ -52,4 +52,30 @@ describe('applyDerivedGoogleReviewUrl', () => {
     expect(await applyDerivedGoogleReviewUrl(repo, 'nobody', null, DERIVED)).toBe(false);
     expect(await repo.findByTenant('nobody')).toBeNull();
   });
+
+  it('replaces the old listing link after a disconnect and reconnect to another listing', async () => {
+    const repo = new InMemorySettingsRepository();
+    await repo.upsertIdentityFields('t1', { businessName: 'Acme' });
+    await applyDerivedGoogleReviewUrl(repo, 't1', null, 'https://g.page/r/old');
+    // Disconnect deleted the integration row, so the caller knows no previous link.
+    expect(await applyDerivedGoogleReviewUrl(repo, 't1', null, 'https://g.page/r/new')).toBe(true);
+    expect((await repo.findByTenant('t1'))?.googleReviewUrl).toBe('https://g.page/r/new');
+  });
+
+  it('still never replaces a link the owner typed after the app filled one in', async () => {
+    const repo = new InMemorySettingsRepository();
+    await repo.upsertIdentityFields('t1', { businessName: 'Acme' });
+    await applyDerivedGoogleReviewUrl(repo, 't1', null, 'https://g.page/r/old');
+    await repo.update('t1', { googleReviewUrl: 'https://g.page/r/typed' });
+    expect(await applyDerivedGoogleReviewUrl(repo, 't1', null, 'https://g.page/r/new')).toBe(false);
+    expect((await repo.findByTenant('t1'))?.googleReviewUrl).toBe('https://g.page/r/typed');
+  });
+
+  it('adopts a pasted link that matches the listing, so the next listing can replace it', async () => {
+    const repo = new InMemorySettingsRepository();
+    await repo.upsertIdentityFields('t1', { businessName: 'Acme' });
+    await repo.update('t1', { googleReviewUrl: 'https://g.page/r/old' });
+    expect(await applyDerivedGoogleReviewUrl(repo, 't1', null, 'https://g.page/r/old')).toBe(false);
+    expect(await applyDerivedGoogleReviewUrl(repo, 't1', null, 'https://g.page/r/new')).toBe(true);
+  });
 });

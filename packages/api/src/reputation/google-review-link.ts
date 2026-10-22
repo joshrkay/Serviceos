@@ -29,8 +29,13 @@ export function nextGoogleReviewUrl(input: ReviewUrlInputs): string | null {
 
 /**
  * Apply {@link nextGoogleReviewUrl} to the tenant's settings. Returns true
- * when the setting was written. A tenant without a settings row is left
+ * when the review link was written. A tenant without a settings row is left
  * alone (onboarding creates the row).
+ *
+ * The link the app last filled in is remembered on the settings row
+ * (`googleReviewUrlDerived`), so it is still recognised as ours after a
+ * disconnect deletes the integration row; `previousDerived` (from the
+ * integration) only covers rows written before that column existed.
  */
 export async function applyDerivedGoogleReviewUrl(
   settingsRepo: Pick<SettingsRepository, 'findByTenant' | 'update'>,
@@ -42,10 +47,17 @@ export async function applyDerivedGoogleReviewUrl(
   if (!settings) return false;
   const next = nextGoogleReviewUrl({
     current: settings.googleReviewUrl,
-    previousDerived,
+    previousDerived: settings.googleReviewUrlDerived || previousDerived,
     derived,
   });
-  if (next === null) return false;
-  await settingsRepo.update(tenantId, { googleReviewUrl: next });
-  return true;
+  if (next !== null) {
+    await settingsRepo.update(tenantId, { googleReviewUrl: next, googleReviewUrlDerived: next });
+    return true;
+  }
+  // The owner already has this exact link: remember it as derived so the
+  // next listing can replace it.
+  if (derived && settings.googleReviewUrl?.trim() === derived && settings.googleReviewUrlDerived !== derived) {
+    await settingsRepo.update(tenantId, { googleReviewUrlDerived: derived });
+  }
+  return false;
 }

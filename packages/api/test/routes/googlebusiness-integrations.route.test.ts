@@ -600,6 +600,16 @@ describe('Google Business integrations routes', () => {
       expect(status.body.data).toMatchObject({ locationState: 'no_location', locationId: null });
     });
 
+    it('disconnect then connect a different listing replaces the old listing review link', async () => {
+      const settingsRepo = await settingsWith();
+      await connect({ '123': ONE_LOCATION }, { settingsRepo });
+      expect(await integrationRepo.disconnect(TENANT)).toBe(true);
+      await connect({ '456': TWO_LOCATIONS['456'] }, { settingsRepo });
+      expect((await settingsRepo.findByTenant(TENANT))?.googleReviewUrl).toBe(
+        'https://g.page/r/review-555',
+      );
+    });
+
     it('a reconnect keeps the location the owner already chose', async () => {
       await connect(TWO_LOCATIONS);
       await integrationRepo.selectLocation(TENANT, {
