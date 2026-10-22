@@ -8380,7 +8380,37 @@ export const MIGRATIONS = {
     END;
     $$ LANGUAGE plpgsql;
   `,
+  // D-045 (Josh, 2026-10-22: "write both") — the owner may keep one wording
+  // per language, so a business with English and Spanish customers writes
+  // each text twice. Key moves from (tenant, purpose) to (tenant, purpose,
+  // language); existing rows keep the language they were written in.
+  '333_customer_text_wording_per_language': `
+    ALTER TABLE customer_text_wording DROP CONSTRAINT IF EXISTS customer_text_wording_pkey;
+    ALTER TABLE customer_text_wording ADD PRIMARY KEY (tenant_id, purpose, language);
+  `,
 
+  // #1750 (D-044) — Get found online checklist facts on tenant_settings.
+  //   presence_path           — the owner's "do you have a website?" answer; NULL = unanswered
+  //   forwarding_mode         — missed calls only (NULL reads as this default) or all calls
+  //   get_found_skipped_items — checklist item ids the owner skipped
+  // The forwarded line and its forwarding check are NOT new: they are 318's
+  // forwarding_source_number / forwarding_verified_at, bound to the line by
+  // forwarding_generation. Skipped-item ids are not CHECKed: the set grows
+  // with each slice and is validated at the request boundary.
+  '334_tenant_settings_get_found': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS presence_path TEXT,
+      ADD COLUMN IF NOT EXISTS forwarding_mode TEXT,
+      ADD COLUMN IF NOT EXISTS get_found_skipped_items TEXT[] NOT NULL DEFAULT '{}';
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_presence_path_check,
+      ADD CONSTRAINT tenant_settings_presence_path_check
+        CHECK (presence_path IN ('own_website', 'google_only', 'neither')) NOT VALID;
+    ALTER TABLE tenant_settings
+      DROP CONSTRAINT IF EXISTS tenant_settings_forwarding_mode_check,
+      ADD CONSTRAINT tenant_settings_forwarding_mode_check
+        CHECK (forwarding_mode IN ('missed_calls', 'all_calls')) NOT VALID;
+  `,
   // 335 — Dispatch FR-2 phase 3c, review round 2: consent is pinned to the
   // visits it was given for. 332 let an accepted row overlap anything; this
   // adds overlap_accepted_with, backfills rows 332 already marked, and
