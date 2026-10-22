@@ -42,7 +42,7 @@ import {
   type ConsentLedgerLookup,
   type SmsSuppressionReason,
 } from './gated-message-delivery';
-import { readSendClaimStatus, withSendClaim } from './send-claim-ledger';
+import { markSendClaimComplete, readSendClaimStatus, withSendClaim } from './send-claim-ledger';
 
 /** Why a text is going out. Decides quiet hours and how strict consent is. */
 export type MessagePurpose = 'transactional' | 'reply' | 'automated_nudge' | 'marketing';
@@ -121,6 +121,9 @@ const PERMANENT_BLOCK_REASONS: ReadonlySet<MessageBlockReason> = new Set<Message
   'dnc',
   'revoked',
 ]);
+
+/** Extra attempts at the 'sent' tombstone after the provider accepted a text. */
+const FINALIZE_RETRIES = 2;
 
 const WAITS_FOR_DAYTIME: ReadonlySet<MessagePurpose> = new Set<MessagePurpose>([
   'automated_nudge',
@@ -287,13 +290,20 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
       }
     } catch (err) {
       if (delivered) {
-        // The text went out; only marking the claim 'sent' failed. The claim
-        // stays 'sending' (never reclaimed), so a retry cannot resend it.
-        deps.logger.warn('Outbound text sent but its dedupe claim was not finalized', {
-          ...logFields(text, { status: 'sent', delivery: delivered }),
-          error: err instanceof Error ? err.message : String(err),
-        });
-        return { status: 'sent', delivery: delivered };
+        // The text went out; only marking the claim 'sent' failed. Try the
+        // tombstone again: once it lands, a caller that fails to record this
+        // send gets `duplicate: 'sent'` on its retry and can reconcile.
+        const sent: SendOutcome = { status: 'sent', delivery: delivered };
+        if (!(await finalizeClaim(text.tenantId, claimKey))) {
+          // Still 'sending', which is never reclaimed, so no retry resends
+          // it; `findStuckSendClaims` surfaces the row for an operator.
+          deps.logger.warn('Outbound text sent but its dedupe claim is stuck at sending', {
+            ...logFields(text, sent),
+            claimKey,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        return sent;
       }
       // withSendClaim has already released the claim: nothing reached the
       // provider, so a later attempt may send.
@@ -309,6 +319,19 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
     }
     if (outcome.status !== 'sent') deps.logger.info('Outbound text not sent', logFields(text, outcome));
     return outcome;
+  }
+
+  /** Retries the 'sent' tombstone after a delivered text. True once it lands. */
+  async function finalizeClaim(tenantId: string, claimKey: string): Promise<boolean> {
+    for (let attempt = 0; attempt < FINALIZE_RETRIES; attempt++) {
+      try {
+        await markSendClaimComplete(deps.pool!, tenantId, claimKey);
+        return true;
+      } catch {
+        // Fall through to the next attempt.
+      }
+    }
+    return false;
   }
 
   return { sendText };

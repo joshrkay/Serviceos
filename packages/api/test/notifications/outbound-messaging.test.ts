@@ -272,15 +272,43 @@ describe('outbound messaging', () => {
     expect(sendSms).not.toHaveBeenCalled();
   });
 
-  it('reports a delivered text as sent even when finalizing its dedupe claim fails', async () => {
-    await customerRepo.create(makeCustomer());
-    // Wins the claim and the 'sending' step; the final "mark sent" write fails.
+  function finalizeFailingPool(failures: number) {
+    let finalizeCalls = 0;
     const pool = {
       query: vi.fn(async (sql: string) => {
-        if (sql.includes("status = 'sent'")) throw new Error('connection reset');
+        if (sql.includes("status = 'sent'")) {
+          finalizeCalls++;
+          if (finalizeCalls <= failures) throw new Error('connection reset');
+        }
         return { rows: [{ claim_key: 'k' }], rowCount: 1 };
       }),
     } as unknown as Pool;
+    return { pool, finalizeCalls: () => finalizeCalls };
+  }
+
+  it('retries the sent tombstone after a delivered text, so a later retry can reconcile', async () => {
+    await customerRepo.create(makeCustomer());
+    const { pool, finalizeCalls } = finalizeFailingPool(1);
+    const outbound = createOutboundMessaging({
+      delivery: { sendSms, sendEmail: vi.fn() } as unknown as MessageDeliveryProvider,
+      customerRepo,
+      dncRepo,
+      consentLedger: { listByPhone: async () => [] },
+      pool,
+      logger,
+    });
+
+    const outcome = await outbound.sendText(toCustomer('transactional'));
+
+    expect(outcome.status).toBe('sent');
+    expect(finalizeCalls()).toBe(2);
+    expect(sendSms).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports a delivered text as sent even when finalizing its dedupe claim keeps failing', async () => {
+    await customerRepo.create(makeCustomer());
+    // Wins the claim; every "mark sent" write fails.
+    const { pool } = finalizeFailingPool(Infinity);
     const outbound = createOutboundMessaging({
       delivery: { sendSms, sendEmail: vi.fn() } as unknown as MessageDeliveryProvider,
       customerRepo,
