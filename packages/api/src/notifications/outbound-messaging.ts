@@ -12,11 +12,13 @@
  *   - Message purpose. `transactional` and `reply` go now. `automated_nudge`
  *     and `marketing` wait for the recipient's daytime window and, whatever
  *     the gate's enforcement mode, need the customer's own SMS consent and a
- *     number off the tenant DNC list.
+ *     number off the tenant DNC list. `marketing` also needs a standing
+ *     marketing grant in the consent ledger (D-017: an SMS grant is not one).
  *   - Duplicates. A dedupe key (`messageKind` + `recordId`) is required; the
  *     send is claimed in the send-claim ledger under it, so a retry or a
  *     concurrent sweep never texts the same thing twice.
- *   - Outcome. Every call returns a send outcome instead of throwing: sent,
+ *   - Outcome. Every call returns a send outcome instead of throwing, even
+ *     when a lookup fails: sent,
  *     scheduled (with the time the window opens) or blocked (with the reason,
  *     and whether it can clear on its own). Nothing fails silently.
  *
@@ -37,6 +39,7 @@ import type {
 import {
   SmsDeferredError,
   SmsSuppressedError,
+  type ConsentLedgerLookup,
   type SmsSuppressionReason,
 } from './gated-message-delivery';
 import { withSendClaim } from './send-claim-ledger';
@@ -66,6 +69,8 @@ export type MessageBlockReason =
   | SmsSuppressionReason
   | 'customer_not_found'
   | 'no_phone'
+  /** A marketing text to a number with no standing marketing grant. */
+  | 'no_marketing_consent'
   | 'send_failed';
 
 export type SendOutcome =
@@ -101,6 +106,7 @@ export type SendOutcome =
 const PERMANENT_BLOCK_REASONS: ReadonlySet<MessageBlockReason> = new Set<MessageBlockReason>([
   'customer_not_found',
   'no_phone',
+  'no_marketing_consent',
   'no_consent',
   'dnc',
   'revoked',
@@ -116,6 +122,8 @@ export interface OutboundMessagingDeps {
   delivery: MessageDeliveryProvider;
   customerRepo: Pick<CustomerRepository, 'findById'>;
   dncRepo: Pick<DncRepository, 'isOnDnc'>;
+  /** Consent ledger (newest first), read for a marketing grant. */
+  consentLedger: ConsentLedgerLookup;
   /** Send-claim ledger pool. Null in dev/test without a DB: no dedupe claim. */
   pool: Pool | null;
   logger: Pick<Logger, 'info' | 'warn'>;
@@ -181,6 +189,9 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
         return blocked('dnc');
       }
     }
+    if (purpose === 'marketing' && !(await hasMarketingGrant(tenantId, customer.primaryPhone))) {
+      return blocked('no_marketing_consent');
+    }
     return {
       to: customer.primaryPhone,
       body,
@@ -191,8 +202,26 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
     };
   }
 
+  /** The newest explicit marketing event for the number is a grant. */
+  async function hasMarketingGrant(tenantId: string, phone: string): Promise<boolean> {
+    const events = await deps.consentLedger.listByPhone(tenantId, phone);
+    const latest = events.find(
+      (e) => e.kind === 'marketing' && (e.state === 'granted' || e.state === 'revoked'),
+    );
+    return latest?.state === 'granted';
+  }
+
   async function sendText(text: OutboundText): Promise<SendOutcome> {
-    const addressed = await address(text);
+    let addressed: SmsMessage | SendOutcome;
+    try {
+      addressed = await address(text);
+    } catch (err) {
+      // A failed customer, DNC or ledger read is not a verdict: nothing was
+      // sent, and a later attempt may get through.
+      const outcome = blocked('send_failed', err instanceof Error ? err.message : String(err));
+      deps.logger.warn('Outbound text recipient lookup failed', logFields(text, outcome));
+      return outcome;
+    }
     if ('status' in addressed) {
       deps.logger.info('Outbound text blocked before sending', logFields(text, addressed));
       return addressed;

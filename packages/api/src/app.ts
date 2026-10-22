@@ -1682,6 +1682,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         delivery: messageDelivery,
         customerRepo,
         dncRepo,
+        consentLedger: consentEventRepo,
         pool: pool ?? null,
         logger: createLogger({
           service: 'outbound-messaging',

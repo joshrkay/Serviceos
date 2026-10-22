@@ -21,6 +21,8 @@ import {
 } from '../../src/jobs/job-lifecycle';
 import { v4 as uuidv4 } from 'uuid';
 
+/** No consent-ledger events: the thank-you is an automated nudge, not marketing. */
+const noLedger = { listByPhone: async () => [] };
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
 const NOW = new Date('2026-06-17T15:00:00Z');
 const FOUR_HOURS_AGO = new Date(NOW.getTime() - 4 * 60 * 60 * 1000);
@@ -129,7 +131,7 @@ describe('thank-you-sms worker — integration', () => {
     const b = await seedCustomerAndJob({ completedAtAgo: 'one_hour' });
 
     const { delivery, calls } = makeCapturingDelivery();
-    const messaging = createOutboundMessaging({ delivery, customerRepo, dncRepo, pool, logger });
+    const messaging = createOutboundMessaging({ delivery, customerRepo, dncRepo, consentLedger: noLedger, pool, logger });
     await runThankYouSmsSweep({
       pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
       now: () => NOW,
@@ -157,7 +159,7 @@ describe('thank-you-sms worker — integration', () => {
     const seed = await seedCustomerAndJob({ completedAtAgo: 'four_hours' });
 
     const { delivery, calls } = makeCapturingDelivery();
-    const messaging = createOutboundMessaging({ delivery, customerRepo, dncRepo, pool, logger });
+    const messaging = createOutboundMessaging({ delivery, customerRepo, dncRepo, consentLedger: noLedger, pool, logger });
     await runThankYouSmsSweep({
       pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
       now: () => NOW,
@@ -173,7 +175,7 @@ describe('thank-you-sms worker — integration', () => {
     const seed = await seedCustomerAndJob({ completedAtAgo: 'four_hours' });
 
     const { delivery, calls } = makeCapturingDelivery();
-    const messaging = createOutboundMessaging({ delivery, customerRepo, dncRepo, pool, logger });
+    const messaging = createOutboundMessaging({ delivery, customerRepo, dncRepo, consentLedger: noLedger, pool, logger });
     await runThankYouSmsSweep({
       pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
       now: () => NOW,
@@ -192,7 +194,7 @@ describe('thank-you-sms worker — integration', () => {
     const { jobId } = await seedCustomerAndJob({ completedAtAgo: 'four_hours' });
 
     const { delivery } = makeCapturingDelivery();
-    const messaging = createOutboundMessaging({ delivery, customerRepo, dncRepo, pool, logger });
+    const messaging = createOutboundMessaging({ delivery, customerRepo, dncRepo, consentLedger: noLedger, pool, logger });
     await runThankYouSmsSweep({
       pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
       now: () => NOW,
@@ -244,7 +246,7 @@ describe('thank-you-sms worker — integration', () => {
       );
 
       const { delivery, calls } = makeCapturingDelivery();
-    const messaging = createOutboundMessaging({ delivery, customerRepo, dncRepo, pool, logger });
+    const messaging = createOutboundMessaging({ delivery, customerRepo, dncRepo, consentLedger: noLedger, pool, logger });
       await runThankYouSmsSweep({
         pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
         now: () => NOW,
@@ -269,7 +271,7 @@ describe('thank-you-sms worker — integration', () => {
       );
 
       const { delivery, calls } = makeCapturingDelivery();
-    const messaging = createOutboundMessaging({ delivery, customerRepo, dncRepo, pool, logger });
+    const messaging = createOutboundMessaging({ delivery, customerRepo, dncRepo, consentLedger: noLedger, pool, logger });
       await runThankYouSmsSweep({
         pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
         now: () => NOW,
@@ -286,7 +288,7 @@ describe('thank-you-sms worker — integration', () => {
     it('two concurrent sweeps against the same eligible job send exactly once', async () => {
       const seed = await seedCustomerAndJob({ completedAtAgo: 'four_hours' });
       const { delivery, calls } = makeCapturingDelivery();
-    const messaging = createOutboundMessaging({ delivery, customerRepo, dncRepo, pool, logger });
+    const messaging = createOutboundMessaging({ delivery, customerRepo, dncRepo, consentLedger: noLedger, pool, logger });
 
       await Promise.all([
         runThankYouSmsSweep({
@@ -313,7 +315,7 @@ describe('thank-you-sms worker — integration', () => {
       });
 
       const { delivery, calls } = makeCapturingDelivery();
-    const messaging = createOutboundMessaging({ delivery, customerRepo, dncRepo, pool, logger });
+    const messaging = createOutboundMessaging({ delivery, customerRepo, dncRepo, consentLedger: noLedger, pool, logger });
       await runThankYouSmsSweep({
         pool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,
         now: () => NOW,
@@ -339,6 +341,7 @@ describe('thank-you-sms worker — integration', () => {
         createOutboundMessaging({
           customerRepo,
           dncRepo,
+          consentLedger: noLedger,
           pool,
           logger,
           delivery: new GatedMessageDelivery({

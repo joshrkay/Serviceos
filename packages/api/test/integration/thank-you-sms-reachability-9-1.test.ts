@@ -129,7 +129,14 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
       // would short-circuit to `channel_disabled`, silently proving nothing.
       env: { ...process.env, TELEPHONY_ENABLED: 'true' },
     });
-    return createOutboundMessaging({ delivery: gate, customerRepo, dncRepo, pool, logger });
+    return createOutboundMessaging({
+      delivery: gate,
+      customerRepo,
+      dncRepo,
+      consentLedger: { listByPhone: async () => [] },
+      pool,
+      logger,
+    });
   }
 
   it('two concurrent sweeps over the same eligible job, through the real gate: exactly one send, one audit row — and a neighbour tenant sends+audits independently (T2)', async () => {

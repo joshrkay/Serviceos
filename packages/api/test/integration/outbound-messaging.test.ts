@@ -12,6 +12,7 @@ import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant } from './shared';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgDncRepository } from '../../src/compliance/dnc';
+import { PgConsentEventRepository } from '../../src/compliance/consent-events';
 import { createLogger } from '../../src/logging/logger';
 import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
 import { createOutboundMessaging } from '../../src/notifications/outbound-messaging';
@@ -42,6 +43,7 @@ describe('Postgres integration — outbound messaging', () => {
       delivery,
       customerRepo: new PgCustomerRepository(pool),
       dncRepo: new PgDncRepository(pool),
+      consentLedger: new PgConsentEventRepository(pool),
       pool,
       logger,
     });
@@ -96,6 +98,35 @@ describe('Postgres integration — outbound messaging', () => {
       permanent: true,
     });
     await pool.query(`UPDATE customers SET sms_consent = true WHERE id = $1`, [customerId]);
+    expect((await messaging.sendText(text)).status).toBe('sent');
+    expect(delivery.sentSms).toHaveLength(1);
+  });
+
+  it('marketing needs a marketing grant in the real consent ledger', async () => {
+    const tenant = await createTestTenant(pool);
+    const { customerId, phone } = await seedCustomer(tenant, true);
+    const { messaging, delivery } = build();
+    const text = {
+      tenantId: tenant.tenantId,
+      recipient: { kind: 'customer' as const, customerId },
+      purpose: 'marketing' as const,
+      dedupe: { messageKind: 'om_marketing', recordId: customerId },
+      body: 'Fall tune-up special',
+    };
+
+    expect(await messaging.sendText(text)).toEqual({
+      status: 'blocked',
+      reason: 'no_marketing_consent',
+      permanent: true,
+    });
+    await new PgConsentEventRepository(pool).append({
+      tenantId: tenant.tenantId,
+      customerId,
+      phone,
+      kind: 'marketing',
+      state: 'granted',
+      source: 'portal',
+    });
     expect((await messaging.sendText(text)).status).toBe('sent');
     expect(delivery.sentSms).toHaveLength(1);
   });

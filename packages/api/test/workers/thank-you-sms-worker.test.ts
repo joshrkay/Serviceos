@@ -215,6 +215,7 @@ describe('runThankYouSmsSweep', () => {
         delivery: deliveryOverride ?? delivery,
         customerRepo,
         dncRepo,
+        consentLedger: { listByPhone: async () => [] },
         pool,
         logger,
       }),

@@ -6,6 +6,7 @@ import {
   SmsSuppressedError,
 } from '../../src/notifications/gated-message-delivery';
 import type { MessageDeliveryProvider, SmsMessage } from '../../src/notifications/delivery-provider';
+import type { ConsentLedgerEventLike } from '../../src/compliance/resolve-outbound-consent';
 import {
   createOutboundMessaging,
   type OutboundText,
@@ -37,12 +38,14 @@ describe('outbound messaging', () => {
   let dncRepo: InMemoryDncRepository;
   let sent: SmsMessage[];
   let sendSms: ReturnType<typeof vi.fn>;
+  let ledger: ConsentLedgerEventLike[];
   const logger = { info: vi.fn(), warn: vi.fn() };
 
   beforeEach(() => {
     customerRepo = new InMemoryCustomerRepository();
     dncRepo = new InMemoryDncRepository();
     sent = [];
+    ledger = [];
     sendSms = vi.fn(async (message: SmsMessage) => {
       sent.push(message);
       return { provider: 'test', providerMessageId: `m-${sent.length}`, channel: 'sms' as const };
@@ -54,7 +57,14 @@ describe('outbound messaging', () => {
       sendSms: overrideSend ?? sendSms,
       sendEmail: vi.fn(),
     } as unknown as MessageDeliveryProvider;
-    return createOutboundMessaging({ delivery, customerRepo, dncRepo, pool: null, logger });
+    return createOutboundMessaging({
+      delivery,
+      customerRepo,
+      dncRepo,
+      consentLedger: { listByPhone: async () => ledger },
+      pool: null,
+      logger,
+    });
   }
 
   const toCustomer = (purpose: OutboundText['purpose']): OutboundText => ({
@@ -97,6 +107,7 @@ describe('outbound messaging', () => {
     'holds a %s text for the daytime window',
     async (purpose) => {
       await customerRepo.create(makeCustomer());
+      ledger = [{ kind: 'marketing', state: 'granted' }];
 
       await messaging().sendText(toCustomer(purpose));
 
@@ -120,6 +131,37 @@ describe('outbound messaging', () => {
     const outcome = await messaging().sendText(toCustomer('automated_nudge'));
 
     expect(outcome).toEqual({ status: 'blocked', reason: 'dnc', permanent: true });
+    expect(sendSms).not.toHaveBeenCalled();
+  });
+
+  it('blocks marketing without a standing marketing grant; SMS consent alone is not one', async () => {
+    await customerRepo.create(makeCustomer());
+
+    const none = await messaging().sendText(toCustomer('marketing'));
+    ledger = [
+      { kind: 'marketing', state: 'revoked' },
+      { kind: 'marketing', state: 'granted' },
+    ];
+    const revokedSinceGrant = await messaging().sendText(toCustomer('marketing'));
+
+    expect(none).toEqual({ status: 'blocked', reason: 'no_marketing_consent', permanent: true });
+    expect(revokedSinceGrant).toEqual({ status: 'blocked', reason: 'no_marketing_consent', permanent: true });
+    expect(sendSms).not.toHaveBeenCalled();
+  });
+
+  it('turns a failed recipient lookup into a retryable block, never a throw', async () => {
+    customerRepo.findById = async () => {
+      throw new Error('connection reset');
+    };
+
+    const outcome = await messaging().sendText(toCustomer('transactional'));
+
+    expect(outcome).toEqual({
+      status: 'blocked',
+      reason: 'send_failed',
+      permanent: false,
+      detail: 'connection reset',
+    });
     expect(sendSms).not.toHaveBeenCalled();
   });
 

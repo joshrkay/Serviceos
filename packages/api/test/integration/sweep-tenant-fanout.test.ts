@@ -1324,6 +1324,7 @@ describe('Postgres integration — cross-tenant query sweep fan-out (T4)', () =>
         messaging: createOutboundMessaging({
           customerRepo: new PgCustomerRepository(pool),
           dncRepo: new PgDncRepository(pool),
+          consentLedger: { listByPhone: async () => [] },
           pool,
           logger,
           delivery: {
