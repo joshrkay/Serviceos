@@ -107,3 +107,39 @@ describe('B3-5 — the voice line says why a card cannot be approved yet', () =>
     );
   });
 });
+
+// B3-6 follow-up — the voice twin of the SMS expiry reply. A schedule card's
+// 48-hour window is swept hourly, so between its expiresAt and the sweep a
+// spoken yes still reaches approveProposal, which marks the card expired and
+// refuses with a ValidationError that names no fields. The line said "it's
+// missing required info" — nothing was missing, and it cannot be finished.
+describe('B3-6 — a voice yes on a card whose window has just passed', () => {
+  it('says it expired, approves nothing, and does not claim missing info', async () => {
+    const h = await harness();
+    const proposal = await seed(h.proposalRepo, {
+      tenantId: TENANT,
+      proposalType: 'create_appointment',
+      payload: {
+        customerName: 'Mrs Lee',
+        scheduledStart: '2026-06-16T19:00:00Z',
+        scheduledEnd: '2026-06-16T20:00:00Z',
+      },
+      summary: 'Book Mrs Lee Tuesday 2pm',
+      confidenceScore: 0.97,
+      createdBy: 'voice',
+      expiresAt: new Date(Date.now() - 60_000),
+    });
+
+    const result = await approveByVoice(h.deps);
+
+    expect(result.outcome).toBe('approve_failed');
+    expect(result.speak).toBe("Can't approve that one — it expired. You can redo it in the app.");
+    expect(result.speak).not.toMatch(/missing/i);
+    expect(result.speak).not.toMatch(BANNED);
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('expired');
+    expect(h.auditRepo.getAll().map((e) => e.eventType)).not.toContain('proposal.approved');
+    expect(h.auditRepo.getAll().find((e) => e.eventType === 'proposal.voice_approve_blocked')?.metadata).toMatchObject({
+      heldBy: 'expired',
+    });
+  });
+});
