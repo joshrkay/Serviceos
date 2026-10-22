@@ -51,7 +51,7 @@ export function priceEntry(v: TradeVoice): ChoiceEntry {
     explain:
       "The trip fee is what a customer pays for you to come out and look. The hourly rate is what the work costs after that. These are the numbers I quote when callers ask.",
     example:
-      `Say a caller asks ${v.priceAsk}. With the first, I tell them it's {tripFee} for the visit, credited toward the repair, and you give the full price once you've seen the job.`,
+      `Say a caller asks ${v.priceAsk}. With the first, I say it's {tripFee} for the visit, credited toward the repair. With the second, I quote the higher fee on that card: fewer callers book, but the ones who do mean it.`,
     options: [
       {
         key: 'a',
