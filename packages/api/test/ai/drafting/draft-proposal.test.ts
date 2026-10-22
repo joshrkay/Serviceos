@@ -137,6 +137,80 @@ describe('draftProposal', () => {
     expect(outcome.proposal.status).not.toBe('approved');
   });
 
+  it('a draft the handler auto-approved and the gate pulls back loses its approval time too', async () => {
+    const handler = handlerReturning({ jobId: JOB });
+    const approving: TaskHandler = {
+      ...handler,
+      handle: async (ctx) => {
+        const result = await handler.handle(ctx);
+        Object.assign(result.proposal, { status: 'approved', approvedAt: new Date() });
+        return result;
+      },
+    };
+
+    const outcome = await draftProposal({ handler: approving, context: CONTEXT, operatorText: `job ${JOB}`, entities: {} });
+
+    if (outcome.kind === 'refusal') throw new Error('expected a draft');
+    expect(outcome.proposal.status).toBe('draft');
+    expect(outcome.proposal.approvedAt).toBeUndefined();
+  });
+
+  it('a verified id replaces a value that is not an id at all, such as a job title', async () => {
+    for (const notAnId of ['Water heater install', ` ${JOB} `]) {
+      const outcome = await draftProposal({
+        handler: handlerReturning({ jobId: notAnId, priority: 'urgent' }),
+        context: CONTEXT,
+        operatorText: `the Water heater install job ${JOB}`,
+        entities: {},
+        verifiedIds: { jobId: JOB },
+      });
+
+      expect(outcome.kind).toBe('proposal');
+      if (outcome.kind !== 'proposal') return;
+      expect(outcome.proposal.payload.jobId).toBe(JOB);
+    }
+  });
+
+  it('scrubs a made-up linked job so a booking still has to name who it is for', async () => {
+    const outcome = await draftProposal({
+      handler: handlerReturning(
+        { linkedJobId: MADE_UP, scheduledStart: '2026-11-03T14:00:00.000Z', scheduledEnd: '2026-11-03T15:00:00.000Z' },
+        'create_appointment',
+      ),
+      context: CONTEXT,
+      operatorText: 'book it for Tuesday at 2',
+      entities: {},
+    });
+
+    expect(outcome.kind).toBe('clarification');
+    if (outcome.kind !== 'clarification') return;
+    expect(outcome.proposal.payload.linkedJobId).toBeUndefined();
+    expect(outcome.missingFields).toContain('customerId');
+  });
+
+  it('a clarification is never left approved, even when the gate added nothing new', async () => {
+    const handler = handlerReturning({ priority: 'urgent' });
+    const approving: TaskHandler = {
+      ...handler,
+      handle: async (ctx) => {
+        const result = await handler.handle(ctx);
+        Object.assign(result.proposal, {
+          status: 'approved',
+          approvedAt: new Date(),
+          sourceContext: { missingFields: ['jobId'] },
+        });
+        return result;
+      },
+    };
+
+    const outcome = await draftProposal({ handler: approving, context: CONTEXT, operatorText: 'urgent', entities: {} });
+
+    expect(outcome.kind).toBe('clarification');
+    if (outcome.kind === 'refusal') return;
+    expect(outcome.proposal.status).toBe('draft');
+    expect(outcome.proposal.approvedAt).toBeUndefined();
+  });
+
   it('refuses with a reason when the handler drafts nothing', async () => {
     const outcome = await draftProposal({
       handler: handlerReturning(undefined),

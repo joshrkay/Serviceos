@@ -63,7 +63,7 @@ export async function draftProposal(request: DraftRequest): Promise<DraftOutcome
 }
 
 /** The checks every draft gets, in order. Mutates and returns the outcome. */
-export function finishDraft(
+function finishDraft(
   proposal: Proposal,
   request: Pick<DraftRequest, 'operatorText' | 'entities' | 'verifiedIds' | 'beforeGate'>,
 ): DraftOutcome {
@@ -79,6 +79,11 @@ export function finishDraft(
   const missingFields = missingFieldsFor(proposal);
   const clarification = (proposal.payload as { clarification?: { needed?: unknown } }).clarification;
   if (missingFields.length > 0 || clarification?.needed === true) {
+    // A question is never already approved, whichever check raised it.
+    if (proposal.status === 'approved') {
+      proposal.status = 'draft';
+      proposal.approvedAt = undefined;
+    }
     return { kind: 'clarification', proposal, missingFields };
   }
   return { kind: 'proposal', proposal };
@@ -110,7 +115,7 @@ const UPDATE_CUSTOMER_FIELDS = ['name', 'email', 'phone', 'address'] as const;
  * approvable. Hoist both into one shared module the moment
  * `voice-payload.ts` is free to change.
  */
-export function namedDraftContractGap(
+function namedDraftContractGap(
   proposalType: string,
   payload: Record<string, unknown>,
 ): string[] {
@@ -215,7 +220,12 @@ export function applyContractGate(proposal: Proposal): string[] {
     ...(proposal.sourceContext ?? {}),
     missingFields: [...existing, ...added],
   };
-  if (proposal.status === 'approved') proposal.status = 'draft';
+  if (proposal.status === 'approved') {
+    proposal.status = 'draft';
+    // A later tap keeps an existing approvedAt, so a stale one would start
+    // the undo window at drafting time instead of at the tap.
+    proposal.approvedAt = undefined;
+  }
   return added;
 }
 
@@ -252,7 +262,9 @@ export function dropUnverifiedIds(
     sourceContext?.verifiedIds && typeof sourceContext.verifiedIds === 'object'
       ? (sourceContext.verifiedIds as Record<string, unknown>)
       : undefined;
-  for (const key of ['jobId', 'customerId', 'estimateId', 'invoiceId', 'appointmentId']) {
+  // technicianId is not here: handlers look technicians up themselves
+  // without stamping verifiedIds (voice-extended-tasks.ts).
+  for (const key of ['jobId', 'linkedJobId', 'customerId', 'estimateId', 'invoiceId', 'appointmentId']) {
     const v = payload[key];
     if (typeof v !== 'string' || v.length < 32) continue;
     if (haystack.includes(v.toLowerCase())) continue;
@@ -265,8 +277,9 @@ export function dropUnverifiedIds(
  * U1 — record route-resolved ids on `sourceContext.verifiedIds` so
  * `dropUnverifiedIds` preserves them (pattern: IssueInvoiceTaskHandler's
  * rung-2 conversation-context resolution, ai/orchestration/task-router.ts).
- * SECURITY: callers must only pass ids from `resolveVerifiedIdsForDraft`
- * (a DB lookup) — never classifier/LLM output. A task handler's own
+ * SECURITY: callers must only pass ids from a DB lookup — chat's
+ * `resolveVerifiedIdsForDraft`; on memos the resolver's matches, the caller-ID
+ * customer and the job the memo was recorded on — never classifier/LLM output. A task handler's own
  * repo-verified `verifiedIds` (e.g. send_estimate_nudge's liftGate) win on
  * key collision; both sources are DB-verified so either value is safe.
  */
@@ -318,10 +331,15 @@ export function applyVerifiedIdsToPayload(
 ): string[] {
   const wasValid = validateProposalPayload(proposal.proposalType, proposal.payload).valid;
   const written: string[] = [];
+  const replaced: Record<string, unknown> = {};
   for (const [key, id] of Object.entries(verifiedIds)) {
     if (!isGatedReferenceField(key)) continue;
     const current = proposal.payload[key];
-    if (typeof current === 'string' && current.trim().length > 0) continue;
+    // A value that is not an id at all (a job title echoed into jobId, a
+    // padded uuid) would otherwise hold the slot and leave the card gated
+    // on a field nothing can fill.
+    if (typeof current === 'string' && current.trim().length > 0 && isWellFormedId(current)) continue;
+    if (current !== undefined) replaced[key] = current;
     proposal.payload[key] = id;
     written.push(key);
   }
@@ -330,7 +348,10 @@ export function applyVerifiedIdsToPayload(
     wasValid &&
     !validateProposalPayload(proposal.proposalType, proposal.payload).valid
   ) {
-    for (const key of written) delete proposal.payload[key];
+    for (const key of written) {
+      if (key in replaced) proposal.payload[key] = replaced[key];
+      else delete proposal.payload[key];
+    }
     return [];
   }
   // Clear-on-fill, through the SAME shared helper `applyGatedReferences` uses.
@@ -348,4 +369,11 @@ export function applyVerifiedIdsToPayload(
     }
   }
   return written;
+}
+
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** A uuid, or a chain reference to an earlier step's id. */
+function isWellFormedId(value: string): boolean {
+  return UUID_SHAPE.test(value) || value.startsWith('$ref:');
 }

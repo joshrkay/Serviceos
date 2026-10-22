@@ -28,6 +28,7 @@ import type { IntentClassification } from '../../src/ai/orchestration/intent-cla
 import type { QueueMessage } from '../../src/queues/queue';
 import type { Logger } from '../../src/logging/logger';
 import { resolvesCustomer, RESOLVED_CUSTOMER_ID } from '../helpers/resolves-customer';
+import { NOT_DRAFTED_REASON } from '../../src/ai/drafting/draft-proposal';
 
 const TENANT = 't-drafting';
 const MADE_UP = '11111111-1111-4111-8111-111111111111';
@@ -129,5 +130,8 @@ describe('voice memo drafting (D-045 point 8)', () => {
     const proposals = await route();
 
     expect(proposals.map((p) => p.proposalType)).toEqual(['voice_clarification']);
+    // The card says drafting's own reason, not "didn't catch that".
+    expect(proposals[0].explanation).toBe(NOT_DRAFTED_REASON);
+    expect(proposals[0].payload.reason).toBe('missing_entities');
   });
 });

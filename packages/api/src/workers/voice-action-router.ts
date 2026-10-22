@@ -1021,13 +1021,20 @@ async function emitClarification(
        */
       additionalAmbiguities?: SingleEntityAmbiguity[];
     };
+    /**
+     * The intent classified fine but its handler drafted nothing. The card
+     * says so in drafting's own words instead of "didn't catch that".
+     */
+    notDrafted?: { explanation: string };
   },
   log: Logger
 ): Promise<void> {
   const { tenantId, userId, transcript, classification, conversationId, recordingId } = input;
   const reason = input.entityAmbiguity
     ? 'ambiguous_entity'
-    : (classification.unknownReason ?? 'unknown_intent');
+    : input.notDrafted
+      ? 'missing_entities'
+      : (classification.unknownReason ?? 'unknown_intent');
 
   const suggestedIntents: string[] = [];
   if (classification.lowConfidenceIntent) {
@@ -1091,7 +1098,9 @@ async function emitClarification(
       (moreAmbiguitiesCount > 0
         ? ` (${moreAmbiguitiesCount} more reference${moreAmbiguitiesCount === 1 ? '' : 's'} will need picking after this.)`
         : '')
-    : clarificationExplanation(classification);
+    : input.notDrafted
+      ? input.notDrafted.explanation
+      : clarificationExplanation(classification);
 
   const proposal = createProposal({
     tenantId,
@@ -1967,6 +1976,7 @@ async function processSegment(
         ...(params.applyDedup && recordingId
           ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
           : {}),
+        notDrafted: { explanation: drafted.reason },
       },
       log,
     );
