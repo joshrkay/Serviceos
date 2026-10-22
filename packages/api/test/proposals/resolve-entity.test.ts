@@ -1354,6 +1354,9 @@ describe('A1 — resolveProposalEntity commits each path in one short transactio
     expect(events).toEqual([
       'LLM (no tx)',
       `BEGIN ${TENANT_UUID}`,
+      // A3-1 — the row lock first: the draft is only written over the row it
+      // was built from.
+      'findByIdsForUpdate (in tx)',
       'update (in tx)',
       'updateStatus (in tx)',
       'create (in tx)',
@@ -1377,6 +1380,7 @@ describe('A1 — resolveProposalEntity commits each path in one short transactio
     expect(events).toEqual([
       'LLM (no tx)',
       `BEGIN ${TENANT_UUID}`,
+      'findByIdsForUpdate (in tx)',
       'update (in tx)',
       'updateStatus (in tx) -> fails',
       'ROLLBACK',
@@ -1531,6 +1535,195 @@ describe('A1 — resolveProposalEntity commits each path in one short transactio
 
       expect(result.status).toBe('ready_for_review');
       expect((result.payload as Record<string, unknown>).customerId).toBe(CUST_B);
+    });
+  });
+
+  // A3-1 — the pick built its patch from the row it read BEFORE its
+  // transaction, and the lock only re-checked the status. A payload edit, a
+  // resolve-line or a second pick that committed in that gap (the re-draft's
+  // gap spans its LLM call) was silently overwritten with the stale copy.
+  describe('A3-1 — a pick never overwrites a change that landed after its read', () => {
+    const PENDING_JOB = {
+      pendingEntityAmbiguities: [
+        {
+          entityKind: 'job',
+          reference: 'Rodriguez job',
+          candidates: [
+            { id: JOB_A, kind: 'job', label: 'Rodriguez — kitchen', score: 0.8 },
+            { id: JOB_B, kind: 'job', label: 'Rodriguez — bath', score: 0.79 },
+          ],
+        },
+      ],
+    };
+
+    /** The pick's read returns its snapshot, then `concurrent` commits (as
+     *  another request would) before the pick goes on. The pick's own event
+     *  log starts after it. */
+    function afterTheRead(concurrent: () => Promise<unknown>) {
+      const realFindById = repo.findById.bind(repo);
+      vi.spyOn(repo, 'findById').mockImplementationOnce(async (tenantId, id) => {
+        const snapshot = await realFindById(tenantId, id);
+        await concurrent();
+        events.length = 0;
+        return snapshot;
+      });
+    }
+
+    /** An owner edit of the payload (PUT /proposals/:id), through the
+     *  unspied repo so it stays out of the pick's event log. */
+    const anEditLands = () =>
+      afterTheRead(async () => {
+        const row = await InMemoryProposalRepository.prototype.findById.call(repo, TENANT_UUID, PROPOSAL);
+        await InMemoryProposalRepository.prototype.update.call(repo, TENANT_UUID, PROPOSAL, {
+          payload: { ...row!.payload, transcript: 'invoice Bob for the water heater and the filter' },
+        });
+      });
+
+    /** A second pick of `candidateId`, from another tab, that commits first. */
+    const anotherPickLands = (candidateId: string, deps: Partial<Parameters<typeof resolveProposalEntity>[1]> = {}) =>
+      afterTheRead(() =>
+        resolveProposalEntity(
+          { tenantId: TENANT_UUID, proposalId: PROPOSAL, candidateId, actorId: OWNER, actorRole: 'owner' },
+          { proposalRepo: repo, auditRepo, transactionRunner: runner, ...deps },
+        ),
+      );
+
+    const resolvedAuditCount = async () =>
+      (await auditRepo.findByEntity(TENANT_UUID, 'proposal', PROPOSAL)).filter(
+        (a) => a.eventType === 'proposal.entity_resolved',
+      ).length;
+
+    it('annotate-only: an edit that lands after the read is kept, and the pick lands on top of it', async () => {
+      await repo.create(clarification());
+      anEditLands();
+      const aliasCapture = capture();
+
+      const result = await resolve({ entityAliasCandidateCapture: aliasCapture });
+
+      const payload = result.payload as Record<string, unknown>;
+      expect(payload.transcript).toBe('invoice Bob for the water heater and the filter');
+      expect(payload.customerId).toBe(CUST_B);
+      expect(payload.entityCandidates).toBeUndefined();
+      expect(result.status).toBe('ready_for_review');
+      expect(events).toEqual([
+        `BEGIN ${TENANT_UUID}`,
+        'findByIdsForUpdate (in tx)',
+        'update (in tx)',
+        'updateStatus (in tx)',
+        'create (in tx)',
+        'COMMIT',
+        'capture (after commit)',
+      ]);
+      // The alias is grounded in the row the patch was built from.
+      expect(vi.mocked(aliasCapture.capture).mock.calls[0][0]).toMatchObject({
+        groundingProposal: { payload: { transcript: 'invoice Bob for the water heater and the filter' } },
+      });
+    });
+
+    it('annotate-only: a different pick that landed first wins; this one is refused and writes nothing', async () => {
+      await repo.create(clarification());
+      anotherPickLands(CUST_A);
+      const aliasCapture = capture();
+
+      const err = await resolve({ entityAliasCandidateCapture: aliasCapture }).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(ConflictError);
+      expect((err as Error).message).toBe('This was already handled, so that choice was not saved.');
+      expect(events).toEqual([`BEGIN ${TENANT_UUID}`, 'findByIdsForUpdate (in tx)', 'ROLLBACK']);
+      const row = await repo.findById(TENANT_UUID, PROPOSAL);
+      expect((row!.payload as Record<string, unknown>).customerId).toBe(CUST_A);
+      expect(await resolvedAuditCount()).toBe(1);
+      expect(aliasCapture.capture).not.toHaveBeenCalled();
+    });
+
+    it('annotate-only: the same pick landing first (a double tap) is a no-op success, not a second write', async () => {
+      await repo.create(clarification());
+      anotherPickLands(CUST_B);
+
+      const result = await resolve();
+
+      expect((result.payload as Record<string, unknown>).customerId).toBe(CUST_B);
+      expect(events.filter((e) => e.startsWith('update') || e.startsWith('create'))).toEqual([]);
+      expect(await resolvedAuditCount()).toBe(1);
+    });
+
+    it('next ambiguity: an edit that lands after the read is kept, and the row advances on top of it', async () => {
+      await repo.create(clarification(PENDING_JOB));
+      anEditLands();
+
+      const result = await resolve();
+
+      const payload = result.payload as Record<string, unknown>;
+      expect(payload.transcript).toBe('invoice Bob for the water heater and the filter');
+      expect(payload.entityReference).toBe('Rodriguez job');
+      expect((payload.entityCandidates as Array<{ id: string }>).map((c) => c.id)).toEqual([JOB_A, JOB_B]);
+      expect((result.sourceContext as Record<string, unknown>).resolvedEntities).toEqual([
+        { id: CUST_B, field: 'customerId', kind: 'customer', label: 'Bob Jones' },
+      ]);
+      expect(result.status).toBe('draft');
+    });
+
+    it('next ambiguity: a different pick that landed first wins; this one is refused and the row is not advanced again', async () => {
+      await repo.create(clarification(PENDING_JOB));
+      anotherPickLands(CUST_A);
+
+      await expect(resolve()).rejects.toBeInstanceOf(ConflictError);
+
+      expect(events).toEqual([`BEGIN ${TENANT_UUID}`, 'findByIdsForUpdate (in tx)', 'ROLLBACK']);
+      const row = await repo.findById(TENANT_UUID, PROPOSAL);
+      expect((row!.sourceContext as Record<string, unknown>).resolvedEntities).toEqual([
+        { id: CUST_A, field: 'customerId', kind: 'customer', label: 'Bob Smith' },
+      ]);
+      expect(await resolvedAuditCount()).toBe(1);
+    });
+
+    it('re-draft: an edit that lands during the LLM call refuses the stale draft; nothing is written', async () => {
+      await repo.create(clarification(ORIGINAL_INTENT));
+      anEditLands();
+      const aliasCapture = capture();
+
+      const err = await resolve({
+        redraftHandlerFactory: () => draftingHandler(),
+        entityAliasCandidateCapture: aliasCapture,
+      }).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(ConflictError);
+      expect((err as Error).message).toBe('This was already handled, so that choice was not saved.');
+      expect(events).toEqual(['LLM (no tx)', `BEGIN ${TENANT_UUID}`, 'findByIdsForUpdate (in tx)', 'ROLLBACK']);
+      const row = await repo.findById(TENANT_UUID, PROPOSAL);
+      expect(row!.proposalType).toBe('voice_clarification');
+      expect(row!.status).toBe('draft');
+      expect((row!.payload as Record<string, unknown>).transcript).toBe(
+        'invoice Bob for the water heater and the filter',
+      );
+      expect((row!.payload as Record<string, unknown>).customerId).toBeUndefined();
+      expect(await resolvedAuditCount()).toBe(0);
+      expect(aliasCapture.capture).not.toHaveBeenCalled();
+    });
+
+    it('re-draft: a different pick that re-drafted first wins; the stale draft is refused', async () => {
+      await repo.create(clarification(ORIGINAL_INTENT));
+      anotherPickLands(CUST_A, { redraftHandlerFactory: () => draftingHandler() });
+
+      const err = await resolve({ redraftHandlerFactory: () => draftingHandler() }).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(ConflictError);
+      expect(events).toEqual(['LLM (no tx)', `BEGIN ${TENANT_UUID}`, 'findByIdsForUpdate (in tx)', 'ROLLBACK']);
+      const row = await repo.findById(TENANT_UUID, PROPOSAL);
+      expect((row!.sourceContext as Record<string, unknown>).resolvedEntity).toMatchObject({ id: CUST_A });
+      expect(await resolvedAuditCount()).toBe(1);
+    });
+
+    it('re-draft: the same pick re-drafting first (a double tap) is a no-op success with the draft that landed', async () => {
+      await repo.create(clarification(ORIGINAL_INTENT));
+      anotherPickLands(CUST_B, { redraftHandlerFactory: () => draftingHandler() });
+
+      const result = await resolve({ redraftHandlerFactory: () => draftingHandler() });
+
+      expect(result.proposalType).toBe('draft_invoice');
+      expect(result.status).toBe('ready_for_review');
+      expect(events.filter((e) => e.startsWith('update') || e.startsWith('create'))).toEqual([]);
+      expect(await resolvedAuditCount()).toBe(1);
     });
   });
 });
