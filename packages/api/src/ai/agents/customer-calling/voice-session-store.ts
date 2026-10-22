@@ -418,6 +418,15 @@ export interface VoiceSession {
    */
   ownerLineGrant?: { extendedIntents: boolean; actorUserId?: string };
   /**
+   * B4-4 — what this turn's owner-line re-check (`refreshOwnerLine`, run first
+   * by every turn: `speechTurn`, the Gather loop, the silence turn) resolved,
+   * so the turn's approve / reject / edit step reuses it instead of a second
+   * settings + users read. That step takes (clears) it; a step that finds
+   * none re-checks itself. `approver: null` — the line did not resolve this
+   * turn (a lookup error included), so the step refuses: fail closed.
+   */
+  ownerLineThisTurn?: { approver: ResolvedApprover | null };
+  /**
    * True once the recording disclosure has actually been emitted to the caller
    * on this call (set by `bootstrapCallEstablishment`, which is the only
    * caller of `discloseRecording`). Any path that resumes or re-arms audio

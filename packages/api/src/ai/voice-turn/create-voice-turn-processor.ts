@@ -1159,7 +1159,9 @@ export interface VoiceTurnProcessor {
    * turn, before anything reads its privileges (`ownerSession`,
    * `extendedIntents`, `actorUserId`): kept while the line still resolves,
    * dropped for the turn when it does not. `speechTurn` runs it first; the
-   * Gather loop, which drives the turn itself, calls it at its own start.
+   * Gather loop, which drives the turn itself, calls it at its own start, and
+   * so does the silence turn (`handlePendingDialogueSilence`). B4-4 — the
+   * turn's approval step reuses its answer.
    * Resolves who the line approves as now (null: it no longer resolves),
    * or undefined — a no-op — for a session with no `ownerLineApprover`.
    */
@@ -4106,12 +4108,25 @@ export function createVoiceTurnProcessor(
    * them. Returns who the line approves as now, null when it no longer
    * resolves, or undefined for a session whose owner authority did not come
    * from caller-ID (in-app, a harness fixture) — that session is untouched.
+   * B4-4 — the answer is kept on the session for this turn's approval step
+   * (`currentApprovalLine`), so an approval turn reads the line once.
    */
   async function refreshOwnerLine(
     session: VoiceSession,
     tenantId: string,
   ): Promise<ResolvedApprover | null | undefined> {
     if (!session.ownerLineApprover) return undefined;
+    const now = await recheckOwnerLine(session, session.ownerLineApprover, tenantId);
+    session.ownerLineThisTurn = { approver: now };
+    return now;
+  }
+
+  /** The re-check itself (`refreshOwnerLine`): resolve the line, set or drop its privileges. */
+  async function recheckOwnerLine(
+    session: VoiceSession,
+    pickedUpAs: NonNullable<VoiceSession['ownerLineApprover']>,
+    tenantId: string,
+  ): Promise<ResolvedApprover | null> {
     // What establishment granted, recorded before the first re-check can drop it.
     const grant = (session.ownerLineGrant ??= {
       extendedIntents: session.machine.currentContext.extendedIntents === true,
@@ -4132,7 +4147,7 @@ export function createVoiceTurnProcessor(
     // backup's mobile, another teammate made backup on it) is not that line:
     // it gets nothing while it does, and only a turn that names the same
     // person again gets the grant back.
-    const now = resolved && resolved.userRowId === session.ownerLineApprover.userRowId ? resolved : null;
+    const now = resolved && resolved.userRowId === pickedUpAs.userRowId ? resolved : null;
     session.machine.setOwnerLinePrivileges({
       ownerSession: now !== null,
       extendedIntents: now !== null && grant.extendedIntents,
@@ -4143,21 +4158,27 @@ export function createVoiceTurnProcessor(
   }
 
   /**
-   * B1 follow-up — who the line approves as AT THIS STEP, re-checked
-   * (`refreshOwnerLine`) before every approve / reject / edit step — the way
-   * a one-tap link re-checks when tapped — so a backup demoted, deactivated
-   * or replaced mid-call acts as who they are now: a technician is turned
-   * away, and a caller-ID that no longer names an approver (or cannot be
-   * looked up) is no owner line for approvals at all. A session whose owner
-   * authority did not come from caller-ID (in-app) carries no stamp and is
-   * the owner, as before.
+   * B1 follow-up — who the line approves as AT THIS STEP, re-checked before
+   * every approve / reject / edit step — the way a one-tap link re-checks
+   * when tapped — so a backup demoted, deactivated or replaced mid-call acts
+   * as who they are now: a technician is turned away, and a caller-ID that
+   * no longer names an approver (or cannot be looked up) is no owner line for
+   * approvals at all. A session whose owner authority did not come from
+   * caller-ID (in-app) carries no stamp and is the owner, as before.
+   * B4-4 — the check is the one this turn ran at its start
+   * (`refreshOwnerLine`), taken once: a second settings + users read on the
+   * same turn told it nothing new. A step that finds none re-checks now. A
+   * turn whose check failed (lookup error) refuses its step — fail closed,
+   * the same turn the lookups were refused.
    */
   async function currentApprovalLine(
     session: VoiceSession,
     tenantId: string,
   ): Promise<Pick<VoiceApprovalSessionRef, 'ownerSession' | 'approver'>> {
-    const now = await refreshOwnerLine(session, tenantId);
-    if (now === undefined) return { ownerSession: session.machine.currentContext.ownerSession === true };
+    if (!session.ownerLineApprover) return { ownerSession: session.machine.currentContext.ownerSession === true };
+    const turnCheck = session.ownerLineThisTurn;
+    delete session.ownerLineThisTurn;
+    const now = turnCheck ? turnCheck.approver : await recheckOwnerLine(session, session.ownerLineApprover, tenantId);
     if (now === null) return { ownerSession: false };
     return { ownerSession: true, approver: { role: now.role, ...(now.userId ? { userId: now.userId } : {}) } };
   }

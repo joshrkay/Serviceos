@@ -54,14 +54,16 @@ export class CallingAgentStateMachine {
    * deactivated or replaced mid-call, the owner phone changed, the lookup
    * failed) loses `ownerSession` and `extendedIntents` for that turn, and a
    * later turn that resolves it again gets them back. Driven only by that
-   * caller-ID re-check, never by utterance content. No state change.
+   * caller-ID re-check, never by utterance content. No state change. B4-4 —
+   * the extended lookups are an owner-line privilege: never set without
+   * `ownerSession` (establishment grants them the same way).
    */
   setOwnerLinePrivileges(privileges: { ownerSession: boolean; extendedIntents: boolean }): void {
     const next: CallingAgentContext = { ...this.context };
     delete next.ownerSession;
     delete next.extendedIntents;
     if (privileges.ownerSession) next.ownerSession = true;
-    if (privileges.extendedIntents) next.extendedIntents = true;
+    if (privileges.ownerSession && privileges.extendedIntents) next.extendedIntents = true;
     this.context = next;
   }
 

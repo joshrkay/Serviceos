@@ -59,6 +59,18 @@ describe('CallingAgentStateMachine.setOwnerLinePrivileges', () => {
     expect(fsm.currentContext.extendedIntents).toBe(true);
   });
 
+  // B4-4 — the extended owner lookups are an owner-line privilege
+  // (establishment grants them only with ownerSession); the setter never
+  // hands them to a caller who is not on the owner line.
+  it('never grants the extended lookups without the owner line', () => {
+    const fsm = ownerLineMachine();
+
+    fsm.setOwnerLinePrivileges({ ownerSession: false, extendedIntents: true });
+
+    expect(fsm.currentContext).not.toHaveProperty('ownerSession');
+    expect(fsm.currentContext).not.toHaveProperty('extendedIntents');
+  });
+
   it('changes no state and no other context field', () => {
     const fsm = ownerLineMachine();
     const stateBefore = fsm.currentState;

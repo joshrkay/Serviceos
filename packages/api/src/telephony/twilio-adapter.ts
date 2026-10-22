@@ -2169,6 +2169,9 @@ export class TwilioGatherAdapter {
     session: VoiceSession,
     tenantId: string,
   ): Promise<SideEffect[] | null> {
+    // B3-1 / B4-4 — a silence is a turn too: the owner line is re-checked
+    // first, as the speech turns do, and the approval step below uses that.
+    await this.processor.refreshOwnerLine(session, tenantId);
     const approvalTurn = await this.processor.handlePendingVoiceApproval(session, '', tenantId);
     if (approvalTurn) {
       await this.processor.executeSideEffects(session, approvalTurn, tenantId);

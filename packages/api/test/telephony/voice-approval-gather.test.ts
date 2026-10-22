@@ -710,12 +710,24 @@ describe('B1 follow-up — the owner line re-checks its approver at every approv
       clerkUserId: 'clerk-backup-recheck',
     };
     const tenantSettings = { ownerPhone: OWNER_PHONE, backupSupervisorUserId: BACKUP_ID, escalationSettings: {} };
+    // B4-4 — reads of the backup's users row (only the owner-line check
+    // makes them), and a one-shot failure of the next settings read.
+    const reads = { backup: 0 };
+    const settingsFailure = { next: false };
     const h = makeHarness({
       gateway: gatewayReturning(classifications),
-      settingsRepo: { findByTenant: async () => ({ ...tenantSettings }) } as unknown as SettingsRepository,
+      settingsRepo: {
+        findByTenant: async () => {
+          if (settingsFailure.next) {
+            settingsFailure.next = false;
+            throw new Error('settings read timed out');
+          }
+          return { ...tenantSettings };
+        },
+      } as unknown as SettingsRepository,
       userRepo: {
         findById: async (t: string, id: string) =>
-          t === TENANT && id === BACKUP_ID
+          t === TENANT && id === BACKUP_ID && ++reads.backup
             ? {
                 id: BACKUP_ID,
                 tenantId: TENANT,
@@ -729,7 +741,7 @@ describe('B1 follow-up — the owner line re-checks its approver at every approv
         findByTenant: async () => [],
       } as unknown as UserRepository,
     });
-    return { ...h, backup, tenantSettings };
+    return { ...h, backup, tenantSettings, reads, settingsFailure };
   }
 
   const say = (h: ReturnType<typeof makeHarness>, sessionId: string, callSid: string, speechResult: string) =>
@@ -815,6 +827,53 @@ describe('B1 follow-up — the owner line re-checks its approver at every approv
     const stored = (await m.proposalRepo.findById(TENANT, proposal.id))!;
     expect(stored.status).toBe('approved');
     expect(stored.executedByRole).toBe('dispatcher');
+  });
+
+  // B4-4 — the turn re-checks the line once, at its start, and its approval
+  // step uses that answer instead of a second settings + users read.
+  it('an approval turn reads the owner line once: the readback turn and the yes turn', async () => {
+    const m = mutableBackupHarness([APPROVE_CLASSIFICATION]);
+    const proposal = await seedPending(m.proposalRepo);
+    const sessionId = await startCall(m, BACKUP_MOBILE, 'CA-recheck-once');
+
+    m.reads.backup = 0;
+    expect(await say(m, sessionId, 'CA-recheck-once', 'approve the Henderson estimate')).toContain('Henderson Family LLC');
+    expect(m.reads.backup).toBe(1);
+
+    m.reads.backup = 0;
+    await say(m, sessionId, 'CA-recheck-once', 'yes');
+    expect(m.reads.backup).toBe(1);
+    expect((await m.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('approved');
+  });
+
+  it("a lookup failure at the start of the yes turn refuses that turn's yes; nothing is approved", async () => {
+    const m = mutableBackupHarness([APPROVE_CLASSIFICATION]);
+    const proposal = await seedPending(m.proposalRepo);
+    const sessionId = await startCall(m, BACKUP_MOBILE, 'CA-recheck-failed');
+    await say(m, sessionId, 'CA-recheck-failed', 'approve the Henderson estimate');
+
+    m.settingsFailure.next = true;
+    const answer = await say(m, sessionId, 'CA-recheck-failed', 'yes');
+
+    expect(answer).toContain(REFUSED);
+    expect((await m.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
+    expect(m.auditRepo.getAll().map((e) => e.eventType)).not.toContain('proposal.approved');
+  });
+
+  it('a silence turn re-checks the line: a backup deactivated after the readback is refused there too', async () => {
+    const m = mutableBackupHarness([APPROVE_CLASSIFICATION]);
+    const proposal = await seedPending(m.proposalRepo);
+    const sessionId = await startCall(m, BACKUP_MOBILE, 'CA-recheck-silence');
+    await say(m, sessionId, 'CA-recheck-silence', 'approve the Henderson estimate');
+    m.backup.status = 'suspended';
+
+    const effects = await m.adapter.handlePendingDialogueSilence(m.store.get(sessionId)!, TENANT);
+
+    const spoken = (effects ?? []).map((e) => String((e.payload as { text?: string }).text ?? '')).join(' ');
+    expect(spoken).toContain(REFUSED);
+    expect(m.store.get(sessionId)!.pendingVoiceApproval).toBeUndefined();
+    expect(m.store.get(sessionId)!.machine.currentContext.ownerSession).not.toBe(true);
+    expect((await m.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
   });
 
   // B4-2 — signing up changes a backup's subject (row id → Clerk login), not
