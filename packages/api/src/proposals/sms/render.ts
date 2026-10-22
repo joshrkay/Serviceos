@@ -26,7 +26,8 @@
  *
  * OVAS-01 — a payload carrying the RV-042 acceptance-void marker always gets
  * the "Check: approving voids the customer's prior acceptance" line, at any
- * confidence level (proposals/acceptance-void.ts).
+ * confidence level and on every form — the review-in-app and not-executable-
+ * yet forms too (proposals/acceptance-void.ts).
  */
 import type { ProposalType } from '../proposal';
 import { actionClassForProposalType } from '../proposal';
@@ -238,26 +239,33 @@ export function renderProposalSms(
   const { overallConfidence, fieldConfidence, firstMarkerReason } = extractMeta(input.payload);
   const summary = input.summary.trim();
   const prefix = options.reapproval ? 'Updated: ' : '';
+  // OVAS-01 — the acceptance-void warning prints on EVERY form, the
+  // review-only ones below included (C-1698-P2): approving that card deletes
+  // the customer's signed acceptance, whatever the owner is asked to do next.
+  const voidsAcceptance = voidsCustomerAcceptance(input.payload);
+  const acceptanceCheckLine = voidsAcceptance ? `\nCheck: ${ACCEPTANCE_VOID_MARKER.reason}` : '';
 
   // ── #1485 — not executable yet: never-approvable form + the ask ──
   if (options.blockedBy) {
-    const tail = `${options.blockedBy} ${REVIEW_IN_APP_INSTRUCTIONS}`;
+    const tail = `${options.blockedBy} ${REVIEW_IN_APP_INSTRUCTIONS}${acceptanceCheckLine}`;
     const summaryBudget = Math.max(PROPOSAL_SMS_MAX_CHARS - prefix.length - 1 - tail.length, 20);
     return `${prefix}${truncate(summary, summaryBudget)} ${tail}`;
   }
 
   // ── LOW / VERY_LOW: never-approvable form — no Reply Y, no one-tap link ──
   if (isBlocking(overallConfidence)) {
-    // Same truncation contract as the normal form: the instructions are
-    // sacred ("reply N to reject" must survive), the summary gives way.
+    // Same truncation contract as the normal form: the instructions (and the
+    // acceptance warning) are sacred ("reply N to reject" must survive), the
+    // summary gives way.
     const summaryBudget = Math.max(
       PROPOSAL_SMS_MAX_CHARS -
         prefix.length -
         1 - // space before instructions
-        REVIEW_IN_APP_INSTRUCTIONS.length,
+        REVIEW_IN_APP_INSTRUCTIONS.length -
+        acceptanceCheckLine.length,
       20,
     );
-    return `${prefix}${truncate(summary, summaryBudget)} ${REVIEW_IN_APP_INSTRUCTIONS}`;
+    return `${prefix}${truncate(summary, summaryBudget)} ${REVIEW_IN_APP_INSTRUCTIONS}${acceptanceCheckLine}`;
   }
 
   // ── HIGH (or absent _meta): existing behavior, byte-identical ──
@@ -317,15 +325,13 @@ export function renderProposalSms(
   const linkPart = options.approveUrl ? ` Or tap (30 min): ${options.approveUrl}` : '';
 
   // MEDIUM: append Check: line when a marker exists (within budget).
-  // OVAS-01 — the acceptance-void warning prints at EVERY level: approving
-  // that card deletes the customer's signed acceptance, and a 'high' render
-  // used to hand the owner a bare "Reply Y" with no hint of it.
-  const checkReason = voidsCustomerAcceptance(input.payload)
-    ? ACCEPTANCE_VOID_MARKER.reason
-    : overallConfidence === 'medium'
-      ? firstMarkerReason
-      : undefined;
-  const checkLine = checkReason ? `\nCheck: ${checkReason}` : '';
+  // OVAS-01 — the acceptance-void warning wins at EVERY level: a 'high'
+  // render used to hand the owner a bare "Reply Y" with no hint of it.
+  const checkLine = voidsAcceptance
+    ? acceptanceCheckLine
+    : overallConfidence === 'medium' && firstMarkerReason
+      ? `\nCheck: ${firstMarkerReason}`
+      : '';
 
   // The summary absorbs all truncation; instructions are sacred. The link
   // is appended outside the budget (see module note).
