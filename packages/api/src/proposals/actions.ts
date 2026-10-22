@@ -75,6 +75,9 @@ const CONFIG_WRITING_PROPOSAL_TYPES: ReadonlySet<string> = new Set([
   // D-044 / #1769 — approving writes the public about copy of the hosted site;
   // publishing the site itself needs settings:update, so this does too.
   'update_tenant_site_about',
+  // D-044 / #1771 — approving changes the public Google listing (website and
+  // booking link); it needs the same settings:update as the site itself.
+  'update_google_listing_website',
   // PI-2 — a standing instruction is injected as "OWNER STANDING
   // INSTRUCTIONS" into every drafting prompt and composeBrandVoiceMessage,
   // including the dropped-call recovery SMS that goes to customers unreviewed.

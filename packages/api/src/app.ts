@@ -2252,6 +2252,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     ? new TwilioCustomerMessageService(messageDelivery, dispatchRepo, customerRepo)
     : undefined;
   const executionHandlers = createExecutionHandlerRegistry({
+    googleBusinessIntegrationRepo,
+    googleBusinessConfig: googleBusinessOAuthConfig ?? null,
     customerRepo,
     jobRepo,
     // B7 (money-loss fix) — update_job routes status changes through
@@ -6042,6 +6044,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     '/api/get-found-online',
     createGetFoundOnlineRouter({
       integrationRepo: googleBusinessIntegrationRepo,
+      proposalRepo,
+      webOrigin: tenantSiteViewDeps.webOrigin,
       ...(googleReviewsPollStateRepo ? { pollStateRepo: googleReviewsPollStateRepo } : {}),
       settingsRepo,
       dismissalRepo: pool

@@ -28,7 +28,7 @@ export type ProposalStatus =
   // or re-executed. If the operator wants to proceed after undoing,
   // they draft a new proposal. Decision 9 ("5-second undo window").
   | 'undone';
-export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'update_job' | 'create_appointment' | 'create_booking' | 'callback' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'create_invoice_schedule' | 'batch_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'add_crew_member' | 'remove_crew_member' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'send_estimate' | 'send_estimate_nudge' | 'record_payment' | 'log_expense' | 'convert_lead' | 'confirm_appointment' | 'mark_lead_lost' | 'add_service_location' | 'log_time_entry' | 'notify_delay' | 'request_feedback' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'onboarding_voice_policy' | 'review_response_proposal' | 'send_payment_reminder' | 'apply_late_fee' | 'create_standing_instruction' | 'update_catalog_item' | 'adopt_entity_alias' | 'update_brand_voice' | 'record_refund' | 'apply_credit' | 'send_customer_message' | 'create_change_order' | 'create_service_agreement' | 'add_material' | 'add_catalog_item' | 'update_tenant_site_about';
+export type ProposalType = 'create_customer' | 'update_customer' | 'create_job' | 'update_job' | 'create_appointment' | 'create_booking' | 'callback' | 'draft_estimate' | 'update_estimate' | 'draft_invoice' | 'update_invoice' | 'issue_invoice' | 'create_invoice_schedule' | 'batch_invoice' | 'reassign_appointment' | 'reschedule_appointment' | 'add_crew_member' | 'remove_crew_member' | 'cancel_appointment' | 'voice_clarification' | 'add_note' | 'send_invoice' | 'send_estimate' | 'send_estimate_nudge' | 'record_payment' | 'log_expense' | 'convert_lead' | 'confirm_appointment' | 'mark_lead_lost' | 'add_service_location' | 'log_time_entry' | 'notify_delay' | 'request_feedback' | 'emergency_dispatch' | 'onboarding_tenant_settings' | 'onboarding_service_category' | 'onboarding_estimate_template' | 'onboarding_team_member' | 'onboarding_schedule' | 'onboarding_voice_policy' | 'review_response_proposal' | 'send_payment_reminder' | 'apply_late_fee' | 'create_standing_instruction' | 'update_catalog_item' | 'adopt_entity_alias' | 'update_brand_voice' | 'record_refund' | 'apply_credit' | 'send_customer_message' | 'create_change_order' | 'create_service_agreement' | 'add_material' | 'add_catalog_item' | 'update_tenant_site_about' | 'update_google_listing_website';
 
 /**
  * D-015 — a lane booking that went live: approved, mid-execution, executed,
@@ -125,6 +125,7 @@ export const VALID_PROPOSAL_TYPES: ProposalType[] = [
   'add_material',
   'add_catalog_item',
   'update_tenant_site_about',
+  'update_google_listing_website',
 ];
 
 /**
@@ -538,6 +539,9 @@ export function actionClassForProposalType(type: ProposalType): ActionClass {
     // auto-approved at any trust tier, and nothing goes live until the owner
     // approves (editing first if they like).
     case 'update_tenant_site_about':
+    // D-044 / #1771 — writes the website and booking link to the owner's public
+    // Google listing. Public and outward-facing: 'manual', never auto-approved.
+    case 'update_google_listing_website':
       return 'manual';
   }
 }

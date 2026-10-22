@@ -20,7 +20,11 @@ const FORWARDING_PASSED = {
   mode: 'missed' as const,
   checkPassedAt: new Date('2026-10-20T15:00:00Z'),
 };
-const CONNECTED = { locationState: 'connected' as const, pollingPaused: false };
+const CONNECTED = {
+  locationState: 'connected' as const,
+  pollingPaused: false,
+  listingWebsiteUri: 'https://joes-plumbing.sites.example.com',
+};
 const REVIEW = 'https://g.page/r/review-999';
 const SITE = 'https://joes-plumbing.sites.example.com';
 
@@ -37,6 +41,7 @@ describe('deriveGetFoundOnlineChecklist', () => {
       review_link: ['pending', 'missing'],
       call_forwarding: ['pending', 'not_set_up'],
       website: ['pending', 'missing'],
+      google_website: ['pending', 'not_connected'],
     });
     expect(deriveGetFoundOnlineChecklist(NOTHING)).toMatchObject({ allDone: false, visible: true });
   });
@@ -55,6 +60,7 @@ describe('deriveGetFoundOnlineChecklist', () => {
       review_link: ['current', 'missing'],
       call_forwarding: ['pending', 'not_set_up'],
       website: ['pending', 'missing'],
+      google_website: ['pending', 'not_connected'],
     });
   });
 
@@ -66,6 +72,7 @@ describe('deriveGetFoundOnlineChecklist', () => {
       review_link: ['done', undefined],
       call_forwarding: ['current', 'not_set_up'],
       website: ['pending', 'missing'],
+      google_website: ['pending', 'no_website'],
     });
   });
 
@@ -84,6 +91,61 @@ describe('deriveGetFoundOnlineChecklist', () => {
       website: ['done', undefined],
     });
     expect(statuses({ ...NOTHING, websiteUrl: '  ' })).toMatchObject({ website: ['pending', 'missing'] });
+  });
+
+  it('#1771 google_website: ticks only when the listing shows the tenant website', () => {
+    const base = { ...NOTHING, google: CONNECTED, websiteUrl: SITE };
+    expect(statuses(base)).toMatchObject({ google_website: ['done', undefined] });
+    // Case, a trailing slash and a bare www. do not matter.
+    expect(
+      statuses({ ...base, websiteUrl: 'HTTPS://www.Joes-Plumbing.sites.example.com/' }),
+    ).toMatchObject({ google_website: ['done', undefined] });
+    // A different path is a different page.
+    expect(statuses({ ...base, websiteUrl: `${SITE}/about` })).toMatchObject({
+      google_website: ['pending', 'not_published'],
+    });
+    // The owner changed their website setting after we wrote the old one.
+    expect(statuses({ ...base, websiteUrl: 'https://joesplumbing.com' })).toMatchObject({
+      google_website: ['pending', 'not_published'],
+    });
+    // Nothing written yet.
+    expect(
+      statuses({ ...base, google: { ...CONNECTED, listingWebsiteUri: null } }),
+    ).toMatchObject({ google_website: ['pending', 'not_published'] });
+  });
+
+  it('#1771 google_website: a refused write is an error with the reason, until the listing shows the site', () => {
+    const failed = {
+      ...NOTHING,
+      google: { ...CONNECTED, listingWebsiteUri: null },
+      websiteUrl: SITE,
+      googleWebsiteFailure: 'Google no longer accepts the connection.',
+    };
+    const item = deriveGetFoundOnlineChecklist(failed).items.find((i) => i.id === 'google_website');
+    expect(item).toEqual({
+      id: 'google_website',
+      status: 'error',
+      reason: 'failed',
+      failureReason: 'Google no longer accepts the connection.',
+    });
+    expect(
+      statuses({ ...failed, google: CONNECTED }),
+    ).toMatchObject({ google_website: ['done', undefined] });
+  });
+
+  it('#1771 google_website: needs a connected listing and a website first', () => {
+    expect(statuses({ ...NOTHING, websiteUrl: SITE })).toMatchObject({
+      google_website: ['pending', 'not_connected'],
+    });
+    expect(
+      statuses({ ...NOTHING, websiteUrl: SITE, google: { ...CONNECTED, locationState: 'needs_pick' } }),
+    ).toMatchObject({ google_website: ['pending', 'needs_pick'] });
+    expect(statuses({ ...NOTHING, google: CONNECTED })).toMatchObject({
+      google_website: ['pending', 'no_website'],
+    });
+    expect(statuses({ ...NOTHING, google: CONNECTED, websiteUrl: '  ' })).toMatchObject({
+      google_website: ['pending', 'no_website'],
+    });
   });
 
   it('everything done: visible until dismissed', () => {

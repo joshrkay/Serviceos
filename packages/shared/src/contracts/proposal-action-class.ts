@@ -136,6 +136,8 @@ export const MANUAL_PROPOSAL_TYPES: ReadonlySet<string> = new Set<string>([
   // D-044 / #1769 — AI-drafted about copy for the hosted tenant site. Public
   // words under the business's name: never auto-approved at any trust tier.
   ProposalType.UPDATE_TENANT_SITE_ABOUT,
+  // D-044 / #1771 — public change to the owner's Google listing: never auto-approved.
+  ProposalType.UPDATE_GOOGLE_LISTING_WEBSITE,
 ]);
 
 /** Mirrors the API's ActionClass union (packages/api/src/proposals/proposal.ts). */

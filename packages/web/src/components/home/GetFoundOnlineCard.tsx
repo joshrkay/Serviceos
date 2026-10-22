@@ -9,7 +9,7 @@ import { useNavigate } from 'react-router';
 import { CheckCircle2, Circle, Clock, AlertCircle, ChevronRight } from 'lucide-react';
 import { useApiClient } from '../../lib/apiClient';
 
-type ItemId = 'google_listing' | 'review_link' | 'call_forwarding' | 'website';
+type ItemId = 'google_listing' | 'review_link' | 'call_forwarding' | 'website' | 'google_website';
 type ItemStatus = 'done' | 'current' | 'pending' | 'waiting' | 'error';
 type ItemReason =
   | 'not_connected'
@@ -18,7 +18,10 @@ type ItemReason =
   | 'polling_paused'
   | 'missing'
   | 'not_set_up'
-  | 'not_checked';
+  | 'not_checked'
+  | 'no_website'
+  | 'not_published'
+  | 'failed';
 
 interface ChecklistItem {
   id: ItemId;
@@ -26,6 +29,15 @@ interface ChecklistItem {
   reason?: ItemReason;
   /** call_forwarding, when done: ISO time of the last passing check. */
   checkedAt?: string;
+  /** google_website, when failed: why Google refused the write. */
+  failureReason?: string;
+}
+
+/** The approval card for putting the website and booking link on Google (#1771). */
+interface GoogleWebsiteDraft {
+  proposalId: string;
+  websiteUri: string;
+  bookingUri?: string;
 }
 
 interface Checklist {
@@ -39,6 +51,7 @@ const TITLES: Record<ItemId, string> = {
   review_link: 'Send happy customers to your Google reviews',
   call_forwarding: 'Calls reach the AI',
   website: 'Have a website',
+  google_website: 'Google shows your site',
 };
 
 const DONE_DETAIL: Record<ItemId, string> = {
@@ -46,6 +59,7 @@ const DONE_DETAIL: Record<ItemId, string> = {
   review_link: 'After each job, 4★ and up customers are sent to your review link.',
   call_forwarding: 'Your business number forwards to Rivet.',
   website: 'Customers who search for you have a site to land on.',
+  google_website: 'Your Google listing links to your website and online booking.',
 };
 
 /** Shown when an item is open for the plain reason that it is not done yet. */
@@ -54,6 +68,7 @@ const MISSING_DETAIL: Record<ItemId, string> = {
   review_link: 'Add your Google review link so happy customers can review you.',
   call_forwarding: 'Forward your business number to Rivet so the AI answers your calls.',
   website: 'Add your website, or let us make you one.',
+  google_website: 'Show your website and booking link on your Google listing.',
 };
 
 const REASON_DETAIL: Record<Exclude<ItemReason, 'missing'>, string> = {
@@ -63,6 +78,9 @@ const REASON_DETAIL: Record<Exclude<ItemReason, 'missing'>, string> = {
   polling_paused: 'Google stopped accepting the connection. Reconnect it.',
   not_set_up: 'Forward your business number to Rivet so the AI answers your calls.',
   not_checked: 'Forwarding is set up. Test it to make sure calls reach the AI.',
+  no_website: 'Add your website first, then show it on Google.',
+  not_published: 'Show your website and booking link on your Google listing.',
+  failed: 'Google did not accept the change. Tap to try again.',
 };
 
 /** Where the owner finishes each item. */
@@ -71,6 +89,8 @@ const ACTIONS: Record<ItemId, string> = {
   review_link: '/settings?open=review-links',
   call_forwarding: '/settings/phone',
   website: '/settings?open=website',
+  // Overridden while the item is ready for the approval card (see onItemTap).
+  google_website: '/settings?open=google-business',
 };
 
 function doneDetail(item: ChecklistItem): string {
@@ -103,6 +123,10 @@ export function GetFoundOnlineCard() {
   const [checklist, setChecklist] = useState<Checklist | null>(null);
   const [hiding, setHiding] = useState(false);
   const [hideError, setHideError] = useState('');
+  const [gwDraft, setGwDraft] = useState<GoogleWebsiteDraft | null>(null);
+  const [gwBusy, setGwBusy] = useState(false);
+  const [gwMessage, setGwMessage] = useState('');
+  const [gwError, setGwError] = useState('');
 
   useEffect(() => {
     let cancelled = false;
@@ -118,6 +142,59 @@ export function GetFoundOnlineCard() {
       cancelled = true;
     };
   }, [apiFetch]);
+
+  /** Builds the approval card; nothing reaches Google until the owner approves it. */
+  async function openGoogleWebsiteCard() {
+    setGwBusy(true);
+    setGwError('');
+    setGwMessage('');
+    try {
+      const res = await apiFetch('/api/get-found-online/google-website/draft', {
+        method: 'POST',
+        body: '{}',
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error((body as { message?: string }).message || `HTTP ${res.status}`);
+      setGwDraft((body as { data: GoogleWebsiteDraft }).data);
+    } catch (err) {
+      setGwError(err instanceof Error && err.message ? err.message : 'Could not prepare this. Try again.');
+    } finally {
+      setGwBusy(false);
+    }
+  }
+
+  async function decideGoogleWebsite(decision: 'approve' | 'reject') {
+    if (!gwDraft) return;
+    setGwBusy(true);
+    setGwError('');
+    try {
+      const res = await apiFetch(`/api/proposals/${gwDraft.proposalId}/${decision}`, {
+        method: 'POST',
+        body: decision === 'reject' ? JSON.stringify({ reason: 'not_right' }) : '{}',
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      setGwDraft(null);
+      if (decision === 'approve') {
+        setGwMessage('Approved. Your Google listing updates in a few seconds.');
+      }
+    } catch {
+      setGwError(
+        decision === 'approve' ? 'Could not approve this. Try again.' : 'Could not discard this. Try again.',
+      );
+    } finally {
+      setGwBusy(false);
+    }
+  }
+
+  function onItemTap(item: ChecklistItem) {
+    if (item.id === 'google_website' && (item.reason === 'not_published' || item.reason === 'failed')) {
+      void openGoogleWebsiteCard();
+      return;
+    }
+    void navigate(
+      item.id === 'google_website' && item.reason === 'no_website' ? ACTIONS.website : ACTIONS[item.id],
+    );
+  }
 
   if (!checklist || !checklist.visible) return null;
 
@@ -155,9 +232,13 @@ export function GetFoundOnlineCard() {
       <ul className="mt-2 divide-y divide-border">
         {checklist.items.map((item) => {
           const detail =
-            item.status === 'done' ? doneDetail(item) : item.reason && item.reason !== 'missing'
-                ? REASON_DETAIL[item.reason]
-                : MISSING_DETAIL[item.id];
+            item.status === 'done'
+              ? doneDetail(item)
+              : item.reason === 'failed' && item.failureReason
+                ? `${item.failureReason} Tap to try again.`
+                : item.reason && item.reason !== 'missing'
+                  ? REASON_DETAIL[item.reason]
+                  : MISSING_DETAIL[item.id];
           const body = (
             <>
               <StatusIcon status={item.status} />
@@ -180,12 +261,62 @@ export function GetFoundOnlineCard() {
               ) : (
                 <button
                   type="button"
-                  onClick={() => void navigate(ACTIONS[item.id])}
-                  className="flex min-h-11 w-full items-start gap-3 py-2 text-left"
+                  onClick={() => onItemTap(item)}
+                  disabled={item.id === 'google_website' && gwBusy}
+                  className="flex min-h-11 w-full items-start gap-3 py-2 text-left disabled:opacity-60"
                 >
                   {body}
                   <ChevronRight size={16} className="mt-0.5 shrink-0 text-muted-foreground" aria-hidden />
                 </button>
+              )}
+              {item.id === 'google_website' && gwDraft && (
+                <div
+                  data-testid="google-website-approval"
+                  className="mb-3 rounded-lg border border-border bg-secondary/40 p-3"
+                >
+                  <p className="text-sm font-medium text-foreground">Change your Google listing?</p>
+                  <p className="mt-1 text-xs text-muted-foreground break-words">
+                    Your website: {gwDraft.websiteUri}
+                  </p>
+                  {gwDraft.bookingUri && (
+                    <p className="mt-1 text-xs text-muted-foreground break-words">
+                      Book online link: {gwDraft.bookingUri}
+                    </p>
+                  )}
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    This is public. Customers will see it on Google.
+                  </p>
+                  <div className="mt-2 flex flex-wrap gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void decideGoogleWebsite('approve')}
+                      disabled={gwBusy}
+                      data-testid="google-website-approve"
+                      className="min-h-11 rounded-lg bg-primary px-4 text-sm text-primary-foreground disabled:opacity-60"
+                    >
+                      {gwBusy ? 'Working…' : 'Show on Google'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void decideGoogleWebsite('reject')}
+                      disabled={gwBusy}
+                      data-testid="google-website-discard"
+                      className="min-h-11 rounded-lg px-3 text-sm text-muted-foreground hover:bg-secondary disabled:opacity-60"
+                    >
+                      Not now
+                    </button>
+                  </div>
+                </div>
+              )}
+              {item.id === 'google_website' && gwMessage && (
+                <p className="mb-2 text-xs text-muted-foreground" role="status">
+                  {gwMessage}
+                </p>
+              )}
+              {item.id === 'google_website' && gwError && (
+                <p className="mb-2 text-xs text-red-600" role="alert">
+                  {gwError}
+                </p>
               )}
             </li>
           );

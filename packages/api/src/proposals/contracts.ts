@@ -35,6 +35,7 @@ import { addCatalogItemPayloadSchema } from './contracts/add-catalog-item';
 import { adoptEntityAliasPayloadSchema } from './contracts/adopt-entity-alias';
 import { updateBrandVoicePayloadSchema } from './contracts/brand-voice';
 import { updateTenantSiteAboutPayloadSchema } from './contracts/tenant-site-about';
+import { updateGoogleListingWebsitePayloadSchema } from './contracts/google-listing-website';
 import {
   onboardingTenantSettingsPayloadSchema,
   onboardingServiceCategoryPayloadSchema,
@@ -914,6 +915,7 @@ export const PROPOSAL_TYPE_SCHEMAS: Record<ProposalType, z.ZodType> = {
   adopt_entity_alias: adoptEntityAliasPayloadSchema,
   update_brand_voice: updateBrandVoicePayloadSchema,
   update_tenant_site_about: updateTenantSiteAboutPayloadSchema,
+  update_google_listing_website: updateGoogleListingWebsitePayloadSchema,
 };
 
 export function validateProposalPayload(

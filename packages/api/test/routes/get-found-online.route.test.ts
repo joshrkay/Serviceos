@@ -17,6 +17,7 @@ import {
   InMemoryForwardingCheckRepository,
 } from '../../src/onboarding/forwarding-check';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
+import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
 const TENANT = 'tenant-gfo-1';
@@ -32,6 +33,7 @@ describe('/api/get-found-online', () => {
   let checkFetch: ReturnType<typeof vi.fn>;
   let checkService: ForwardingCheckService;
   let auditRepo: InMemoryAuditRepository;
+  let proposalRepo: InMemoryProposalRepository;
 
   beforeAll(() => {
     originalKey = process.env.TENANT_ENCRYPTION_KEY;
@@ -65,6 +67,7 @@ describe('/api/get-found-online', () => {
       fetchImpl: checkFetch as unknown as typeof fetch,
     });
     auditRepo = new InMemoryAuditRepository();
+    proposalRepo = new InMemoryProposalRepository();
   });
 
   function app(role: NonNullable<AuthenticatedRequest['auth']>['role'] = 'owner') {
@@ -84,6 +87,8 @@ describe('/api/get-found-online', () => {
         forwardingRepo,
         getRivetNumber: async () => '+15125550123',
         forwardingCheck: checkService,
+        proposalRepo,
+        webOrigin: 'https://app.example.com',
         auditRepo,
       }),
     );
@@ -106,6 +111,7 @@ describe('/api/get-found-online', () => {
       locationCount: 1,
     });
     await settingsRepo.update(TENANT, { googleReviewUrl: REVIEW, websiteUrl: 'https://joes.sites.example.com' });
+    await integrationRepo.recordListingWebsite(TENANT, '999', 'https://joes.sites.example.com');
     await forwardingRepo.save(TENANT, { carrier: 'att', mode: 'all' });
     await forwardingRepo.recordCheckPassed(TENANT, new Date('2026-10-20T15:00:00Z'));
   }
@@ -119,6 +125,7 @@ describe('/api/get-found-online', () => {
         { id: 'review_link', status: 'pending', reason: 'missing' },
         { id: 'call_forwarding', status: 'pending', reason: 'not_set_up' },
         { id: 'website', status: 'pending', reason: 'missing' },
+        { id: 'google_website', status: 'pending', reason: 'not_connected' },
       ],
       allDone: false,
       visible: true,
@@ -171,6 +178,103 @@ describe('/api/get-found-online', () => {
       locationTitle: 'Acme',
     });
     expect(await item()).toEqual({ id: 'google_listing', status: 'done' });
+  });
+
+  describe('#1771 POST /google-website/draft', () => {
+    const draft = () => request(app()).post('/api/get-found-online/google-website/draft');
+    const pending = async () => [
+      ...(await proposalRepo.findByStatus(TENANT, 'draft')),
+      ...(await proposalRepo.findByStatus(TENANT, 'ready_for_review')),
+    ].filter((p) => p.proposalType === 'update_google_listing_website');
+
+    async function connectOnly(websiteUrl: string | null) {
+      await integrationRepo.upsert({
+        tenantId: TENANT,
+        accessToken: 'AT',
+        refreshToken: 'RT',
+        accessTokenExpiresAt: new Date(Date.now() + 3600_000),
+        selection: { accountId: '123', locationId: '999', placeId: 'ChIJ', reviewUrl: REVIEW, locationTitle: 'Acme' },
+        locationCount: 1,
+      });
+      if (websiteUrl) await settingsRepo.update(TENANT, { websiteUrl });
+    }
+
+    it('drafts a manual-class card with the website and the public booking page, and audits it', async () => {
+      await connectOnly('https://joesplumbing.com');
+      const res = await draft();
+      expect(res.status).toBe(201);
+      expect(res.body.data).toMatchObject({
+        websiteUri: 'https://joesplumbing.com',
+        bookingUri: `https://app.example.com/book?t=${TENANT}`,
+      });
+      const [proposal] = await pending();
+      expect(proposal).toMatchObject({ status: 'draft', payload: { websiteUri: 'https://joesplumbing.com' } });
+      const events = await auditRepo.findByEntity(TENANT, 'google_business_listing', (await integrationRepo.get(TENANT))!.id);
+      expect(events.map((e) => e.eventType)).toEqual(['google_listing.website_drafted']);
+    });
+
+    it('a new draft replaces the old one', async () => {
+      await connectOnly('https://joesplumbing.com');
+      await draft();
+      await settingsRepo.update(TENANT, { websiteUrl: 'https://joes-new.com' });
+      await draft();
+      const open = await pending();
+      expect(open).toHaveLength(1);
+      expect(open[0]!.payload.websiteUri).toBe('https://joes-new.com');
+    });
+
+    it('makes no proposal when the listing is not connected', async () => {
+      await settingsRepo.update(TENANT, { websiteUrl: 'https://joesplumbing.com' });
+      expect((await draft()).status).toBe(400);
+      expect(await pending()).toHaveLength(0);
+    });
+
+    it('makes no proposal when a location is not chosen yet', async () => {
+      await integrationRepo.upsert({
+        tenantId: TENANT,
+        accessToken: 'AT',
+        refreshToken: 'RT',
+        accessTokenExpiresAt: new Date(Date.now() + 3600_000),
+        locationCount: 2,
+      });
+      await settingsRepo.update(TENANT, { websiteUrl: 'https://joesplumbing.com' });
+      expect((await draft()).status).toBe(400);
+      expect(await pending()).toHaveLength(0);
+    });
+
+    it('makes no proposal when the website is empty', async () => {
+      await connectOnly(null);
+      const res = await draft();
+      expect(res.status).toBe(400);
+      expect(res.body.message ?? res.body.error).toMatch(/website/i);
+      expect(await pending()).toHaveLength(0);
+    });
+
+    it('a failed approval surfaces Google\'s reason on the checklist item', async () => {
+      await connectOnly('https://joesplumbing.com');
+      const { body } = await draft();
+      const failed = await proposalRepo.findById(TENANT, body.data.proposalId);
+      await proposalRepo.updateStatus(TENANT, failed!.id, 'approved');
+      await proposalRepo.updateStatus(TENANT, failed!.id, 'executing');
+      await proposalRepo.updateStatus(TENANT, failed!.id, 'execution_failed', {
+        executionError: 'Google no longer accepts the connection.',
+      });
+      const item = (await request(app()).get('/api/get-found-online')).body.data.items.find(
+        (i: { id: string }) => i.id === 'google_website',
+      );
+      expect(item).toEqual({
+        id: 'google_website',
+        status: 'error',
+        reason: 'failed',
+        failureReason: 'Google no longer accepts the connection.',
+      });
+    });
+
+    it('is owner-only', async () => {
+      await connectOnly('https://joesplumbing.com');
+      expect((await request(app('technician')).post('/api/get-found-online/google-website/draft')).status).toBe(403);
+      expect(await pending()).toHaveLength(0);
+    });
   });
 
   it('dismiss is refused while an item is open', async () => {

@@ -270,6 +270,9 @@ export enum ProposalType {
   // site. Manual-class: public-facing words never auto-approve, and nothing
   // goes live until the owner approves (and may edit) the draft.
   UPDATE_TENANT_SITE_ABOUT = 'update_tenant_site_about',
+  // D-044 / #1771 — website + booking link on the owner's Google listing. A
+  // public change to their listing: manual-class, only after an owner tap.
+  UPDATE_GOOGLE_LISTING_WEBSITE = 'update_google_listing_website',
 }
 
 export enum RejectionCategory {

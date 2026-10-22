@@ -25,6 +25,7 @@ const OPEN = {
     { id: 'review_link', status: 'pending', reason: 'missing' },
     { id: 'call_forwarding', status: 'pending', reason: 'not_set_up' },
     { id: 'website', status: 'pending', reason: 'missing' },
+    { id: 'google_website', status: 'pending', reason: 'not_published' },
   ],
   allDone: false,
   visible: true,
@@ -36,6 +37,7 @@ const DONE = {
     { id: 'review_link', status: 'done' },
     { id: 'call_forwarding', status: 'done', checkedAt: '2026-10-20T15:00:00.000Z' },
     { id: 'website', status: 'done' },
+    { id: 'google_website', status: 'done' },
   ],
   allDone: true,
   visible: true,
@@ -67,7 +69,7 @@ describe('GetFoundOnlineCard', () => {
     AH.fetcher.mockResolvedValueOnce(jsonResponse({ data: OPEN }));
     renderCard();
     await screen.findByTestId('get-found-online-card');
-    expect(screen.getByTestId('get-found-online-progress')).toHaveTextContent('0 of 4 done');
+    expect(screen.getByTestId('get-found-online-progress')).toHaveTextContent('0 of 5 done');
     expect(screen.getByTestId('get-found-online-item-google_listing')).toHaveTextContent(
       'Pick which Google location is yours.',
     );
@@ -108,6 +110,90 @@ describe('GetFoundOnlineCard', () => {
     renderCard();
     const item = await screen.findByTestId('get-found-online-item-website');
     expect(item).toHaveTextContent('Add your website, or let us make you one.');
+    fireEvent.click(item.querySelector('button')!);
+    expect(await screen.findByTestId('location')).toHaveTextContent('/settings?open=website');
+  });
+
+  it('#1771 Google shows your site: a tap builds the approval card, approving sends it', async () => {
+    AH.fetcher
+      .mockResolvedValueOnce(jsonResponse({ data: OPEN }))
+      .mockResolvedValueOnce(
+        jsonResponse(
+          {
+            data: {
+              proposalId: 'p-1',
+              websiteUri: 'https://joesplumbing.com',
+              bookingUri: 'https://app.example.com/book?t=t1',
+            },
+          },
+          201,
+        ),
+      )
+      .mockResolvedValueOnce(jsonResponse({ id: 'p-1', status: 'approved' }));
+    renderCard();
+    const item = await screen.findByTestId('get-found-online-item-google_website');
+    expect(item).toHaveTextContent('Google shows your site');
+    fireEvent.click(item.querySelector('button')!);
+
+    const card = await screen.findByTestId('google-website-approval');
+    expect(card).toHaveTextContent('https://joesplumbing.com');
+    expect(card).toHaveTextContent('https://app.example.com/book?t=t1');
+    expect(AH.fetcher).toHaveBeenLastCalledWith(
+      '/api/get-found-online/google-website/draft',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    // Drafting alone sent nothing to Google: no approve call yet.
+    expect(AH.fetcher.mock.calls.some((c) => String(c[0]).includes('/approve'))).toBe(false);
+
+    fireEvent.click(screen.getByTestId('google-website-approve'));
+    await screen.findByRole('status');
+    expect(AH.fetcher).toHaveBeenLastCalledWith('/api/proposals/p-1/approve', expect.objectContaining({ method: 'POST' }));
+    expect(screen.queryByTestId('google-website-approval')).toBeNull();
+  });
+
+  it('#1771 Not now discards the card; a failed draft says why', async () => {
+    AH.fetcher
+      .mockResolvedValueOnce(jsonResponse({ data: OPEN }))
+      .mockResolvedValueOnce(jsonResponse({ data: { proposalId: 'p-2', websiteUri: 'https://a.com' } }, 201))
+      .mockResolvedValueOnce(jsonResponse({ id: 'p-2', status: 'rejected' }));
+    renderCard();
+    fireEvent.click((await screen.findByTestId('get-found-online-item-google_website')).querySelector('button')!);
+    fireEvent.click(await screen.findByTestId('google-website-discard'));
+    await waitFor(() => expect(screen.queryByTestId('google-website-approval')).toBeNull());
+    expect(AH.fetcher).toHaveBeenLastCalledWith('/api/proposals/p-2/reject', expect.objectContaining({ method: 'POST' }));
+
+    AH.fetcher.mockResolvedValueOnce(jsonResponse({ message: 'Connect your Google Business Profile first' }, 400));
+    fireEvent.click(screen.getByTestId('get-found-online-item-google_website').querySelector('button')!);
+    expect(await screen.findByRole('alert')).toHaveTextContent('Connect your Google Business Profile first');
+  });
+
+  it('#1771 shows Google\'s reason after a refused write, and no website sends the owner to add one', async () => {
+    AH.fetcher.mockResolvedValueOnce(
+      jsonResponse({
+        data: {
+          ...OPEN,
+          items: [
+            ...OPEN.items.slice(0, 4),
+            { id: 'google_website', status: 'error', reason: 'failed', failureReason: 'Google no longer accepts the connection.' },
+          ],
+        },
+      }),
+    );
+    renderCard();
+    const failed = await screen.findByTestId('get-found-online-item-google_website');
+    expect(failed).toHaveTextContent('Google no longer accepts the connection.');
+    expect(failed).toHaveAttribute('data-status', 'error');
+  });
+
+  it('#1771 with no website yet, the item opens the Website card', async () => {
+    AH.fetcher.mockResolvedValueOnce(
+      jsonResponse({
+        data: { ...OPEN, items: [...OPEN.items.slice(0, 4), { id: 'google_website', status: 'pending', reason: 'no_website' }] },
+      }),
+    );
+    renderCard();
+    const item = await screen.findByTestId('get-found-online-item-google_website');
+    expect(item).toHaveTextContent('Add your website first');
     fireEvent.click(item.querySelector('button')!);
     expect(await screen.findByTestId('location')).toHaveTextContent('/settings?open=website');
   });
