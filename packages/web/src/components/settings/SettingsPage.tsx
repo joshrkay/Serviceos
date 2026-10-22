@@ -25,6 +25,7 @@ import { TerminologySheet } from './TerminologySheet';
 import { JobFormTemplatesSheet } from './JobFormTemplatesSheet';
 import { JobCustomFieldsSheet } from './JobCustomFieldsSheet';
 import { MarketingCampaignsSheet } from './MarketingCampaignsSheet';
+import { DripCampaignsSheet } from './DripCampaignsSheet';
 import { CustomerGroupsSheet } from './CustomerGroupsSheet';
 import { StandingInstructionsSheet } from './StandingInstructionsSheet';
 import { BrandVoiceSheet } from './BrandVoiceSheet';
@@ -598,6 +599,7 @@ export function SettingsPage() {
   const [jobFormsOpen, setJobFormsOpen] = useState(false);
   const [jobCustomFieldsOpen, setJobCustomFieldsOpen] = useState(false);
   const [marketingOpen, setMarketingOpen] = useState(false);
+  const [dripOpen, setDripOpen] = useState(false);
   const [customerGroupsOpen, setCustomerGroupsOpen] = useState(false);
   const [standingInstructionsOpen, setStandingInstructionsOpen] = useState(false);
   const [brandVoiceOpen, setBrandVoiceOpen] = useState(false);
@@ -996,6 +998,11 @@ export function SettingsPage() {
           : []),
         { icon: Star, label: 'Feedback & reviews', description: 'Average rating, distribution, and recent comments', action: () => navigate('/settings/feedback') },
         { icon: Megaphone, label: 'Email campaigns', description: 'Send promos & announcements to customer segments', action: () => setMarketingOpen(true) },
+        // #1735 — owner-only multi-step text/call/email follow-ups. The sheet
+        // explains itself when the tenant flag is off.
+        ...(me?.role === 'owner'
+          ? [{ icon: Megaphone, label: 'Follow-up campaigns', description: 'Automatic text, call and email follow-ups for lapsed customers and unsold estimates', action: () => setDripOpen(true) }]
+          : []),
       ],
     },
     {
@@ -1791,6 +1798,7 @@ export function SettingsPage() {
       {marketingOpen && (
         <MarketingCampaignsSheet onClose={() => setMarketingOpen(false)} />
       )}
+      {dripOpen && <DripCampaignsSheet onClose={() => setDripOpen(false)} />}
       {customerGroupsOpen && (
         <CustomerGroupsSheet onClose={() => setCustomerGroupsOpen(false)} />
       )}

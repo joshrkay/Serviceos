@@ -328,6 +328,8 @@ export default defineConfig<DevAuthFixtures>({
               'google-profile-walkthrough-mobile.spec.ts',
               // #1738 — Settings → Google Local Services leads sheet at 320px.
               'lsa-leads-mobile.spec.ts',
+              // #1735 — Settings → Follow-up campaigns sheet at 320px.
+              'drip-campaigns-mobile.spec.ts',
             ],
             testIgnore: [],
             dependencies: ['devauth-setup'],

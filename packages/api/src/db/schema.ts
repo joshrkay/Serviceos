@@ -8322,6 +8322,8 @@ export const MIGRATIONS = {
     ALTER TABLE drip_step_events FORCE ROW LEVEL SECURITY;
     DROP POLICY IF EXISTS tenant_isolation_drip_step_events ON drip_step_events;
     CREATE POLICY tenant_isolation_drip_step_events ON drip_step_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 
   // #1738 — Google Local Services Ads lead intake. One row per linked tenant:
   // the per-tenant webhook secret (AES-GCM, never plaintext) that authenticates
