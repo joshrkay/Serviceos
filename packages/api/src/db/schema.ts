@@ -8449,10 +8449,13 @@ export const MIGRATIONS = {
               && tstzrange(NEW.scheduled_start, NEW.scheduled_end)
           AND NOT (NEW.overlap_accepted AND aa.appointment_id = ANY (NEW.overlap_accepted_with))
       ) THEN
+        -- Raised as the no_double_booking violation it is (same SQLSTATE and
+        -- constraint name as the EXCLUDE constraint), so every caller that
+        -- recognised the constraint keeps recognising the guard.
         RAISE EXCEPTION 'DOUBLE_BOOKING: technician % already has an active assignment overlapping [%, %]%',
           NEW.technician_id, NEW.scheduled_start, NEW.scheduled_end,
           CASE WHEN NEW.overlap_accepted THEN ' that the dispatcher did not accept' ELSE '' END
-          USING ERRCODE = 'exclusion_violation';
+          USING ERRCODE = 'exclusion_violation', CONSTRAINT = 'no_double_booking';
       END IF;
       RETURN NEW;
     END;
