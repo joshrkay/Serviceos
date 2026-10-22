@@ -136,7 +136,8 @@ export interface AppointmentAssignment {
   /**
    * The dispatcher booked this tech knowing the visit overlaps another one
    * (FR-2 phase 3c). Exempts this row from `no_double_booking` (migration
-   * 332); set only when an overlap actually existed at assignment time.
+   * 346, originally 332); set only when an overlap actually existed at
+   * assignment time.
    */
   overlapAccepted?: boolean;
   /** The appointment ids that acceptance covers; the DB guard holds the row to exactly these. */
