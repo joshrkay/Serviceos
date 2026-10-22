@@ -54,7 +54,17 @@ function bookedOnly(s: TechnicianSuggestion): boolean {
   return !s.feasible && s.overlaps.length > 0 && blockingCount === s.overlaps.length;
 }
 
-function OverlapAlerts({ booked, timezone }: { booked: TechnicianSuggestion[]; timezone: string }) {
+// FR-2 phase 3c — a booked tech can still be picked, but only through this
+// explicit button (Josh, 2026-10-22: "Allow overlap if select by user"); the
+// confirm dialog then asks the dispatcher to tick "Book anyway" as well.
+function OverlapAlerts({
+  booked, timezone, appointmentId, onPick,
+}: {
+  booked: TechnicianSuggestion[];
+  timezone: string;
+  appointmentId: string;
+  onPick: SuggestedTechniciansProps['onPick'];
+}) {
   if (booked.length === 0) return null;
   return (
     <ul className="mt-1 flex flex-col gap-1" data-testid="suggest-techs-overlaps">
@@ -71,6 +81,14 @@ function OverlapAlerts({ booked, timezone }: { booked: TechnicianSuggestion[]; t
               {overlapLabel(o, timezone)}
             </span>
           ))}
+          <button
+            type="button"
+            className="mt-2 min-h-11 w-full rounded-md border border-amber-400 bg-white px-3 text-sm font-medium text-amber-900 hover:bg-amber-100"
+            onClick={() => onPick(appointmentId, s.technicianId, s.name)}
+            data-testid="suggest-techs-book-anyway"
+          >
+            Book {s.name} anyway
+          </button>
         </li>
       ))}
     </ul>
@@ -171,7 +189,7 @@ export function SuggestedTechnicians({ appointmentId, onPick }: SuggestedTechnic
           {firstBlocked?.reasons[0] ? ` (${firstBlocked.name}: ${firstBlocked.reasons[0]})` : ''}.
         </p>
         {state.partialNote && <PartialNote text={state.partialNote} />}
-        <OverlapAlerts booked={booked} timezone={timezone} />
+        <OverlapAlerts booked={booked} timezone={timezone} appointmentId={appointmentId} onPick={onPick} />
       </div>
     );
   }
@@ -199,7 +217,7 @@ export function SuggestedTechnicians({ appointmentId, onPick }: SuggestedTechnic
           </li>
         ))}
       </ul>
-      <OverlapAlerts booked={booked} timezone={timezone} />
+      <OverlapAlerts booked={booked} timezone={timezone} appointmentId={appointmentId} onPick={onPick} />
       {state.partialNote && <PartialNote text={state.partialNote} />}
     </div>
   );

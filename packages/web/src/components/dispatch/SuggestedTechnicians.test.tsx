@@ -81,20 +81,29 @@ describe('SuggestedTechnicians', () => {
     expect(await screen.findByTestId('suggest-techs-none')).toHaveTextContent('Xi: Outside working hours');
   });
 
-  it('alerts on a booked tech with the clashing visit and its times in tenant time, without offering a pick', async () => {
+  it('alerts on a booked tech with the clashing visit and its times in tenant time, offering only an explicit "Book anyway"', async () => {
+    const onPick = vi.fn();
     respondWith([
       sug({ technicianId: 'a', name: 'Ann' }),
       sug({ technicianId: 'e', name: 'Eve', feasible: false, reasons: ['Overlaps with appointment a-other'], overlaps: [clash] }),
       sug({ technicianId: 'c', name: 'Cal', feasible: false, reasons: ['Technician is missing required skill(s): hvac'] }),
     ]);
-    render(<SuggestedTechnicians appointmentId="appt-1" onPick={vi.fn()} />);
+    render(<SuggestedTechnicians appointmentId="appt-1" onPick={onPick} />);
     fireEvent.click(screen.getByTestId('suggest-techs-button'));
     const alerts = await screen.findAllByTestId('suggest-techs-overlap');
     expect(alerts).toHaveLength(1);
     expect(alerts[0]).toHaveTextContent('Eve is booked');
     expect(alerts[0]).toHaveTextContent('Overlaps by 30 min: Boiler service, 1:30 PM–3:00 PM');
-    expect(alerts[0].querySelector('button')).toBeNull();
+    // FR-2 phase 3c — booked techs are never a plain pick; only the labelled
+    // "Book anyway" hands them to the board (which asks again in the dialog).
     expect(screen.getAllByTestId('suggest-techs-pick')).toHaveLength(1);
+    const bookAnyway = screen.getByTestId('suggest-techs-book-anyway');
+    expect(bookAnyway).toHaveTextContent('Book Eve anyway');
+    expect(bookAnyway.className).toMatch(/\bmin-h-11\b/);
+    expect(bookAnyway.className).toMatch(/\bw-full\b/);
+    fireEvent.click(bookAnyway);
+    expect(onPick).toHaveBeenCalledWith('appt-1', 'e', 'Eve');
+    // A tech blocked by a missing skill gets no such button.
     expect(screen.queryByText(/Cal/)).toBeNull();
   });
 
