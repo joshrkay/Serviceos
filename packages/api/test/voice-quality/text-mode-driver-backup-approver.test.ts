@@ -13,7 +13,12 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import { AgentEventBus } from '../../src/ai/voice-quality/event-bus';
-import { TextModeDriver } from '../../src/ai/voice-quality/text-mode-driver';
+import {
+  TextModeDriver,
+  vqOwnerActorId,
+  vqResolveMemberRoleFor,
+} from '../../src/ai/voice-quality/text-mode-driver';
+import { InMemoryDailyDigestRepository } from '../../src/digest/digest-service';
 import { createMockLLMGateway } from '../../src/ai/gateway/factory';
 import { InMemoryProposalRepository, createProposal, type Proposal } from '../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
@@ -63,6 +68,13 @@ async function build(role: 'dispatcher' | 'technician') {
     }),
   );
   const proposalRepo = new InMemoryProposalRepository();
+  const dailyDigestRepo = new InMemoryDailyDigestRepository();
+  await dailyDigestRepo.upsert(
+    TENANT,
+    new Date().toISOString().slice(0, 10),
+    {} as Parameters<InMemoryDailyDigestRepository['upsert']>[2],
+    'Owner digest: revenue was strong',
+  );
   const driver = new TextModeDriver({
     voiceSessionStore: store,
     bus,
@@ -73,8 +85,14 @@ async function build(role: 'dispatcher' | 'technician') {
     settingsRepo,
     userRepo,
     systemActorId: 'system:vq-test',
+    // The corpus factory's bundle shape: the harness role resolver maps the
+    // synthetic owner subject to owner and a seeded member to their role.
+    lookups: {
+      answers: { dailyDigestRepo, resolveMemberRole: vqResolveMemberRoleFor(userRepo) },
+      shared: { proposalRepo },
+    } as never,
   });
-  return { store, driver, proposalRepo };
+  return { store, driver, proposalRepo, provider };
 }
 
 async function seedEstimate(repo: InMemoryProposalRepository): Promise<Proposal> {
@@ -135,5 +153,44 @@ describe('B1 follow-up — TextModeDriver carries the resolved approver (product
     });
     expect(h.store.snapshot(fixture.sessionId)?.context.ownerSession).toBe(true);
     expect(h.store.get(fixture.sessionId)?.ownerLineApprover).toBeUndefined();
+  });
+});
+
+// B3-7 — production resolves the phone ACTOR (the subject every lookup is
+// authorised by) from the caller-ID: the backup supervisor's mobile matches
+// their own users row (telephony/phone-actor.ts, via 'mobile'). The driver
+// stamped the synthetic OWNER subject on every owner line, so a corpus call
+// from the backup's mobile was authorised as the owner for its lookups.
+describe('B3-7 — TextModeDriver resolves a backup caller\'s phone actor as production does', () => {
+  const DIGEST = JSON.stringify({ intentType: 'lookup_digest', confidence: 0.96 });
+
+  it("a backup caller's actor is the backup's own subject; the owner phone keeps the owner's", async () => {
+    const h = await build('dispatcher');
+    const backup = await h.driver.startSession({ tenantId: TENANT, callerId: BACKUP_MOBILE, callerIdBlocked: false });
+    expect(h.store.get(backup.sessionId)?.actorUserId).toBe(BACKUP_SUBJECT);
+
+    const owner = await h.driver.startSession({ tenantId: TENANT, callerId: OWNER_PHONE, callerIdBlocked: false });
+    expect(h.store.get(owner.sessionId)?.actorUserId).toBe(vqOwnerActorId(TENANT));
+  });
+
+  it("a technician backup's owner-grade lookup is refused, as their role is in production", async () => {
+    const h = await build('technician');
+    h.provider.setDefaultResponse(DIGEST);
+    const { sessionId } = await h.driver.startSession({ tenantId: TENANT, callerId: BACKUP_MOBILE, callerIdBlocked: false });
+
+    const answer = await h.driver.speak(sessionId, 'question about the digest');
+
+    expect(answer.agentResponse).toContain('owner-level report');
+    expect(answer.agentResponse).not.toContain('revenue was strong');
+  });
+
+  it("a dispatcher backup's lookup is answered under their own role", async () => {
+    const h = await build('dispatcher');
+    h.provider.setDefaultResponse(DIGEST);
+    const { sessionId } = await h.driver.startSession({ tenantId: TENANT, callerId: BACKUP_MOBILE, callerIdBlocked: false });
+
+    expect((await h.driver.speak(sessionId, 'question about the digest')).agentResponse).toContain(
+      'Owner digest: revenue was strong',
+    );
   });
 });

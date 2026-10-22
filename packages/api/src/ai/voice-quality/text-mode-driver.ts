@@ -43,13 +43,15 @@
  * turn arriving after that point makes no model call and speaks nothing; the
  * turn marker is still recorded so the graders' per-turn windows line up.
  *
- * # Identity (unchanged, #869)
+ * # Identity (#869)
  * The phone resolves its ACTOR once, at establishment, from caller-ID
- * (`telephony/phone-actor.ts`). This harness has no users substrate, so a
- * recognized owner line (the `callerIsOwner` fixture or a caller-ID match
- * against `tenant_settings.owner_phone`) stamps a SYNTHETIC actor the
- * harness-owned `lookups.answers.resolveMemberRole` maps to `owner`; everyone
- * else gets no actor, exactly like a customer on the phone.
+ * (`telephony/phone-actor.ts`). This harness has no owner users row, so the
+ * owner phone (the `callerIsOwner` fixture or a caller-ID match against
+ * `tenant_settings.owner_phone`) stamps a SYNTHETIC actor the harness-owned
+ * `lookups.answers.resolveMemberRole` maps to `owner`. The backup
+ * supervisor's line and a team member's registered mobile resolve through
+ * the production resolver to that member's own subject (B3-7, #1604);
+ * everyone else gets no actor, exactly like a customer on the phone.
  *
  * # Synthetic CallSid
  * `TEXT_MODE_<uuid>` — unambiguous against real Twilio CallSids (`CA…`).
@@ -370,24 +372,38 @@ export class TextModeDriver implements AgentDriver {
       };
     }
 
+    // The caller's number as Twilio sends it; '' when blocked/withheld
+    // (establishInboundSession pins it for both transports).
+    const from = opts.callerId && !opts.callerIdBlocked ? opts.callerId : '';
+    if (from) session.callerPhone = from;
+
     // #869 — ACTOR, stamped ONCE at establishment and never from utterance
     // content (telephony/phone-actor.ts). See the module doc on identity.
     if (ownerSession) {
-      session.actorUserId = vqOwnerActorId(tenantId);
+      // B3-7 — the backup supervisor's line resolves its actor exactly as
+      // production does (`resolvePhoneActor`: their registered mobile → their
+      // own subject; nothing resolved → no actor), so their lookups are
+      // authorised as their role. The owner phone (or a forced owner
+      // fixture) keeps the synthetic owner subject: the harness's stand-in
+      // for the owner_phone bridge.
+      if (lineApprover?.via === 'backup_supervisor') {
+        const actor = this.deps.userRepo
+          ? await resolvePhoneActor({ userRepo: this.deps.userRepo }, tenantId, from, true)
+          : null;
+        if (actor) session.actorUserId = actor.userId;
+      } else {
+        session.actorUserId = vqOwnerActorId(tenantId);
+      }
       // The owner line is identity-resolved the instant the session is
-      // established (the caller-ID matched the owner phone). Production has
-      // no lookup skill for this, so the identity stamp is recorded here for
-      // the floor PII grader. The PIN challenge remains the money gate.
+      // established (the caller-ID matched the owner phone or the backup's
+      // mobile). Production has no lookup skill for this, so the identity
+      // stamp is recorded here for the floor PII grader. The PIN challenge
+      // remains the money gate.
       session.events.emit(
         'voice-event',
         lookupExecutedEvent(OWNER_IDENTITY_LOOKUP_SKILL, 0, true),
       );
     }
-
-    // The caller's number as Twilio sends it; '' when blocked/withheld
-    // (establishInboundSession pins it for both transports).
-    const from = opts.callerId && !opts.callerIdBlocked ? opts.callerId : '';
-    if (from) session.callerPhone = from;
 
     // #1604 — a caller-ID that matches a team member's registered mobile is
     // the D-026 phone actor, resolved ONCE here through the production
