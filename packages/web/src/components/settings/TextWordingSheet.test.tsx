@@ -179,6 +179,23 @@ describe('D-045 — TextWordingSheet', () => {
     expect(preview.textContent).toBe('Invoice EST-1042: https://app.example.com/e/sample\nAcme HVAC collects payment in person.');
   });
 
+  it('locks the box and fill-ins while a save is on its way, so nothing typed meanwhile is lost', async () => {
+    let finish: (v: { body: string; language: string; updatedAt: string }) => void = () => {};
+    const save = vi.fn(() => new Promise<{ body: string; language: string; updatedAt: string }>((r) => (finish = r)));
+    render(<TextWordingSheet onClose={() => {}} api={mockApi({ save })} />);
+    const estimate = await screen.findByRole('region', { name: /estimate text/i });
+    const box = within(estimate).getByLabelText(/estimate text wording/i);
+
+    fireEvent.change(box, { target: { value: 'Quote: {{link}}' } });
+    fireEvent.click(within(estimate).getByRole('button', { name: /^save$/i }));
+
+    expect(box).toHaveAttribute('readonly');
+    expect(within(estimate).getByRole('button', { name: '{{link}}' })).toBeDisabled();
+    finish({ body: 'Quote: {{link}}', language: 'en', updatedAt: '2026-10-22T13:00:00Z' });
+    await waitFor(() => expect(box).not.toHaveAttribute('readonly'));
+    expect(within(estimate).getByRole('button', { name: '{{link}}' })).toBeEnabled();
+  });
+
   it('every button is at least 44px tall (min-h-11)', async () => {
     render(<TextWordingSheet onClose={() => {}} api={mockApi()} />);
     await screen.findByTestId('wording-estimate_text-status');

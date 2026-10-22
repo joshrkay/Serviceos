@@ -144,6 +144,9 @@ function WordingCard({
         rows={4}
         value={draft}
         maxLength={maxLength * 2}
+        // Locked while a save or reset is on its way: its answer replaces
+        // the box, so anything typed meanwhile would be lost.
+        readOnly={busy}
         onChange={(e) => setDraft(e.target.value)}
         placeholder="Write your own, or leave empty to use ours."
         className="w-full rounded-lg border border-border px-3 py-2 text-sm break-words"
@@ -154,7 +157,8 @@ function WordingCard({
             key={f}
             type="button"
             onClick={() => insert(f)}
-            className="min-h-11 rounded-lg border border-border px-2 text-xs font-mono break-all"
+            disabled={busy}
+            className="min-h-11 rounded-lg border border-border px-2 text-xs font-mono break-all disabled:opacity-50"
           >
             {`{{${f}}}`}
           </button>
