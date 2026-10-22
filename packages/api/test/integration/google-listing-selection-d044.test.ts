@@ -234,24 +234,43 @@ describe('D-044 Google listing selection (real Postgres)', () => {
     const repo = new PgReviewPollStateRepository(pool);
     await repo.recordQuotaError(tenantId, 30);
     expect((await repo.getPollState(tenantId))?.backoffReason).toBe('quota');
-    await repo.recordQuotaError(tenantId, 3600, 'auth');
+    await repo.recordAuthFailure(tenantId, 3600, (await repo.getPollState(tenantId))?.authGeneration ?? 0);
     expect((await repo.getPollState(tenantId))?.backoffReason).toBe('auth');
     await repo.recordSuccess(tenantId, '2026-10-01T00:00:00.000Z');
     expect((await repo.getPollState(tenantId))?.backoffReason).toBeNull();
   });
 
-  it('clearAuthBackoff lifts a credentials pause and keeps a quota pause', async () => {
+  it('recordReconnect lifts a credentials pause and keeps a quota pause', async () => {
     const { tenantId } = await createTestTenant(pool);
     const repo = new PgReviewPollStateRepository(pool);
-    await repo.recordQuotaError(tenantId, 3600, 'auth');
-    expect(await repo.clearAuthBackoff(tenantId)).toBe(true);
+    await repo.recordAuthFailure(tenantId, 3600, (await repo.getPollState(tenantId))?.authGeneration ?? 0);
+    expect(await repo.recordReconnect(tenantId)).toBe(true);
     expect(await repo.getPollState(tenantId)).toMatchObject({
       backoffUntil: null,
       backoffReason: null,
       consecutive429Count: 0,
     });
     await repo.recordQuotaError(tenantId, 30);
-    expect(await repo.clearAuthBackoff(tenantId)).toBe(false);
+    expect(await repo.recordReconnect(tenantId)).toBe(false);
     expect((await repo.getPollState(tenantId))?.backoffReason).toBe('quota');
+  });
+
+  it('an auth failure from before a reconnect is dropped', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    const repo = new PgReviewPollStateRepository(pool);
+    // A sweep read the state (no row yet) and the old credentials ...
+    const sweptWith = (await repo.getPollState(tenantId))?.authGeneration ?? 0;
+    // ... then the owner reconnected ...
+    await repo.recordReconnect(tenantId);
+    expect((await repo.getPollState(tenantId))?.authGeneration).toBe(1);
+    // ... and the old credentials' failure arrives late.
+    expect(await repo.recordAuthFailure(tenantId, 3600, sweptWith)).toBe(false);
+    expect((await repo.getPollState(tenantId))?.backoffUntil).toBeNull();
+
+    expect(await repo.recordAuthFailure(tenantId, 3600, 1)).toBe(true);
+    expect((await repo.getPollState(tenantId))).toMatchObject({ backoffReason: 'auth', authGeneration: 1 });
+    // A success keeps the generation.
+    await repo.recordSuccess(tenantId, '2026-10-01T00:00:00.000Z');
+    expect((await repo.getPollState(tenantId))?.authGeneration).toBe(1);
   });
 });

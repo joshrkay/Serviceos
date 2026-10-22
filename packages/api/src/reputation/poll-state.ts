@@ -35,6 +35,13 @@ export interface ReviewPollState {
    */
   backoffReason: ReviewBackoffReason | null;
   consecutive429Count: number;
+  /**
+   * Bumped on every reconnect. A sweep remembers the value it started
+   * with, and its "credentials rejected" backoff only lands when no
+   * reconnect has happened since, so a sweep still using the old
+   * credentials can't pause the new ones.
+   */
+  authGeneration: number;
   updatedAt: Date;
 }
 
@@ -55,11 +62,12 @@ export interface ReviewPollStateRepository {
   resetCursor(tenantId: string): Promise<void>;
 
   /**
-   * The owner reconnected with fresh credentials: lift a backoff that
-   * rejected credentials caused (or one recorded before the reason was).
-   * A Google quota backoff is kept. True when one was lifted.
+   * The owner reconnected with fresh credentials: bump `authGeneration`
+   * (creating the row if needed) and lift a backoff that rejected
+   * credentials caused (or one recorded before the reason was). A Google
+   * quota backoff is kept. True when one was lifted.
    */
-  clearAuthBackoff(tenantId: string): Promise<boolean>;
+  recordReconnect(tenantId: string): Promise<boolean>;
 
   /**
    * Persist a 429: increment `consecutive_429_count`, set
@@ -71,15 +79,21 @@ export interface ReviewPollStateRepository {
    *   from the 429 response. Floors the wait — it never shortens the
    *   exponential delay, only extends it when Google asks for more.
    *   The exponential count still increments either way.
-   * @param reason  `auth` when the backoff is for rejected credentials
-   *   (the worker reuses this backoff for them), so the owner is told to
-   *   reconnect only then.
    */
-  recordQuotaError(
+  recordQuotaError(tenantId: string, retryAfterSeconds?: number): Promise<void>;
+
+  /**
+   * Google rejected the credentials: the same backoff, tagged `auth` so the
+   * owner is told to reconnect. Only lands while `authGeneration` is still
+   * the value the sweep read before it loaded the credentials; after a
+   * reconnect the failure belonged to the old credentials and is dropped.
+   * True when recorded.
+   */
+  recordAuthFailure(
     tenantId: string,
-    retryAfterSeconds?: number,
-    reason?: ReviewBackoffReason,
-  ): Promise<void>;
+    retryAfterSeconds: number,
+    authGeneration: number,
+  ): Promise<boolean>;
 }
 
 /**
@@ -112,6 +126,7 @@ interface PollStateRow {
   backoff_until: string | null;
   backoff_reason: ReviewBackoffReason | null;
   consecutive_429_count: number;
+  auth_generation: number;
   updated_at: string;
 }
 
@@ -125,6 +140,7 @@ function mapRow(row: PollStateRow): ReviewPollState {
     backoffUntil: row.backoff_until ? new Date(row.backoff_until) : null,
     backoffReason: row.backoff_reason ?? null,
     consecutive429Count: row.consecutive_429_count,
+    authGeneration: row.auth_generation,
     updatedAt: new Date(row.updated_at),
   };
 }
@@ -144,7 +160,8 @@ export class PgReviewPollStateRepository
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query<PollStateRow>(
         `SELECT tenant_id, cursor, last_successful_poll_at,
-                backoff_until, backoff_reason, consecutive_429_count, updated_at
+                backoff_until, backoff_reason, consecutive_429_count,
+                auth_generation, updated_at
            FROM review_poll_state
           WHERE tenant_id = $1`,
         [tenantId],
@@ -183,27 +200,53 @@ export class PgReviewPollStateRepository
     });
   }
 
-  async clearAuthBackoff(tenantId: string): Promise<boolean> {
+  async recordReconnect(tenantId: string): Promise<boolean> {
     const now = this.now();
     return this.withTenant(tenantId, async (client) => {
-      const result = await client.query(
-        `UPDATE review_poll_state
-            SET backoff_until = NULL, backoff_reason = NULL,
-                consecutive_429_count = 0, updated_at = $2
-          WHERE tenant_id = $1
-            AND backoff_until IS NOT NULL
-            AND backoff_reason IS DISTINCT FROM 'quota'`,
+      const prev = await client.query<{ lifted: boolean }>(
+        `SELECT (backoff_until IS NOT NULL AND backoff_reason IS DISTINCT FROM 'quota') AS lifted
+           FROM review_poll_state WHERE tenant_id = $1 FOR UPDATE`,
+        [tenantId],
+      );
+      await client.query(
+        `INSERT INTO review_poll_state (
+           tenant_id, cursor, last_successful_poll_at,
+           backoff_until, consecutive_429_count, updated_at, auth_generation
+         ) VALUES ($1, NULL, NULL, NULL, 0, $2, 1)
+         ON CONFLICT (tenant_id) DO UPDATE
+           SET auth_generation = review_poll_state.auth_generation + 1,
+               backoff_until = CASE WHEN review_poll_state.backoff_reason = 'quota'
+                                    THEN review_poll_state.backoff_until END,
+               consecutive_429_count = CASE WHEN review_poll_state.backoff_reason = 'quota'
+                                            THEN review_poll_state.consecutive_429_count ELSE 0 END,
+               backoff_reason = CASE WHEN review_poll_state.backoff_reason = 'quota'
+                                     THEN review_poll_state.backoff_reason END,
+               updated_at = $2`,
         [tenantId, now],
       );
-      return (result.rowCount ?? 0) > 0;
+      return prev.rows[0]?.lifted ?? false;
     });
   }
 
-  async recordQuotaError(
+  async recordQuotaError(tenantId: string, retryAfterSeconds?: number): Promise<void> {
+    await this.recordBackoff(tenantId, retryAfterSeconds, 'quota', null);
+  }
+
+  async recordAuthFailure(
     tenantId: string,
-    retryAfterSeconds?: number,
-    reason: ReviewBackoffReason = 'quota',
-  ): Promise<void> {
+    retryAfterSeconds: number,
+    authGeneration: number,
+  ): Promise<boolean> {
+    return this.recordBackoff(tenantId, retryAfterSeconds, 'auth', authGeneration);
+  }
+
+  /** A null `authGeneration` records unconditionally. */
+  private async recordBackoff(
+    tenantId: string,
+    retryAfterSeconds: number | undefined,
+    reason: ReviewBackoffReason,
+    authGeneration: number | null,
+  ): Promise<boolean> {
     const now = this.now();
     // `Retry-After` floors the wait but never shortens the exponential
     // delay. The SQL uses GREATEST(exponential, retryAfterMs) so the
@@ -214,13 +257,15 @@ export class PgReviewPollStateRepository
       retryAfterSeconds !== undefined && retryAfterSeconds > 0
         ? Math.floor(retryAfterSeconds * 1000)
         : 0;
-    await this.withTenant(tenantId, async (client) => {
+    return this.withTenant(tenantId, async (client) => {
       // Single round-trip: compute next count + backoff in SQL so we
       // never race with a concurrent worker tick (there shouldn't be
       // one — single-process interval driver — but defense in depth).
       // The arithmetic mirrors computeBackoffMs() above; keep them in
       // sync if either changes.
-      await client.query(
+      // A reconnect since the sweep started (auth_generation moved, or a
+      // row now exists where the sweep saw none) drops the write.
+      const result = await client.query(
         `INSERT INTO review_poll_state (
            tenant_id, cursor, last_successful_poll_at,
            backoff_until, consecutive_429_count, updated_at, backoff_reason
@@ -245,7 +290,8 @@ export class PgReviewPollStateRepository
                  ),
                  $5::bigint
                ) || ' milliseconds')::interval,
-               updated_at            = $2`,
+               updated_at            = $2
+           WHERE $7::int IS NULL OR review_poll_state.auth_generation = $7::int`,
         [
           tenantId,
           now,
@@ -253,8 +299,10 @@ export class PgReviewPollStateRepository
           REVIEW_BACKOFF_MAX_MS,
           retryAfterMs,
           reason,
+          authGeneration,
         ],
       );
+      return (result.rowCount ?? 0) > 0;
     });
   }
 }
@@ -283,6 +331,7 @@ export class InMemoryReviewPollStateRepository
       backoffUntil: null,
       backoffReason: null,
       consecutive429Count: 0,
+      authGeneration: this.store.get(tenantId)?.authGeneration ?? 0,
       updatedAt: now,
     });
   }
@@ -293,26 +342,46 @@ export class InMemoryReviewPollStateRepository
     this.store.set(tenantId, { ...existing, cursor: null, updatedAt: this.now() });
   }
 
-  async clearAuthBackoff(tenantId: string): Promise<boolean> {
+  async recordReconnect(tenantId: string): Promise<boolean> {
     const existing = this.store.get(tenantId);
-    if (!existing?.backoffUntil || existing.backoffReason === 'quota') return false;
+    const lifted = !!existing?.backoffUntil && existing.backoffReason !== 'quota';
+    const keepQuota = existing?.backoffReason === 'quota';
     this.store.set(tenantId, {
-      ...existing,
-      backoffUntil: null,
-      backoffReason: null,
-      consecutive429Count: 0,
+      tenantId,
+      cursor: existing?.cursor ?? null,
+      lastSuccessfulPollAt: existing?.lastSuccessfulPollAt ?? null,
+      backoffUntil: keepQuota ? existing!.backoffUntil : null,
+      backoffReason: keepQuota ? 'quota' : null,
+      consecutive429Count: keepQuota ? existing!.consecutive429Count : 0,
+      authGeneration: (existing?.authGeneration ?? 0) + 1,
       updatedAt: this.now(),
     });
-    return true;
+    return lifted;
   }
 
-  async recordQuotaError(
+  async recordQuotaError(tenantId: string, retryAfterSeconds?: number): Promise<void> {
+    this.recordBackoff(tenantId, retryAfterSeconds, 'quota', null);
+  }
+
+  async recordAuthFailure(
     tenantId: string,
-    retryAfterSeconds?: number,
-    reason: ReviewBackoffReason = 'quota',
-  ): Promise<void> {
+    retryAfterSeconds: number,
+    authGeneration: number,
+  ): Promise<boolean> {
+    return this.recordBackoff(tenantId, retryAfterSeconds, 'auth', authGeneration);
+  }
+
+  private recordBackoff(
+    tenantId: string,
+    retryAfterSeconds: number | undefined,
+    reason: ReviewBackoffReason,
+    authGeneration: number | null,
+  ): boolean {
     const now = this.now();
     const existing = this.store.get(tenantId);
+    if (authGeneration !== null && (existing?.authGeneration ?? 0) !== authGeneration) {
+      return false;
+    }
     const nextCount = (existing?.consecutive429Count ?? 0) + 1;
     const exponentialMs = computeBackoffMs(nextCount);
     const retryAfterMs =
@@ -329,7 +398,9 @@ export class InMemoryReviewPollStateRepository
       backoffUntil: new Date(now.getTime() + delay),
       backoffReason: reason,
       consecutive429Count: nextCount,
+      authGeneration: existing?.authGeneration ?? 0,
       updatedAt: now,
     });
+    return true;
   }
 }

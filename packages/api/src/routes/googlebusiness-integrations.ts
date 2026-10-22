@@ -275,9 +275,10 @@ export function createGoogleBusinessOAuthCallbackRouter(
         ...(locationCount != null ? { locationCount } : {}),
       });
 
-      // New credentials: a pause for rejected ones no longer applies.
+      // New credentials: a pause for rejected ones no longer applies, and
+      // a sweep still running on the old ones can't record a new one.
       const authBackoffCleared = deps.pollStateRepo
-        ? await deps.pollStateRepo.clearAuthBackoff(consumed.tenantId)
+        ? await deps.pollStateRepo.recordReconnect(consumed.tenantId)
         : false;
       // With no listing chosen after a discovery that worked (the saved one
       // is gone, or a connect after a disconnect finds zero or several), a

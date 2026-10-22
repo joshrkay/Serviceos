@@ -8246,6 +8246,8 @@ export const MIGRATIONS = {
     ALTER TABLE review_poll_state
       ADD COLUMN IF NOT EXISTS backoff_reason TEXT
         CHECK (backoff_reason IN ('quota', 'auth'));
+    ALTER TABLE review_poll_state
+      ADD COLUMN IF NOT EXISTS auth_generation INTEGER NOT NULL DEFAULT 0;
   `,
 };
 

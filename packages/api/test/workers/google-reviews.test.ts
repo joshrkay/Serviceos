@@ -832,6 +832,36 @@ describe('P7-026 runGoogleReviewsSweep — refresh-token handling', () => {
     expect(state?.cursor).toBe('L@2026-05-17T10:00:00.000Z');
   });
 
+  it('a reconnect during the sweep keeps the old credentials\' failure from pausing the new ones', async () => {
+    const fetchFn = async (input: string | URL | Request): Promise<Response> => {
+      const url = String(input);
+      if (url.includes('oauth2.googleapis.com/token')) {
+        // The owner finishes reconnecting while this sweep is mid-flight.
+        await pollStateRepo.recordReconnect('t1');
+        return new Response('{"error":"invalid_grant"}', { status: 400 });
+      }
+      return new Response('{"error":"invalid_token"}', { status: 401 });
+    };
+
+    const result = await runGoogleReviewsSweep({
+      reviewRepo,
+      pollStateRepo,
+      credentialResolver: makeResolver({
+        credentials: { t1: staleCredRow('t1') },
+      }),
+      listTenantIds: async () => ['t1'],
+      logger,
+      now: () => NOW,
+      fetchFn,
+      googleConfig: AUTH_CONFIG,
+      credentialStore: { persistRotatedAccessToken: vi.fn(async () => {}) },
+    });
+
+    expect(result.failed).toBe(0);
+    const state = await pollStateRepo.getPollState('t1');
+    expect(state).toMatchObject({ backoffUntil: null, backoffReason: null, authGeneration: 1 });
+  });
+
   it('refresh failure lands in the poll-state backoff (visible degradation, not silent)', async () => {
     const persist = vi.fn(async () => {});
     const fetchFn = async (

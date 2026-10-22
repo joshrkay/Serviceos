@@ -799,7 +799,7 @@ describe('Google Business integrations routes', () => {
     it('a reconnect lifts a pause for rejected credentials but keeps a Google quota pause', async () => {
       const pollStateRepo = new InMemoryReviewPollStateRepository(() => new Date());
       await connect({ '123': ONE_LOCATION }, { pollStateRepo });
-      await pollStateRepo.recordQuotaError(TENANT, 3600, 'auth');
+      await pollStateRepo.recordAuthFailure(TENANT, 3600, (await pollStateRepo.getPollState(TENANT))?.authGeneration ?? 0);
       await connect({ '123': ONE_LOCATION }, { pollStateRepo });
       expect(await pollStateRepo.getPollState(TENANT)).toMatchObject({
         backoffUntil: null,

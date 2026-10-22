@@ -227,8 +227,11 @@ export async function runGoogleReviewsSweep(
   const encKey = process.env.TENANT_ENCRYPTION_KEY;
 
   for (const tenantId of tenantIds) {
+    // Read before the credentials: a reconnect after this point bumps it.
+    let authGeneration = 0;
     try {
       const state = await deps.pollStateRepo.getPollState(tenantId);
+      authGeneration = state?.authGeneration ?? 0;
       if (isThrottled(state, now())) {
         throttled++;
         deps.logger.debug('Google reviews sweep: tenant throttled', {
@@ -406,9 +409,12 @@ export async function runGoogleReviewsSweep(
         // the degradation is visible — the status endpoint surfaces
         // `backoffUntil`, and subsequent sweeps skip the tenant instead
         // of hammering Google — rather than only a log line.
-        failed++;
-        await deps.pollStateRepo
-          .recordQuotaError(tenantId, GOOGLE_BUSINESS_AUTH_BACKOFF_SECONDS, 'auth')
+        const recorded = await deps.pollStateRepo
+          .recordAuthFailure(
+            tenantId,
+            GOOGLE_BUSINESS_AUTH_BACKOFF_SECONDS,
+            authGeneration,
+          )
           .catch((recordErr) => {
             deps.logger.error(
               'Google reviews sweep: failed to record auth-failure backoff',
@@ -420,7 +426,18 @@ export async function runGoogleReviewsSweep(
                     : String(recordErr),
               },
             );
+            return true;
           });
+        if (!recorded) {
+          // The owner reconnected while this sweep was using the old
+          // credentials; the new ones haven't failed.
+          deps.logger.info(
+            'Google reviews sweep: auth failure from credentials replaced by a reconnect — not pausing',
+            { tenantId },
+          );
+          continue;
+        }
+        failed++;
         deps.logger.warn(
           'Google reviews sweep: authorization failed and token refresh did not recover — backing off; operator must reconnect Google Business',
           {

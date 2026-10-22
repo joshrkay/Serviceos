@@ -102,7 +102,7 @@ describe('/api/get-found-online', () => {
     expect((await request(app()).get('/api/get-found-online')).body.data.allDone).toBe(true);
 
     // Rejected credentials need the owner.
-    await pollStateRepo.recordQuotaError(TENANT, 3600, 'auth');
+    await pollStateRepo.recordAuthFailure(TENANT, 3600, (await pollStateRepo.getPollState(TENANT))?.authGeneration ?? 0);
     const paused = await request(app()).get('/api/get-found-online');
     expect(paused.body.data.items[0]).toEqual({
       id: 'google_listing',
