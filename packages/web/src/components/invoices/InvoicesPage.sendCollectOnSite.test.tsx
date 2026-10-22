@@ -143,3 +143,63 @@ describe('InvoicesPage send sheet — honours the payment choice (S5a-2, U8)', (
     expect(screen.queryByTestId('send-sheet-payment-mode')).not.toBeInTheDocument();
   });
 });
+
+describe('InvoicesPage send sheet — a draft whose first send is refused (D-045)', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('the retry sends without issuing the now-open invoice again', async () => {
+    const draft = { ...openInvoice, id: 'i-draft', invoiceNumber: 'INV-DRAFT', status: 'draft', dueDate: undefined };
+    const calls: string[] = [];
+    let sendAttempts = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+        const url = new URL(String(input), 'http://app.test');
+        const method = init?.method ?? 'GET';
+        if (method === 'POST') calls.push(url.pathname);
+        if (method === 'POST' && url.pathname === '/api/invoices/i-draft/issue') {
+          // The API refuses a second issue: the invoice is open now.
+          const already = calls.filter((c) => c.endsWith('/issue')).length > 1;
+          return Promise.resolve(
+            already ? json(400, { message: 'Invalid transition from open to open' }) : json(200, { ...draft, status: 'open' }),
+          );
+        }
+        if (method === 'POST' && url.pathname === '/api/invoices/i-draft/send') {
+          sendAttempts += 1;
+          return Promise.resolve(
+            sendAttempts === 1
+              ? json(503, { error: 'PAY_LINK_UNAVAILABLE', message: "Invoice INV-DRAFT was not sent: its pay link couldn't be made." })
+              : json(202, { viewUrl: 'https://app.test/pay/tok9', viewToken: 'tok9', paymentCollectionMode: 'pay_link' }),
+          );
+        }
+        if (method === 'GET' && url.pathname === '/api/invoices/i-draft') return Promise.resolve(json(200, draft));
+        if (method === 'GET' && url.pathname === '/api/invoices') {
+          return Promise.resolve(json(200, { data: [draft], total: 1, page: 1, pageSize: 25 }));
+        }
+        if (method === 'GET') return Promise.resolve(json(200, []));
+        return Promise.reject(new Error(`unexpected request ${method} ${url.pathname}`));
+      }),
+    );
+    render(
+      <MemoryRouter>
+        <InvoicesPage defaultSelectedId="i-draft" />
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(await screen.findByRole('button', { name: /^send payment link$/i }));
+    const sheetSend = () => screen.getAllByRole('button', { name: /^send payment link$/i }).at(-1)!;
+    fireEvent.click(sheetSend());
+    expect(await screen.findByText(/Send failed: Invoice INV-DRAFT was not sent/)).toBeInTheDocument();
+
+    fireEvent.click(sheetSend());
+    await waitFor(() => expect(screen.getByText('https://app.test/pay/tok9')).toBeInTheDocument());
+    expect(calls).toEqual([
+      '/api/invoices/i-draft/issue',
+      '/api/invoices/i-draft/send',
+      '/api/invoices/i-draft/send',
+    ]);
+  });
+});
+

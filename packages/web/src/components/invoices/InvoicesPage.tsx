@@ -506,12 +506,18 @@ function SendPaymentSheet({ inv, amountDueCents, paymentLink, onClose, onSent, a
     `/api/invoices/${apiId}/issue`
   );
 
+  // Remembered apart from the send: when the issue succeeds but the send is
+  // refused (e.g. the pay link couldn't be made), a retry must not issue the
+  // now-open invoice again ("Invalid transition from open to open").
+  const [issued, setIssued] = useState(false);
+
   async function handleSend() {
     setSending(true);
     setSendError(null);
     try {
-      if (inv.status === 'Draft') {
+      if (inv.status === 'Draft' && !issued) {
         await issueInvoice({});
+        setIssued(true);
       }
       const result = await sendInvoice({
         channel,
