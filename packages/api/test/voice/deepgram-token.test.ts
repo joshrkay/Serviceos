@@ -6,6 +6,8 @@ import {
   DeepgramTokenPermissionError,
   STREAM_TOKEN_TTL_SECONDS,
   STREAM_TOKEN_MODEL,
+  FIXTURE_STREAM_TOKEN,
+  FIXTURE_STREAM_MODEL,
 } from '../../src/voice/deepgram-token';
 
 function okFetch(body: unknown): typeof fetch {
@@ -15,6 +17,28 @@ function okFetch(body: unknown): typeof fetch {
     json: async () => body,
   })) as unknown as typeof fetch;
 }
+
+describe('STT_PROVIDER=fixture (the e2e lane\'s scripted transcription)', () => {
+  it('mints the fixture token with no key and no network', async () => {
+    const fetchImpl = vi.fn() as unknown as typeof fetch;
+    const result = await mintDeepgramStreamToken({ apiKey: undefined, sttProvider: 'fixture', nodeEnv: 'dev', fetchImpl });
+    expect(result).toEqual({ token: FIXTURE_STREAM_TOKEN, expiresInSeconds: STREAM_TOKEN_TTL_SECONDS, model: FIXTURE_STREAM_MODEL });
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('wins over a real key, so a developer\'s own key never opens a real socket in the lane', async () => {
+    const fetchImpl = vi.fn() as unknown as typeof fetch;
+    const result = await mintDeepgramStreamToken({ apiKey: 'real-key', sttProvider: 'fixture', nodeEnv: 'test', fetchImpl });
+    expect(result.token).toBe(FIXTURE_STREAM_TOKEN);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it.each(['production', 'prod'])('is refused when NODE_ENV=%s (→503), even with a key', async (nodeEnv) => {
+    await expect(
+      mintDeepgramStreamToken({ apiKey: 'real-key', sttProvider: 'fixture', nodeEnv, fetchImpl: okFetch({ access_token: 'x' }) }),
+    ).rejects.toBeInstanceOf(DeepgramTokenUnavailableError);
+  });
+});
 
 describe('Story 3.2 — mintDeepgramStreamToken', () => {
   it('throws (→503) when no API key is configured', async () => {

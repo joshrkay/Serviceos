@@ -221,7 +221,11 @@ export function createVoiceRouter(
       }
 
       try {
-        const minted = await mintDeepgramStreamToken({ apiKey: process.env.DEEPGRAM_API_KEY });
+        const minted = await mintDeepgramStreamToken({
+          apiKey: process.env.DEEPGRAM_API_KEY,
+          sttProvider: process.env.STT_PROVIDER,
+          nodeEnv: process.env.NODE_ENV,
+        });
         await auditMint('voice.stream_token_minted', {
           model: minted.model,
           expiresInSeconds: minted.expiresInSeconds,

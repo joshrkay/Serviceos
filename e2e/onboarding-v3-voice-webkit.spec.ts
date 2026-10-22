@@ -1,4 +1,5 @@
 import { test, expect, type Page, type Request } from '@playwright/test';
+import { fakeDeepgram } from './helpers/fake-deepgram';
 
 /**
  * Rivet's voice in the "pick, don't build" onboarding shell (slice S3, plan
@@ -23,15 +24,21 @@ import { test, expect, type Page, type Request } from '@playwright/test';
  * That iOS really refuses, and really records audio/mp4 for the live
  * transcription stream, is a device run (the web verify skill, owner action).
  *
- * Listening (S3-5): the lane has no transcription key, so whether the browser
- * refuses the microphone (Chromium's --deny-permission-prompts) or grants it
- * (the fake device) and the real POST /api/voice/stream-token answers 503, the
- * turn has no mic, no alert, the greeting keeps only "Tap one to hear it." (the
- * listening half is never promised where nothing listens), every turn is
- * answered by tap, and the funnel records `answer_mode: 'tap'` once per turn.
- * A live transcription run (audio/mp4 accepted by the stream, the transcript
- * card on a phone) needs a Deepgram key and a microphone: a device run through
- * the web verify skill (owner action).
+ * Listening (S3-5): whether the browser refuses the microphone (Chromium's
+ * --deny-permission-prompts) or grants it (the fake device) and the token route
+ * answers 503 (no transcription), the turn has no mic, no alert, the greeting
+ * keeps only "Tap one to hear it." (the listening half is never promised where
+ * nothing listens), every turn is answered by tap, and the funnel records
+ * `answer_mode: 'tap'` once per turn.
+ *
+ * Scripted speech (voice-only onboarding, build plan PR 1): the lane's API runs
+ * with STT_PROVIDER=fixture, so the real token route mints a fixture token, and
+ * e2e/helpers/fake-deepgram.ts intercepts the browser's Deepgram socket and
+ * plays transcripts back in Deepgram's message shape. Proven: a spoken answer
+ * picks the card and moves on (`answer_mode: 'voice'`), and a miss is shown and
+ * said aloud. That real speech is recognised (audio/mp4 accepted by the stream,
+ * the transcript card on a phone) needs a Deepgram key and a microphone: a
+ * device run through the web verify skill (owner action).
  *
  * Browser-specific tests carry a tag the config filters per project, never a
  * run-time skip (scripts/release/verify.mjs fails a run with any skip).
@@ -283,8 +290,8 @@ for (const vp of viewports) {
         // The turn's heading is Rivet's question.
         await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[i] })).toBeVisible();
         if (i === 0) {
-          // The greeting tells the owner a tap plays the option. Nothing listens in this keyless lane,
-          // so the line never says to say "first" or "second".
+          // The greeting tells the owner a tap plays the option. Nothing listens here (the microphone is
+          // refused), so the line never says to say "first" or "second".
           await expect(page.getByText('Tap one to hear it.', { exact: true })).toBeVisible();
           await expect(page.getByText(/say "first"/i)).toHaveCount(0);
         }
@@ -410,9 +417,14 @@ test.describe('v3 listening, microphone granted, no transcription on the server 
   // permission is what lets the page open it.
   test.use({ viewport: { width: 320, height: 568 }, permissions: ['microphone'] });
 
-  test('the real token route answers 503, the mic goes away with no alert, and every turn is still a tap', { tag: '@chromium' }, async ({ page }) => {
+  test('the token route answers 503, the mic goes away with no alert, and every turn is still a tap', { tag: '@chromium' }, async ({ page }) => {
     test.setTimeout(90_000);
     await signInAsFreshOwner(page, 'no_transcription');
+    // The lane's API mints fixture tokens (STT_PROVIDER=fixture); this owner's server has no transcription,
+    // answered exactly as the route answers with no key (pinned in voice-stream-token.route.test.ts).
+    await page.route('**/api/voice/stream-token**', (route) =>
+      route.fulfill({ status: 503, json: { error: 'NOT_CONFIGURED', message: 'Live transcription is not configured' } }),
+    );
     await watchVoiceAndFunnel(page);
     const mints = recordTokenMints(page);
     await startShop(page);
@@ -424,5 +436,60 @@ test.describe('v3 listening, microphone granted, no transcription on the server 
     expect(mints.map((m) => m.status)).toEqual([503]);
     expect(await v3Events(page, 'v3_voice_input')).toEqual([expect.objectContaining({ state: 'unavailable' })]);
     expect((await v3Events(page, 'v3_choice_made')).map((c) => c.answer_mode)).toEqual(CHOICE_KEYS.map(() => 'tap'));
+  });
+});
+
+test.describe('v3 listening with scripted speech (voice-only onboarding PR 1) at 320x568', () => {
+  test.use({ viewport: { width: 320, height: 568 }, permissions: ['microphone'] });
+
+  test('a spoken answer picks the card and moves on; a miss is shown and said aloud', { tag: '@chromium' }, async ({ page }) => {
+    test.setTimeout(90_000);
+    await signInAsFreshOwner(page, 'scripted_speech');
+    await watchVoiceAndFunnel(page);
+    const voice = recordVoice(page);
+    const mints = recordTokenMints(page);
+    const deepgram = await fakeDeepgram(page);
+    await startShop(page);
+    await page.getByRole('button', { name: 'Make it mine, 7 choices' }).click();
+
+    // The greeting turn listens: the real token route minted (the fixture provider), the socket opened.
+    await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[0] })).toBeVisible();
+    const mic = page.getByRole('button', { name: 'Answer out loud' });
+    await expect(mic).toHaveAttribute('aria-pressed', 'true');
+    expect(mints.map((m) => m.status)).toEqual([200]);
+    expect(new URL(deepgram.urls[0]).searchParams.getAll('keyterm')).toEqual(expect.arrayContaining(['first', 'second']));
+    await expectScreenFits(page);
+
+    // A miss: what was heard and how to answer, on screen and said aloud. Nothing is picked.
+    deepgram.say('banana');
+    const missLine = 'I heard “banana”. Tap one, or say first or second.';
+    await expect(page.getByTestId('rivet-transcript')).toHaveText(missLine);
+    await expect.poll(() => voice.filter((c) => c.path === '/api/voice/tts').flatMap((c) => c.items)).toContain(missLine);
+    await expect(page.getByRole('radio', { checked: true })).toHaveCount(0);
+    await expectScreenFits(page);
+
+    // A spoken answer picks the second card and answers at once.
+    const saved = page.waitForResponse((r) => r.url().includes('/api/onboarding/draft/choices/') && r.request().method() === 'PUT');
+    deepgram.say('the second one');
+    expect((await saved).status()).toBe(200);
+    await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[1] })).toBeVisible();
+
+    // The next turn opens its own socket with a fresh token, and "first" answers it.
+    await expect(mic).toHaveAttribute('aria-pressed', 'true');
+    await expect.poll(() => deepgram.urls.length).toBe(2);
+    // A start cancelled while the answer saved may have minted one more: every mint is the real route's 200.
+    expect(mints.length).toBeGreaterThanOrEqual(2);
+    expect(mints.every((m) => m.status === 200)).toBe(true);
+    const savedSecond = page.waitForResponse((r) => r.url().includes('/api/onboarding/draft/choices/') && r.request().method() === 'PUT');
+    deepgram.say('first');
+    expect((await savedSecond).status()).toBe(200);
+    await expect(page.getByRole('heading', { level: 1, name: QUESTIONS[2] })).toBeVisible();
+
+    const choices = await v3Events(page, 'v3_choice_made');
+    expect(choices.map((c) => [c.choice_key, c.answer_mode])).toEqual([
+      ['greeting', 'voice'],
+      ['trip_fee_and_rate', 'voice'],
+    ]);
+    await expect(page.getByRole('alert')).toHaveCount(0);
   });
 });

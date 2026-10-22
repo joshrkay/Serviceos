@@ -880,6 +880,16 @@ const prodEnvSchema = z
         message:
           "DEV_AUTH_BYPASS=true is forbidden in production. Unset or set to 'false' before starting.",
       }),
+    // The e2e lane's scripted transcription (voice/deepgram-token.ts): a
+    // production browser would get a token no real Deepgram accepts, and
+    // every spoken answer would fail. Refused at boot, like TTS_PROVIDER=fixture.
+    STT_PROVIDER: z
+      .string()
+      .optional()
+      .refine((v) => v !== 'fixture', {
+        message:
+          "STT_PROVIDER=fixture is forbidden in production: it hands browsers a token Deepgram refuses. Unset it.",
+      }),
   });
 
 export type Env = z.infer<typeof devEnvSchema> & Partial<z.infer<typeof prodEnvSchema>>;

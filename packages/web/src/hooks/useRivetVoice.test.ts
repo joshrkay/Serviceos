@@ -10,7 +10,7 @@
  * element's own `playing` / `ended` / `error` events; speechSynthesis is faked
  * the way useConversationVoice.test.ts fakes it.
  *
- * S3-5 — the listening half (`openMic`, `useRivetListening`): the microphone,
+ * S3-5 — the listening half (`openMic`, `useRivetTurnListener`): the microphone,
  * MediaRecorder and Deepgram's socket are faked at the browser/vendor boundary
  * the way useDeepgramDictation.test.ts fakes them; POST /api/voice/stream-token
  * is answered at fetch like the other routes.
@@ -21,7 +21,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const track = vi.hoisted(() => ({ trackFunnel: vi.fn(), track: vi.fn() }));
 vi.mock('../lib/analytics', () => track);
 
-import { useRivetListening, useRivetVoice, type RivetVoice } from './useRivetVoice';
+import { useRivetTurnListener, useRivetVoice, type RivetVoice } from './useRivetVoice';
+import type { UtteranceScreen } from '../lib/onboarding-utterance';
 
 const FUNNEL = { tenantId: 'tenant-1', userId: 'user-1' };
 
@@ -475,18 +476,20 @@ const partial = (transcript: string) =>
   });
 
 /** The shell's voice with one turn listening, the way the shell and OptionPairTurn compose them. */
-function mountTurn(over: { enabled?: boolean } = {}) {
-  const onMatch = vi.fn();
-  const onNoMatch = vi.fn();
+const SCREEN: UtteranceScreen = { options: LABELS };
+
+function mountTurn(over: { enabled?: boolean; screen?: UtteranceScreen } = {}) {
+  const onResult = vi.fn();
+  const screen = over.screen ?? SCREEN;
   const view = renderHook(
     ({ enabled }: { enabled: boolean }) => {
       const voice = useRivetVoice({ funnel: FUNNEL });
-      const listening = useRivetListening(voice, { turn: 'booking_posture', options: LABELS, enabled, onMatch, onNoMatch });
+      const listening = useRivetTurnListener(voice, { turn: 'booking_posture', screen, enabled, onResult });
       return { voice, listening };
     },
     { initialProps: { enabled: over.enabled ?? true } },
   );
-  return { ...view, onMatch, onNoMatch };
+  return { ...view, onResult };
 }
 
 /** "Make it mine": the tap that unlocks the audio and asks for the microphone, once. */
@@ -561,23 +564,71 @@ describe('useRivetVoice — listening (S3-5)', () => {
   });
 
   it('matches "the second one" to the second card with no request but the token', async () => {
-    const { result, onMatch, onNoMatch } = mountTurn();
+    const { result, onResult } = mountTurn();
     await makeItMine(result);
     act(() => socket().open());
     const before = sent.length;
     say('the second one');
-    expect(onMatch).toHaveBeenCalledWith('b', 'the second one');
-    expect(onNoMatch).not.toHaveBeenCalled();
+    expect(onResult).toHaveBeenCalledWith(expect.objectContaining({ kind: 'pick', key: 'b', transcript: 'the second one' }));
+    expect(onResult).toHaveBeenCalledTimes(1);
     expect(sent.slice(before)).toEqual([]);
+    expect(result.current.listening.missed).toBeNull();
   });
 
-  it('hands back what it heard when it matches neither card', async () => {
-    const { result, onMatch, onNoMatch } = mountTurn();
+  it('an unclear answer is never silent: Rivet says what he heard and what the turn accepts, then an example', async () => {
+    const { result, onResult } = mountTurn();
     await makeItMine(result);
     act(() => socket().open());
+    const before = sent.length;
     say('banana');
-    expect(onNoMatch).toHaveBeenCalledWith('banana');
-    expect(onMatch).not.toHaveBeenCalled();
+    expect(onResult).toHaveBeenCalledWith({ kind: 'unclear', transcript: 'banana' });
+    expect(result.current.listening.missed).toEqual({
+      transcript: 'banana',
+      reply: 'I heard “banana”. Tap one, or say first or second.',
+      count: 1,
+    });
+    await settle();
+    expect(sent.slice(before)).toEqual([
+      { method: 'POST', path: '/api/voice/tts', body: { text: 'I heard “banana”. Tap one, or say first or second.' } },
+    ]);
+
+    say('something else');
+    expect(result.current.listening.missed?.reply).toBe(
+      'I heard “something else”. Tap one, or say first or second. For example, say “first”.',
+    );
+    say('the first one');
+    expect(result.current.listening.missed).toBeNull();
+  });
+
+  it('sorts help and commands on a screen that offers them, and boosts the command phrases', async () => {
+    const { result, onResult } = mountTurn({
+      screen: { help: ['repeat'], commands: [{ id: 'make_it_mine', phrases: ['make it mine'] }] },
+    });
+    await makeItMine(result);
+    expect(new URL(socket().url).searchParams.getAll('keyterm')).toEqual(['make it mine']);
+    act(() => socket().open());
+    say('say that again');
+    say("let's make it mine");
+    expect(onResult.mock.calls.map(([u]) => u)).toEqual([
+      { kind: 'help', help: 'repeat', transcript: 'say that again' },
+      { kind: 'command', command: 'make_it_mine', transcript: "let's make it mine" },
+    ]);
+    expect(result.current.listening.missed).toBeNull();
+  });
+
+  it('a turn paused while its socket is still starting listens again when it resumes', async () => {
+    // The shell's save flickers `enabled` as a turn opens: the start in flight is cancelled, and the
+    // turn must not take that as "stop listening".
+    const { result, rerender } = mountTurn({ enabled: false });
+    await makeItMine(result);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    rerender({ enabled: true }); // the start asks for its token...
+    rerender({ enabled: false }); // ...and is cancelled before it arrives
+    rerender({ enabled: true });
+    await settle();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    act(() => socket().open());
+    expect(result.current.listening.listening).toBe(true);
   });
 
   it('a socket dropped mid-turn is reopened once with a new token, on the same microphone', async () => {
@@ -626,7 +677,7 @@ describe('useRivetVoice — listening (S3-5)', () => {
     getUserMedia.mockImplementation(async () => {
       throw new DOMException('Permission denied', 'NotAllowedError');
     });
-    const { result, onMatch } = mountTurn();
+    const { result, onResult } = mountTurn();
     await makeItMine(result);
     expect(result.current.voice.input).toBe('denied');
     expect(result.current.listening.available).toBe(false);
@@ -637,7 +688,7 @@ describe('useRivetVoice — listening (S3-5)', () => {
     expect(getUserMedia).toHaveBeenCalledTimes(1);
     expect(sent.filter((r) => r.path.startsWith('/api/voice/stream-token'))).toEqual([]);
     expect(FakeWebSocket.instances).toEqual([]);
-    expect(onMatch).not.toHaveBeenCalled();
+    expect(onResult).not.toHaveBeenCalled();
   });
 
   it('no transcription here (the token route answers 503): unavailable once, and the microphone is let go', async () => {
