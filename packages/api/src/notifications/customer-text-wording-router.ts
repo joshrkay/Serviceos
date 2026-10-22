@@ -26,7 +26,8 @@ import {
   renderThankYouSms,
 } from './templates';
 
-const saveSchema = z.object({ body: z.string().max(4000) });
+// Generous: the real limit is checked after trimming, with a reason the owner can act on.
+const saveSchema = z.object({ body: z.string().max(20000) });
 
 const SAMPLE = {
   customerName: 'Sam Rivera',

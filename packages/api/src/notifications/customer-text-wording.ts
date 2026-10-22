@@ -45,6 +45,8 @@ const LINK_REQUIRED: ReadonlySet<WordingPurpose> = new Set([
   'portal_link_text',
 ]);
 
+const FILL_IN = /\{\{\s*[a-zA-Z0-9_]+\s*\}\}/g;
+
 /** About three text segments: long enough for a friendly note, short enough to read. */
 export const MAX_WORDING_LENGTH = 480;
 
@@ -68,6 +70,11 @@ export function wordingProblems(purpose: WordingPurpose, body: string): string[]
         .join(', ')}.`,
     );
   }
+  // Anything brace-like that isn't a whole `{{fill_in}}` ("{{customer name}}",
+  // "{{{link}}}", a missing "}") would reach the customer as typed.
+  if (/[{}]/.test(trimmed.replace(FILL_IN, ''))) {
+    problems.push('Fill-ins look like {{customer_name}}: two braces each side, no spaces inside. Remove any other { or }.');
+  }
   if (LINK_REQUIRED.has(purpose) && !extractTemplateVariables(trimmed).includes('link')) {
     problems.push('Include {{link}} so the customer can open it.');
   }
@@ -87,10 +94,13 @@ export function fillOwnerWording(args: {
 }): string | null {
   const values: Record<string, string> = {};
   for (const [k, v] of Object.entries(args.values)) {
-    if (v !== undefined) values[k] = v.trim();
+    // A value's own braces (a customer named "{{link}}") never reach the text.
+    if (typeof v === 'string') values[k] = v.replace(/[{}]/g, '').trim();
   }
   const { text, missingVariables } = renderMessageTemplate(args.body.trim(), values);
-  if (missingVariables.length > 0) return null;
+  // A wording saved before a check existed, or edited outside the screen,
+  // must still never send a raw placeholder.
+  if (missingVariables.length > 0 || /\{\{|\}\}/.test(text)) return null;
   const lines = text.split('\n');
   const note = args.note?.trim();
   if (note) lines.splice(1, 0, note);
@@ -166,14 +176,27 @@ export class PgCustomerTextWordingRepository
     });
   }
 
+  /**
+   * Read inside a savepoint: on a send this runs on the request's own
+   * transaction, and a failed read (timeout, table not migrated yet) must
+   * leave that transaction usable so the send goes on with our wording.
+   */
   async find(tenantId: string, purpose: WordingPurpose): Promise<SavedWording | null> {
     return this.withTenant(tenantId, async (client) => {
-      const result = await client.query(
-        `SELECT purpose, body, updated_by, updated_at FROM customer_text_wording
-          WHERE tenant_id = $1 AND purpose = $2`,
-        [tenantId, purpose],
-      );
-      return result.rows[0] ? rowToWording(result.rows[0]) : null;
+      await client.query('SAVEPOINT text_wording_read');
+      try {
+        const result = await client.query(
+          `SELECT purpose, body, updated_by, updated_at FROM customer_text_wording
+            WHERE tenant_id = $1 AND purpose = $2`,
+          [tenantId, purpose],
+        );
+        await client.query('RELEASE SAVEPOINT text_wording_read');
+        return result.rows[0] ? rowToWording(result.rows[0]) : null;
+      } catch (err) {
+        await client.query('ROLLBACK TO SAVEPOINT text_wording_read');
+        await client.query('RELEASE SAVEPOINT text_wording_read').catch(() => undefined);
+        throw err;
+      }
     });
   }
 
@@ -238,12 +261,22 @@ export function createCustomerTextWording(deps: {
         return args.builtIn();
       }
       if (!saved) return args.builtIn();
-      const text = fillOwnerWording({
-        body: saved.body,
-        values: args.values,
-        note: args.note,
-        extraLines: args.extraLines,
-      });
+      let text: string | null;
+      try {
+        text = fillOwnerWording({
+          body: saved.body,
+          values: args.values,
+          note: args.note,
+          extraLines: args.extraLines,
+        });
+      } catch (err) {
+        deps.logger.warn('Owner text wording could not be filled; sending our wording', {
+          tenantId: args.tenantId,
+          purpose: args.purpose,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return args.builtIn();
+      }
       if (text === null) {
         deps.logger.warn('Owner text wording has a fill-in with no value; sending our wording', {
           tenantId: args.tenantId,

@@ -107,6 +107,18 @@ describe('D-045 — TextWordingSheet', () => {
     expect(within(card(/thank-you text/i)).getByRole('button', { name: /^save$/i })).toBeDisabled();
   });
 
+  it('clearing the box on a saved wording still shows what customers get: the saved wording', async () => {
+    render(<TextWordingSheet onClose={() => {}} api={mockApi()} />);
+    const thanks = await screen.findByRole('region', { name: /thank-you text/i });
+
+    fireEvent.change(within(thanks).getByLabelText(/thank-you text wording/i), { target: { value: '' } });
+
+    expect(screen.getByTestId('wording-thank_you_text-preview')).toHaveTextContent('Thanks Sam Rivera!');
+    expect(screen.getByTestId('wording-thank_you_text-cleared-hint')).toHaveTextContent(/Reset to ours/);
+    expect(within(thanks).getByRole('button', { name: /^save$/i })).toBeDisabled();
+    expect(within(thanks).getByText('Your wording')).toBeInTheDocument();
+  });
+
   it('Reset to ours clears the wording and the card goes back to ours', async () => {
     const api = mockApi();
     render(<TextWordingSheet onClose={() => {}} api={api} />);

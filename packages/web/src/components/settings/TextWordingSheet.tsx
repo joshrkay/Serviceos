@@ -103,7 +103,13 @@ function WordingCard({
     }
   };
 
-  const preview = draft.trim() ? previewWording(draft, text.sampleValues) : text.ours;
+  // An emptied box saves nothing: what customers get is still the saved
+  // wording (or ours) until the owner saves or resets.
+  const preview = draft.trim()
+    ? previewWording(draft, text.sampleValues)
+    : text.saved
+      ? previewWording(text.saved.body, text.sampleValues)
+      : text.ours;
 
   return (
     <section aria-labelledby={`${id}-title`} className="rounded-xl border border-border p-3 space-y-2 min-w-0">
@@ -157,6 +163,11 @@ function WordingCard({
         >
           {preview}
         </p>
+        {!draft.trim() && text.saved && (
+          <p className="mt-1 text-xs text-muted-foreground" data-testid={`${id}-cleared-hint`}>
+            Your saved wording still goes out. Tap Reset to ours to go back to our wording.
+          </p>
+        )}
       </div>
 
       {problems.length > 0 && (

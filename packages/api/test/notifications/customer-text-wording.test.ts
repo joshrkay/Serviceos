@@ -30,6 +30,17 @@ describe('wordingProblems', () => {
     expect(wordingProblems('thank_you_text', 'Thanks!')).toEqual([]);
   });
 
+  it.each(['Hi {{customer name}} {{link}}', 'Hi {{customer-name}} {{link}}', 'Hi {{}} {{link}}', 'Hi {{ customer_name } {{link}}', 'Hi {{{link}}}'])(
+    'refuses anything brace-like that is not a whole fill-in: %s',
+    (body) => {
+      expect(wordingProblems('estimate_text', body)).toContainEqual(expect.stringMatching(/two braces each side/));
+    },
+  );
+
+  it('accepts spaces inside a whole fill-in', () => {
+    expect(wordingProblems('estimate_text', 'Hi {{ customer_name }}: {{ link }}')).toEqual([]);
+  });
+
   it('caps the length', () => {
     const long = `{{link}} ${'a'.repeat(MAX_WORDING_LENGTH)}`;
     expect(wordingProblems('invoice_text', long)[0]).toMatch(/Keep it under 480 characters/);
@@ -57,10 +68,18 @@ describe('fillOwnerWording', () => {
     expect(fillOwnerWording({ body: 'Hi {{customer_name}} {{link}}', values: { link: 'L', customer_name: '  ' } })).toBeNull();
   });
 
-  it('never re-reads a value as a fill-in', () => {
-    expect(fillOwnerWording({ body: 'Hi {{customer_name}} {{link}}', values: { customer_name: '{{link}}', link: 'L' } })).toBe(
-      'Hi {{link}} L',
+  it("drops a value's own braces, so nothing placeholder-like reaches the customer", () => {
+    expect(fillOwnerWording({ body: 'Hi {{customer_name}} {{link}}', values: { customer_name: '{{link}} Ana', link: 'L' } })).toBe(
+      'Hi link Ana L',
     );
+  });
+
+  it('is null when a stored wording would still send a raw placeholder', () => {
+    expect(fillOwnerWording({ body: 'Hi {{customer name}} {{link}}', values: { link: 'L' } })).toBeNull();
+  });
+
+  it('a value that is not text counts as missing', () => {
+    expect(fillOwnerWording({ body: '{{number}} {{link}}', values: { number: null as unknown as string, link: 'L' } })).toBeNull();
   });
 });
 
