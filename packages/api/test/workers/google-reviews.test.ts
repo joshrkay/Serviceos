@@ -224,6 +224,7 @@ describe('P7-026 runGoogleReviewsSweep', () => {
     expect(result.persisted).toBe(0);
     const state = await pollStateRepo.getPollState('t1');
     expect(state?.consecutive429Count).toBe(1);
+    expect(state?.backoffReason).toBe('quota');
     // Retry-After=30s equals the exponential base of 30s — GREATEST
     // picks either; the resulting backoff is the same.
     expect(state?.backoffUntil?.getTime()).toBe(
@@ -802,6 +803,8 @@ describe('P7-026 runGoogleReviewsSweep — refresh-token handling', () => {
     expect(state!.backoffUntil!.getTime()).toBe(
       NOW.getTime() + GOOGLE_BUSINESS_AUTH_BACKOFF_SECONDS * 1000,
     );
+    // Marked as a credentials problem, so only this asks for a reconnect.
+    expect(state?.backoffReason).toBe('auth');
     expect(state?.consecutive429Count).toBeGreaterThanOrEqual(1);
 
     // And the next sweep skips the tenant entirely (throttled), so we

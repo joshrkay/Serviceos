@@ -139,6 +139,16 @@ describe('P7-026 InMemoryReviewPollStateRepository', () => {
     );
   });
 
+  it('records why it backed off, and a success clears the reason', async () => {
+    const repo = new InMemoryReviewPollStateRepository(() => NOW);
+    await repo.recordQuotaError('t1');
+    expect((await repo.getPollState('t1'))?.backoffReason).toBe('quota');
+    await repo.recordQuotaError('t1', 3600, 'auth');
+    expect((await repo.getPollState('t1'))?.backoffReason).toBe('auth');
+    await repo.recordSuccess('t1', '2026-10-01T00:00:00.000Z');
+    expect((await repo.getPollState('t1'))?.backoffReason).toBeNull();
+  });
+
   it('recordQuotaError preserves existing cursor (we retry from same watermark)', async () => {
     const repo = new InMemoryReviewPollStateRepository(() => NOW);
     await repo.recordSuccess('t1', '2026-05-17T11:00:00.000Z');

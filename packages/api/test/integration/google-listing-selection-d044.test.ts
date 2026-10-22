@@ -8,7 +8,9 @@
  * fields), the token read the picker uses, and the settings write, against
  * a real Postgres under RLS. No Google calls.
  *
- * Also pins review_poll_state.cursor reset on a listing change.
+ * Also pins review_poll_state.cursor reset on a listing change, and
+ * review_poll_state.backoff_reason (migration 330) so the home checklist
+ * asks for a reconnect only when Google rejected the credentials.
  *
  * #1763 — also pins tenant_settings.get_found_online_dismissed_at (migration
  * 330), read and written by the home checklist's dismissal repo.
@@ -179,5 +181,44 @@ describe('D-044 Google listing selection (real Postgres)', () => {
     const updated = await repo.recordLocationCount(tenantId, 0);
     expect(updated).toMatchObject({ locationCount: 0, locationId: null });
     expect((await repo.getTokens(tenantId))?.accessToken).toBe('AT-1');
+  });
+
+  it('forgetLocation drops the listing ids, keeps the tokens, and the worker sees no location', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    const repo = new PgGoogleBusinessIntegrationRepository(pool);
+    await repo.upsert({
+      tenantId,
+      accessToken: 'AT-1',
+      refreshToken: 'RT-1',
+      accessTokenExpiresAt: new Date('2026-10-22T05:00:00Z'),
+      selection: {
+        accountId: '123',
+        locationId: '999',
+        placeId: 'ChIJplace',
+        reviewUrl: 'https://g.page/r/review-999',
+        locationTitle: 'Acme',
+      },
+      locationCount: 1,
+    });
+    const forgotten = await repo.forgetLocation(tenantId, 0);
+    expect(forgotten).toMatchObject({ accountId: null, locationId: null, reviewUrl: null, locationCount: 0 });
+    expect((await repo.getTokens(tenantId))?.accessToken).toBe('AT-1');
+    const { rows } = await pool.query(
+      `SELECT credentials->'providerData' AS pd
+         FROM tenant_integrations WHERE tenant_id = $1 AND provider = 'google_business'`,
+      [tenantId],
+    );
+    expect(rows[0].pd).toMatchObject({ accountId: null, locationId: null, locationCount: 0 });
+  });
+
+  it('backoff_reason records quota vs auth and a success clears it', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    const repo = new PgReviewPollStateRepository(pool);
+    await repo.recordQuotaError(tenantId, 30);
+    expect((await repo.getPollState(tenantId))?.backoffReason).toBe('quota');
+    await repo.recordQuotaError(tenantId, 3600, 'auth');
+    expect((await repo.getPollState(tenantId))?.backoffReason).toBe('auth');
+    await repo.recordSuccess(tenantId, '2026-10-01T00:00:00.000Z');
+    expect((await repo.getPollState(tenantId))?.backoffReason).toBeNull();
   });
 });

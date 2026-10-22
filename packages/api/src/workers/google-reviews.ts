@@ -409,7 +409,7 @@ export async function runGoogleReviewsSweep(
         // of hammering Google — rather than only a log line.
         failed++;
         await deps.pollStateRepo
-          .recordQuotaError(tenantId, GOOGLE_BUSINESS_AUTH_BACKOFF_SECONDS)
+          .recordQuotaError(tenantId, GOOGLE_BUSINESS_AUTH_BACKOFF_SECONDS, 'auth')
           .catch((recordErr) => {
             deps.logger.error(
               'Google reviews sweep: failed to record auth-failure backoff',

@@ -88,11 +88,16 @@ describe('/api/get-found-online', () => {
     });
   });
 
-  it('reads the connected listing, the review link and a paused poll', async () => {
+  it('reads the connected listing, the review link and a poll paused by rejected credentials', async () => {
     await connectListing();
     expect((await request(app()).get('/api/get-found-online')).body.data.allDone).toBe(true);
 
+    // Google throttling clears on its own: no "reconnect" error.
     await pollStateRepo.recordQuotaError(TENANT, 3600);
+    expect((await request(app()).get('/api/get-found-online')).body.data.allDone).toBe(true);
+
+    // Rejected credentials need the owner.
+    await pollStateRepo.recordQuotaError(TENANT, 3600, 'auth');
     const paused = await request(app()).get('/api/get-found-online');
     expect(paused.body.data.items[0]).toEqual({
       id: 'google_listing',

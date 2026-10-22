@@ -49,8 +49,14 @@ export async function loadGetFoundOnlineFacts(
     google: integration
       ? {
           locationState: googleBusinessLocationState(integration),
+          // Google throttling (`quota`) clears on its own and a reconnect
+          // can't fix it; rejected credentials (or a backoff recorded
+          // before the reason was) need the owner.
           pollingPaused:
-            !!pollState?.backoffUntil && pollState.backoffUntil.getTime() > now.getTime(),
+            !!pollState &&
+            pollState.backoffReason !== 'quota' &&
+            !!pollState.backoffUntil &&
+            pollState.backoffUntil.getTime() > now.getTime(),
         }
       : null,
     googleReviewUrl: settings?.googleReviewUrl ?? null,

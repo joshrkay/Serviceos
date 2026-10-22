@@ -8225,6 +8225,9 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS get_found_online_dismissed_at TIMESTAMPTZ;
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS google_review_url_derived TEXT;
+    ALTER TABLE review_poll_state
+      ADD COLUMN IF NOT EXISTS backoff_reason TEXT
+        CHECK (backoff_reason IN ('quota', 'auth'));
   `,
 };
 

@@ -76,8 +76,9 @@ function getKey(): string {
 
 /** The connected Google listing (D-044) inside `credentials.providerData`. */
 interface StoredProviderData {
-  accountId?: string;
-  locationId?: string;
+  /** Null once the chosen listing was forgotten (Google stopped listing it). */
+  accountId?: string | null;
+  locationId?: string | null;
   placeId?: string | null;
   reviewUrl?: string | null;
   locationTitle?: string | null;
@@ -160,9 +161,11 @@ export function resolveGoogleBusinessLocation(credRow: CredentialRow): {
 } {
   const creds = (credRow.credentials ?? {}) as StoredGoogleBusinessCredentials;
   // Per field: a legacy hand-seeded row keeps its top-level ids even after
-  // providerData gains other fields (e.g. only locationCount).
-  const accountId = creds.providerData?.accountId ?? creds.accountId;
-  const locationId = creds.providerData?.locationId ?? creds.locationId;
+  // providerData gains other fields (e.g. only locationCount); an id
+  // providerData holds, even a forgetLocation null, wins.
+  const pd = creds.providerData;
+  const accountId = pd && 'accountId' in pd ? pd.accountId : creds.accountId;
+  const locationId = pd && 'locationId' in pd ? pd.locationId : creds.locationId;
   return {
     ...(accountId != null ? { accountId } : {}),
     ...(locationId != null ? { locationId } : {}),
@@ -314,6 +317,16 @@ export interface GoogleBusinessIntegrationRepository
     locationCount: number,
   ): Promise<GoogleBusinessIntegrationSummary | null>;
   /**
+   * Drop the chosen listing (Google no longer lists it for this
+   * connection) and record the new count, so the owner is asked to pick
+   * again and the poll worker stops polling it. Keeps the tokens. Null
+   * when the tenant has no integration row.
+   */
+  forgetLocation(
+    tenantId: string,
+    locationCount: number,
+  ): Promise<GoogleBusinessIntegrationSummary | null>;
+  /**
    * Hard-delete the row. The poll worker treats "no row" as a silent
    * skip (many tenants legitimately have no GBP), so deletion — not a
    * status flip — is what stops per-sweep failure noise after
@@ -338,6 +351,14 @@ function buildCredentialsJson(
     },
   };
 }
+
+const FORGOTTEN_LISTING: StoredProviderData = {
+  accountId: null,
+  locationId: null,
+  placeId: null,
+  reviewUrl: null,
+  locationTitle: null,
+};
 
 function selectionProviderData(
   selection: GoogleBusinessLocationSelection,
@@ -459,6 +480,13 @@ export class InMemoryGoogleBusinessIntegrationRepository
     locationCount: number,
   ): Promise<GoogleBusinessIntegrationSummary | null> {
     return this.mergeProviderData(tenantId, { locationCount });
+  }
+
+  async forgetLocation(
+    tenantId: string,
+    locationCount: number,
+  ): Promise<GoogleBusinessIntegrationSummary | null> {
+    return this.mergeProviderData(tenantId, { ...FORGOTTEN_LISTING, locationCount });
   }
 
   private mergeProviderData(
@@ -652,6 +680,13 @@ export class PgGoogleBusinessIntegrationRepository
     locationCount: number,
   ): Promise<GoogleBusinessIntegrationSummary | null> {
     return this.mergeProviderData(tenantId, { locationCount });
+  }
+
+  async forgetLocation(
+    tenantId: string,
+    locationCount: number,
+  ): Promise<GoogleBusinessIntegrationSummary | null> {
+    return this.mergeProviderData(tenantId, { ...FORGOTTEN_LISTING, locationCount });
   }
 
   private async mergeProviderData(

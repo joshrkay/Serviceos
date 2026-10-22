@@ -699,6 +699,68 @@ describe('Google Business integrations routes', () => {
       );
     });
 
+    it('the picker drops a saved listing Google no longer lists and clears its app-filled link', async () => {
+      const settingsRepo = await settingsWith();
+      await connect({ '123': ONE_LOCATION }, { settingsRepo });
+      const auditRepo = new InMemoryAuditRepository();
+      const app = buildApp({
+        integrationRepo,
+        stateRepo,
+        googleConfig: GOOGLE_CONFIG,
+        googleFetch: makeConnectFetch({ '456': TWO_LOCATIONS['456'] }) as unknown as typeof fetch,
+        settingsRepo,
+        auditRepo,
+      });
+      const res = await request(app).get('/api/googlebusiness-integrations/google/locations');
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        listingRemoved: true,
+        reviewUrlCleared: true,
+        integration: { locationState: 'needs_pick', locationId: null, reviewUrl: null },
+      });
+      expect(res.body.data).toHaveLength(1);
+      expect((await settingsRepo.findByTenant(TENANT))?.googleReviewUrl ?? null).toBeNull();
+      const summary = await integrationRepo.get(TENANT);
+      expect(summary).toMatchObject({ accountId: null, locationId: null, locationCount: 1 });
+      // The worker no longer polls the gone listing.
+      expect((await integrationRepo.getCredential(TENANT, 'google_business'))?.credentials).toMatchObject({
+        providerData: { locationId: null },
+      });
+      const events = await auditRepo.findByEntity(TENANT, 'googlebusiness_integration', summary!.id);
+      expect(events.map((e) => e.eventType)).toContain('googlebusiness_integration.location_lost');
+    });
+
+    it('the picker finding no locations moves a lost listing to waiting on Google and keeps a typed link', async () => {
+      const settingsRepo = await settingsWith('https://g.page/r/typed-by-owner');
+      await connect({ '123': ONE_LOCATION }, { settingsRepo });
+      const app = buildApp({
+        integrationRepo,
+        stateRepo,
+        googleConfig: GOOGLE_CONFIG,
+        googleFetch: makeConnectFetch({ '123': [] }) as unknown as typeof fetch,
+        settingsRepo,
+      });
+      const res = await request(app).get('/api/googlebusiness-integrations/google/locations');
+      expect(res.body).toMatchObject({ data: [], listingRemoved: true, reviewUrlCleared: false });
+      expect(res.body.integration.locationState).toBe('no_location');
+      expect((await settingsRepo.findByTenant(TENANT))?.googleReviewUrl).toBe(
+        'https://g.page/r/typed-by-owner',
+      );
+    });
+
+    it('the picker leaves a saved listing Google still lists alone', async () => {
+      await connect({ '123': ONE_LOCATION });
+      const app = buildApp({
+        integrationRepo,
+        stateRepo,
+        googleConfig: GOOGLE_CONFIG,
+        googleFetch: makeConnectFetch(TWO_LOCATIONS) as unknown as typeof fetch,
+      });
+      const res = await request(app).get('/api/googlebusiness-integrations/google/locations');
+      expect(res.body.listingRemoved).toBeUndefined();
+      expect(await integrationRepo.get(TENANT)).toMatchObject({ locationId: '999', locationCount: 2 });
+    });
+
     it('a reconnect where the saved listing is gone clears the link the app filled from it', async () => {
       const settingsRepo = await settingsWith();
       await connect({ '123': ONE_LOCATION }, { settingsRepo });

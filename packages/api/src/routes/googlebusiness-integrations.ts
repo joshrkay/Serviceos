@@ -23,7 +23,7 @@ import {
 } from '../reputation/google-business-integration';
 import { applyDerivedGoogleReviewUrl } from '../reputation/google-review-link';
 import type { SettingsRepository } from '../settings/settings';
-import { ReviewPollStateRepository } from '../reputation/poll-state';
+import { ReviewPollState, ReviewPollStateRepository } from '../reputation/poll-state';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 
 /**
@@ -171,7 +171,7 @@ async function fillReviewUrl(
 
 function statusView(
   integration: GoogleBusinessIntegrationSummary,
-  pollState: { lastSuccessfulPollAt?: Date | null; backoffUntil?: Date | null } | null,
+  pollState: Pick<ReviewPollState, 'lastSuccessfulPollAt' | 'backoffUntil' | 'backoffReason'> | null,
 ) {
   return {
     id: integration.id,
@@ -186,6 +186,7 @@ function statusView(
     updatedAt: integration.updatedAt.toISOString(),
     lastSuccessfulPollAt: pollState?.lastSuccessfulPollAt?.toISOString() ?? null,
     backoffUntil: pollState?.backoffUntil?.toISOString() ?? null,
+    backoffReason: pollState?.backoffReason ?? null,
   };
 }
 
@@ -457,10 +458,55 @@ export function createGoogleBusinessIntegrationsRouter(
       try {
         const tenantId = req.auth!.tenantId;
         const locations = await discoverForTenant(tenantId);
+        const current = await deps.integrationRepo.get(tenantId);
+        const listingGone =
+          !!current?.locationId &&
+          !locations.some(
+            (l) => l.locationId === current.locationId && l.accountId === current.accountId,
+          );
+        if (current && listingGone) {
+          // The saved listing was removed or this connection lost access:
+          // stop polling it, ask for a pick, and clear a review link the
+          // app filled from it (a typed one stays).
+          const forgotten = await deps.integrationRepo.forgetLocation(tenantId, locations.length);
+          const reviewUrl = await fillReviewUrl(deps, tenantId, current.reviewUrl, null);
+          if (deps.auditRepo && forgotten) {
+            await deps.auditRepo.create(
+              createAuditEvent({
+                tenantId,
+                actorId: req.auth!.userId,
+                actorRole: req.auth!.role,
+                eventType: 'googlebusiness_integration.location_lost',
+                entityType: 'googlebusiness_integration',
+                entityId: forgotten.id,
+                metadata: {
+                  provider: 'google_business',
+                  previousLocationId: current.locationId,
+                  locationCount: locations.length,
+                  ...reviewUrl,
+                },
+              }),
+            );
+          }
+          if (reviewUrl.reviewUrlError) {
+            throw new Error(
+              `Your saved Google location is gone, but the old review link could not be removed: ${reviewUrl.reviewUrlError}`,
+            );
+          }
+          const pollState = deps.pollStateRepo
+            ? await deps.pollStateRepo.getPollState(tenantId)
+            : null;
+          res.json({
+            data: locations,
+            listingRemoved: true,
+            ...(forgotten ? { integration: statusView(forgotten, pollState) } : {}),
+            reviewUrlCleared: reviewUrl.reviewUrlCleared ?? false,
+          });
+          return;
+        }
         // A connect whose discovery failed stored no count; once Google
         // answers, an empty account must read as "waiting on Google", not
         // "pick a location".
-        const current = await deps.integrationRepo.get(tenantId);
         if (current && current.locationCount !== locations.length) {
           await deps.integrationRepo.recordLocationCount(tenantId, locations.length);
         }

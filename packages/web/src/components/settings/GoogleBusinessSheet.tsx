@@ -30,6 +30,8 @@ interface GoogleBusinessIntegrationView {
   updatedAt: string;
   lastSuccessfulPollAt: string | null;
   backoffUntil: string | null;
+  /** quota = Google throttling (clears on its own); auth = reconnect needed. */
+  backoffReason?: 'quota' | 'auth' | null;
 }
 
 interface GoogleBusinessLocationView {
@@ -77,8 +79,24 @@ export function GoogleBusinessSheet({ onClose, onReviewUrlChange }: GoogleBusine
       if (!res.ok) {
         throw new Error(await errorDetail(res, `Could not load locations (${res.status})`));
       }
-      const json = (await res.json()) as { data?: GoogleBusinessLocationView[] };
+      const json = (await res.json()) as {
+        data?: GoogleBusinessLocationView[];
+        listingRemoved?: boolean;
+        integration?: GoogleBusinessIntegrationView;
+        reviewUrlCleared?: boolean;
+      };
       setLocations(json.data ?? []);
+      if (json.listingRemoved) {
+        // The saved listing is no longer on this Google account; the
+        // server dropped it, so the owner must pick again.
+        if (json.integration) setIntegration(json.integration);
+        if (json.reviewUrlCleared) onReviewUrlChange?.(null);
+        toast.error(
+          json.reviewUrlCleared
+            ? 'Your saved Google location is no longer on this account, so its review link was removed. Pick your location again.'
+            : 'Your saved Google location is no longer on this account. Pick your location again.',
+        );
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Could not load locations');
     } finally {
@@ -205,8 +223,11 @@ export function GoogleBusinessSheet({ onClose, onReviewUrlChange }: GoogleBusine
   const locationState = integration?.locationState;
   // Backoff in the future ⇒ polling is paused (usually broken
   // credentials after the operator revoked access on Google's side).
+  // Google throttling also backs off, but clears on its own and a
+  // reconnect can't fix it, so it doesn't ask the owner to reconnect.
   const needsAttention =
     isConnected &&
+    integration!.backoffReason !== 'quota' &&
     integration!.backoffUntil !== null &&
     new Date(integration!.backoffUntil).getTime() > Date.now();
 

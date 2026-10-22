@@ -396,6 +396,7 @@ describe('Google Reviews worker — integration', () => {
     const after = await pollStateRepo.getPollState(tenantA.tenantId);
     expect(after).not.toBeNull();
     expect(after!.consecutive429Count).toBe(1);
+    expect(after!.backoffReason).toBe('quota');
     expect(after!.backoffUntil).not.toBeNull();
     // backoffUntil must be in the future after a quota error.
     expect(after!.backoffUntil!.getTime()).toBeGreaterThan(Date.now());

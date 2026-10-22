@@ -81,6 +81,17 @@ describe('GoogleBusinessSheet', () => {
     expect(screen.getByTestId('googlebusiness-connect')).toBeInTheDocument();
   });
 
+  it('Google throttling does not ask the owner to reconnect', async () => {
+    apiFetchMock.mockResolvedValueOnce(
+      jsonResponse({
+        data: connectedIntegration({ backoffUntil: '2100-01-01T00:00:00Z', backoffReason: 'quota' }),
+      }),
+    );
+    render(<GoogleBusinessSheet onClose={() => {}} />);
+    await screen.findByTestId('googlebusiness-connected');
+    expect(screen.queryByTestId('googlebusiness-attention')).toBeNull();
+  });
+
   it('clicking Connect POSTs and redirects to the returned Google URL', async () => {
     const assignSpy = vi.fn();
     Object.defineProperty(window, 'location', {
@@ -306,6 +317,37 @@ describe('GoogleBusinessSheet', () => {
       fireEvent.click(await screen.findByTestId('googlebusiness-change-location'));
       await screen.findByTestId('googlebusiness-location-picker');
       expect(screen.getByText('Acme Plumbing (current)').closest('button')).toBeDisabled();
+    });
+
+    it('connected: a saved listing Google no longer lists is dropped and the owner told', async () => {
+      const onReviewUrlChange = vi.fn();
+      apiFetchMock
+        .mockResolvedValueOnce(
+          jsonResponse({
+            data: connectedIntegration({ locationTitle: 'Acme Plumbing', locationState: 'connected' }),
+          }),
+        )
+        .mockResolvedValueOnce(
+          jsonResponse({
+            data: LOCATIONS,
+            listingRemoved: true,
+            reviewUrlCleared: true,
+            integration: connectedIntegration({
+              accountId: null,
+              locationId: null,
+              locationTitle: null,
+              locationState: 'needs_pick',
+            }),
+          }),
+        );
+      render(<GoogleBusinessSheet onClose={() => {}} onReviewUrlChange={onReviewUrlChange} />);
+      fireEvent.click(await screen.findByTestId('googlebusiness-change-location'));
+      await screen.findByTestId('googlebusiness-location-picker');
+      expect(onReviewUrlChange).toHaveBeenCalledWith(null);
+      expect(toastError).toHaveBeenCalledWith(
+        expect.stringContaining('no longer on this account, so its review link was removed'),
+      );
+      expect(screen.queryByText('Acme Plumbing (current)')).toBeNull();
     });
 
     it('a failed save shows the API reason', async () => {

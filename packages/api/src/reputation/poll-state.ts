@@ -28,9 +28,17 @@ export interface ReviewPollState {
   cursor: string | null;
   lastSuccessfulPollAt: Date | null;
   backoffUntil: Date | null;
+  /**
+   * Why the current backoff was set: Google throttling (`quota`, clears on
+   * its own) or credentials Google rejected (`auth`, needs a reconnect).
+   * Null with no backoff, and on rows written before the column existed.
+   */
+  backoffReason: ReviewBackoffReason | null;
   consecutive429Count: number;
   updatedAt: Date;
 }
+
+export type ReviewBackoffReason = 'quota' | 'auth';
 
 export interface ReviewPollStateRepository {
   /** Returns null when no row exists for the tenant (first poll). */
@@ -56,10 +64,14 @@ export interface ReviewPollStateRepository {
    *   from the 429 response. Floors the wait — it never shortens the
    *   exponential delay, only extends it when Google asks for more.
    *   The exponential count still increments either way.
+   * @param reason  `auth` when the backoff is for rejected credentials
+   *   (the worker reuses this backoff for them), so the owner is told to
+   *   reconnect only then.
    */
   recordQuotaError(
     tenantId: string,
     retryAfterSeconds?: number,
+    reason?: ReviewBackoffReason,
   ): Promise<void>;
 }
 
@@ -79,7 +91,7 @@ export function computeBackoffMs(consecutiveCount: number): number {
 
 /** True iff `now < state.backoffUntil`. Null-safe (no state → not throttled). */
 export function isThrottled(
-  state: ReviewPollState | null,
+  state: Pick<ReviewPollState, 'backoffUntil'> | null,
   now: Date,
 ): boolean {
   if (!state || !state.backoffUntil) return false;
@@ -91,6 +103,7 @@ interface PollStateRow {
   cursor: string | null;
   last_successful_poll_at: string | null;
   backoff_until: string | null;
+  backoff_reason: ReviewBackoffReason | null;
   consecutive_429_count: number;
   updated_at: string;
 }
@@ -103,6 +116,7 @@ function mapRow(row: PollStateRow): ReviewPollState {
       ? new Date(row.last_successful_poll_at)
       : null,
     backoffUntil: row.backoff_until ? new Date(row.backoff_until) : null,
+    backoffReason: row.backoff_reason ?? null,
     consecutive429Count: row.consecutive_429_count,
     updatedAt: new Date(row.updated_at),
   };
@@ -123,7 +137,7 @@ export class PgReviewPollStateRepository
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query<PollStateRow>(
         `SELECT tenant_id, cursor, last_successful_poll_at,
-                backoff_until, consecutive_429_count, updated_at
+                backoff_until, backoff_reason, consecutive_429_count, updated_at
            FROM review_poll_state
           WHERE tenant_id = $1`,
         [tenantId],
@@ -144,6 +158,7 @@ export class PgReviewPollStateRepository
            SET cursor                  = EXCLUDED.cursor,
                last_successful_poll_at = EXCLUDED.last_successful_poll_at,
                backoff_until           = NULL,
+               backoff_reason          = NULL,
                consecutive_429_count   = 0,
                updated_at              = EXCLUDED.updated_at`,
         [tenantId, newCursor, now],
@@ -164,6 +179,7 @@ export class PgReviewPollStateRepository
   async recordQuotaError(
     tenantId: string,
     retryAfterSeconds?: number,
+    reason: ReviewBackoffReason = 'quota',
   ): Promise<void> {
     const now = this.now();
     // `Retry-After` floors the wait but never shortens the exponential
@@ -184,7 +200,7 @@ export class PgReviewPollStateRepository
       await client.query(
         `INSERT INTO review_poll_state (
            tenant_id, cursor, last_successful_poll_at,
-           backoff_until, consecutive_429_count, updated_at
+           backoff_until, consecutive_429_count, updated_at, backoff_reason
          ) VALUES (
            $1, NULL, NULL,
            $2::timestamptz + (GREATEST(
@@ -194,10 +210,11 @@ export class PgReviewPollStateRepository
              ),
              $5::bigint
            ) || ' milliseconds')::interval,
-           1, $2
+           1, $2, $6
          )
          ON CONFLICT (tenant_id) DO UPDATE
            SET consecutive_429_count = review_poll_state.consecutive_429_count + 1,
+               backoff_reason        = $6,
                backoff_until         = $2::timestamptz + (GREATEST(
                  LEAST(
                    ($3::bigint * POWER(2, review_poll_state.consecutive_429_count)::bigint),
@@ -212,6 +229,7 @@ export class PgReviewPollStateRepository
           REVIEW_BACKOFF_BASE_MS,
           REVIEW_BACKOFF_MAX_MS,
           retryAfterMs,
+          reason,
         ],
       );
     });
@@ -240,6 +258,7 @@ export class InMemoryReviewPollStateRepository
       cursor: newCursor,
       lastSuccessfulPollAt: now,
       backoffUntil: null,
+      backoffReason: null,
       consecutive429Count: 0,
       updatedAt: now,
     });
@@ -254,6 +273,7 @@ export class InMemoryReviewPollStateRepository
   async recordQuotaError(
     tenantId: string,
     retryAfterSeconds?: number,
+    reason: ReviewBackoffReason = 'quota',
   ): Promise<void> {
     const now = this.now();
     const existing = this.store.get(tenantId);
@@ -271,6 +291,7 @@ export class InMemoryReviewPollStateRepository
       cursor: existing?.cursor ?? null,
       lastSuccessfulPollAt: existing?.lastSuccessfulPollAt ?? null,
       backoffUntil: new Date(now.getTime() + delay),
+      backoffReason: reason,
       consecutive429Count: nextCount,
       updatedAt: now,
     });
