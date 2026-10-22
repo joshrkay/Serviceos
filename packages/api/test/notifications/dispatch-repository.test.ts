@@ -55,6 +55,15 @@ describe('InMemoryDispatchRepository', () => {
       expect(row).toMatchObject({ provider: 'sms-gateway', providerMessageId: 'SM1', recipient: '+15550001111' });
     });
 
+    it('keeps a known number when a sent backfill replaces a blocked text', async () => {
+      const repo = new InMemoryDispatchRepository();
+      await repo.recordOutcome({ ...base, idempotencyKey: 'k-1', outcome: { status: 'blocked', reason: 'send_failed', permanent: false } });
+
+      const after = await repo.recordOutcome({ ...base, recipient: '', idempotencyKey: 'k-1', outcome: { status: 'sent', provider: 'unknown' } });
+
+      expect(after).toMatchObject({ status: 'sent', recipient: '+15550001111' });
+    });
+
     it('keeps a failed or bounced row when a retry backfills sent', async () => {
       const repo = new InMemoryDispatchRepository();
       const sent = await repo.recordOutcome({

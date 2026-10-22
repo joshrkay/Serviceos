@@ -232,7 +232,14 @@ export class InMemoryDispatchRepository implements DispatchRepository {
       (r) => r.tenantId === input.tenantId && r.idempotencyKey === input.idempotencyKey,
     );
     if (existing && !replaces(existing, input)) return { ...existing };
-    const row: MessageDispatch = { ...outcomeColumns(input), id: existing?.id ?? uuidv4(), sentAt: new Date() };
+    const columns = outcomeColumns(input);
+    const row: MessageDispatch = {
+      ...columns,
+      // A backfill that never learned the number keeps the one already known.
+      recipient: columns.recipient || existing?.recipient || '',
+      id: existing?.id ?? uuidv4(),
+      sentAt: new Date(),
+    };
     this.rows.set(row.id, row);
     return { ...row };
   }
@@ -358,7 +365,9 @@ export class PgDispatchRepository extends PgBaseRepository implements DispatchRe
          ON CONFLICT (tenant_id, idempotency_key) WHERE idempotency_key IS NOT NULL
          DO UPDATE SET
            entity_type = EXCLUDED.entity_type, entity_id = EXCLUDED.entity_id,
-           channel = EXCLUDED.channel, recipient = EXCLUDED.recipient,
+           channel = EXCLUDED.channel,
+           -- A backfill that never learned the number keeps the one already known.
+           recipient = COALESCE(NULLIF(EXCLUDED.recipient, ''), message_dispatches.recipient),
            provider = EXCLUDED.provider, provider_message_id = EXCLUDED.provider_message_id,
            status = EXCLUDED.status, error_message = EXCLUDED.error_message,
            customer_id = EXCLUDED.customer_id, job_id = EXCLUDED.job_id,

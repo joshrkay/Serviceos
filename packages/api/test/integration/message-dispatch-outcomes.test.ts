@@ -91,6 +91,15 @@ describe('Postgres integration — message dispatch outcomes', () => {
     expect(after).toMatchObject({ providerMessageId: 'SM3', recipient: '+15550001111' });
   });
 
+  it('keeps a known number when a sent backfill replaces a held text', async () => {
+    const input = await base();
+    await repo.recordOutcome({ ...input, outcome: { status: 'scheduled', scheduledFor: new Date('2026-10-23T15:00:00Z') } });
+
+    const after = await repo.recordOutcome({ ...input, recipient: '', outcome: { status: 'sent', provider: 'unknown' } });
+
+    expect(after).toMatchObject({ status: 'sent', recipient: '+15550001111' });
+  });
+
   it('never turns a later delivery failure back into sent', async () => {
     const input = await base();
     const sent = await repo.recordOutcome({
