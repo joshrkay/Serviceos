@@ -609,8 +609,17 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
           !!customer.primaryPhone &&
           !!lead.primaryPhone &&
           normalizePhone(customer.primaryPhone) === normalizePhone(lead.primaryPhone);
+        // The text greets whoever asked: on a contact-bound link that is the
+        // contact, not the account holder the lead's name fell back to.
+        let greetAs = lead;
+        if (contactBound && !parsed.firstName) {
+          const contactRepo = deps.middlewareOptions?.contactRepo ?? deps.contactRepo;
+          // A failed lookup must not fail a request already captured; "there" greets instead.
+          const contact = await contactRepo?.findById(tenantId, req.portal!.contactId!).catch(() => null);
+          greetAs = { ...lead, firstName: contact?.name.trim().split(/\s+/)[0] ?? '' };
+        }
         await deps.autoReplyToNewLead({
-          lead,
+          lead: greetAs,
           outcome,
           smsConsent: tickApplies || storedConsentApplies,
         });

@@ -810,7 +810,10 @@ describe('#1738 portal service request: instant reply consent', () => {
         .post(`/api/public/portal/${token}/request-service`)
         .send({ summary: 'Water heater leaking', ...body });
       expect(res.status).toBe(201);
-      return autoReplyToNewLead.mock.calls[0][0] as { smsConsent: boolean; lead: { primaryPhone?: string } };
+      return autoReplyToNewLead.mock.calls[0][0] as {
+        smsConsent: boolean;
+        lead: { primaryPhone?: string; firstName?: string };
+      };
     }
 
     it("cannot tick consent for the account holder's number by leaving the phone blank", async () => {
@@ -823,8 +826,10 @@ describe('#1738 portal service request: instant reply consent', () => {
       expect((await submitAsContact({})).smsConsent).toBe(false);
     });
 
-    it('counts the tick for a number the contact typed', async () => {
-      expect((await submitAsContact({ smsConsent: true, primaryPhone: '+15555550177' })).smsConsent).toBe(true);
+    it('counts the tick for a number the contact typed, and greets the contact, not the account holder', async () => {
+      const call = await submitAsContact({ smsConsent: true, primaryPhone: '+15555550177' });
+      expect(call.smsConsent).toBe(true);
+      expect(call.lead.firstName).toBe('Site');
     });
   });
 });
