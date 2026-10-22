@@ -1,13 +1,12 @@
 import { useContext, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Mic } from 'lucide-react';
-import type { AssembledOnboardingChoice, OnboardingOptionKey, StagedOnboardingChoice } from '@ai-service-os/shared';
-import { RivetVoiceContext, useRivetLine, useRivetTurnListener } from '../../../hooks/useRivetVoice';
+import { narrateTurn, type AssembledOnboardingChoice, type OnboardingOptionKey, type StagedOnboardingChoice } from '@ai-service-os/shared';
+import { RivetVoiceContext, useRivetNarration, useRivetTurnListener } from '../../../hooks/useRivetVoice';
 import type { UtteranceScreen } from '../../../lib/onboarding-utterance';
 import { Button, OptionCard } from '../../ui';
 import { cn } from '../../ui/utils';
 import { withoutListeningPromise } from './listening-copy';
 import { RivetHeading, SpeakerLine } from './TurnFrame';
-import { spokenLines } from './turns';
 import { TypeInsteadFields } from './TypeInsteadFields';
 import {
   initialTypedValues,
@@ -57,8 +56,8 @@ export function OptionPairTurn({ choice, staged, busy, error, notice, onPick, on
   const [typedErrors, setTypedErrors] = useState<TypedErrors>({});
 
   const voice = useContext(RivetVoiceContext);
-  const lines = useMemo(() => spokenLines(choice), [choice]);
-  useRivetLine(choice.settingKey, choice.question, lines);
+  const lines = useMemo(() => narrateTurn(choice), [choice]);
+  useRivetNarration(choice.settingKey, lines);
   const [heard, setHeard] = useState<{ key: OnboardingOptionKey; text: string } | null>(null);
   const [resumedAfterQuiet, setResumedAfterQuiet] = useState(false);
   // An answer was sent from this turn: stop listening until it fails (the shell moves on when it saves),
@@ -90,7 +89,7 @@ export function OptionPairTurn({ choice, staged, busy, error, notice, onPick, on
     setSelected(key);
     if (heard && heard.key !== key) setHeard(null);
     const line = choice.options.find((o) => o.key === key)?.rivetLine;
-    if (voice && line) void voice.speak(line, { turn: choice.settingKey, with: lines });
+    if (voice && line) void voice.speak(line, { turn: choice.settingKey });
   };
 
   // Each turn is a fresh mount, so put focus on Rivet's new question rather than let it fall to the page.

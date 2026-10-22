@@ -50,7 +50,7 @@ const CANNOT_LISTEN: ReadonlySet<VoiceInputState> = new Set(['denied', 'unsuppor
 export interface SpeakOptions {
   /** The turn this line belongs to: a choice key, or 'ready' / 'readback' / 'trial' / 'number'. */
   turn: string;
-  /** The whole turn's lines (question, then the two option lines): fetched together as one batch. */
+  /** The whole turn's lines (its narration, `narrateTurn`): fetched together as one batch. */
   with?: readonly string[];
 }
 
@@ -59,6 +59,12 @@ export interface RivetVoice {
   unlock: (gesture: RivetVoiceGesture) => void;
   /** Say one line, interrupting whatever Rivet was saying. Resolves when it is done (or given up). */
   speak: (text: string, opts: SpeakOptions) => Promise<void>;
+  /**
+   * Say several lines in order with a short pause between them, interrupting whatever Rivet was
+   * saying. Anything that interrupts one line (`stop`, the owner talking, another `speak`) ends
+   * the rest. Resolves when the last line is done (or the sequence was cut off).
+   */
+  speakAll: (lines: readonly string[], opts: SpeakOptions) => Promise<void>;
   /** Fetch a turn's lines ahead of time, after anything already being fetched. */
   prefetch: (lines: readonly string[]) => void;
   /** Stop speaking. */
@@ -84,8 +90,10 @@ type Held = { clip: Clip } | { failed: TtsFallbackReason };
 
 /** A 44-byte WAV with no samples: what the unlock plays inside the tap. */
 const SILENT_WAV = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQAAAAA=';
-/** One turn, as the batch route bounds it. */
-const BATCH_MAX_ITEMS = 3;
+/** One turn, as the batch route bounds it (packages/api/src/ai/tts/tts-batch.ts). */
+const BATCH_MAX_ITEMS = 4;
+/** Between two lines of one narration: a breath, so the options don't run together. */
+const LINE_GAP_MS = 250;
 /** Per-viewer convenience: the hashes of clips already heard, so a reload replays them for free. */
 const HASH_INDEX_KEY = 'rivet-voice:clip-hashes';
 const HASH_INDEX_MAX = 64;
@@ -385,6 +393,23 @@ export function useRivetVoice(opts: { funnel: FunnelContext }): RivetVoice {
     halt();
   }, [halt]);
 
+  const speakAll = useCallback(
+    async (lines: readonly string[], opts: SpeakOptions) => {
+      const spoken = lines.map((l) => l.trim()).filter(Boolean);
+      for (let i = 0; i < spoken.length; i += 1) {
+        // speak() takes the next generation as it starts; anything newer means this line was cut off.
+        const mine = generation.current + 1;
+        await speak(spoken[i], opts);
+        if (generation.current !== mine) return;
+        if (i + 1 < spoken.length) {
+          await new Promise((resolve) => setTimeout(resolve, LINE_GAP_MS));
+          if (generation.current !== mine) return;
+        }
+      }
+    },
+    [speak],
+  );
+
   const recordInput = useCallback((event: VoiceInputEvent) => {
     if (inputEventsSent.current.has(event)) return;
     inputEventsSent.current.add(event);
@@ -463,8 +488,8 @@ export function useRivetVoice(opts: { funnel: FunnelContext }): RivetVoice {
 
   const speaking = audioPlaying || ttsSpeaking;
   return useMemo(
-    () => ({ unlock, speak, prefetch: fetchBatch, stop, speaking, openMic, input, stream, keytermsOff, noteInput }),
-    [unlock, speak, fetchBatch, stop, speaking, openMic, input, stream, keytermsOff, noteInput],
+    () => ({ unlock, speak, speakAll, prefetch: fetchBatch, stop, speaking, openMic, input, stream, keytermsOff, noteInput }),
+    [unlock, speak, speakAll, fetchBatch, stop, speaking, openMic, input, stream, keytermsOff, noteInput],
   );
 }
 
@@ -500,6 +525,23 @@ export function useRivetLine(turn: string, text: string | null | undefined, with
     void speak(text, { turn, with: linesKey ? linesKey.split('\n') : undefined });
     return stop;
   }, [speak, stop, turn, text, linesKey]);
+}
+
+/**
+ * Say a turn's narration (several lines, one batch request) when the screen shows it, and again when
+ * it changes; stop when the screen goes.
+ */
+export function useRivetNarration(turn: string, lines: readonly string[]): void {
+  const voice = useContext(RivetVoiceContext);
+  const speakAll = voice?.speakAll;
+  const stop = voice?.stop;
+  const linesKey = lines.join('\n');
+  useEffect(() => {
+    if (!speakAll || !stop || !linesKey) return;
+    const all = linesKey.split('\n');
+    void speakAll(all, { turn, with: all });
+    return stop;
+  }, [speakAll, stop, turn, linesKey]);
 }
 
 /** Deepgram's trailing silence that ends an utterance (the spec's 1.2 s). */

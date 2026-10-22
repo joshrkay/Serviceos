@@ -12,8 +12,11 @@ import { fakeDeepgram } from './helpers/fake-deepgram';
  * real and the browser really plays the clip. Proven: once Ready's line is done
  * the element is paused, and after "Make it mine" an audio/mpeg clip reaches
  * `playing` within 5 s (time to first heard is recorded); each choice turn's
- * lines go out as one request of at most three clips, the next turn is asked
- * for while the current one is up and never two ahead, a full pass is 21 clips;
+ * narration (the question, each option with why and what callers hear, then
+ * which one most shops pick: voice-only onboarding PR 2) goes out as one
+ * request of at most four clips, the next turn is asked for while the current
+ * one is up and never two ahead, a full pass is 22 clips (the closing line is
+ * shared, so it is fetched once);
  * a 429 from the per-user clip budget (a fast pass in a fresh process) never
  * blocks a tap. On WebKit (iOS Safari's engine, project onboarding-v3-webkit,
  * E2E_V3_WEBKIT=1): an owner who reloads on Ready hears nothing until a tap,
@@ -253,7 +256,7 @@ for (const vp of viewports) {
   test.describe(`v3 voice at ${vp.name}`, () => {
     test.use({ viewport: { width: vp.width, height: vp.height } });
 
-    test('Rivet is heard after "Make it mine", every turn speaks through one request of at most three clips, and all seven are answered by tap', async ({
+    test('Rivet is heard after "Make it mine", every turn is narrated through one request of at most four clips, and all seven are answered by tap', async ({
       page,
     }) => {
       test.setTimeout(120_000);
@@ -278,6 +281,13 @@ for (const vp of viewports) {
       await firstTurn;
       await expect.poll(() => voice.find((c) => c.path === '/api/voice/tts')?.items).toEqual(['Walsh Plumbing is already set up.']);
       expect(batches(voice).map((c) => c.items[0])).toEqual([QUESTIONS[0]]);
+      // The greeting's narration: the question, both greetings with why, then the usual pick.
+      expect(batches(voice)[0].items).toEqual([
+        QUESTIONS[0],
+        expect.stringMatching(/^First: Walsh Plumbing, how can I help\? Short\./),
+        expect.stringMatching(/^Second: Thanks for calling Walsh Plumbing\. What's going on today\? A few more words\./),
+        'Most shops pick the first. Which one?',
+      ]);
       // Ready's line is said and done: before "Make it mine" the element is paused.
       await expect.poll(() => everyElementPaused(page)).toBe(true);
 
@@ -321,8 +331,8 @@ for (const vp of viewports) {
 
       const turnBatches = batches(voice);
       expect(turnBatches).toHaveLength(7);
-      expect(turnBatches.every((c) => c.items.length <= 3)).toBe(true);
-      expect(turnBatches.flatMap((c) => c.items)).toHaveLength(21);
+      expect(turnBatches.every((c) => c.items.length <= 4)).toBe(true);
+      expect(turnBatches.flatMap((c) => c.items)).toHaveLength(22);
       // The real routes answered with clips, or with the per-user clip budget's 429 on a fast pass.
       await expect.poll(() => voice.every((c) => c.status !== undefined)).toBe(true);
       for (const call of voice) expect([200, 429], `${call.path} answered ${call.status}`).toContain(call.status);
