@@ -14,12 +14,15 @@
 
 export type TechStatus = 'en_route' | 'on_site' | 'in_progress' | 'waiting' | 'complete';
 
-// Checked in this order; the first match wins. "Waiting" comes first so that
-// "waiting on parts, should be done tomorrow" is waiting, not complete.
+// Checked in this order; the first match wins. An outstanding wait comes
+// first so that "waiting on parts, should be done tomorrow" is waiting, not
+// complete. A bare "ordered" may be a part already fitted ("ordered the
+// capacitor, installed it, all done"), so an explicit completion beats it.
 const STATUS_PATTERNS: Array<[RegExp, TechStatus]> = [
-  [/\b(waiting (?:on|for)|need to order|ordered|back.?order(?:ed)?|getting parts|parts (?:are )?coming|come back)\b/i, 'waiting'],
+  [/\b(waiting (?:on|for)|need to order|back.?order(?:ed)?|getting parts|parts (?:are )?coming|come back)\b/i, 'waiting'],
   [/\b(on my way|heading (?:over|there|out)|leaving now|en route|driving over)\b/i, 'en_route'],
   [/\b(all done|i'?m done|we'?re done|done here|finished up|job(?:'s| is) (?:done|complete|finished)|wrapping up|that'?s it for (?:this|the) job)\b/i, 'complete'],
+  [/\bordered\b/i, 'waiting'],
   [/\b(arrived|on site|i'?m here|we'?re here|starting (?:the )?(?:job|work)|getting started)\b/i, 'in_progress'],
 ];
 

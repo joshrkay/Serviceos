@@ -12,6 +12,9 @@ describe('suggestTechStatus', () => {
     // A negated phrase is skipped, so the next status in the words wins.
     ['not waiting on parts anymore, all done', 'complete'],
     ["we don't need to order anything; we're done", 'complete'],
+    // A part already ordered and fitted does not hold up a finished job.
+    ['I ordered the capacitor, installed it, all done', 'complete'],
+    ['ordered the blower motor, it ships Friday', 'waiting'],
   ])('%j → %s', (text, status) => {
     expect(suggestTechStatus(text)).toBe(status);
   });
