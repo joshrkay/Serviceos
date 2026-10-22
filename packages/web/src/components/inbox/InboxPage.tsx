@@ -10,6 +10,7 @@ import { useTenantTimezone } from '../../hooks/useTenantTimezone';
 import { formatInTenantTz } from '../../utils/formatInTenantTz';
 import { useUndoableApproval, type ApproveResponseLike } from '../../hooks/useUndoableApproval';
 import { UndoToast } from '../common/UndoToast';
+import { BlockedTextsNotice } from '../interactions/BlockedTextsNotice';
 import { ProposalChainCard, ChainRow } from './ProposalChainCard';
 import { TierBreakdown, hasTierBreakdown } from './TierBreakdown';
 import { AmbiguityPicker, type AmbiguityCandidate } from './AmbiguityPicker';
@@ -1029,6 +1030,9 @@ export function InboxPage() {
             </p>
           )}
         </div>
+
+        {/* D-045 — customer texts that did not go out reach the owner here. */}
+        <BlockedTextsNotice />
 
         {isLoading && rows.length === 0 && expired.length === 0 && failed.length === 0 && (
           <p className="text-sm text-muted-foreground">Loading…</p>

@@ -8170,29 +8170,75 @@ export const MIGRATIONS = {
     ALTER TABLE jobs
       ADD COLUMN IF NOT EXISTS required_skills TEXT[] NOT NULL DEFAULT '{}';
   `,
+  // D-045 item 2 — one record per message. Outbound messaging records every
+  // send outcome here, not only sends that reached a provider: a text held
+  // for the customer's daytime window is 'scheduled' (scheduled_for = when the
+  // window opens), a refused one is 'blocked' (block_reason, and whether it
+  // clears on its own). The record links the customer and, when there is one,
+  // the job, so the job and customer screens can show a status bubble and the
+  // owner can see blocked messages. `sent_at` stays the time of the latest
+  // outcome. A blocked text may have no number yet: recipient is '' then.
+  // 'thank_you' — the after-job thank-you text (entity_id = jobs.id).
+  // Readers that ask "did this go out?" (`findByEntity`) only see rows that
+  // reached a provider: sent, delivered, failed, bounced.
+  '329_message_dispatch_outcomes': `
+    ALTER TABLE message_dispatches
+      ADD COLUMN IF NOT EXISTS customer_id UUID,
+      ADD COLUMN IF NOT EXISTS job_id UUID,
+      ADD COLUMN IF NOT EXISTS purpose TEXT,
+      ADD COLUMN IF NOT EXISTS scheduled_for TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS block_reason TEXT,
+      ADD COLUMN IF NOT EXISTS block_permanent BOOLEAN;
+    ALTER TABLE message_dispatches
+      DROP CONSTRAINT IF EXISTS message_dispatches_status_check;
+    ALTER TABLE message_dispatches
+      ADD CONSTRAINT message_dispatches_status_check
+        CHECK (status IN ('sent', 'delivered', 'failed', 'bounced', 'scheduled', 'blocked')) NOT VALID;
+    ALTER TABLE message_dispatches
+      DROP CONSTRAINT IF EXISTS message_dispatches_purpose_check;
+    ALTER TABLE message_dispatches
+      ADD CONSTRAINT message_dispatches_purpose_check
+        CHECK (purpose IS NULL OR purpose IN ('transactional', 'reply', 'automated_nudge', 'marketing')) NOT VALID;
+    ALTER TABLE message_dispatches
+      DROP CONSTRAINT IF EXISTS message_dispatches_entity_type_check;
+    ALTER TABLE message_dispatches
+      ADD CONSTRAINT message_dispatches_entity_type_check
+        CHECK (entity_type IN (
+          'estimate', 'invoice', 'appointment_confirmation',
+          'appointment_reschedule', 'appointment_cancel', 'appointment_reminder',
+          'payment_receipt', 'invoice_overdue', 'delay_notice', 'appointment_en_route',
+          'daily_digest', 'conversation_reply', 'portal_session', 'custom_message',
+          'thank_you'
+        )) NOT VALID;
+    CREATE INDEX IF NOT EXISTS idx_dispatches_tenant_customer
+      ON message_dispatches (tenant_id, customer_id, sent_at DESC) WHERE customer_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_dispatches_tenant_job
+      ON message_dispatches (tenant_id, job_id, sent_at DESC) WHERE job_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS idx_dispatches_tenant_blocked
+      ON message_dispatches (tenant_id, sent_at DESC) WHERE status = 'blocked';
+  `,
 
-  // #1750 slice 1 (D-044) — Get-found checklist facts on tenant_settings.
+  // #1750 (D-044) — Get found online checklist facts on tenant_settings.
   //   presence_path           — the owner's "do you have a website?" answer; NULL = unanswered
-  //   call_routing_mode       — how calls to the owner's existing number reach the AI
+  //   forwarding_mode         — missed calls only (NULL reads as this default) or all calls
   //   get_found_skipped_items — checklist item ids the owner skipped
-  // The forwarded line itself and its verification stamp are NOT new: they
-  // are 318's forwarding_source_number / forwarding_verified_at (bound to the
-  // line by forwarding_generation), which this checklist reads.
-  // Skipped-item ids are not CHECKed: the set grows with each slice and is
-  // validated at the request boundary.
-  '329_tenant_settings_get_found': `
+  // The forwarded line and its forwarding check are NOT new: they are 318's
+  // forwarding_source_number / forwarding_verified_at, bound to the line by
+  // forwarding_generation. Skipped-item ids are not CHECKed: the set grows
+  // with each slice and is validated at the request boundary.
+  '330_tenant_settings_get_found': `
     ALTER TABLE tenant_settings
       ADD COLUMN IF NOT EXISTS presence_path TEXT,
-      ADD COLUMN IF NOT EXISTS call_routing_mode TEXT,
+      ADD COLUMN IF NOT EXISTS forwarding_mode TEXT,
       ADD COLUMN IF NOT EXISTS get_found_skipped_items TEXT[] NOT NULL DEFAULT '{}';
     ALTER TABLE tenant_settings
       DROP CONSTRAINT IF EXISTS tenant_settings_presence_path_check,
       ADD CONSTRAINT tenant_settings_presence_path_check
         CHECK (presence_path IN ('own_website', 'google_only', 'neither')) NOT VALID;
     ALTER TABLE tenant_settings
-      DROP CONSTRAINT IF EXISTS tenant_settings_call_routing_mode_check,
-      ADD CONSTRAINT tenant_settings_call_routing_mode_check
-        CHECK (call_routing_mode IN ('forward_all', 'forward_unanswered', 'rivet_only')) NOT VALID;
+      DROP CONSTRAINT IF EXISTS tenant_settings_forwarding_mode_check,
+      ADD CONSTRAINT tenant_settings_forwarding_mode_check
+        CHECK (forwarding_mode IN ('missed_calls', 'all_calls')) NOT VALID;
   `,
 };
 

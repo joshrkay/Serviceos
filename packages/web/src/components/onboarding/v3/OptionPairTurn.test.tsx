@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { AssembledOnboardingChoice, OnboardingCoreChoiceKey, StagedOnboardingChoice } from '@ai-service-os/shared';
+import { narrateTurn, type AssembledOnboardingChoice, type OnboardingCoreChoiceKey, type StagedOnboardingChoice } from '@ai-service-os/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useState, type ReactNode } from 'react';
 import { expectAllTapTargets, expectTapTarget } from '../../../test-utils/tap-target';
@@ -402,15 +402,28 @@ describe('OptionPairTurn', () => {
       return <RivetVoiceContext.Provider value={voice}>{children}</RivetVoiceContext.Provider>;
     }
     let batches: string[][];
+    let singles: string[];
     let played: string[];
+    let element: HTMLMediaElement | null;
+    /** The clip playing now reaches its end, as the audio element reports it. */
+    const finish = () => act(() => void element?.dispatchEvent(new Event('ended')));
     const src = (text: string) => `data:audio/mpeg;base64,${btoa(encodeURIComponent(text))}`;
 
     beforeEach(() => {
       batches = [];
+      singles = [];
       played = [];
+      element = null;
       vi.stubGlobal(
         'fetch',
         vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+          const json = (body: unknown) =>
+            Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+          if (String(input) === '/api/voice/tts') {
+            const { text } = JSON.parse(String(init?.body)) as { text: string };
+            singles.push(text);
+            return json({ clipHash: 'f'.repeat(64), audio: btoa(encodeURIComponent(text)), contentType: 'audio/mpeg' });
+          }
           const { items } = JSON.parse(String(init?.body)) as { items: string[] };
           if (String(input) !== '/api/voice/tts/batch') throw new Error(`unexpected request ${String(input)}`);
           batches.push(items);
@@ -425,6 +438,7 @@ describe('OptionPairTurn', () => {
         }),
       );
       vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(function (this: HTMLMediaElement) {
+        element = this;
         played.push(this.src);
         return Promise.resolve();
       });
@@ -436,21 +450,48 @@ describe('OptionPairTurn', () => {
       vi.unstubAllGlobals();
     });
 
-    it("says the question when the turn opens, and a tapped card selects it and plays that option's line", async () => {
+    it('narrates the turn when it opens: the question, each option with its reason and what callers hear, then which most shops pick', async () => {
       const choice = choiceFor('booking_posture');
+      const lines = narrateTurn(choice);
       render(
         <Voice>
           <OptionPairTurn choice={choice} busy={false} error={null} notice={null} editing={false} onPick={vi.fn()} />
         </Voice>,
       );
-      await waitFor(() => expect(played).toEqual([src(choice.question)]));
-      expect(batches).toEqual([[choice.question, choice.options[0].rivetLine, choice.options[1].rivetLine]]);
+      await waitFor(() => expect(played).toEqual([src(lines[0])]));
+      // The whole narration is one request.
+      expect(batches).toEqual([lines]);
+      expect(lines).toEqual([
+        'When someone wants a repair, do I book it or hold it for you?',
+        expect.stringMatching(/^First: Book it on the call\. The caller leaves with a time\..* Callers hear: “I have Tuesday at 2/),
+        expect.stringMatching(/^Second: Hold it for me\. I take the details.* Callers hear: “I've got everything I need\./),
+        'Most shops pick the first. Which one?',
+      ]);
+      for (let i = 1; i < lines.length; i += 1) {
+        finish();
+        await waitFor(() => expect(played.at(-1)).toBe(src(lines[i])));
+      }
+      expect(singles).toEqual([]);
+    });
+
+    it("a tapped card selects it, cuts the narration short, and plays that option's caller line", async () => {
+      const choice = choiceFor('booking_posture');
+      const lines = narrateTurn(choice);
+      render(
+        <Voice>
+          <OptionPairTurn choice={choice} busy={false} error={null} notice={null} editing={false} onPick={vi.fn()} />
+        </Voice>,
+      );
+      await waitFor(() => expect(played).toEqual([src(lines[0])]));
 
       await userEvent.click(screen.getByRole('radio', { name: 'Hold it for me' }));
       expect(screen.getByRole('radio', { name: 'Hold it for me' })).toHaveAttribute('aria-checked', 'true');
       await waitFor(() => expect(played.at(-1)).toBe(src(choice.options[1].rivetLine)));
-      // Played from the turn already fetched: still the one request.
-      expect(batches).toHaveLength(1);
+      expect(singles).toEqual([choice.options[1].rivetLine]);
+      finish();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      // The rest of the narration never plays after the tap.
+      expect(played).toEqual([src(lines[0]), src(choice.options[1].rivetLine)]);
       expect(next()).toBeEnabled();
     });
 
@@ -638,6 +679,18 @@ describe('OptionPairTurn', () => {
       expect(within(hold).getByText('Heard: “hold it”')).toBeInTheDocument();
       expect(onPick).toHaveBeenCalledTimes(1);
       expect(onPick).toHaveBeenCalledWith('b', 'voice');
+    });
+
+    it('the same answer heard twice in one moment answers once', async () => {
+      const { onPick } = await openTurn('booking_posture');
+      open();
+      const final = JSON.stringify({ is_final: true, speech_final: true, channel: { alternatives: [{ transcript: 'first' }] } });
+      act(() => {
+        socket().onmessage?.({ data: final });
+        socket().onmessage?.({ data: final });
+      });
+      expect(onPick).toHaveBeenCalledTimes(1);
+      expect(onPick).toHaveBeenCalledWith('a', 'voice');
     });
 
     it('a miss says what it heard and how to answer; the second miss adds an example; nothing is picked', async () => {

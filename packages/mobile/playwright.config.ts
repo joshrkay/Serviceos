@@ -11,6 +11,12 @@ import { defineConfig, devices } from '@playwright/test';
  * (provided in CI). Without it the export serves a blank shell; the spec still
  * asserts the document-level no-overflow invariant and skips content/tap-target
  * checks (see mobile-viewport.spec.ts).
+ *
+ * setup-voice-mobile.spec.ts needs no Clerk at all: it signs in with the shared
+ * offline window.Clerk stub and answers every API call itself. It only needs the
+ * export built with EXPO_PUBLIC_API_URL and a well-formed publishable key set (a
+ * production export throws at startup without the URL); `npm run e2e:viewport`
+ * fills in never-contacted placeholders when they aren't in the environment.
  */
 const PORT = Number(process.env.MOBILE_E2E_PORT ?? 8788);
 

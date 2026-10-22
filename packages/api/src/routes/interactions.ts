@@ -4,7 +4,7 @@ import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import type { DispatchRepository } from '../notifications/dispatch-repository';
+import { DISPATCH_STATUSES, type DispatchRepository } from '../notifications/dispatch-repository';
 import { routeParam } from '../shared/route-params';
 
 export interface InteractionsRouterDeps {
@@ -48,6 +48,13 @@ const SESSION_COLUMNS = `
   ) AS customer_address
 FROM voice_sessions vs
 LEFT JOIN customers c ON c.id = vs.customer_id AND c.tenant_id = vs.tenant_id`;
+
+
+const dispatchFiltersSchema = z.object({
+  status: z.enum(DISPATCH_STATUSES).optional(),
+  customerId: z.guid().optional(),
+  jobId: z.guid().optional(),
+});
 
 export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
   const { pool, dispatchRepo } = deps;
@@ -123,11 +130,14 @@ export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
   }));
 
   /**
-   * GET /api/interactions/dispatches?limit=&offset=
+   * GET /api/interactions/dispatches?limit=&offset=&status=&customerId=&jobId=
    *
    * Outbound message dispatch log (SMS / email) — appointment
-   * confirmations, delay notices, estimate / invoice deliveries. Backs
-   * the web DispatchLogPage. Gated by `dispatch:view` (owner + dispatcher;
+   * confirmations, delay notices, estimate / invoice deliveries, and (D-045)
+   * texts that were held or blocked. The optional filters back the status
+   * bubble on a job or customer (latest message: `jobId`/`customerId`,
+   * `limit=1`) and the owner's list of blocked texts (`status=blocked`).
+   * Backs the web DispatchLogPage. Gated by `dispatch:view` (owner + dispatcher;
    * technicians get a 403 — they have no billing/comms surface). Registered
    * before `/:id` so "dispatches" isn't matched as an interaction id.
    */
@@ -146,8 +156,21 @@ export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
       return;
     }
 
+    const filters = dispatchFiltersSchema.safeParse(req.query);
+    if (!filters.success) {
+      res.status(400).json({
+        error: 'VALIDATION_ERROR',
+        message: 'status must be a message status; customerId and jobId must be ids',
+      });
+      return;
+    }
+
     const tenantId = req.auth!.tenantId;
-    const { dispatches, total } = await dispatchRepo.listByTenant(tenantId, { limit, offset });
+    const { dispatches, total } = await dispatchRepo.listByTenant(tenantId, {
+      limit,
+      offset,
+      ...filters.data,
+    });
 
     res.json({ dispatches, total, limit, offset });
   }));

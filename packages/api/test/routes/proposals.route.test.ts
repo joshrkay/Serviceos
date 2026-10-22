@@ -419,9 +419,9 @@ describe('POST /api/proposals/:id/undo', () => {
     const ports = new FakeConfigPorts({ laborRateCents: 11500 });
     app.use('/api/proposals', createProposalsRouter(proposalRepo, undefined, auditRepo, undefined, { lessonRepo, ports }));
 
-    const proposal = createProposal(baseInput);
+    // Seeded executed: the status-write gate refuses draft → executed.
+    const proposal = { ...createProposal(baseInput), status: 'executed' as const };
     await proposalRepo.create(proposal);
-    await proposalRepo.updateStatus(TEST_TENANT_ID, proposal.id, 'executed');
     await recordCorrectionLessons(
       {
         tenantId: TEST_TENANT_ID,

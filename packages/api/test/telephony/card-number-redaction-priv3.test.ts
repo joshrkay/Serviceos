@@ -27,6 +27,9 @@ import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { createVoiceTurnProcessor } from '../../src/ai/voice-turn/create-voice-turn-processor';
 
 const TENANT = 'tenant-pan';
+// The card's digits, run together or spaced. Not a bare '4111': a random
+// uuid (a proposal id) contains that often enough to fail the suite.
+const CARD_DIGITS = /4111\D?1111/;
 const SPOKEN = 'can I just pay now, my card is 4111 1111 1111 1111 expires 09/27';
 const STORED = 'can I just pay now, my card is [card number] expires 09/27';
 
@@ -82,7 +85,7 @@ function assertNoCardNumber(h: ReturnType<typeof harness>, sessionTranscript: st
     .map((t) => t.text);
   expect(storedCallerTurns).toEqual([STORED]);
   expect(sessionTranscript).toContain(`caller: ${STORED}`);
-  expect(JSON.stringify(sessionTranscript)).not.toContain('4111');
+  expect(JSON.stringify(sessionTranscript)).not.toMatch(CARD_DIGITS);
   expect(h.providerRequests.length).toBeGreaterThan(0);
   for (const req of h.providerRequests) {
     expect(JSON.stringify(req.messages)).not.toContain('4111 1111 1111 1111');
@@ -179,7 +182,7 @@ describe('PRIV-3 (review round 1) — a recited card number never reaches a stor
     const proposals = await h.proposalRepo.findByTenant(TENANT);
     expect(proposals).toHaveLength(1);
     expect((proposals[0].payload as { transcript?: string }).transcript).toBe(COMPLAINT_STORED);
-    expect(JSON.stringify(proposals)).not.toContain('4111');
+    expect(JSON.stringify(proposals)).not.toMatch(CARD_DIGITS);
   });
 
   it('Media Streams: the complaint callback proposal carries the marker, not the digits', async () => {
@@ -194,7 +197,7 @@ describe('PRIV-3 (review round 1) — a recited card number never reaches a stor
     const proposals = await h.proposalRepo.findByTenant(TENANT);
     expect(proposals).toHaveLength(1);
     expect((proposals[0].payload as { transcript?: string }).transcript).toBe(COMPLAINT_STORED);
-    expect(JSON.stringify(proposals)).not.toContain('4111');
+    expect(JSON.stringify(proposals)).not.toMatch(CARD_DIGITS);
   });
 
   it("Gather: a new caller's sign-up proposal keeps the card out of its transcript and summary", async () => {
@@ -220,7 +223,7 @@ describe('PRIV-3 (review round 1) — a recited card number never reaches a stor
     expect(proposals[0].sourceContext).toMatchObject({
       transcript: 'hi this is Jane Doe, I want to set up an account, my card is [card number]',
     });
-    expect(JSON.stringify(proposals)).not.toContain('4111');
+    expect(JSON.stringify(proposals)).not.toMatch(CARD_DIGITS);
   });
 });
 
@@ -259,7 +262,7 @@ describe('PRIV-3 (review round 1) — the shared voice-turn processor scrubs its
     const proposals = await proposalRepo.findByTenant(TENANT);
     expect(proposals).toHaveLength(1);
     expect((proposals[0].payload as { transcript?: string }).transcript).toBe(COMPLAINT_STORED);
-    expect(JSON.stringify(proposals)).not.toContain('4111');
-    expect(JSON.stringify(session.transcript)).not.toContain('4111');
+    expect(JSON.stringify(proposals)).not.toMatch(CARD_DIGITS);
+    expect(JSON.stringify(session.transcript)).not.toMatch(CARD_DIGITS);
   });
 });

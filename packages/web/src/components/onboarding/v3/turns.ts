@@ -13,15 +13,6 @@ import {
 
 export type CoreTurn = AssembledOnboardingChoice & { settingKey: OnboardingCoreChoiceKey };
 
-/**
- * What Rivet can say on a choice turn, in the order the batch carries it: the
- * question (spoken when the turn opens), then each option's line (played when
- * its card is tapped). One turn is one request to the voice batch route.
- */
-export function spokenLines(choice: AssembledOnboardingChoice): string[] {
-  return [choice.question, ...choice.options.map((o) => o.rivetLine)];
-}
-
 /** The core choices the draft carries, in registry order. A choice the draft lacks is skipped, never invented. */
 export function coreTurns(draft: OnboardingDraft): CoreTurn[] {
   return ONBOARDING_CORE_CHOICE_KEYS.flatMap((key) => {

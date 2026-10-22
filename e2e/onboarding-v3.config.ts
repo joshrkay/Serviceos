@@ -28,8 +28,10 @@ import { defineConfig, devices } from '@playwright/test';
  * speak every line as one bundled 200 ms silent mp3 (a non-production provider
  * at the vendor boundary), so the browser really plays a clip after the tap
  * while the voice routes, the clip cache, the per-clip charge and the audit run
- * for real. Live transcription has no key here (POST /api/voice/stream-token
- * answers 503), so the tap-only path is what is proven for listening.
+ * for real. Listening is hermetic too: STT_PROVIDER=fixture makes the real
+ * POST /api/voice/stream-token mint a fixture token (refused in production),
+ * and e2e/helpers/fake-deepgram.ts plays scripted transcripts into the
+ * browser's Deepgram socket, so spoken answers are proven with no vendor key.
  *
  * WebKit (iPhone 13) is a second project, opt-in with E2E_V3_WEBKIT=1 because
  * it needs `npx playwright install --with-deps webkit`. It runs the voice spec
@@ -132,9 +134,13 @@ export default defineConfig({
         STRIPE_STARTER_PRICE_ID: '',
         STRIPE_GROWTH_PRICE_ID: '',
         STRIPE_PRICE_ID: '',
-        // No live transcription in the lane (blanked so a developer's own key cannot open a real socket):
-        // POST /api/voice/stream-token answers 503 and the shell's tap-only path is what is proven.
+        // The synthetic key would send pay-link requests to Stripe (401), and an invoice send now
+        // needs its pay link made first (D-045), so links come from the dev-only mock provider.
+        PAYMENT_LINK_PROVIDER: 'mock',
+        // Scripted transcription (e2e/helpers/fake-deepgram.ts): the token route mints a fixture token, and
+        // the key is blanked so a developer's own cannot open a real socket.
         DEEPGRAM_API_KEY: '',
+        STT_PROVIDER: 'fixture',
         // Rivet's voice: the dev-only fixture provider (refused in production), so a clip really plays
         // after the tap with no vendor key. It wins over any vendor key in a developer's own shell.
         TTS_PROVIDER: 'fixture',

@@ -25,6 +25,7 @@ import { InMemoryRegionalPriceTierRepository } from '../../../src/onboarding/cho
 import { ConflictError } from '../../../src/shared/errors';
 import { deriveOnboardingStatus, type OnboardingFacts } from '../../../src/onboarding/derive-status';
 import { lockedSetFact } from '../../../src/onboarding/draft/locked-set';
+import { forceStatus } from '../../helpers/proposal-status';
 
 const TENANT = '00000000-0000-0000-0000-00000000e0c5';
 const CLE = { standard: { tripFeeCents: 8900, hourlyRateCents: 15000 }, premium: { tripFeeCents: 12900, hourlyRateCents: 18500 } };
@@ -53,7 +54,7 @@ describe('resetApprovedDraft', () => {
   });
 
   async function force(id: string, status: ProposalStatus, extra: Partial<Proposal> = {}): Promise<void> {
-    await proposalRepo.update(TENANT, id, { status, ...extra });
+    forceStatus(proposalRepo, TENANT, id, status, extra);
   }
   /** What the status read would say about this draft right now (the shell's hint). */
   async function recoveryHint() {

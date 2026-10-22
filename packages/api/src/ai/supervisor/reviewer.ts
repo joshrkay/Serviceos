@@ -343,15 +343,19 @@ export function createSupervisorReviewGate(deps: SupervisorReviewerDeps): Superv
       if (hold) {
         // Enforce + customer-harm critical: force draft (no one-tap link minted,
         // no approval SMS) and fire the high-priority escalation alert.
-        reviewed = { ...reviewed, status: 'draft' };
-        await deps.proposalRepo
+        // The returned status is the row's real one: a hold whose write is
+        // refused (e.g. the proposal was already approved) must not report
+        // 'draft' to the caller.
+        const held = await deps.proposalRepo
           .updateStatus(proposal.tenantId, proposal.id, 'draft')
           .catch((err) => {
             deps.logger.warn('supervisor-review: hold status write failed', {
               proposalId: proposal.id,
               error: err instanceof Error ? err.message : String(err),
             });
+            return null;
           });
+        if (held) reviewed = { ...reviewed, status: held.status };
         await notifyOwner(proposal.tenantId, 'escalation', {
           reason: `Supervisor held a proposal: ${reasons.join('; ') || 'critical review finding'}`,
           proposalId: proposal.id,

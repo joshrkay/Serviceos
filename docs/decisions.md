@@ -1839,79 +1839,141 @@ failed shows 100 % rather than "not enough calls"; `voice_turn_latency_ms` keeps
 "first audible, filler included" meaning and is not reused for the SLO. The number in (3) is
 replaced, with the run date and instance size, by whoever runs the first staging sweep.
 
----
-## D-044 — "Get found online": we host a generated Business page, connect (never sell) domains, create the Google profile via API, and add Web chat as a fourth surface
+## D-044 — "Get found online": a hosted tenant site, a guided Google profile, call forwarding only, and a home checklist outside onboarding
 
 **Date:** 2026-10-21
-**Status:** Accepted (owner decision 2026-10-21, grilling round 1)
+**Status:** Accepted (owner decisions 2026-10-21, grilled in the "Google reviews integration flows" project thread)
 
-**Context.** A tradesperson signing up often has no website, no Google Business Profile, a
-hand-pasted (or missing) review link, and calls that ring a personal mobile. The product already
-connects an *existing* Google profile, polls reviews, texts post-job review requests, provisions a
-Twilio number, and serves `/intake` and `/book` pages — but nothing walks the owner from "nothing
-online" to "found, reviewed, and answered".
+**Context.** An owner should be able to go from "no web presence" to "customers find me on
+Google, leave reviews, and their calls reach the AI" without leaving the app. What already
+ships: connecting an existing Google Business Profile (first account and first location only),
+the 15-minute review sweep and AI reply drafts, the post-job rating text that sends 4★+ to a
+review link the owner pastes by hand, the public lead and booking pages, and number
+provisioning (D-037). What does not: any website, any path for an owner with no Google
+profile, a location picker, forwarding instructions in the current onboarding, a check that
+forwarding works, and anything that tracks setup after activation.
 
 **Decision.**
-1. **Business page, hosted by us.** One generated page per tenant built from settings already held
-   (services, service area, hours, rating, Call / Book / Web chat), on a product-owned subdomain.
-   No multi-page builder. Tenants with their own website get embed snippets instead.
-2. **Connected domains only.** The owner buys a domain elsewhere; we show the DNS records, verify,
-   and issue TLS. We never register, resell or renew domains.
-3. **Google profile created via the API** (pre-filled from settings) when the owner has none, then
-   the owner completes Google's verification; a guided deep-link walkthrough is the fallback when
-   the API refuses.
-4. **Call routing modes:** forward all, forward when unanswered, or the Rivet number alone, with
-   carrier codes, an off code, and a live test call. Porting is deferred.
-5. **Web chat is a full AI surface** on the same turn pipeline as the phone, actor-less like an
-   unidentified caller; bookings stay proposals (D-004).
-6. **Where it lives:** one presence-path question in onboarding; everything else in a
-   post-activation Get-found checklist that never gates activation or `isComplete`.
-7. **Review link auto-filled** from the connected Google profile; manual paste stays as an override.
 
-**Amended 2026-10-21 (grilling round 2, owner accepted all recommendations).**
-8. **Listing number (NAP):** when forwarding, the owner's existing number stays on the Google profile
-   and Business page; the Rivet number is listed only in *Rivet number only* mode. We never change a
-   verified profile's phone without the owner's say-so (it can trigger re-verification).
-9. **Business page content:** generated from settings plus owner-owned headline, logo, up to 6
-   photos, and an AI-drafted "about" blurb that is a proposal the owner approves.
-10. **Web chat hand-off:** what it cannot finish becomes a lead plus an inbox conversation and an owner
-    notification; the reply goes out by SMS. No live owner-typed chat in v1.
-11. **Web chat scope:** business questions, lead capture and booking proposals only; no own-record
-    lookups (no SMS OTP identity) in v1 — the portal links cover those.
-12. **Metering:** Web chat conversations count against the same usage caps as calls; the Business
-    page, connected domain, Google setup and call routing are included.
-13. **Hosting:** Business pages are server-rendered (indexable, fast on mobile) by a small renderer
-    service on `<slug>.therivetapp.com`; connected domains point at the same service. TLS for both via
-    Cloudflare for SaaS custom hostnames (new vendor; ~$0.10/hostname/mo after 100).
-14. **Tenant slug:** a unique slug column generated from the business name, owner-editable after
-    setup; a changed slug redirects for 90 days. Existing `/intake` and `/book` keep the tenant UUID.
-15. **Web chat identity:** the phone number is asked lazily (to book, on hand-off, or after ~3
-    messages), then the lead/customer is found or created by phone exactly as for a caller.
-16. **Web chat origins:** the widget API is open to any origin, keyed by a public per-tenant widget
-    key, rate-limited per IP and per tenant, credential-less (no cookies).
-17. **Google API access is a precondition, not an assumption:** the guided walkthrough ships first;
-    API create/verify sits behind a flag until Google approves the project's Business Profile API
-    access (quota is 0 until then). Video verification cannot run through the API.
-18. **Search before create, always:** match the business on Google first and offer claim (request
-    admin rights) / connect / create — never create a location that may already exist on Maps.
+1. **Tenant site.** An owner without a website gets a one-page site we host, on a subdomain of
+   a **separate domain reserved for tenant sites**, never the app's domain, so a flagged
+   tenant site cannot hurt the app's login or mail reputation. The page is built from tenant
+   settings (name, services, service area, hours, phone, the booking and lead forms). Its
+   "about" copy is AI-drafted through the gateway as a **proposal**; nothing on the page goes
+   live until the owner approves it.
+2. **Connected domain, no registrar.** An owner who already owns a domain can point it at their
+   tenant site: we show the one DNS record, verify it, and issue HTTPS. We do not sell, buy or
+   renew domains.
+3. **Google profile is guided, not created.** Google requires the owner to verify a profile
+   themselves, so for an owner with none we deep-link them through creating it, then connect it
+   once verified. A connection picks **one location** from a picker (no more first-location
+   default); multi-location tenants are out of scope.
+4. **Derived from the connection.** Once connected, the Google review link is filled in from the
+   location instead of being pasted. Setting the location's website (tenant site or connected
+   domain) and booking link on Google is an outward-facing write, so it is an **approval card**
+   the owner taps, never automatic.
+5. **Call forwarding only — no porting.** The owner keeps their number and forwards it with
+   carrier codes. Two **forwarding modes**: *missed calls only* (default — their phone rings
+   first) and *all calls*. A **forwarding check** places a call from our line to their business
+   number and passes when it arrives back on our number (for missed-calls-only the owner lets
+   it ring out). Porting is a later add-on.
+6. **Chat is the lead form for now.** The tenant site's chat bubble opens the existing lead /
+   booking form. A real AI chatbot needs a public, unauthenticated path into the AI with abuse
+   and per-tenant cost caps, and is its own decision later.
+7. **A home checklist, not onboarding steps.** Progress lives in a "Get found online" checklist
+   on the home page, derived from tenant facts. It is **not** added to the onboarding steps,
+   because activation and the setup-reminder email gate on that list and a Google postcard can
+   take weeks.
 
-**Amended 2026-10-21 (grilling round 3, owner accepted all recommendations).**
-19. **Ship order:** (1) Get-found checklist + presence-path question + review link (auto/manual) +
-    call routing modes; (2) Google match/claim/connect/create, location picker, walkthrough, flagged
-    API create; (3) tenant slug + Business page renderer + subdomain, then connected domains;
-    (4) Web chat transport, widget + widget key, `webchat` lead source, metering.
-20. **Checklist by presence path:** *own website* → Google profile, review link, call routing, Web
-    chat snippet (no Business page); *Google only* → Google profile, review link, call routing, with a
-    quiet Business page as the profile's website and Web chat's home; *neither* → Business page (+
-    optional connected domain), Google profile, review link, call routing. Changing the path
-    re-derives the checklist.
-21. **Completion is detected, never ticked:** each item is derived from facts (profile connected and
-    verified, review link set, a call forwarded from the owner's existing number arrived, the snippet
-    loaded from their origin, domain DNS verified). Items can be skipped into a hidden row.
-22. **Nudges:** the existing digest names the next open item at most once a week; no new email
-    series; the 24 h setup reminder stays onboarding-only.
+**Alternatives rejected.** Linking out to Wix/Squarespace (the owner leaves the app and the
+booking form is not on the site); buying domains for tenants (registrar account, renewals and
+support for little gain); hosting sites on the app's own domain (shared reputation); creating
+Google profiles on the owner's behalf (Google does not allow third-party verification); porting
+in v1 (weeks of carrier paperwork); an AI web chatbot in v1 (needs its own abuse and cost model).
 
-**Alternatives rejected.** A multi-page site builder (a separate product); domain resale (renewal
-liability and billing for little v1 value); deep-link-only Google setup (the friction this exists to
-remove); porting in v1 (weeks of carrier paperwork, the most failure modes); lead-form-only chat
-(the owner asked for the chatbot); adding the steps to onboarding (delays voice going live).
+**Consequences.** Ops must buy the tenant-site domain and point a wildcard record at the
+deploy. Every checklist item is derived, so a tenant who disconnects Google or unpublishes their
+site sees the item reopen rather than a stale tick. Forwarding is the exception: turning it off at
+the carrier sends us nothing, so the forwarding check is a point-in-time proof. The forwarding item
+shows the date of the last passing check, reopens when the owner changes carrier or forwarding mode
+in the app, and offers a re-check; detecting carrier-side changes is not promised.
+
+**Amended 2026-10-22 (owner, reconciling the parallel "Get found online" thread, issue #1750).**
+A second grilling the same day recorded its own D-044 on branch `claude/tender-sagan-r78w4n`.
+Reconciled point by point, this entry stays the source of truth and gains:
+- **Presence path.** One onboarding question — *own website*, *Google only*, or *neither* —
+  decides which checklist items show. *Google only* still gets a quiet tenant site as the
+  listing's website, with no domain step.
+- **Skippable items.** The owner can skip an item into a hidden row and bring it back; a
+  skipped item counts as settled. Detection still wins: a skipped item that becomes true shows
+  done.
+- **Day-one owners are not a forwarding mode.** An owner with no existing business line
+  forwards nothing; their call item is done once their Rivet number is live **and** has
+  answered a real inbound call — provisioning alone does not count.
+- **A forwarding mode change voids the last check.** Changing forwarding mode clears the
+  passing check (and advances the line's `forwarding_generation`), so a check proven under one
+  mode never completes the other.
+- **Deferred, not rejected:** creating Google profiles through Google's API (behind Google's
+  API-access approval) and an AI web chat (needs its own abuse, cost-cap and usage-metering
+  decision — what unit a conversation bills as). Both return as their own decisions.
+
+## D-045 — Outbound messaging decides its own policy; invoices go by text with a pay link; proposal status moves only through the lifecycle
+
+**Date:** 2026-10-21
+**Status:** Accepted (owner decisions 2026-10-21, grilled in the "Backend architecture review" project thread)
+
+**Context.** The architecture review found two rules enforced by caller discipline. Outbound
+texts pass one consent gate (`notifications/gated-message-delivery.ts`), but each of about 40
+senders chooses its own policy inputs: an `owner`/`customer` tag that skips every check when
+wrong, a consent snapshot it looked up itself, and an opt-in quiet-hours flag only 2 senders
+set. Invoices and estimates go by email first whenever an email is on file (#1524), and when
+the pay link cannot be made the invoice quietly goes out view-only. Separately, about 20
+callers write a proposal's status directly, and the repository checks no transition.
+
+**Decision.**
+
+1. **Outbound messaging owns the policy.** A sender names a recipient (a customer by id, the
+   owner or team, or a reply to a number that just contacted us) and a **message purpose**
+   (transactional, reply, automated nudge, marketing). The module looks up consent itself,
+   derives quiet-hours handling from the purpose, holds a nudge and sends it when the
+   customer's daytime window opens, and requires a duplicate key built from the purpose and
+   the record the message is about.
+2. **Every message has a send outcome.** *Sent*, *scheduled* (with the time) or *blocked*
+   (with the reason). A send a person triggered shows the reason on screen; an automated
+   one records it. One record per message replaces the invoice/estimate-only dispatch log
+   and links the customer and, when there is one, the job and the invoice or estimate. That
+   record drives a status bubble on the job and the customer; blocked messages also reach
+   the owner's inbox.
+3. **Invoices and estimates go by text first.** When the customer has a textable number and
+   has not opted out, the send is a text with the link; email is the fallback. An invoice
+   text carries a **pay link** unless the owner chose *collect on the spot*. If the pay link
+   cannot be made, the invoice is not sent without it: an owner-pressed send is refused with
+   the reason, and an automatic one is held, retried once, then put on the owner's to-do
+   list. This supersedes #1524's email-first default and S5a-1's fail-open view-only send.
+4. **Wording.** Each purpose has a default message: the owner's saved template for it if
+   there is one, otherwise the built-in text. Any single send may add an owner note on top.
+5. **Email stays as it is for now.** Customer emails outside invoice and estimate sends
+   (campaigns, some replies, review follow-ups) are left alone and tracked as known
+   exceptions until an email-consent decision is made (D-017 says a grant never crosses
+   channels, so an SMS grant is not email consent).
+6. **Migration is gradual.** Senders move one file at a time; a guard test lists today's
+   direct callers of the raw sender and the list may only shrink.
+7. **Proposal status moves only through the lifecycle.** The repository runs the transition
+   table on every status write (the **status-write gate**). Four moves the code already made
+   are allowed there as system-only writes, kept out of the table that approve, reject and
+   undo consult: ready_for_review → draft (supervisor hold), approved → executing (execution
+   claim), executing → approved (chain dependent released), approved → rejected (a caller
+   revoking their own unexecuted booking; the generic reject endpoint still cannot reach an
+   approved proposal).
+8. **Drafting has one entry point and three outcomes.** Every surface drafts through one
+   module that returns a proposal, a clarification, or a refusal with a reason, and runs the
+   made-up-id scrub that only chat ran before. Owners keep editing drafts before approval in
+   the app and the portal; an edit re-runs the same checks.
+
+**Not decided (deferred by the owner).** An auto-send trust ramp (auto-approving customer
+messages after N approvals above a confidence bar) was raised and deliberately set aside.
+Customer messages and money still never auto-approve (D-004, D-033).
+
+**Alternatives rejected.** Leaving policy at the call site with a lint rule (the tag still
+lies when wrong); gating email now (needs the email-consent decision first); a big-bang
+rewrite of all senders.

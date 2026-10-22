@@ -332,6 +332,7 @@ import {
   PgRecipientSmsVolumeLedger,
 } from './notifications/recipient-sms-volume';
 import { SendService } from './notifications/send-service';
+import { createInvoicePaymentLink } from './invoices/invoice-payment-link';
 import { PublicEstimateService } from './estimates/public-estimate-service';
 import { createPublicEstimatesRouter } from './routes/public-estimates';
 import { PublicInvoiceService } from './invoices/public-invoice-service';
@@ -360,6 +361,7 @@ import {
 } from './digest/weekly-feedback-config';
 import { runGoogleReviewsSweep } from './workers/google-reviews';
 import { runThankYouSmsSweep } from './workers/thank-you-sms-worker';
+import { createOutboundMessaging } from './notifications/outbound-messaging';
 import { runReviewRequestSweep } from './workers/review-request-worker';
 import { createLifecycleEmailWorker } from './workers/lifecycle-email-worker';
 import { runSetupReminderSweep } from './workers/setup-reminder-sweep';
@@ -1674,20 +1676,47 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   const feedbackDispatcher = messageDelivery
     ? new MessageDeliveryFeedbackDispatcher(messageDelivery)
     : new NoopFeedbackDispatcher();
+  // D-045 — outbound messaging: senders name the recipient and the message
+  // purpose; consent lookup, quiet hours and dedupe are decided here. Null
+  // without a provider, so a sender reports "not sent" instead of a no-op.
+  const outboundMessaging = messageDelivery
+    ? createOutboundMessaging({
+        delivery: messageDelivery,
+        customerRepo,
+        dncRepo,
+        consentLedger: consentEventRepo,
+        pool: pool ?? null,
+        dispatchRepo,
+        logger: createLogger({
+          service: 'outbound-messaging',
+          environment: process.env.NODE_ENV || 'development',
+        }),
+      })
+    : null;
   const publicBaseUrl = config.publicOrigins.web;
-  const sendService = messageDelivery
+  const sendService = messageDelivery && outboundMessaging
     ? new SendService({
         delivery: messageDelivery,
+        outbound: outboundMessaging,
         estimateRepo,
         invoiceRepo,
         jobRepo,
         customerRepo,
         settingsRepo,
         dispatchRepo,
-        // S5a-1 (U8) — audits `invoice.payment_mode_unavailable` when a
-        // send goes out fail-closed (no pay CTA) because the policy read failed.
+        // S5a-1 (U8) — audits `invoice.payment_mode_unavailable` when the
+        // policy read fails and the send is refused.
         auditRepo,
         publicBaseUrl,
+        // D-045 — an invoice in pay_link mode is sent only once its pay link exists.
+        ensureInvoicePayLink: (tenantId, invoiceId) =>
+          createInvoicePaymentLink(tenantId, invoiceId, {
+            invoiceRepo,
+            provider: paymentLinkProvider,
+            settingsRepo,
+            connectAccountResolver,
+            auditRepo,
+          }),
       })
     : undefined;
 
@@ -7471,8 +7500,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           jobRepo,
           customerRepo,
           settingsRepo,
-          dncRepo,
-          dispatcher: feedbackDispatcher,
+          messaging: outboundMessaging,
           auditRepo,
           logger: thankYouSmsLogger,
           ...(messageDelivery ? { sendWindow: messageDelivery } : {}),

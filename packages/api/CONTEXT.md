@@ -129,36 +129,55 @@ Terms for how the product states what it can prove about itself. The PRD's
   to one that is merely off by default or lacks an owner-facing control. It
   caps at 4 regardless of how well it is tested.
 
-## Online presence (D-044)
+## Getting found online (D-044)
 
-Terms for how a tenant's customers find and reach them outside the product.
-
-- **Web chat** — the unauthenticated chat a tenant's *customers* use on the
-  tenant's public web presence; a fourth surface beside phone, memo and chat.
-  It has no actor, so like an unidentified caller it answers only the
-  customer's own records and tenant-public lookups, and anything that writes
-  is a proposal. _Avoid_: chat, chatbot, site chat (bare "chat" is the
-  operator's in-app chat).
-- **Business page** — the one-page public site the product generates from a
-  tenant's own settings and serves on a product-owned subdomain or a
-  connected custom domain. _Avoid_: website (a tenant's own site, built
-  elsewhere), landing page, microsite.
-- **Connected domain** — a domain the owner bought elsewhere and pointed at
-  their Business page; the product never registers or renews domains.
-  _Avoid_: custom domain purchase, reseller domain.
+- **Tenant site** — the one-page public website we host for a tenant, built
+  from tenant settings, on a subdomain of the domain reserved for tenant sites.
+  _Avoid_: landing page, microsite, website builder.
+- **Connected domain** — a domain the owner already owns and points at their
+  tenant site. We verify it and serve HTTPS; we never sell or renew it.
+  _Avoid_: custom domain purchase.
+- **Google listing** — the one Google Business Profile location a tenant has
+  connected. Its review link is read from it; the website and booking link
+  are written to it, only through an owner-approved card.
+  _Avoid_: GBP account (an account can hold many locations).
+- **Forwarding mode** — how the owner's existing number reaches the AI:
+  *missed calls only* (default) or *all calls*. Porting is not a mode.
+- **Forwarding check** — a call from our line to the owner's business number
+  that passes when it arrives back on our number.
+- **Get found online checklist** — the derived home-page checklist of
+  web-presence setup. Separate from onboarding steps, which gate activation.
 - **Presence path** — the owner's one answer to "do you have a website?":
-  *own website*, *Google only*, or *neither*. It decides which items the
-  Get-found checklist shows.
-- **Get-found checklist** — the post-activation setup list (Business page,
-  Google Business Profile, review link, call routing, Web chat). Separate
-  from onboarding steps; it never gates activation.
-  _Avoid_: onboarding steps, setup steps.
-- **Widget key** — the public, per-tenant key a Web chat embed carries to
-  name its tenant. Not a secret and not an identity; it grants only what an
-  anonymous visitor may do. _Avoid_: API key, tenant token.
-- **Tenant slug** — the tenant's public, human-readable name in URLs (the
-  Business page subdomain). Owner-editable; the tenant id stays the internal
-  key. _Avoid_: handle, subdomain.
-- **Call routing mode** — how calls to the owner's existing number reach the
-  AI: *forward all*, *forward when unanswered*, or *Rivet number only*.
-  Porting is not a mode.
+  *own website*, *Google only*, or *neither*. It decides which checklist items
+  show. _Avoid_: website status.
+
+## Outbound messaging and drafting (D-045)
+
+- **Outbound messaging** — the one module every customer or owner text goes
+  through. A sender names the recipient and the message purpose; the module
+  decides consent, quiet hours, duplicates and channel, and records the
+  outcome. Lives in `src/notifications/outbound-messaging.ts`; files not yet
+  moved onto it are listed in
+  `test/notifications/outbound-messaging-migration-guard.test.ts`.
+  _Avoid_: notification service, SMS sender.
+- **Message purpose** — why a message goes out, which decides when it may:
+  *transactional* (invoice, estimate, confirmation) and *reply* (to someone
+  who just contacted us) send now; *automated nudge* (thank-you, review
+  request, reminder) and *marketing* wait for the customer's daytime window,
+  and marketing also needs marketing consent.
+- **Send outcome** — what outbound messaging returns and records for every
+  message: *sent*, *scheduled* (with the time), or *blocked* (with the
+  reason). Never silent; the record links the customer and, when there is
+  one, the job and the invoice or estimate.
+- **Message record** — the one `message_dispatches` row per customer
+  message, keyed by its dedupe key. A later outcome replaces a scheduled or
+  blocked one; a sent row is never overwritten. "Did this go out?"
+  (`findByEntity`) sees only rows that reached a provider.
+  _Avoid_: dispatch log entry (it now also holds texts that never went).
+- **Status-write gate** — the lifecycle check every proposal status write
+  runs inside the repository (`proposals/lifecycle.ts#assertStatusWrite`).
+  A move the transition table does not list is refused; a caller cannot
+  route around it by writing the status directly.
+- **Draft outcome** — what drafting a proposal returns to a surface: a
+  *proposal*, a *clarification* question, or a *refusal* with a reason. The
+  surface only decides how to say it.

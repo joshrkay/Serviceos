@@ -31,8 +31,15 @@ async function loadTechnicianAppointmentsInWindow(
   windowEnd: Date,
 ): Promise<Array<Appointment & { technicianId: string }>> {
   const assignments = await deps.assignmentRepo.findByTechnician(tenantId, technicianId);
+  // Skip the per-appointment read for assignments whose denormalised window
+  // (kept in sync by migration 131's triggers) lies outside this one, so a
+  // long-tenured tech costs one query, not one per historical visit. Rows
+  // without the copy are still loaded; the real times decide below.
+  const candidates = assignments.filter(
+    (a) => !a.scheduledStart || !a.scheduledEnd || (a.scheduledEnd > windowStart && a.scheduledStart < windowEnd),
+  );
   const appts = await Promise.all(
-    assignments.map((a) => deps.appointmentRepo.findById(tenantId, a.appointmentId)),
+    candidates.map((a) => deps.appointmentRepo.findById(tenantId, a.appointmentId)),
   );
   return appts
     .filter((a): a is Appointment => a !== null)
@@ -200,7 +207,7 @@ async function travelTimeIssues(
   const next = siblings.find((a) => a.scheduledStart >= input.proposedScheduledEnd) ?? null;
 
   const summary: TravelTimeSummary = {
-    fromPrevSeconds: null, toNextSeconds: null,
+    fromPrevSeconds: null, prevEndsAt: prev?.scheduledEnd ?? null, toNextSeconds: null,
     estimateSource: 'unknown', degraded: false,
   };
   const issues: FeasibilityIssue[] = [];

@@ -14,10 +14,13 @@ import type {
 } from '../../lookup-events/lookup-event-service';
 import { t, type Language } from '../i18n/i18n';
 import { formatCents } from './spoken-format';
+import { customerJobsForLookup } from './customer-jobs';
 
 export interface LookupBalanceInput {
   tenantId: string;
   customerId: string;
+  /** Only this job's invoices: the job the operator pointed at ("what does this job owe?"). */
+  jobId?: string;
   timezone?: string;
   sessionId?: string;
   /** P11-002: spoken-summary language. Defaults to 'en'. */
@@ -89,7 +92,7 @@ export async function lookupBalance(
 
   let jobs;
   try {
-    jobs = await deps.jobRepo.findByCustomer(input.tenantId, input.customerId, {
+    jobs = await customerJobsForLookup(deps.jobRepo, input.tenantId, input.customerId, input.jobId, {
       includeArchived: true,
     });
   } catch (err) {

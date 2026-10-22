@@ -8,6 +8,7 @@ import { InMemoryRegionalPriceTierRepository } from '../../src/onboarding/choice
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
+import { forceStatus } from '../helpers/proposal-status';
 
 const TENANT_ID = '00000000-0000-0000-0000-0000000000a1';
 const USER_ID = 'user-owner-1';
@@ -442,7 +443,7 @@ describe('POST /retry', () => {
     return [...res.body.proposalIds].sort();
   }
   const fail = (id: string) =>
-    ctx.proposalRepo.update(TENANT_ID, id, { status: 'execution_failed', approvedAt: new Date(Date.now() - 3_600_000), executionError: 'boom' });
+    forceStatus(ctx.proposalRepo, TENANT_ID, id, 'execution_failed', { approvedAt: new Date(Date.now() - 3_600_000), executionError: 'boom' });
 
   it('re-queues the failed proposal and answers { draft, retriedProposalIds }', async () => {
     const [a, b] = await approved();
@@ -500,7 +501,7 @@ describe('POST /retry', () => {
   it('a failed proposal next to an undone one is a 409 DRAFT_RETRY_UNSAFE and nothing is re-queued', async () => {
     const [a, b] = await approved();
     await fail(a);
-    await ctx.proposalRepo.update(TENANT_ID, b, { status: 'undone' });
+    forceStatus(ctx.proposalRepo, TENANT_ID, b, 'undone');
     const draftBefore = await ctx.draftRepo.getForTenant(TENANT_ID);
     const res = await request(ctx.app).post('/api/onboarding/draft/retry').send();
     expect(res.status).toBe(409);
@@ -602,7 +603,7 @@ describe('POST /retry', () => {
 
       const [a, b] = [...(await request(ctx.app).post('/api/onboarding/draft/approve').send({})).body.proposalIds].sort();
       await fail(a);
-      await ctx.proposalRepo.update(TENANT_ID, b, { status: 'undone' });
+      forceStatus(ctx.proposalRepo, TENANT_ID, b, 'undone');
       const v = (await ctx.draftRepo.getForTenant(TENANT_ID))!.version;
       expect(errText(await post({ expectedVersion: v + 5 }))).toMatch(/VERSION_CONFLICT/);
       expect(errText(await post({ expectedVersion: v }))).toMatch(/DRAFT_RETRY_UNSAFE/);
@@ -696,13 +697,13 @@ describe('POST /undo', () => {
 
   it('a member already applying is 409 DRAFT_UNDO_REFUSED with the statuses in details; a closed window is 409 UNDO_WINDOW_CLOSED', async () => {
     const { ids, version } = await approved();
-    await ctx.proposalRepo.update(TENANT_ID, ids[0], { status: 'executing' });
+    forceStatus(ctx.proposalRepo, TENANT_ID, ids[0], 'executing');
     const refused = await undo({ expectedVersion: version });
     expect(refused.status).toBe(409);
     expect(refused.body.message).toMatch(/^DRAFT_UNDO_REFUSED: /);
     expect(refused.body.details.statuses).toEqual(expect.arrayContaining(['executing', 'approved']));
 
-    await ctx.proposalRepo.update(TENANT_ID, ids[0], { status: 'approved', approvedAt: new Date(Date.now() - 60_000) });
+    forceStatus(ctx.proposalRepo, TENANT_ID, ids[0], 'approved', { approvedAt: new Date(Date.now() - 60_000) });
     const closed = await undo({ expectedVersion: version });
     expect(closed.status).toBe(409);
     expect(closed.body.message).toMatch(/^UNDO_WINDOW_CLOSED: /);
@@ -734,7 +735,7 @@ describe('POST /reset', () => {
     await request(ctx.app).post('/api/onboarding/draft').send(CREATE);
     const res = await request(ctx.app).post('/api/onboarding/draft/approve').send({});
     const ids = [...res.body.proposalIds].sort();
-    await ctx.proposalRepo.update(TENANT_ID, ids[0], { status: 'undone' });
+    forceStatus(ctx.proposalRepo, TENANT_ID, ids[0], 'undone');
     return { ids, version: res.body.draft.version };
   }
 
@@ -777,19 +778,19 @@ describe('POST /reset', () => {
     expect(stale.status).toBe(409);
     expect(stale.body.message).toBe(`VERSION_CONFLICT: expected ${version - 1}, found ${version}; re-read the draft`);
 
-    await ctx.proposalRepo.update(TENANT_ID, ids[1], { status: 'executed' });
+    forceStatus(ctx.proposalRepo, TENANT_ID, ids[1], 'executed');
     const applied = await reset({ expectedVersion: version });
     expect(applied.status).toBe(409);
     expect(applied.body.message).toMatch(/^DRAFT_RESET_REFUSED: /);
     expect(applied.body.details).toEqual({ reason: 'applied', statuses: ['undone', 'executed'], expected: 2 });
 
-    await ctx.proposalRepo.update(TENANT_ID, ids[1], { status: 'executing' });
+    forceStatus(ctx.proposalRepo, TENANT_ID, ids[1], 'executing');
     const executing = await reset({ expectedVersion: version });
     expect(executing.status).toBe(409);
     expect(executing.body.message).toMatch(/^DRAFT_RESET_REFUSED: /);
     expect(executing.body.details).toMatchObject({ reason: 'executing', statuses: ['undone', 'executing'] });
 
-    await ctx.proposalRepo.update(TENANT_ID, ids[1], { status: 'approved', approvedAt: new Date(Date.now() - 60_000) });
+    forceStatus(ctx.proposalRepo, TENANT_ID, ids[1], 'approved', { approvedAt: new Date(Date.now() - 60_000) });
     const closed = await reset({ expectedVersion: version });
     expect(closed.status).toBe(409);
     expect(closed.body.message).toMatch(/^UNDO_WINDOW_CLOSED: /);
