@@ -52,9 +52,12 @@ Customer charges may be **Connect direct charges** (`Stripe-Account`). Those obj
    - `POST /api/terminal/connection-token` → `{ secret, locationId, stripeAccountId }`
      (lazily creates a Terminal Location from the Connect business address; persists `tenants.stripe_terminal_location_id`)
    - `POST /api/terminal/payment-intents` `{ invoiceId }` → card_present PI on the Connect account
-3. Mobile (EAS native build with `@stripe/stripe-terminal-react-native` + Tap to Pay plugins):
-   - Invoice detail → **Collect payment** → `initialize` → `easyConnect({ discoveryMethod: 'tapToPay', locationId })` → collect/confirm
-   - Set `EXPO_PUBLIC_TERMINAL_SIMULATED=1` for Stripe simulated Tap to Pay in Test mode
+3. Mobile (EAS native build with the `@stripe/stripe-terminal-react-native` config plugin):
+   - Invoice detail → **Collect payment** → `initialize` → `easyConnect({ discoveryMethod: 'internet', locationId })` → collect/confirm.
+     Discovers a Stripe **smart reader** (e.g. WisePOS E) registered to the tenant's Terminal
+     Location. Tap to Pay on iPhone / Android is out of v1 (docs/decisions.md D-046): it needs
+     Apple's proximity-reader entitlement / Stripe's Android access, which the store build lacks.
+   - Set `EXPO_PUBLIC_TERMINAL_SIMULATED=1` for a Stripe **simulated internet reader** in Test mode
    - **Not supported in Expo Go** — use an EAS development or production build
    - Web export stubs the Terminal package (Metro) so Playwright viewport e2e still runs
 4. Settlement: existing `payment_intent.succeeded` webhook → `recordPayment` (metadata `invoice_id` + `collection=terminal`).
