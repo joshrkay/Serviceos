@@ -1002,6 +1002,67 @@ describe('Google Business integrations routes', () => {
       );
     });
 
+    it('a pick whose link write failed is repaired the next time the picker loads', async () => {
+      const settingsRepo = await settingsWith();
+      await connect(TWO_LOCATIONS, { settingsRepo });
+      const auditRepo = new InMemoryAuditRepository();
+      const app = buildApp({
+        integrationRepo,
+        stateRepo,
+        googleConfig: GOOGLE_CONFIG,
+        googleFetch: makeConnectFetch(TWO_LOCATIONS) as unknown as typeof fetch,
+        settingsRepo,
+        auditRepo,
+      });
+      await request(app)
+        .put('/api/googlebusiness-integrations/google/location')
+        .send({ accountId: '123', locationId: '999' });
+      vi.spyOn(settingsRepo, 'update').mockRejectedValueOnce(new Error('db down'));
+      const failed = await request(app)
+        .put('/api/googlebusiness-integrations/google/location')
+        .send({ accountId: '456', locationId: '555' });
+      expect(failed.status).toBe(500);
+      expect((await settingsRepo.findByTenant(TENANT))?.googleReviewUrl).toBe(
+        'https://g.page/r/review-999',
+      );
+
+      const res = await request(app).get('/api/googlebusiness-integrations/google/locations');
+      expect(res.body).toMatchObject({
+        reviewUrlFilled: true,
+        integration: { locationId: '555', reviewUrl: 'https://g.page/r/review-555' },
+      });
+      expect((await settingsRepo.findByTenant(TENANT))?.googleReviewUrl).toBe(
+        'https://g.page/r/review-555',
+      );
+      const summary = await integrationRepo.get(TENANT);
+      const events = await auditRepo.findByEntity(TENANT, 'googlebusiness_integration', summary!.id);
+      expect(events.map((e) => e.eventType)).toContain(
+        'googlebusiness_integration.review_link_repaired',
+      );
+
+      const again = await request(app).get('/api/googlebusiness-integrations/google/locations');
+      expect(again.body.reviewUrlFilled).toBeUndefined();
+      expect(again.body.integration).toBeUndefined();
+    });
+
+    it('the picker never overwrites a link the owner typed', async () => {
+      const settingsRepo = await settingsWith();
+      await connect({ '123': ONE_LOCATION }, { settingsRepo });
+      await settingsRepo.update(TENANT, { googleReviewUrl: 'https://g.page/r/typed-by-owner' });
+      const app = buildApp({
+        integrationRepo,
+        stateRepo,
+        googleConfig: GOOGLE_CONFIG,
+        googleFetch: makeConnectFetch({ '123': ONE_LOCATION }) as unknown as typeof fetch,
+        settingsRepo,
+      });
+      const res = await request(app).get('/api/googlebusiness-integrations/google/locations');
+      expect(res.body.reviewUrlFilled).toBeUndefined();
+      expect((await settingsRepo.findByTenant(TENANT))?.googleReviewUrl).toBe(
+        'https://g.page/r/typed-by-owner',
+      );
+    });
+
     it('PUT /google/location to a listing with no review link clears the old one and says so', async () => {
       const WITH_UNVERIFIED: Record<string, StubLocation[]> = {
         '123': ONE_LOCATION,

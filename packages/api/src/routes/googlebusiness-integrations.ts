@@ -565,6 +565,44 @@ export function createGoogleBusinessIntegrationsRouter(
           });
           return;
         }
+        // The saved listing hasn't changed, but the link may still not
+        // match it: a pick or connect whose link write failed after the
+        // listing was saved leaves the old listing's link, and the picker
+        // won't re-pick the current listing. Applying it again is a no-op
+        // when the link already matches or was typed by the owner.
+        if (current && saved) {
+          const reviewUrl = await fillReviewUrl(deps, tenantId, saved.reviewUrl);
+          if (reviewUrl.reviewUrlError) {
+            throw new Error(
+              `Your review link doesn't match your Google location and could not be updated: ${reviewUrl.reviewUrlError}`,
+            );
+          }
+          if (reviewUrl.reviewUrlFilled || reviewUrl.reviewUrlCleared) {
+            if (deps.auditRepo) {
+              await deps.auditRepo.create(
+                createAuditEvent({
+                  tenantId,
+                  actorId: req.auth!.userId,
+                  actorRole: req.auth!.role,
+                  eventType: 'googlebusiness_integration.review_link_repaired',
+                  entityType: 'googlebusiness_integration',
+                  entityId: current.id,
+                  metadata: { provider: 'google_business', locationId: saved.locationId, ...reviewUrl },
+                }),
+              );
+            }
+            const pollState = deps.pollStateRepo
+              ? await deps.pollStateRepo.getPollState(tenantId)
+              : null;
+            res.json({
+              data: locations,
+              integration: statusView(current, pollState),
+              reviewUrlFilled: reviewUrl.reviewUrlFilled,
+              reviewUrlCleared: reviewUrl.reviewUrlCleared ?? false,
+            });
+            return;
+          }
+        }
         res.json({ data: locations });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
@@ -647,10 +685,10 @@ export function createGoogleBusinessIntegrationsRouter(
         }
 
         // The location is saved either way; a review-link write that failed
-        // is reported, not swallowed.
+        // is reported, not swallowed. Loading the picker again repairs it.
         if (reviewUrl.reviewUrlError) {
           throw new Error(
-            `Location saved, but the review link could not be updated: ${reviewUrl.reviewUrlError}`,
+            `Location saved, but the review link could not be updated: ${reviewUrl.reviewUrlError}. Tap "Change location" to try again.`,
           );
         }
 
