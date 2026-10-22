@@ -990,7 +990,7 @@ export function createEstimateRouter(
           entityId: routeParam(req, 'id'),
           metadata: {
             channels: result.channelsSent.map((c) => c.channel),
-            dispatchIds: result.channelsSent.map((c) => c.dispatchId),
+            dispatchIds: result.channelsSent.flatMap((c) => (c.dispatchId ? [c.dispatchId] : [])),
           },
         });
         // §6 Time-to-Cash. sendEstimate transitions the estimate to

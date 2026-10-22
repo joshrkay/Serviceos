@@ -698,7 +698,7 @@ export function createInvoiceRouter(
           entityId: routeParam(req, 'id'),
           metadata: {
             channels: result.channelsSent.map((c) => c.channel),
-            dispatchIds: result.channelsSent.map((c) => c.dispatchId),
+            dispatchIds: result.channelsSent.flatMap((c) => (c.dispatchId ? [c.dispatchId] : [])),
             // S5a-1 (U8) — the payment policy applied at SEND time (the
             // value then wins over whatever held when the invoice was issued).
             paymentCollectionMode: result.paymentCollectionMode,

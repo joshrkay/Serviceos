@@ -250,7 +250,7 @@ export function createPortalRouter(deps: PortalRouterDeps): Router {
             customerId: parsed.customerId,
             contactId: parsed.contactId,
             channels: result.channelsSent.map((c) => c.channel),
-            dispatchIds: result.channelsSent.map((c) => c.dispatchId),
+            dispatchIds: result.channelsSent.flatMap((c) => (c.dispatchId ? [c.dispatchId] : [])),
             expiresAt: session.expiresAt.toISOString(),
             ipAddress: auditContext.ipAddress,
             userAgent: auditContext.userAgent,

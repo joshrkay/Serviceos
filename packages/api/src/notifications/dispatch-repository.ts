@@ -120,6 +120,10 @@ export interface CreateDispatchInput {
   status?: DispatchStatus;
   errorMessage?: string;
   idempotencyKey?: string;
+  /** The customer and job the message is about, so the status bubble finds it. */
+  customerId?: string;
+  jobId?: string;
+  purpose?: MessagePurpose;
 }
 
 export interface DispatchListOptions {
@@ -180,6 +184,9 @@ export class InMemoryDispatchRepository implements DispatchRepository {
       errorMessage: input.errorMessage,
       idempotencyKey: input.idempotencyKey,
       sentAt: new Date(),
+      customerId: input.customerId,
+      jobId: input.jobId,
+      purpose: input.purpose,
     };
     this.rows.set(row.id, row);
     return { ...row };
@@ -280,8 +287,9 @@ export class PgDispatchRepository extends PgBaseRepository implements DispatchRe
       const { rows } = await client.query(
         `INSERT INTO message_dispatches
           (id, tenant_id, entity_type, entity_id, channel, recipient,
-           provider, provider_message_id, status, error_message, idempotency_key)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+           provider, provider_message_id, status, error_message, idempotency_key,
+           customer_id, job_id, purpose)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
          RETURNING *`,
         [
           id,
@@ -295,6 +303,9 @@ export class PgDispatchRepository extends PgBaseRepository implements DispatchRe
           status,
           input.errorMessage ?? null,
           input.idempotencyKey ?? null,
+          input.customerId ?? null,
+          input.jobId ?? null,
+          input.purpose ?? null,
         ]
       );
       return mapRow(rows[0]);

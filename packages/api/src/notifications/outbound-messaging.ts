@@ -53,7 +53,15 @@ import { markSendClaimComplete, readSendClaimStatus, withSendClaim } from './sen
 export type MessagePurpose = 'transactional' | 'reply' | 'automated_nudge' | 'marketing';
 
 export type MessageRecipient =
-  | { kind: 'customer'; customerId: string }
+  | {
+      kind: 'customer';
+      customerId: string;
+      /**
+       * A number the owner typed for this one send, used instead of the one
+       * on file. The customer's own consent still decides whether it goes.
+       */
+      phone?: string;
+    }
   | { kind: 'owner'; phone: string; alertClass?: SmsAlertClass }
   | { kind: 'reply'; phone: string; customerId?: string };
 
@@ -166,8 +174,11 @@ export interface OutboundMessagingDeps {
   logger: Pick<Logger, 'info' | 'warn'>;
 }
 
+/** A send outcome plus the id of its message record, when one was written. */
+export type RecordedSendOutcome = SendOutcome & { messageId?: string };
+
 export interface OutboundMessaging {
-  sendText(text: OutboundText): Promise<SendOutcome>;
+  sendText(text: OutboundText): Promise<RecordedSendOutcome>;
 }
 
 function blocked(reason: MessageBlockReason, detail?: string): SendOutcome {
@@ -230,7 +241,7 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
 
     const customer = await deps.customerRepo.findById(tenantId, recipient.customerId);
     if (!customer) return { outcome: blocked('customer_not_found'), to: '' };
-    const to = customer.primaryPhone;
+    const to = recipient.phone?.trim() || customer.primaryPhone;
     if (!to) return { outcome: blocked('no_phone'), to: '' };
     if (WAITS_FOR_DAYTIME.has(purpose)) {
       // A message nobody asked for needs the customer's own yes, whatever mode
@@ -264,7 +275,7 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
     return latest?.state === 'granted';
   }
 
-  async function sendText(text: OutboundText): Promise<SendOutcome> {
+  async function sendText(text: OutboundText): Promise<RecordedSendOutcome> {
     const claimKey = outboundClaimKey(text.dedupe);
     let addressed: Awaited<ReturnType<typeof address>>;
     try {
@@ -360,19 +371,23 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
 
   /**
    * Records a customer text's outcome as its message record and returns the
-   * outcome unchanged. Not recorded: a text to the owner, and an 'in_flight'
+   * outcome with the record's id. Not recorded: a text to the owner, and an 'in_flight'
    * block (the attempt holding the key records its own outcome). A send an
    * earlier attempt already made is recorded too: if that attempt's write
    * failed, this backfills it ("sent", number and provider unknown); if it
    * landed, the existing sent row stands. A failed write is logged; it never
    * turns a delivered text into a failure.
    */
-  async function record(text: OutboundText, to: string, outcome: SendOutcome): Promise<SendOutcome> {
+  async function record(
+    text: OutboundText,
+    to: string,
+    outcome: SendOutcome,
+  ): Promise<RecordedSendOutcome> {
     if (!text.about) return outcome;
     if (outcome.status === 'blocked' && outcome.reason === 'in_flight') return outcome;
     const { about } = text;
     try {
-      await deps.dispatchRepo.recordOutcome({
+      const row = await deps.dispatchRepo.recordOutcome({
         tenantId: text.tenantId,
         idempotencyKey: outboundClaimKey(text.dedupe),
         entityType: about.entityType,
@@ -398,6 +413,7 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
                   ...(outcome.detail ? { detail: outcome.detail } : {}),
                 },
       });
+      return { ...outcome, messageId: row.id };
     } catch (err) {
       deps.logger.warn('Outbound text outcome was not recorded', {
         ...logFields(text, outcome),

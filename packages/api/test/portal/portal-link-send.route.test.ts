@@ -38,6 +38,7 @@ import { GatedMessageDelivery } from '../../src/notifications/gated-message-deli
 import { InMemoryDncRepository, normalizePhone } from '../../src/compliance/dnc';
 import { SendService } from '../../src/notifications/send-service';
 import { createPortalRouter } from '../../src/routes/portal';
+import { withOutbound } from '../helpers/outbound-messaging';
 
 const TENANT = uuidv4();
 const ACTOR = 'user-portal-send';
@@ -103,7 +104,7 @@ async function build(opts: {
   // wrapper — consent/DNC enforcement is NOT re-implemented by the route.
   const sendService = opts.withoutSendService
     ? undefined
-    : new SendService({
+    : new SendService(withOutbound({
         delivery: new GatedMessageDelivery({
           base: delivery,
           dnc,
@@ -118,7 +119,7 @@ async function build(opts: {
         dispatchRepo,
         publicBaseUrl: 'https://app.example.com',
         ensureInvoicePayLink: async () => undefined,
-      });
+      }));
 
   const app = express();
   app.use(express.json());
@@ -281,21 +282,21 @@ describe('POST /api/portal-sessions/send — consent/DNC gating (never weakened)
     // Nothing reached the provider.
     expect(h.delivery.sentSms).toHaveLength(0);
 
-    // The suppression is recorded on the dispatch ledger like every other
-    // gated send (provider='suppressed', status='failed').
+    // The refusal is the text's message record, with the reason, like every
+    // other customer text (D-045).
     const created = h.auditRepo
       .getAll()
       .find((e) => e.eventType === 'portal_session.created');
     expect(created).toBeTruthy();
     const sessionId = created!.entityId;
-    const dispatches = await h.dispatchRepo.findByEntity(
-      TENANT,
-      'portal_session',
-      sessionId,
-    );
+    const { dispatches } = await h.dispatchRepo.listByTenant(TENANT, { entityType: 'portal_session' });
     expect(dispatches).toHaveLength(1);
-    expect(dispatches[0].provider).toBe('suppressed');
-    expect(dispatches[0].status).toBe('failed');
+    expect(dispatches[0]).toMatchObject({
+      entityId: sessionId,
+      status: 'blocked',
+      blockReason: 'no_consent',
+      customerId: h.customer.id,
+    });
 
     // A minted-but-never-delivered token must not stay live.
     const session = await h.portalRepo.findById(TENANT, sessionId);

@@ -25,6 +25,7 @@ import {
   InMemorySettingsRepository,
 } from '../../src/settings/settings';
 import { InMemoryDncRepository, normalizePhone } from '../../src/compliance/dnc';
+import { withOutbound } from '../helpers/outbound-messaging';
 
 const TENANT = 'tenant-test-1';
 
@@ -156,7 +157,7 @@ async function buildHarness(): Promise<Harness> {
     enforcement: 'block',
   });
 
-  const send = new SendService({
+  const send = new SendService(withOutbound({
     delivery: gatedDelivery,
     estimateRepo: estimate,
     invoiceRepo: invoice,
@@ -166,7 +167,7 @@ async function buildHarness(): Promise<Harness> {
     dispatchRepo: dispatch,
     publicBaseUrl: 'https://app.example.com',
     ensureInvoicePayLink: async () => undefined,
-  });
+  }));
   return { send, delivery, dispatch, customer, job, estimate, invoice, settings, dnc };
 }
 
@@ -480,7 +481,7 @@ describe('SendService — failure audit and idempotency', () => {
         channel: 'email' as const,
       }),
     };
-    const send = new SendService({
+    const send = new SendService(withOutbound({
       delivery: failingDelivery,
       estimateRepo: h.estimate,
       invoiceRepo: h.invoice,
@@ -490,7 +491,7 @@ describe('SendService — failure audit and idempotency', () => {
       dispatchRepo: h.dispatch,
       publicBaseUrl: 'https://app.example.com',
       ensureInvoicePayLink: async () => undefined,
-    });
+    }));
 
     const result = await send.sendEstimate({
       tenantId: TENANT,
@@ -502,14 +503,23 @@ describe('SendService — failure audit and idempotency', () => {
     expect(result.channelsSent).toHaveLength(1);
     expect(result.channelsSent[0].channel).toBe('email');
 
-    // BOTH a failed (sms) and a sent (email) dispatch were written.
-    const dispatches = await h.dispatch.findByEntity(TENANT, 'estimate', est.id);
+    // BOTH channels have a message record: the text not sent (the provider
+    // refused it, retryable, its words kept) and the email sent, each linked
+    // to the customer and job so the status bubble finds them.
+    const { dispatches } = await h.dispatch.listByTenant(TENANT, { entityType: 'estimate' });
     expect(dispatches).toHaveLength(2);
-    const failed = dispatches.find((d) => d.status === 'failed');
-    expect(failed?.channel).toBe('sms');
+    const failed = dispatches.find((d) => d.channel === 'sms');
+    expect(failed).toMatchObject({
+      status: 'blocked',
+      blockReason: 'send_failed',
+      blockPermanent: false,
+      customerId: c.id,
+      jobId: j.id,
+      purpose: 'transactional',
+    });
     expect(failed?.errorMessage).toContain('invalid phone');
-    const succeeded = dispatches.find((d) => d.status === 'sent');
-    expect(succeeded?.channel).toBe('email');
+    const succeeded = dispatches.find((d) => d.channel === 'email');
+    expect(succeeded).toMatchObject({ status: 'sent', customerId: c.id, jobId: j.id, purpose: 'transactional' });
   });
 
   it('passes a stable idempotency key to the delivery provider', async () => {
@@ -562,10 +572,9 @@ describe('SendService SMS suppression (§7 phase 1)', () => {
     expect(h.delivery.sentEmails).toHaveLength(1);
     expect(result.channelsSent.map((c) => c.channel)).toEqual(['email']);
 
-    const rows = await h.dispatch.findByEntity(TENANT, 'invoice', inv.id);
+    const { dispatches: rows } = await h.dispatch.listByTenant(TENANT, { entityType: 'invoice' });
     const smsRow = rows.find((r) => r.channel === 'sms');
-    expect(smsRow?.status).toBe('failed');
-    expect(smsRow?.errorMessage ?? '').toMatch(/suppressed|DNC|opt[- ]?out/i);
+    expect(smsRow).toMatchObject({ status: 'blocked', blockReason: 'dnc', blockPermanent: true, customerId: c.id });
   });
 
   it('SMS to a customer with sms_consent=false is blocked even when channel=sms only', async () => {

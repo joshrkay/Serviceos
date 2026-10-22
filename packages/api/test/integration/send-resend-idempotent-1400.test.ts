@@ -22,6 +22,7 @@ import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provi
 import { SendService } from '../../src/notifications/send-service';
 import { buildLineItem } from '../../src/shared/billing-engine';
 import { createEstimate } from '../../src/estimates/estimate';
+import { withOutbound } from '../helpers/outbound-messaging';
 
 describe('Postgres integration — same-minute owner resend is an idempotent replay (#1400)', () => {
   let pool: Pool;
@@ -60,10 +61,10 @@ describe('Postgres integration — same-minute owner resend is an idempotent rep
     });
 
     delivery = new InMemoryDeliveryProvider();
-    sendService = new SendService({
+    sendService = new SendService(withOutbound({
       delivery, estimateRepo, invoiceRepo: new InMemoryInvoiceRepository(), jobRepo, customerRepo,
       settingsRepo: new PgSettingsRepository(pool), dispatchRepo, publicBaseUrl: 'https://test.example.com', ensureInvoicePayLink: async () => undefined,
-    });
+    }, pool));
   });
 
   afterEach(() => {

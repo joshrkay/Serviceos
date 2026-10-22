@@ -265,7 +265,7 @@ async function buildSendHarness(opts: {
   await jobRepo.create(job);
   const invoice = makeInvoice(job.id);
   await invoiceRepo.create(invoice);
-  const send = new SendService({
+  const send = new SendService(withOutbound({
     delivery,
     estimateRepo: new InMemoryEstimateRepository(),
     invoiceRepo,
@@ -276,7 +276,7 @@ async function buildSendHarness(opts: {
     auditRepo: audit,
     publicBaseUrl: 'https://app.example.com',
     ensureInvoicePayLink: opts.ensureInvoicePayLink ?? (async () => undefined),
-  });
+  }));
   return { send, delivery, settings, invoiceRepo, audit, invoice };
 }
 
@@ -924,7 +924,7 @@ describe('owner invoice routes honour payment_collection_mode', () => {
     const job = makeJob(customer.id);
     await jobRepo.create(job);
     const invoice = await invoiceRepo.create(makeInvoice(job.id));
-    const sendService = new SendService({
+    const sendService = new SendService(withOutbound({
       delivery,
       estimateRepo: new InMemoryEstimateRepository(),
       invoiceRepo,
@@ -936,7 +936,7 @@ describe('owner invoice routes honour payment_collection_mode', () => {
       publicBaseUrl: 'https://app.example.com',
       ensureInvoicePayLink: (tenantId, invoiceId) =>
         createInvoicePaymentLink(tenantId, invoiceId, { invoiceRepo, provider, settingsRepo: settings, auditRepo: audit }),
-    });
+    }));
     const app = express();
     app.use(express.json());
     app.use((req: Request, res: Response, next: NextFunction) => {
@@ -1090,6 +1090,7 @@ describe('renderCollectOnSiteInactiveMessage — what an already-sent link shows
 // The in-memory twin takes the mode through an injected `modeLookup`.
 // ─────────────────────────────────────────────────────────────────────────────
 import { paymentModeLockKey } from '../../src/invoices/payment-collection-mode';
+import { withOutbound } from '../helpers/outbound-messaging';
 
 /** modeLookup over a settings repo: the in-memory stand-in for the attach's own read. */
 function modeFrom(settings: SettingsRepository) {

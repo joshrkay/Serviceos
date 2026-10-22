@@ -57,6 +57,7 @@ import {
   type PaymentLinkResult,
 } from '../../src/payments/payment-link-provider';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
+import { withOutbound } from '../helpers/outbound-messaging';
 
 const FAULT_SCHEMA = 's5a_fault';
 const FAULT_MESSAGE = 'S5a-1 injected fault: tenant_settings unreadable';
@@ -87,7 +88,7 @@ describe('Postgres integration — payment_collection_mode at the pay surfaces (
     settings: PgSettingsRepository,
     ensureInvoicePayLink: (tenantId: string, invoiceId: string) => Promise<unknown> = async () => undefined,
   ): SendService {
-    return new SendService({
+    return new SendService(withOutbound({
       delivery,
       estimateRepo: new PgEstimateRepository(pool),
       invoiceRepo,
@@ -98,7 +99,7 @@ describe('Postgres integration — payment_collection_mode at the pay surfaces (
       auditRepo,
       publicBaseUrl: 'https://app.example.com',
       ensureInvoicePayLink,
-    });
+    }, pool));
   }
 
   async function seedJobChain(t: { tenantId: string; userId: string }, label: string): Promise<string> {
