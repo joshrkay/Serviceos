@@ -118,7 +118,9 @@ function previousSelection(
  * The review-poll cursor is a timestamp watermark for one listing: a
  * different listing's older unread reviews would sit behind it and never
  * be ingested. Start the new listing from scratch (ingest is idempotent).
- * A previous integration of null means the tenant disconnected, so the
+ * The worker also binds each cursor to its listing, so a sweep for the old
+ * listing that finishes after this reset cannot hand its watermark to the
+ * new one. A previous integration of null means the tenant disconnected, so the
  * cursor's listing is unknown and it is reset too.
  */
 async function resetReviewCursorIfMoved(
