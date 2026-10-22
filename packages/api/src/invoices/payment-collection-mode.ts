@@ -27,6 +27,7 @@ import { AppError, ServiceUnavailableError } from '../shared/errors';
 import type { AuditRepository } from '../audit/audit';
 import { createAuditEvent } from '../audit/audit';
 import { createLogger } from '../logging/logger';
+import { withRequestSavepoint } from '../middleware/tenant-context';
 import type {
   PaymentCollectionMode,
   SettingsRepository,
@@ -97,7 +98,10 @@ export async function readPaymentCollectionMode(
 ): Promise<PaymentCollectionModeRead> {
   let settings: TenantSettings | null;
   try {
-    settings = await settingsRepo.findByTenant(tenantId);
+    // A savepoint inside a request transaction: a failed read is caught and
+    // answered here, so it must not leave the request's transaction aborted,
+    // or the audit of that failure (and everything after it) is lost.
+    settings = await withRequestSavepoint(() => settingsRepo.findByTenant(tenantId));
   } catch (error) {
     return { ok: false, error };
   }

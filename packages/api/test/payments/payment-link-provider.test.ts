@@ -158,4 +158,30 @@ describe('P5-017: MockPaymentLinkProvider production guard', () => {
       ).toThrow(/MockPaymentLinkProvider is forbidden|STRIPE_SECRET_KEY/);
     });
   });
+
+  describe('PAYMENT_LINK_PROVIDER=mock (hermetic e2e stack)', () => {
+    it('returns the mock provider in dev even with a synthetic Stripe key', () => {
+      const provider = createPaymentLinkProvider(
+        { NODE_ENV: 'dev', STRIPE_SECRET_KEY: 'sk_test_hermetic_release', PAYMENT_LINK_PROVIDER: 'mock' },
+        makeDeps(),
+      );
+      expect(provider).toBeInstanceOf(MockPaymentLinkProvider);
+    });
+
+    it('refuses to boot in production or staging', () => {
+      for (const NODE_ENV of ['production', 'staging']) {
+        expect(() =>
+          createPaymentLinkProvider({ NODE_ENV, STRIPE_SECRET_KEY: 'sk_live_x', PAYMENT_LINK_PROVIDER: 'mock' }, makeDeps()),
+        ).toThrow(/PAYMENT_LINK_PROVIDER=mock is forbidden/);
+      }
+    });
+
+    it('any other value keeps the real provider', () => {
+      const provider = createPaymentLinkProvider(
+        { NODE_ENV: 'dev', STRIPE_SECRET_KEY: 'sk_test_x', PAYMENT_LINK_PROVIDER: 'stripe' },
+        makeDeps(),
+      );
+      expect(provider).toBeInstanceOf(StripePaymentLinkProvider);
+    });
+  });
 });

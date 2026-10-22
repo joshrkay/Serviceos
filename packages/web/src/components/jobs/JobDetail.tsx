@@ -89,6 +89,7 @@ import type { CapturedMedia } from '../shared/CameraCapture';
 import { SuppliersSheet } from './SuppliersSheet';
 import { JobPhotoGallery } from './JobPhotoGallery';
 import { JobProfitCard } from './JobProfitCard';
+import { LatestTextStatus } from '../interactions/LatestTextStatus';
 import { JobFormsPanel } from './JobFormsPanel';
 import { JobCustomFieldsPanel } from './JobCustomFieldsPanel';
 import {
@@ -1237,6 +1238,8 @@ export function JobDetailView({
           onViewCustomer={() => navigate(`/customers/${customer.id}`)}
         />
       )}
+      {/* D-045 — the latest text about this job: sent, held, or not sent and why. */}
+      <LatestTextStatus filter={{ jobId: job.id }} />
       <StatusStepper job={job} />
       <ScheduleTechCard
         job={job}

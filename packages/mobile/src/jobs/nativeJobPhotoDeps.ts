@@ -1,4 +1,4 @@
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import type { FileUploader } from './uploadJobPhoto';
 
 // Native implementation of the injectable job-photo uploader. Kept out of

@@ -181,6 +181,7 @@ async function execute(w: Awaited<ReturnType<typeof world>>, proposal: Proposal)
     settingsRepo,
     dispatchRepo,
     publicBaseUrl: 'https://app.example.com',
+    ensureInvoicePayLink: async () => undefined,
   });
   const handler = new SendEstimateNudgeExecutionHandler(w.estimateRepo, sendService, dispatchRepo);
   const result = await handler.execute(proposal, { tenantId: TENANT, executedBy: USER });

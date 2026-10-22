@@ -39,6 +39,7 @@ import { runOverdueInvoiceSweep } from '../../src/workers/overdue-invoice-worker
 import { runHfcrWeeklySendSweep } from '../../src/workers/hfcr-weekly-send-worker';
 import { runGoogleReviewsSweep } from '../../src/workers/google-reviews';
 import { runThankYouSmsSweep } from '../../src/workers/thank-you-sms-worker';
+import { createOutboundMessaging } from '../../src/notifications/outbound-messaging';
 import { PgJobRepository } from '../../src/jobs/pg-job';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
 import { PgLocationRepository } from '../../src/locations/pg-location';
@@ -90,7 +91,7 @@ import { createLogger } from '../../src/logging/logger';
 
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
 
-/** What the thank-you sweep hands its dispatcher — the whole input, so the
+/** What the thank-you sweep hands the provider — the whole message, so the
  *  per-tenant scope can be asserted rather than inferred from the recipient. */
 interface ThankYouDispatch {
   to: string;
@@ -1320,18 +1321,29 @@ describe('Postgres integration — cross-tenant query sweep fan-out (T4)', () =>
         } as never,
         jobRepo: new PgJobRepository(pool),
         customerRepo: new PgCustomerRepository(pool),
-        dncRepo: new PgDncRepository(pool),
-        dispatcher: {
-          // Capture the WHOLE input, not just the recipient. Recording `to`
-          // alone would pass even if every message carried the first tenant's
-          // `tenantId` — under which the production consent-ledger and DNC
-          // lookups would run in the wrong scope, silently. Caught in review on
-          // PR #994 (Codex P2), against the round that made the worker forward
-          // these fields in the first place.
-          send: async (input: ThankYouDispatch) => {
-            dispatched.push(input);
+        messaging: createOutboundMessaging({
+          customerRepo: new PgCustomerRepository(pool),
+          dncRepo: new PgDncRepository(pool),
+          consentLedger: { listByPhone: async () => [] },
+          dispatchRepo: new PgDispatchRepository(pool),
+          pool,
+          logger,
+          delivery: {
+            // Capture the WHOLE message, not just the recipient. Recording `to`
+            // alone would pass even if every message carried the first tenant's
+            // `tenantId` — under which the production consent-ledger and DNC
+            // lookups would run in the wrong scope, silently. Caught in review on
+            // PR #994 (Codex P2), against the round that made the worker forward
+            // these fields in the first place.
+            sendSms: async (input: ThankYouDispatch) => {
+              dispatched.push(input);
+              return { provider: 'test', providerMessageId: `m-${dispatched.length}`, channel: 'sms' };
+            },
+            sendEmail: async () => {
+              throw new Error('not used');
+            },
           },
-        } as never,
+        }),
         logger,
         now: () => FANOUT_NOW,
       });

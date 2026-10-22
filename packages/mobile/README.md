@@ -28,7 +28,13 @@ Consequences:
   needs no built `dist`. It is not an npm dependency of this package.
 
 ## Stack notes
-- **Expo SDK 52** (React 18.3.1, RN 0.76) — React aligned with `packages/web`.
+- **Expo SDK 57** (React 19.2, RN 0.86, New Architecture only). Expo pins React,
+  so mobile runs a newer React than `packages/web`; the Vitest lane still renders
+  hooks/screens with the repo-root React (see `vitest.config.ts` aliases).
+- **Auth:** `@clerk/expo` 4 (Clerk Core 3). The provider, `useAuth` and the
+  secure-store `tokenCache` come from the root / `token-cache` entries; the
+  resource-style `useSignIn` the OTP sign-in flow is built on lives at
+  `@clerk/expo/legacy`.
 - **NativeWind v4** (Tailwind v3) driven by the shared design tokens in
   `src/theme/tokens.js` (mirrors `packages/web/src/index.css`).
 
@@ -53,9 +59,9 @@ npm start
 2. `npm install && npx expo start` (add `--tunnel` if your phone isn't on the same Wi-Fi).
 3. Scan the QR with the Camera app → it opens in Expo Go with live reload.
 
-All current deps (expo-router, nativewind, reanimated, screens, safe-area-context,
-gesture-handler) are Expo SDK 52 modules supported by Expo Go, so no custom dev build is
-needed yet.
+Stripe Terminal is a custom native module, so Expo Go cannot run this app once that
+code path loads — use an EAS `development` build (`eas build --profile development`)
+for on-device work. Expo Go still serves the web preview below.
 
 ### Web preview / screenshot (no device)
 ```

@@ -62,7 +62,7 @@ describe('Postgres integration — same-minute owner resend is an idempotent rep
     delivery = new InMemoryDeliveryProvider();
     sendService = new SendService({
       delivery, estimateRepo, invoiceRepo: new InMemoryInvoiceRepository(), jobRepo, customerRepo,
-      settingsRepo: new PgSettingsRepository(pool), dispatchRepo, publicBaseUrl: 'https://test.example.com',
+      settingsRepo: new PgSettingsRepository(pool), dispatchRepo, publicBaseUrl: 'https://test.example.com', ensureInvoicePayLink: async () => undefined,
     });
   });
 

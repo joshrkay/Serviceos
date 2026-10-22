@@ -246,3 +246,72 @@ describe('GatedMessageDelivery — WS12 cross-channel consent ledger', () => {
     expect(auditRepo.getAll()[0].metadata?.reason).toBe('dnc');
   });
 });
+
+describe('GatedMessageDelivery — onProviderStarting hook', () => {
+  it('runs the hook once, after every check passes, and never hands it to the provider', async () => {
+    const { gate, base } = build('block');
+    const order: string[] = [];
+    const sendSms = base.sendSms.bind(base);
+    base.sendSms = async (m) => {
+      order.push('provider');
+      return sendSms(m);
+    };
+
+    await gate.sendSms(
+      customerMsg({
+        onProviderStarting: async () => {
+          order.push('hook');
+        },
+      }),
+    );
+
+    expect(order).toEqual(['hook', 'provider']);
+    expect(base.sentSms[0]).not.toHaveProperty('onProviderStarting');
+  });
+
+  it('does not run the hook for a suppressed send', async () => {
+    const { gate } = build('block', { dncPhone: DNC_PHONE });
+    let called = false;
+    await expect(
+      gate.sendSms(
+        customerMsg({
+          to: DNC_PHONE,
+          onProviderStarting: async () => {
+            called = true;
+          },
+        }),
+      ),
+    ).rejects.toMatchObject({ reason: 'dnc' });
+    expect(called).toBe(false);
+  });
+
+  it('a throwing hook stops the send before the provider', async () => {
+    const { gate, base } = build('off');
+    await expect(
+      gate.sendSms(
+        customerMsg({
+          onProviderStarting: async () => {
+            throw new Error('claim lost');
+          },
+        }),
+      ),
+    ).rejects.toThrow('claim lost');
+    expect(base.sentSms).toHaveLength(0);
+  });
+
+  it('runs the hook on an owner send too', async () => {
+    const { gate, base } = build('block');
+    let called = false;
+    await gate.sendSms({
+      to: CLEAN_PHONE,
+      body: 'digest',
+      tenantId: TENANT,
+      recipientClass: 'owner',
+      onProviderStarting: async () => {
+        called = true;
+      },
+    });
+    expect(called).toBe(true);
+    expect(base.sentSms).toHaveLength(1);
+  });
+});
