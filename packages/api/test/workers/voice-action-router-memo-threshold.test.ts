@@ -30,6 +30,8 @@ import type { Logger } from '../../src/logging/logger';
 import type { VoiceRecording, VoiceRepository } from '../../src/voice/voice-service';
 import type { VoiceActionRouterPayload } from '../../src/workers/voice-action-router';
 import type { Mode } from '../../src/proposals/auto-approve';
+import { createMemoCreatorModeLoader } from '../../src/workers/memo-creator-mode';
+import { InMemoryUserModeService, type MeUserRecord, type UserModeService } from '../../src/routes/me';
 
 const TENANT = 't-ovas04-memo';
 const RECORDING_ID = 'rec-ovas04';
@@ -151,5 +153,180 @@ describe('OVAS-04 — memo auto-approval honours the creator’s mode and the te
       override: { supervisor: 1, tech: 1, both: 1 },
     });
     expect(proposal.status).not.toBe('approved');
+  });
+});
+
+// C-1698-P1 — the PRODUCTION creator-mode loader. app.ts used to wire the
+// request middleware's resolveUserMode here, which turns a missing user or a
+// DB error into a cached 'supervisor' — the permissive threshold — so a memo
+// whose creator holds a stricter mode could auto-approve between the two
+// thresholds. createMemoCreatorModeLoader is nullable (missing user → null)
+// and error-preserving (a DB error rejects), so memoCreator.mode() returns
+// undefined and the strictest defined tenant rule applies.
+describe('C-1698-P1 — the memo creator-mode loader fails closed', () => {
+  // A permission-holding creator; 'tech' is the stricter mode (0.97).
+  const OVERRIDE = { supervisor: 0.9, tech: 0.97, both: 0.97 };
+  let proposalRepo: InMemoryProposalRepository;
+
+  beforeEach(() => {
+    proposalRepo = new InMemoryProposalRepository();
+    setSupervisorPresenceLoader(async () => true);
+  });
+
+  afterEach(() => {
+    _resetSupervisorPresenceCache();
+    setSupervisorPresenceLoader(null);
+  });
+
+  function memoBy(createdBy: string): Pick<VoiceRepository, 'findById' | 'recordAnswer'> {
+    return {
+      findById: vi.fn(async (tenantId: string, id: string) =>
+        ({
+          id,
+          tenantId,
+          source: 'inapp_voice',
+          transcriptMetadata: { provenance: 'operator' },
+          createdBy,
+          status: 'completed',
+        }) as Partial<VoiceRecording> as VoiceRecording,
+      ),
+      recordAnswer: vi.fn(async () => null) as unknown as VoiceRepository['recordAnswer'],
+    };
+  }
+
+  function member(userId: string, mode: Mode): MeUserRecord {
+    return {
+      user_id: userId,
+      tenant_id: TENANT,
+      role: 'dispatcher',
+      can_field_serve: false,
+      current_mode: mode,
+      mode_changed_at: null,
+    };
+  }
+
+  async function routeWith(
+    service: Pick<UserModeService, 'getUser'>,
+    createdBy: string,
+    // null = the tenant has no auto_approve_threshold override at all.
+    override: Partial<Record<Mode, number>> | null = OVERRIDE,
+    draftConfidence = 0.93,
+  ) {
+    const warnings: string[] = [];
+    const noop = () => {};
+    const log = {
+      debug: noop,
+      info: noop,
+      error: noop,
+      warn: (message: string) => warnings.push(message),
+      child: () => log,
+    } as unknown as Logger;
+    const worker = createVoiceActionRouterWorker({
+      gateway: bookingGateway(draftConfidence),
+      proposalRepo,
+      voiceRepo: memoBy(createdBy),
+      tenantSchedulingResolver: async () => ({ timezone: 'America/Phoenix' }),
+      resolveMemberRole: async () => 'dispatcher',
+      resolveMemberMode: createMemoCreatorModeLoader(() => service),
+      thresholdResolver: async () => override ?? undefined,
+    });
+    await worker.handle(
+      msg({ tenantId: TENANT, userId: 'system', transcript: 'Book Mrs Lee next Tuesday at 2pm', recordingId: RECORDING_ID }),
+      log,
+    );
+    const [proposal] = await proposalRepo.findByTenant(TENANT);
+    expect(proposal.proposalType).toBe('create_appointment');
+    return { proposal, warnings };
+  }
+
+  it("reads the creator's real mode: 'supervisor' approves a 0.93 booking, 'tech' holds it", async () => {
+    const service = new InMemoryUserModeService();
+    service.upsertUser(member('clerk-p1-supervisor', 'supervisor'));
+    service.upsertUser(member('clerk-p1-tech', 'tech'));
+
+    expect((await routeWith(service, 'clerk-p1-supervisor')).proposal.status).toBe('approved');
+    proposalRepo = new InMemoryProposalRepository();
+    expect((await routeWith(service, 'clerk-p1-tech')).proposal.status).not.toBe('approved');
+  });
+
+  it('a creator with no users row gets the strictest tenant rule, not supervisor: the 0.93 booking is held', async () => {
+    const { proposal } = await routeWith(new InMemoryUserModeService(), 'clerk-p1-missing');
+
+    expect(proposal.status).not.toBe('approved');
+  });
+
+  it('a DB error gets the strictest tenant rule, not supervisor — and says so in the log', async () => {
+    const failing: Pick<UserModeService, 'getUser'> = {
+      getUser: async () => {
+        throw new Error('connection terminated');
+      },
+    };
+
+    const { proposal, warnings } = await routeWith(failing, 'clerk-p1-db-error');
+
+    expect(proposal.status).not.toBe('approved');
+    expect(warnings).toContain(
+      'voice-action-router: memo creator mode lookup failed — strictest tenant rule applies',
+    );
+  });
+
+  // Codex P1 on #1795 — with NO tenant override, "the strictest tenant rule"
+  // used to mean the legacy 0.90, below the strictest built-in mode ('tech',
+  // 0.95): a 0.93 memo whose creator could not be read still auto-approved.
+  // An unread mode now resolves to whichever mode is strictest for the tenant,
+  // its override or the built-in default.
+  it('with no tenant override, a creator with no users row is held at the strictest built-in mode, not the legacy 0.90', async () => {
+    const { proposal } = await routeWith(new InMemoryUserModeService(), 'clerk-p1-missing-no-override', null);
+
+    expect(proposal.status).not.toBe('approved');
+  });
+
+  it('with no tenant override, a DB error is held at the strictest built-in mode too', async () => {
+    const failing: Pick<UserModeService, 'getUser'> = {
+      getUser: async () => {
+        throw new Error('connection terminated');
+      },
+    };
+
+    const { proposal } = await routeWith(failing, 'clerk-p1-db-error-no-override', null);
+
+    expect(proposal.status).not.toBe('approved');
+  });
+
+  it("with no tenant override, a creator whose mode is read still gets that mode: 'supervisor' approves 0.93", async () => {
+    const service = new InMemoryUserModeService();
+    service.upsertUser(member('clerk-p1-supervisor-no-override', 'supervisor'));
+
+    const { proposal } = await routeWith(service, 'clerk-p1-supervisor-no-override', null);
+
+    expect(proposal.status).toBe('approved');
+  });
+
+  it('an unread mode takes the strictest mode for the tenant even when the override makes supervisor the strictest', async () => {
+    const supervisorStrictest = { supervisor: 0.99, tech: 0.85, both: 0.85 };
+    const service = new InMemoryUserModeService();
+    service.upsertUser(member('clerk-p1-tech-low', 'tech'));
+
+    expect(
+      (await routeWith(new InMemoryUserModeService(), 'clerk-p1-missing-strict', supervisorStrictest, 0.98)).proposal.status,
+    ).not.toBe('approved');
+    proposalRepo = new InMemoryProposalRepository();
+    expect((await routeWith(service, 'clerk-p1-tech-low', supervisorStrictest, 0.98)).proposal.status).toBe('approved');
+  });
+
+  it('is nullable and error-preserving on its own', async () => {
+    const service = new InMemoryUserModeService();
+    service.upsertUser(member('clerk-p1-both', 'both'));
+    const load = createMemoCreatorModeLoader(() => service);
+
+    await expect(load(TENANT, 'clerk-p1-both')).resolves.toBe('both');
+    await expect(load(TENANT, 'clerk-p1-nobody')).resolves.toBeNull();
+    await expect(load('t-other-tenant', 'clerk-p1-both')).resolves.toBeNull();
+    const boom = createMemoCreatorModeLoader(() => ({
+      getUser: async () => {
+        throw new Error('db down');
+      },
+    }));
+    await expect(boom(TENANT, 'clerk-p1-both')).rejects.toThrow('db down');
   });
 });

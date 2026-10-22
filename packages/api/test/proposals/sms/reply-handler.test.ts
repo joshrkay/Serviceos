@@ -28,6 +28,8 @@ import {
   type Proposal,
 } from '../../../src/proposals/proposal';
 import { applyChainMetadata } from '../../../src/proposals/chain';
+import { jobReferenceCheck } from '../../../src/proposals/approval-reference-checks';
+import { InMemoryJobRepository, createJob } from '../../../src/jobs/job';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import type { SettingsRepository } from '../../../src/settings/settings';
 import type { UserRepository } from '../../../src/users/user';
@@ -234,7 +236,9 @@ describe('handleProposalSmsReply — approve', () => {
     expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe(
       'ready_for_review',
     );
-    expect(h.sent[0].body).toContain("Can't approve yet");
+    expect(h.sent[0].body).toBe(
+      "Can't approve yet — it's missing required info. Open your review queue to finish it.",
+    );
   });
 
   it('Y on a chain head approves capture members and reports linked-action counts', async () => {
@@ -750,7 +754,9 @@ describe('edit session flow', () => {
         }),
       } as unknown as SettingsRepository,
       userRepo: {
-        findById: async () => ({ id: 'u-backup', mobileNumber: BACKUP_PHONE }),
+        // B1 — a real users row always carries its tenant and a role; the
+        // backup approves as that role.
+        findById: async () => ({ id: 'u-backup', tenantId: TENANT, role: 'dispatcher', mobileNumber: BACKUP_PHONE }),
       } as unknown as UserRepository,
       interpretEdit: async () => ({ customerName: 'X' }),
     });
@@ -1395,5 +1401,96 @@ describe('handleProposalSmsReply — approve_all (U5 "ALL" / "APPROVE ALL")', ()
     const result = await handleProposalSmsReply(ctx('ALL'), h.deps);
     expect(result).toMatchObject({ handled: true, reason: 'approve_all_none' });
     expect(h.sent[0].body).toContain('Nothing is waiting');
+  });
+});
+
+// B4 — the SMS Y / APPROVE ALL taps run the SAME approval-time reference checks
+// the dashboard approve route runs (proposals/approval-reference-checks.ts).
+// Without them a card the dashboard would hold (here: its job belongs to a
+// different customer) was approved by a texted Y and then failed at execution.
+describe('B4 — SMS approvals run the approval-time reference checks', () => {
+  const CUSTOMER = '7a1b2c3d-1111-4111-8111-111111111111';
+  const OTHER_CUSTOMER = '7a1b2c3d-2222-4222-8222-222222222222';
+
+  async function harnessWithMismatchedJob(): Promise<{ h: Harness; jobOfOther: string }> {
+    const jobRepo = new InMemoryJobRepository();
+    const jobOfOther = (
+      await createJob(
+        {
+          tenantId: TENANT,
+          customerId: OTHER_CUSTOMER,
+          locationId: 'loc-other',
+          summary: 'Their furnace',
+          createdBy: 'seed',
+        },
+        jobRepo,
+      )
+    ).id;
+    const h = makeHarness({ approvalReferenceChecks: [jobReferenceCheck(jobRepo)] });
+    return { h, jobOfOther };
+  }
+
+  it("Y on a card whose job is another customer's gets a plain reply and approves nothing", async () => {
+    const { h, jobOfOther } = await harnessWithMismatchedJob();
+    const proposal = await seedPendingProposal(h, TENANT, {
+      payload: {
+        customerId: CUSTOMER,
+        jobId: jobOfOther,
+        customerName: 'Mrs Lee',
+        scheduledStart: '2026-06-16T19:00:00Z',
+        scheduledEnd: '2026-06-16T20:00:00Z',
+      },
+    });
+
+    const result = await handleProposalSmsReply(ctx('Y'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'approve_blocked' });
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
+    expect(h.sent).toHaveLength(1);
+    // B4 follow-up — nothing is missing: the job is another customer's. The
+    // reply says something needs fixing and where, not "missing required info".
+    expect(h.sent[0].body).toBe("Can't approve yet — something on it needs fixing first. Open it in the app to fix it.");
+    expect(h.sent[0].body).not.toContain('Approved');
+    expect(h.auditRepo.getAll().map((e) => e.eventType)).not.toContain('proposal.approved');
+  });
+
+  it('APPROVE ALL leaves the held card waiting and says so', async () => {
+    const { h, jobOfOther } = await harnessWithMismatchedJob();
+    const held = await h.proposalRepo.create({
+      ...createProposal({
+        tenantId: TENANT,
+        proposalType: 'create_appointment',
+        payload: { customerId: CUSTOMER, jobId: jobOfOther, customerName: 'Mrs Lee' },
+        summary: 'Book Mrs Lee',
+        confidenceScore: 0.97,
+        createdBy: 'voice',
+      }),
+      status: 'ready_for_review',
+    });
+
+    const result = await handleProposalSmsReply(ctx('APPROVE ALL'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'approved_all' });
+    expect((await h.proposalRepo.findById(TENANT, held.id))?.status).toBe('ready_for_review');
+    expect(h.sent[0].body).toContain('Approved 0 of 1');
+  });
+
+  it('a card the checks pass still approves on Y', async () => {
+    const jobRepo = new InMemoryJobRepository();
+    const ownJob = (
+      await createJob(
+        { tenantId: TENANT, customerId: CUSTOMER, locationId: 'loc-own', summary: 'Own', createdBy: 'seed' },
+        jobRepo,
+      )
+    ).id;
+    const h = makeHarness({ approvalReferenceChecks: [jobReferenceCheck(jobRepo)] });
+    const proposal = await seedPendingProposal(h, TENANT, {
+      payload: { customerId: CUSTOMER, jobId: ownJob, customerName: 'Mrs Lee' },
+    });
+
+    const result = await handleProposalSmsReply(ctx('Y'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'approved' });
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('approved');
   });
 });

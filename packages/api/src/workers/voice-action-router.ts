@@ -6,7 +6,7 @@ import { Proposal, ProposalRepository, createProposal, CreateProposalInput, Prop
 import { assertValidProposalPayload } from '../proposals/contracts';
 import { INTENT_TO_PROPOSAL_TYPE } from '../proposals/voice-intent-map';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
-import { routeUnsupervisedProposal, confidenceMetaBlocksAutoApprove } from '../proposals/auto-approve';
+import { routeUnsupervisedProposal, confidenceMetaBlocksAutoApprove, strictestMode } from '../proposals/auto-approve';
 import {
   AUTO_APPROVE_DIRECT_PERMISSION,
   holdIfCallerCannotApprove,
@@ -505,8 +505,9 @@ export interface VoiceActionRouterDeps {
    * OVAS-04 — the memo creator's `users.current_mode`, threaded as the
    * proposal's supervisorMode so the per-mode thresholds and the tenant's
    * per-mode override apply to memos exactly as they do to chat (which reads
-   * req.auth.mode). Absent / null / a throw → no mode; the resolver then
-   * applies the strictest defined override (never the bare legacy 0.9).
+   * req.auth.mode). null or a throw → the tenant's strictest mode
+   * (strictestMode: each mode's override or built-in default, highest wins),
+   * never the bare legacy 0.9. Absent → no mode (wiring without a lookup).
    */
   resolveMemberMode?: (tenantId: string, userId: string) => Promise<Mode | null>;
   /**
@@ -1834,7 +1835,7 @@ async function processSegment(
   const memoCreator = memoCreatorResolver(deps, tenantId, recordingId, log);
   const supervisorMode =
     AUTO_APPROVE_DIRECT_PERMISSION[handler.taskType] !== undefined
-      ? await memoCreator.mode()
+      ? await memoCreator.mode(tenantThresholdOverride)
       : undefined;
 
   const context: TaskContext = {
@@ -2043,8 +2044,15 @@ export function holdIfUnsupervised(proposal: Proposal, supervisorPresent: boolea
  */
 interface MemoCreator {
   role(): Promise<string | null>;
-  /** OVAS-04 — users.current_mode; undefined when unresolvable. */
-  mode(): Promise<Mode | undefined>;
+  /**
+   * OVAS-04 — users.current_mode. A lookup that ran but could not name a mode
+   * (no creator on the recording, no users row, a failed read) resolves to
+   * the tenant's strictest mode: an undefined mode would fall back to the
+   * legacy 0.9, below the built-in 'tech' default, so the memo could
+   * auto-approve under a stricter real mode. Undefined only when no mode
+   * lookup is wired.
+   */
+  mode(tenantOverride?: Partial<Record<Mode, number>>): Promise<Mode | undefined>;
 }
 
 function memoCreatorResolver(
@@ -2082,17 +2090,18 @@ function memoCreatorResolver(
         return null;
       }
     },
-    async mode() {
+    async mode(tenantOverride) {
+      if (!deps.resolveMemberMode) return undefined;
       const userId = await id();
-      if (!userId || !deps.resolveMemberMode) return undefined;
+      if (!userId) return strictestMode(tenantOverride);
       try {
-        return (await deps.resolveMemberMode(tenantId, userId)) ?? undefined;
+        return (await deps.resolveMemberMode(tenantId, userId)) ?? strictestMode(tenantOverride);
       } catch (err) {
         log.warn('voice-action-router: memo creator mode lookup failed — strictest tenant rule applies', {
           recordingId,
           error: err instanceof Error ? err.message : String(err),
         });
-        return undefined;
+        return strictestMode(tenantOverride);
       }
     },
   };
@@ -2406,6 +2415,8 @@ async function processChain(
           ...(ur.notifyPush ? { notifyPush: ur.notifyPush } : {}),
           ...(ur.secret ? { secret: ur.secret } : {}),
           ...(ur.buildApproveUrl ? { buildApproveUrl: ur.buildApproveUrl } : {}),
+          // B1 — the link approves as its recipient (owner, or the backup).
+          ...(ur.resolveLinkApprover ? { resolveLinkApprover: ur.resolveLinkApprover } : {}),
           ...(ur.recordSmsEvent
             ? {
                 onSmsSent: async ({ body, kind }: { body: string; kind: OutboundAnchorKind }) =>
@@ -2420,14 +2431,15 @@ async function processChain(
           channel: 'other',
           ...(ownerPhone ? { ownerPhone } : {}),
           summaryText: reviewedHead.summary,
-          renderSmsBody: (approveUrl: string) =>
+          renderSmsBody: (approveUrl: string, { recipientCannotApprove }) =>
             renderChainSms(
               ordered.map((p) => ({
                 proposalType: p.proposalType,
                 summary: p.summary,
                 payload: p.payload,
               })),
-              { approveUrl: approveUrl || undefined },
+              // B1 follow-up — a recipient who cannot approve is asked for no reply.
+              { approveUrl: approveUrl || undefined, recipientCannotApprove },
             ),
           // Blocking-member payload (if any) drives the token-suppression /
           // review_required_rendered anchoring; otherwise the head's.
@@ -2813,6 +2825,8 @@ export function createVoiceActionRouterWorker(
                 ...(ur.notifyPush ? { notifyPush: ur.notifyPush } : {}),
                 ...(ur.secret ? { secret: ur.secret } : {}),
                 ...(ur.buildApproveUrl ? { buildApproveUrl: ur.buildApproveUrl } : {}),
+                // B1 — the link approves as its recipient (owner, or the backup).
+                ...(ur.resolveLinkApprover ? { resolveLinkApprover: ur.resolveLinkApprover } : {}),
                 // P2-034 — persist the outbound render so the inbound
                 // Y/N/EDIT reply handler can resolve which proposal the
                 // owner is answering.
@@ -2845,7 +2859,7 @@ export function createVoiceActionRouterWorker(
                 summaryText: proposal.summary,
                 // P2-034 — full reply-token body (summary + facts +
                 // "Reply Y/N/EDIT" + the one-tap link).
-                renderSmsBody: (approveUrl: string) =>
+                renderSmsBody: (approveUrl: string, { recipientCannotApprove }) =>
                   renderProposalSms(
                     {
                       proposalType: proposal.proposalType,
@@ -2855,6 +2869,8 @@ export function createVoiceActionRouterWorker(
                     {
                       approveUrl: approveUrl || undefined,
                       ...(executabilityAsk ? { blockedBy: executabilityAsk } : {}),
+                      // B1 follow-up — a recipient who cannot approve is asked for no reply.
+                      recipientCannotApprove,
                     },
                   ),
                 ...(executabilityAsk ? { suppressApproveLink: true } : {}),

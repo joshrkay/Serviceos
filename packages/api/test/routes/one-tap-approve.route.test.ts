@@ -19,6 +19,9 @@ import {
   createProposal,
 } from '../../src/proposals/proposal';
 import { applyChainMetadata } from '../../src/proposals/chain';
+import { jobReferenceCheck } from '../../src/proposals/approval-reference-checks';
+import type { ResolvedApprover } from '../../src/proposals/approver-identity';
+import { InMemoryJobRepository, createJob } from '../../src/jobs/job';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import {
   InMemoryProposalSmsEventRepository,
@@ -528,5 +531,287 @@ describe('RV-073 — one-tap approvals tag channel one_tap', () => {
     const approvedEvent = events.find((e) => e.eventType === 'proposal.approved');
     expect(approvedEvent).toBeDefined();
     expect(approvedEvent!.metadata).toMatchObject({ channel: 'one_tap' });
+  });
+});
+
+// B4 — the one-tap link runs the SAME approval-time reference checks as the
+// dashboard approve route. A card the checks hold (its job belongs to a
+// different customer) gets a plain "needs a closer look" page, never an
+// "Approved" that then fails at execution.
+describe('B4 — one-tap approval runs the approval-time reference checks', () => {
+  it('holds a card the checks flag: 409 plain page, nothing approved', async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const jobRepo = new InMemoryJobRepository();
+    const jobOfOther = (
+      await createJob(
+        {
+          tenantId: TENANT,
+          customerId: '7a1b2c3d-2222-4222-8222-222222222222',
+          locationId: 'loc-other',
+          summary: 'Their furnace',
+          createdBy: 'seed',
+        },
+        jobRepo,
+      )
+    ).id;
+    const proposal = await proposalRepo.create({
+      ...createProposal({
+        tenantId: TENANT,
+        proposalType: 'create_appointment',
+        payload: {
+          customerId: '7a1b2c3d-1111-4111-8111-111111111111',
+          jobId: jobOfOther,
+          scheduledStart: '2026-06-16T19:00:00Z',
+          scheduledEnd: '2026-06-16T20:00:00Z',
+        },
+        summary: 'Book Mrs Lee Tuesday 2pm',
+        confidenceScore: 0.97,
+        createdBy: 'voice',
+      }),
+      status: 'ready_for_review',
+    });
+    const app = express();
+    app.use(
+      '/public/proposals',
+      createOneTapApproveRouter({
+        proposalRepo,
+        auditRepo,
+        secret: SECRET,
+        consumeNonce: createInMemoryNonceStore(),
+        approvalReferenceChecks: [jobReferenceCheck(jobRepo)],
+      }),
+    );
+
+    const res = await request(app)
+      .get('/public/proposals/one-tap-approve')
+      .query({ token: mint(proposal.id).token });
+
+    expect(res.status).toBe(409);
+    expect(res.text).toContain('Needs a closer look');
+    expect(res.text).toContain('something on it needs fixing first');
+    expect(res.text).not.toContain('Approved');
+    expect((await proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
+    const types = (await auditRepo.findByEntity(TENANT, 'proposal', proposal.id)).map((e) => e.eventType);
+    expect(types).not.toContain('proposal.approved');
+    expect(types).not.toContain('proposal.one_tap_approved');
+  });
+});
+
+// B1 follow-up — a linked step (e.g. "send the estimate") whose earlier step
+// has not run yet is held by approveProposal's linked-step gate. The 409 page
+// said "something on it needs fixing", which is not what the owner has to do:
+// each linked-step hold says its own next step.
+describe('B4 follow-up — one-tap on a linked step says what to do about the earlier step', () => {
+  async function linkedStep(parentType: 'draft_estimate' | 'draft_invoice', parentStatus: 'ready_for_review' | 'approved' | 'rejected') {
+    const proposalRepo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const chainId = '33333333-3333-4333-8333-333333333333';
+    const kind = parentType === 'draft_invoice' ? 'invoiceId' : 'estimateId';
+    const parent = createProposal({
+      tenantId: TENANT,
+      proposalType: parentType,
+      payload: { customerId: '44444444-4444-4444-8444-444444444444', lineItems: [] },
+      summary: 'Estimate for Mrs Lee',
+      createdBy: 'voice',
+    });
+    applyChainMetadata(parent, { chainId, chainIndex: 0, chainLength: 2, dependsOnChainIndices: [], chainRefs: [] });
+    const child = createProposal({
+      tenantId: TENANT,
+      proposalType: parentType === 'draft_invoice' ? 'send_invoice' : 'send_estimate',
+      payload: { channel: 'sms' },
+      summary: 'Send it to Mrs Lee',
+      createdBy: 'voice',
+    });
+    applyChainMetadata(child, {
+      chainId,
+      chainIndex: 1,
+      chainLength: 2,
+      dependsOnChainIndices: [0],
+      chainRefs: [{ payloadPath: kind, parentChainIndex: 0, entityKind: kind }],
+    });
+    await proposalRepo.create({ ...parent, status: parentStatus });
+    await proposalRepo.create({ ...child, status: 'ready_for_review' });
+    const app = express();
+    app.use(
+      '/public/proposals',
+      createOneTapApproveRouter({ proposalRepo, auditRepo, secret: SECRET, consumeNonce: createInMemoryNonceStore() }),
+    );
+    // The voice fallback mints the only non-capture links, with `confirm`.
+    const { token } = createOneTapApproveToken({ proposalId: child.id, tenantId: TENANT, secret: SECRET, confirm: true });
+    const res = await request(app).post('/public/proposals/one-tap-approve').type('form').send({ token });
+    return { res, status: (await proposalRepo.findById(TENANT, child.id))?.status };
+  }
+
+  it('earlier step not approved yet: approve that one first', async () => {
+    const { res, status } = await linkedStep('draft_estimate', 'ready_for_review');
+    expect(res.status).toBe(409);
+    expect(res.text).toContain('Approve the earlier step first');
+    expect(res.text).toContain('This one depends on an earlier step that hasn’t run yet. Approve that one first');
+    expect(res.text).not.toContain('needs fixing');
+    expect(status).toBe('ready_for_review');
+  });
+
+  it('a send linked to an invoice that will be a draft: issue the invoice first', async () => {
+    const { res, status } = await linkedStep('draft_invoice', 'approved');
+    expect(res.status).toBe(409);
+    expect(res.text).toContain('Issue the invoice first');
+    expect(res.text).not.toContain('needs fixing');
+    expect(status).toBe('ready_for_review');
+  });
+
+  it('earlier step did not run: nothing for this one to act on', async () => {
+    const { res, status } = await linkedStep('draft_estimate', 'rejected');
+    expect(res.status).toBe(409);
+    expect(res.text).toContain('The earlier step this one depends on didn’t run');
+    expect(res.text).not.toContain('needs fixing');
+    expect(res.text).not.toContain('Approve the earlier step first');
+    expect(status).toBe('ready_for_review');
+  });
+});
+
+// B1 — a link sent to the backup supervisor (the tenant has no owner phone)
+// carries their user id and role, and the tap approves as them — not 'owner'.
+describe('B1 — a one-tap link approves as its recipient', () => {
+  async function appWith(
+    proposalType: 'draft_estimate' | 'update_catalog_item',
+    resolveBackupApprover?: (tenantId: string) => Promise<ResolvedApprover | null>,
+  ) {
+    const proposalRepo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const proposal = await proposalRepo.create({
+      ...createProposal({
+        tenantId: TENANT,
+        proposalType,
+        payload:
+          proposalType === 'draft_estimate'
+            ? {
+                customerId: '7a1b2c3d-1111-4111-8111-111111111111',
+                lineItems: [{ description: 'Labor', quantity: 1, unitPrice: 11500 }],
+              }
+            : { catalogItemId: '7a1b2c3d-3333-4333-8333-333333333333', unitPriceCents: 9900 },
+        summary: 'Estimate for Mrs Lee',
+        confidenceScore: 0.97,
+        createdBy: 'voice',
+      }),
+      status: 'ready_for_review',
+    });
+    const app = express();
+    app.use(
+      '/public/proposals',
+      createOneTapApproveRouter({
+        proposalRepo,
+        auditRepo,
+        secret: SECRET,
+        consumeNonce: createInMemoryNonceStore(),
+        ...(resolveBackupApprover ? { resolveBackupApprover } : {}),
+      }),
+    );
+    return { app, proposalRepo, auditRepo, proposal };
+  }
+
+  const tokenFor = (proposalId: string, role: 'dispatcher' | 'technician') =>
+    createOneTapApproveToken({
+      proposalId,
+      tenantId: TENANT,
+      secret: SECRET,
+      approver: { userId: 'clerk-backup', role },
+    }).token;
+
+  it("a link minted for a backup dispatcher executes with the dispatcher's role and id", async () => {
+    const { app, proposalRepo, auditRepo, proposal } = await appWith('draft_estimate');
+
+    const res = await request(app)
+      .get('/public/proposals/one-tap-approve')
+      .query({ token: tokenFor(proposal.id, 'dispatcher') });
+
+    expect(res.status).toBe(200);
+    const stored = (await proposalRepo.findById(TENANT, proposal.id))!;
+    expect(stored.status).toBe('approved');
+    expect(stored.executedByRole).toBe('dispatcher');
+    expect(stored.executedBy).toBe('clerk-backup');
+    const approved = (await auditRepo.findByEntity(TENANT, 'proposal', proposal.id)).find(
+      (e) => e.eventType === 'proposal.approved',
+    );
+    expect(approved).toMatchObject({ actorId: 'clerk-backup', actorRole: 'dispatcher' });
+  });
+
+  it.each([
+    ['a technician backup', 'draft_estimate', 'technician'],
+    ['a dispatcher backup on a settings change', 'update_catalog_item', 'dispatcher'],
+  ] as const)('%s gets a plain 403 page and nothing is approved', async (_label, type, role) => {
+    const { app, proposalRepo, proposal } = await appWith(type);
+
+    const res = await request(app)
+      .get('/public/proposals/one-tap-approve')
+      .query({ token: tokenFor(proposal.id, role) });
+
+    expect(res.status).toBe(403);
+    expect(res.text).toContain('owner');
+    expect(res.text).not.toMatch(/proposal|dashboard|verify/i);
+    expect((await proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
+  });
+
+  // The token's claims are from when the text went out; the tap re-checks
+  // who the backup is NOW (resolveBackupSupervisorApprover in production).
+  it('the backup is re-checked at the tap: still the backup → approves with the role they hold now', async () => {
+    const { app, proposalRepo, proposal } = await appWith('draft_estimate', async () => ({
+      role: 'owner',
+      userId: 'clerk-backup',
+      via: 'backup_supervisor',
+    }));
+
+    const res = await request(app)
+      .get('/public/proposals/one-tap-approve')
+      .query({ token: tokenFor(proposal.id, 'dispatcher') });
+
+    expect(res.status).toBe(200);
+    const stored = (await proposalRepo.findById(TENANT, proposal.id))!;
+    expect(stored.executedByRole).toBe('owner');
+    expect(stored.executedBy).toBe('clerk-backup');
+  });
+
+  it('a backup re-roled to technician since the text went out approves nothing', async () => {
+    const { app, proposalRepo, proposal } = await appWith('draft_estimate', async () => ({
+      role: 'technician',
+      userId: 'clerk-backup',
+      via: 'backup_supervisor',
+    }));
+
+    const res = await request(app)
+      .get('/public/proposals/one-tap-approve')
+      .query({ token: tokenFor(proposal.id, 'dispatcher') });
+
+    expect(res.status).toBe(403);
+    expect((await proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
+  });
+
+  it.each([
+    ['replaced by someone else', async () => ({ role: 'dispatcher' as const, userId: 'clerk-someone-else', via: 'backup_supervisor' as const })],
+    ['deactivated, or no longer anyone’s backup', async () => null],
+    ['not knowable (the lookup fails)', async () => { throw new Error('db down'); }],
+  ])('a backup %s since the text went out approves nothing', async (_label, current) => {
+    const { app, proposalRepo, auditRepo, proposal } = await appWith('draft_estimate', current);
+
+    const res = await request(app)
+      .get('/public/proposals/one-tap-approve')
+      .query({ token: tokenFor(proposal.id, 'dispatcher') });
+
+    expect(res.status).toBe(403);
+    expect(res.text).toContain('owner');
+    expect(res.text).not.toMatch(/proposal|dashboard|verify/i);
+    expect((await proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
+    const types = (await auditRepo.findByEntity(TENANT, 'proposal', proposal.id)).map((e) => e.eventType);
+    expect(types).toContain('proposal.one_tap_blocked_recipient');
+    expect(types).not.toContain('proposal.approved');
+  });
+
+  it('an owner link still approves as the owner', async () => {
+    const { app, proposalRepo, proposal } = await appWith('update_catalog_item');
+
+    const res = await request(app).get('/public/proposals/one-tap-approve').query({ token: mint(proposal.id).token });
+
+    expect(res.status).toBe(200);
+    expect((await proposalRepo.findById(TENANT, proposal.id))?.executedByRole).toBe('owner');
   });
 });

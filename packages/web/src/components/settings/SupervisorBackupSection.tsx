@@ -69,9 +69,31 @@ const ROUTING_OPTIONS: ReadonlyArray<{
   },
 ];
 
+function personName(u: RosterUser): string {
+  return [u.firstName, u.lastName].filter(Boolean).join(' ').trim();
+}
+
 function displayName(u: RosterUser): string {
-  const name = [u.firstName, u.lastName].filter(Boolean).join(' ').trim();
+  const name = personName(u);
   return name ? `${name} (${u.email})` : u.email;
+}
+
+/** Offered as a backup: an ACTIVE member whose role can approve work (#1463, B1). */
+function isEligibleBackup(u: RosterUser): boolean {
+  return SUPERVISE_CAPABLE_ROLES.includes(u.role) && isAssignableMember(u);
+}
+
+/**
+ * B1 follow-up — why the backup on file is not an option any more, in plain
+ * words. A backup named before B1 can be a technician, who cannot approve.
+ */
+function ineligibleBackupNote(u: RosterUser | undefined): string {
+  if (!u) return 'Your current backup is no longer on your team. Pick someone who can approve work.';
+  const who = personName(u) || u.email;
+  if (!SUPERVISE_CAPABLE_ROLES.includes(u.role)) {
+    return `${who} can't approve work, so they can't be your backup. Pick someone who can.`;
+  }
+  return `${who} is no longer active on your team. Pick someone who can approve work.`;
 }
 
 export function SupervisorBackupSection({
@@ -85,8 +107,14 @@ export function SupervisorBackupSection({
   const [routing, setRouting] =
     useState<UnsupervisedProposalRouting>(initialRouting);
   const [saving, setSaving] = useState(false);
-  const [users, setUsers] = useState<RosterUser[]>([]);
+  // The whole roster: eligible members are the options, and the backup on
+  // file is looked up here even when it is not one of them (B1 follow-up).
+  const [roster, setRoster] = useState<RosterUser[] | null>(null);
   const [usersError, setUsersError] = useState(false);
+  // The backup on file (mirrors lastSavedRef) — rendered, so it is state.
+  const [savedBackupUserId, setSavedBackupUserId] = useState<string>(
+    initialBackupUserId ?? '',
+  );
 
   // Last value known to be persisted — the revert target for a failed
   // optimistic save.
@@ -98,6 +126,7 @@ export function SupervisorBackupSection({
   // Re-sync when the parent re-fetches /api/me (e.g. after a mode switch).
   useEffect(() => {
     setBackupUserId(initialBackupUserId ?? '');
+    setSavedBackupUserId(initialBackupUserId ?? '');
     lastSavedRef.current.backupUserId = initialBackupUserId ?? '';
   }, [initialBackupUserId]);
   useEffect(() => {
@@ -116,10 +145,7 @@ export function SupervisorBackupSection({
         const json = (await res.json()) as { data?: RosterUser[] } | RosterUser[];
         const list = Array.isArray(json) ? json : (json?.data ?? []);
         if (!cancelled) {
-          setUsers(
-            // #1463 — only ACTIVE supervise-capable members are assignable.
-            list.filter((u) => SUPERVISE_CAPABLE_ROLES.includes(u.role) && isAssignableMember(u)),
-          );
+          setRoster(list);
           setUsersError(false);
         }
       } catch {
@@ -131,21 +157,38 @@ export function SupervisorBackupSection({
     };
   }, [apiClient]);
 
+  // #1463 / B1 — only ACTIVE supervise-capable members are offered.
+  const options = (roster ?? []).filter(isEligibleBackup);
+  // B1 follow-up — the backup on file when it is not one of the options (a
+  // technician named before B1, a deactivated member): still shown, so the
+  // select says who it is instead of silently reading "None".
+  const ineligibleSaved =
+    savedBackupUserId !== '' && !options.some((u) => u.id === savedBackupUserId)
+      ? { id: savedBackupUserId, user: roster?.find((u) => u.id === savedBackupUserId) }
+      : null;
+
   async function handleSave() {
     const prior = { ...lastSavedRef.current };
     const next = { backupUserId, routing };
     // Optimistic: the chosen values stick immediately.
     lastSavedRef.current = next;
+    setSavedBackupUserId(next.backupUserId);
     setSaving(true);
     try {
       await updateTenantModeSettings(apiClient, {
-        backupSupervisorUserId: backupUserId === '' ? null : backupUserId,
+        // B1 follow-up — the backup rides only when it changed: re-sending
+        // a legacy backup the picker no longer offers would refuse a
+        // routing-only save.
+        ...(backupUserId !== prior.backupUserId
+          ? { backupSupervisorUserId: backupUserId === '' ? null : backupUserId }
+          : {}),
         unsupervisedProposalRouting: routing,
       });
       toast.success('Supervisor backup saved');
     } catch (err) {
       // Revert to the last persisted values + toast (AIProposalCard pattern).
       lastSavedRef.current = prior;
+      setSavedBackupUserId(prior.backupUserId);
       setBackupUserId(prior.backupUserId);
       setRouting(prior.routing);
       const message = err instanceof Error ? err.message : 'Save failed';
@@ -188,12 +231,25 @@ export function SupervisorBackupSection({
           className="w-full min-h-[44px] text-sm px-3 py-2 rounded-md border border-slate-200 bg-white focus:border-slate-400"
         >
           <option value="">None</option>
-          {users.map((u) => (
+          {options.map((u) => (
             <option key={u.id} value={u.id}>
               {displayName(u)}
             </option>
           ))}
+          {ineligibleSaved && (
+            <option value={ineligibleSaved.id}>
+              {ineligibleSaved.user ? displayName(ineligibleSaved.user) : 'Current backup'}
+            </option>
+          )}
         </select>
+        {ineligibleSaved && roster && backupUserId === ineligibleSaved.id && (
+          <p
+            data-testid="backup-supervisor-ineligible-note"
+            className="text-xs text-amber-700 mt-1 break-words"
+          >
+            {ineligibleBackupNote(ineligibleSaved.user)}
+          </p>
+        )}
         {usersError && (
           <p className="text-xs text-amber-600 mt-1" role="alert">
             Couldn't load the team list — try reloading the page.
