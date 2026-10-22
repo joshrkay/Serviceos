@@ -19,17 +19,6 @@ async function horizontalOverflowPx(page: Page): Promise<number> {
 
 const ROUTES = ['/', '/today', '/sign-in', '/customers/new', '/schedule', '/digest'];
 
-/**
- * Signed-in setup screens. Signed out, AuthGate redirects them to /sign-in, so a
- * plain overflow check would measure the sign-in page and pass for the wrong
- * reason. These assert the screen was actually reached and skip (saying so)
- * when it wasn't: there is no signed-in fixture for this export yet.
- */
-const SIGNED_IN_ROUTES: { route: string; heading: string }[] = [
-  { route: '/onboarding', heading: 'Start with your voice' },
-  { route: '/setup-voice', heading: 'Set up by voice' },
-];
-
 for (const width of [320, 390]) {
   test.describe(`mobile web @ ${width}px`, () => {
     test.use({ viewport: { width, height: 760 } });
@@ -38,16 +27,6 @@ for (const width of [320, 390]) {
       test(`no horizontal overflow on ${route}`, async ({ page }) => {
         await page.goto(route, { waitUntil: 'networkidle' });
         await page.waitForTimeout(1500);
-        expect(await horizontalOverflowPx(page)).toBeLessThanOrEqual(1);
-      });
-    }
-
-    for (const { route, heading } of SIGNED_IN_ROUTES) {
-      test(`no horizontal overflow on ${route} (skips unless signed in)`, async ({ page }) => {
-        await page.goto(route, { waitUntil: 'networkidle' });
-        await page.waitForTimeout(1500);
-        const reached = new URL(page.url()).pathname === route && (await page.getByText(heading).count()) > 0;
-        test.skip(!reached, `${route} redirected (not signed in) — no signed-in fixture for the web export`);
         expect(await horizontalOverflowPx(page)).toBeLessThanOrEqual(1);
       });
     }

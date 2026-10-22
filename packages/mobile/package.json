@@ -16,7 +16,7 @@
     "lint": "tsc --noEmit",
     "validate:config": "node ./scripts/validate-mobile-config.mjs",
     "export:web": "expo export --platform web --output-dir .e2e-web",
-    "e2e:viewport": "npm run export:web && playwright test --config playwright.config.ts"
+    "e2e:viewport": "EXPO_PUBLIC_API_URL=${EXPO_PUBLIC_API_URL:-http://api.e2e.invalid} EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY=${EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY:-pk_test_Y2xlcmsuZTJlLmludmFsaWQk} npm run export:web -- --clear && playwright test --config playwright.config.ts"
   },
   "dependencies": {
     "@clerk/clerk-expo": "^2.20.0",
