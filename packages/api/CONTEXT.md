@@ -166,6 +166,11 @@ Terms for how the product states what it can prove about itself. The PRD's
   message: *sent*, *scheduled* (with the time), or *blocked* (with the
   reason). Never silent; the record links the customer and, when there is
   one, the job and the invoice or estimate.
+- **Message record** — the one `message_dispatches` row per customer
+  message, keyed by its dedupe key. A later outcome replaces a scheduled or
+  blocked one; a sent row is never overwritten. "Did this go out?"
+  (`findByEntity`) sees only rows that reached a provider.
+  _Avoid_: dispatch log entry (it now also holds texts that never went).
 - **Status-write gate** — the lifecycle check every proposal status write
   runs inside the repository (`proposals/lifecycle.ts#assertStatusWrite`).
   A move the transition table does not list is refused; a caller cannot

@@ -15,6 +15,7 @@ import { PgDncRepository } from '../../src/compliance/dnc';
 import { PgConsentEventRepository } from '../../src/compliance/consent-events';
 import { createLogger } from '../../src/logging/logger';
 import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
+import { PgDispatchRepository } from '../../src/notifications/dispatch-repository';
 import { createOutboundMessaging } from '../../src/notifications/outbound-messaging';
 
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
@@ -44,6 +45,7 @@ describe('Postgres integration — outbound messaging', () => {
       customerRepo: new PgCustomerRepository(pool),
       dncRepo: new PgDncRepository(pool),
       consentLedger: new PgConsentEventRepository(pool),
+      dispatchRepo: new PgDispatchRepository(pool),
       pool,
       logger,
     });
@@ -59,6 +61,7 @@ describe('Postgres integration — outbound messaging', () => {
       recipient: { kind: 'customer' as const, customerId },
       purpose: 'transactional' as const,
       dedupe: { messageKind: 'om_test', recordId: customerId },
+      about: { entityType: 'custom_message' as const, entityId: customerId },
       body: 'Your tech is on the way',
     };
 
@@ -80,6 +83,41 @@ describe('Postgres integration — outbound messaging', () => {
     expect(claim.rows[0].status).toBe('sent');
   });
 
+  it('records the outcome as one message row on the customer and job', async () => {
+    const tenant = await createTestTenant(pool);
+    const { customerId, phone } = await seedCustomer(tenant, false);
+    const { messaging } = build();
+    const jobId = crypto.randomUUID();
+    const text = {
+      tenantId: tenant.tenantId,
+      recipient: { kind: 'customer' as const, customerId },
+      purpose: 'automated_nudge' as const,
+      dedupe: { messageKind: 'om_record', recordId: jobId },
+      about: { entityType: 'thank_you' as const, entityId: jobId, jobId },
+      body: 'Thanks for choosing us',
+    };
+
+    await messaging.sendText(text);
+    await pool.query(`UPDATE customers SET sms_consent = true WHERE id = $1`, [customerId]);
+    await messaging.sendText(text);
+
+    const rows = await pool.query(
+      `SELECT status, recipient, customer_id, job_id, purpose, block_reason
+         FROM message_dispatches WHERE tenant_id = $1 AND idempotency_key = $2`,
+      [tenant.tenantId, `om_record:${jobId}`],
+    );
+    expect(rows.rows).toEqual([
+      {
+        status: 'sent',
+        recipient: phone,
+        customer_id: customerId,
+        job_id: jobId,
+        purpose: 'automated_nudge',
+        block_reason: null,
+      },
+    ]);
+  });
+
   it('a blocked nudge spends no claim, so the same key can send once consent is given', async () => {
     const tenant = await createTestTenant(pool);
     const { customerId } = await seedCustomer(tenant, false);
@@ -89,6 +127,7 @@ describe('Postgres integration — outbound messaging', () => {
       recipient: { kind: 'customer' as const, customerId },
       purpose: 'automated_nudge' as const,
       dedupe: { messageKind: 'om_nudge', recordId: customerId },
+      about: { entityType: 'custom_message' as const, entityId: customerId },
       body: 'Thanks for choosing us',
     };
 
@@ -111,6 +150,7 @@ describe('Postgres integration — outbound messaging', () => {
       recipient: { kind: 'customer' as const, customerId },
       purpose: 'marketing' as const,
       dedupe: { messageKind: 'om_marketing', recordId: customerId },
+      about: { entityType: 'custom_message' as const, entityId: customerId },
       body: 'Fall tune-up special',
     };
 
@@ -147,6 +187,7 @@ describe('Postgres integration — outbound messaging', () => {
       recipient: { kind: 'customer', customerId },
       purpose: 'transactional',
       dedupe: { messageKind: 'om_inflight', recordId: customerId },
+      about: { entityType: 'custom_message' as const, entityId: customerId },
       body: 'Your tech is on the way',
     });
 
@@ -163,6 +204,7 @@ describe('Postgres integration — outbound messaging', () => {
       recipient: { kind: 'customer' as const, customerId },
       purpose: 'automated_nudge' as const,
       dedupe: { messageKind: 'om_resent', recordId: customerId },
+      about: { entityType: 'custom_message' as const, entityId: customerId },
       body: 'Thanks for choosing us',
     };
 
@@ -203,6 +245,7 @@ describe('Postgres integration — outbound messaging', () => {
       recipient: { kind: 'customer', customerId },
       purpose: 'transactional',
       dedupe: { messageKind: 'om_boundary', recordId: customerId },
+      about: { entityType: 'custom_message' as const, entityId: customerId },
       body: 'Your tech is on the way',
     });
 
@@ -232,6 +275,7 @@ describe('Postgres integration — outbound messaging', () => {
       recipient: { kind: 'customer' as const, customerId },
       purpose: 'transactional' as const,
       dedupe: { messageKind: 'om_retry', recordId: customerId },
+      about: { entityType: 'custom_message' as const, entityId: customerId },
       body: 'Invoice ready',
     };
 

@@ -6,6 +6,7 @@ import { InMemoryDncRepository } from '../../src/compliance/dnc';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryJobRepository, type Job } from '../../src/jobs/job';
 import { createLogger } from '../../src/logging/logger';
+import { InMemoryDispatchRepository } from '../../src/notifications/dispatch-repository';
 import { createOutboundMessaging } from '../../src/notifications/outbound-messaging';
 import {
   GatedMessageDelivery,
@@ -216,6 +217,7 @@ describe('runThankYouSmsSweep', () => {
         customerRepo,
         dncRepo,
         consentLedger: { listByPhone: async () => [] },
+        dispatchRepo: new InMemoryDispatchRepository(),
         pool,
         logger,
       }),
