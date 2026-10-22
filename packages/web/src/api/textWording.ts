@@ -51,9 +51,44 @@ async function readOrThrow<T>(res: Response, action: string): Promise<T> {
   return (await res.json()) as T;
 }
 
+/** What the API sent before wording was per language: one version per text, in the business's language. */
+interface SingleLanguageText {
+  purpose: WordingPurpose;
+  fillIns: string[];
+  sampleValues: Record<string, string>;
+  ours: string;
+  addedLines: string[];
+  saved: SavedWording | null;
+}
+
+/**
+ * During a deploy the web can be ahead of the API. An API still on the
+ * one-language shape gets the business's language only: its save and reset
+ * act on that language, so the screen offers nothing it can't do.
+ */
+export function normalizeTextWording(
+  raw: TextWordingState | (Omit<TextWordingState, 'languages' | 'texts'> & { texts: SingleLanguageText[] }),
+): TextWordingState {
+  if ('languages' in raw && Array.isArray(raw.languages)) return raw as TextWordingState;
+  const { language, maxLength } = raw;
+  return {
+    language,
+    languages: [language],
+    maxLength,
+    texts: (raw.texts as SingleLanguageText[]).map(({ purpose, fillIns, sampleValues, ours, addedLines, saved }) => ({
+      purpose,
+      fillIns,
+      sampleValues,
+      byLanguage: {
+        [language]: { ours, addedLines, saved: saved && { body: saved.body, updatedAt: saved.updatedAt } },
+      } as Record<WordingLanguage, WordingVersion>,
+    })),
+  };
+}
+
 /** GET /api/settings/text-wording */
 export async function fetchTextWording(): Promise<TextWordingState> {
-  return readOrThrow(await apiFetch('/api/settings/text-wording'), 'load text wording');
+  return normalizeTextWording(await readOrThrow(await apiFetch('/api/settings/text-wording'), 'load text wording'));
 }
 
 /** PUT /api/settings/text-wording/:purpose */
