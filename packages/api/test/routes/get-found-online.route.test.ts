@@ -111,6 +111,31 @@ describe('/api/get-found-online', () => {
     });
   });
 
+  it('#1764: waiting on Google until a location appears, then a pick, then done', async () => {
+    await integrationRepo.upsert({
+      tenantId: TENANT,
+      accessToken: 'AT',
+      refreshToken: 'RT',
+      accessTokenExpiresAt: new Date(Date.now() + 3600_000),
+      locationCount: 0,
+    });
+    const item = async () => (await request(app()).get('/api/get-found-online')).body.data.items[0];
+    expect(await item()).toEqual({ id: 'google_listing', status: 'waiting', reason: 'no_location' });
+
+    // The re-check lists locations again and records the count.
+    await integrationRepo.recordLocationCount(TENANT, 2);
+    expect(await item()).toEqual({ id: 'google_listing', status: 'current', reason: 'needs_pick' });
+
+    await integrationRepo.selectLocation(TENANT, {
+      accountId: '123',
+      locationId: '999',
+      placeId: 'ChIJ',
+      reviewUrl: REVIEW,
+      locationTitle: 'Acme',
+    });
+    expect(await item()).toEqual({ id: 'google_listing', status: 'done' });
+  });
+
   it('dismiss is refused while an item is open', async () => {
     const res = await request(app()).post('/api/get-found-online/dismiss');
     expect(res.status).toBe(400);

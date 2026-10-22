@@ -152,7 +152,7 @@ describe('Postgres integration — seeded-price baseline (324)', () => {
       ).resolves.toBeDefined();
     });
 
-    it('tenant_settings carries the seven forwarding columns with their types and defaults', async () => {
+    it('tenant_settings carries the forwarding columns (318\'s seven + 330\'s forwarding_mode) with their types and defaults', async () => {
       const { rows } = await pool.query<{ column_name: string; data_type: string; is_nullable: string; column_default: string | null }>(
         `SELECT column_name, data_type, is_nullable, column_default
            FROM information_schema.columns
@@ -163,6 +163,7 @@ describe('Postgres integration — seeded-price baseline (324)', () => {
         { column_name: 'forwarding_carrier', data_type: 'text', is_nullable: 'YES', column_default: null },
         { column_name: 'forwarding_confirmed_at', data_type: 'timestamp with time zone', is_nullable: 'YES', column_default: null },
         { column_name: 'forwarding_generation', data_type: 'integer', is_nullable: 'NO', column_default: '0' },
+        { column_name: 'forwarding_mode', data_type: 'text', is_nullable: 'YES', column_default: null },
         { column_name: 'forwarding_probe_at', data_type: 'timestamp with time zone', is_nullable: 'YES', column_default: null },
         { column_name: 'forwarding_probe_generation', data_type: 'integer', is_nullable: 'YES', column_default: null },
         { column_name: 'forwarding_source_number', data_type: 'text', is_nullable: 'YES', column_default: null },
