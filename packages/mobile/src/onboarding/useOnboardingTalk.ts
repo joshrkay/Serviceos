@@ -27,8 +27,13 @@ export interface OnboardingTalkDeps {
   sendTurn: (req: OnboardingTurnRequest) => Promise<OnboardingTurnOutcome>;
   /** Clip URI → transcript. Throws on a network/server failure. */
   transcribe: (fileUri: string) => Promise<TranscribeOutcome>;
-  /** Speak one of Rivet's lines. Best-effort: resolves even when nothing plays. */
-  speak: (text: string) => Promise<void> | void;
+  /**
+   * Speak one of Rivet's lines. Best-effort: resolves even when nothing plays.
+   * `isCurrent` turns false once the owner reaches for the mic; the clip must
+   * not start after that, because playback flips the audio session out of
+   * record mode and would cut the owner's answer.
+   */
+  speak: (text: string, isCurrent: () => boolean) => Promise<void> | void;
   /** Batch-approve the setup items. Throws on a non-2xx. */
   approve: (proposalIds: string[]) => Promise<BatchApproveResult>;
   /** Whether the business-identity step is done: true, false, or null when the status could not be read. */
@@ -62,6 +67,8 @@ export interface UseOnboardingTalk {
   sttUnavailable: boolean;
   sendText: (text: string) => Promise<void>;
   sendAudio: (fileUri: string) => Promise<void>;
+  /** The owner is about to record: drop any of Rivet's speech that has not started playing. */
+  hush: () => void;
   /** The error's action: re-send the last turn, start a new conversation, re-save, or re-check. */
   recover: () => Promise<void>;
   save: () => Promise<void>;
@@ -74,6 +81,8 @@ export const SAVE_POLL_ATTEMPTS = 15;
 export const NOT_HEARD_COPY = "I didn't catch that. Hold the mic and try again, or type it.";
 export const TRANSCRIBE_FAILED_COPY = "I couldn't hear that clip. Try again, or type it.";
 export const STT_UNAVAILABLE_COPY = "Voice isn't available right now. Type your answer instead.";
+export const MIC_DENIED_COPY = 'Microphone access is off. Turn it on in Settings, or type your answer.';
+export const MIC_FAILED_COPY = "I couldn't start the microphone. Try again, or type your answer.";
 export const SAVE_FAILED_COPY = "I couldn't save your setup. Check your connection and try again.";
 export const SAVE_SLOW_COPY = "Your setup is saved but still being applied. Check again in a moment.";
 export const STATUS_UNKNOWN_COPY = "Your setup is saved, but I couldn't confirm it's finished. Check again in a moment.";
@@ -94,8 +103,15 @@ export function useOnboardingTalk(deps: OnboardingTalkDeps): UseOnboardingTalk {
   const [sttUnavailable, setSttUnavailable] = useState(false);
 
   const sessionId = useRef<string | undefined>(undefined);
+  // Turns never overlap (the controls are disabled while one is in flight), so writing
+  // the latest server answer is never a stale overwrite.
+  const setSession = (id: string | undefined) => {
+    sessionId.current = id;
+  };
   const lastMessage = useRef<string | undefined>(undefined);
   const counter = useRef(0);
+  /** Bumped by hush(); a pending clip plays only while its generation is still current. */
+  const speechGen = useRef(0);
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -124,7 +140,7 @@ export function useOnboardingTalk(deps: OnboardingTalkDeps): UseOnboardingTalk {
       });
       if (!mounted.current) return;
       if (outcome.kind !== 'turn') {
-        if (outcome.kind === 'session_gone' || outcome.kind === 'conflict') sessionId.current = undefined;
+        if (outcome.kind === 'session_gone' || outcome.kind === 'conflict') setSession(undefined);
         setError({
           message: outcome.message,
           action: outcome.kind === 'forbidden' ? 'none' : outcome.kind === 'failed' ? 'retry_turn' : 'restart',
@@ -133,9 +149,10 @@ export function useOnboardingTalk(deps: OnboardingTalkDeps): UseOnboardingTalk {
         return;
       }
       const { turn } = outcome;
-      sessionId.current = turn.sessionId;
+      setSession(turn.sessionId);
       push('rivet', turn.assistantMessage);
-      void speak(turn.assistantMessage);
+      const gen = speechGen.current;
+      void speak(turn.assistantMessage, () => mounted.current && speechGen.current === gen);
       if (turn.completed) {
         setProposalIds(turn.proposalIds);
         setStatus('review');
@@ -192,6 +209,10 @@ export function useOnboardingTalk(deps: OnboardingTalkDeps): UseOnboardingTalk {
     },
     [sendText],
   );
+
+  const hush = useCallback(() => {
+    speechGen.current += 1;
+  }, []);
 
   /** Wait for the identity step to finish executing after approval. */
   const awaitIdentity = useCallback(async () => {
@@ -256,5 +277,5 @@ export function useOnboardingTalk(deps: OnboardingTalkDeps): UseOnboardingTalk {
     }
   }, [error, runTurn, save, awaitIdentity]);
 
-  return { status, turns, proposalIds, error, sttUnavailable, sendText, sendAudio, recover, save };
+  return { status, turns, proposalIds, error, sttUnavailable, sendText, sendAudio, hush, recover, save };
 }

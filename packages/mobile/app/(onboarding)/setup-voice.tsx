@@ -6,7 +6,7 @@ import { PrimaryButton } from '../../src/components/Buttons';
 import { skipSetupGateForSession } from '../../src/hooks/useOnboardingStatus';
 import { usePendingProposals } from '../../src/hooks/usePendingProposals';
 import { useOnboardingTalkController } from '../../src/onboarding/useOnboardingTalkController';
-import type { TalkError } from '../../src/onboarding/useOnboardingTalk';
+import { MIC_DENIED_COPY, MIC_FAILED_COPY, type TalkError } from '../../src/onboarding/useOnboardingTalk';
 import { useRecorder } from '../../src/voice/useRecorder';
 
 const ERROR_ACTION_LABEL: Record<TalkError['action'], string | null> = {
@@ -31,6 +31,7 @@ export default function SetupVoiceScreen() {
   const recorder = useRecorder();
   const [draft, setDraft] = useState('');
   const [holding, setHolding] = useState(false);
+  const [micError, setMicError] = useState<string | null>(null);
   const { status, turns, proposalIds, error, sttUnavailable } = talk;
   const inReview = status === 'review' || status === 'saving';
   const pending = usePendingProposals({ enabled: inReview });
@@ -44,9 +45,15 @@ export default function SetupVoiceScreen() {
   const busy = status === 'starting' || status === 'sending';
   const talking = status === 'ready' || status === 'sending';
 
-  const onPressIn = () => {
+  const onPressIn = async () => {
     setHolding(true);
-    void recorder.startRecording();
+    setMicError(null);
+    talk.hush();
+    const outcome = await recorder.startRecording();
+    if (outcome === 'recording') return;
+    setHolding(false);
+    if (outcome === 'denied') setMicError(MIC_DENIED_COPY);
+    else if (outcome === 'error') setMicError(MIC_FAILED_COPY);
   };
   const onPressOut = async () => {
     setHolding(false);
@@ -118,6 +125,8 @@ export default function SetupVoiceScreen() {
         ) : null}
       </ScrollView>
 
+      {micError ? <Text className="mb-3 text-base text-destructive">{micError}</Text> : null}
+
       {error ? (
         <View className="mb-3">
           <Text className="text-base text-destructive">{error.message}</Text>
@@ -170,7 +179,7 @@ export default function SetupVoiceScreen() {
             <Pressable
               accessibilityRole="button"
               accessibilityLabel="Hold to talk"
-              onPressIn={onPressIn}
+              onPressIn={() => void onPressIn()}
               onPressOut={() => void onPressOut()}
               disabled={busy}
               className={`mt-3 min-h-14 items-center justify-center rounded-md px-4 py-3 ${

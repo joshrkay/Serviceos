@@ -108,7 +108,8 @@ export interface AssistantTransport {
 
 /** Injected TTS player — base64 in, playback out. Isolated so hook tests skip audio. */
 export interface AssistantAudioPlayer {
-  play(base64: string): void | Promise<void>;
+  /** `shouldPlay`, when given, is checked just before the audio session switches to playback. */
+  play(base64: string, shouldPlay?: () => boolean): void | Promise<void>;
 }
 
 export interface AssistantSessionDeps {

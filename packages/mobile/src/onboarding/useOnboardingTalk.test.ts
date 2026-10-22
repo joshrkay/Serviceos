@@ -49,7 +49,19 @@ describe('useOnboardingTalk', () => {
     expect(deps.sendTurn).toHaveBeenCalledTimes(1);
     expect(deps.sendTurn).toHaveBeenCalledWith({ clientTimezone: 'America/New_York' });
     expect(result.current.turns).toEqual([{ id: 't1', role: 'rivet', text: 'What do you call the business?' }]);
-    expect(deps.speak).toHaveBeenCalledWith('What do you call the business?');
+    expect(deps.speak).toHaveBeenCalledWith('What do you call the business?', expect.any(Function));
+  });
+
+  it('reaching for the mic drops a reply that has not started playing, so it cannot cut the recording', async () => {
+    const deps = makeDeps();
+    const { result } = await started(deps);
+    const isCurrent = vi.mocked(deps.speak).mock.calls[0][1];
+    expect(isCurrent()).toBe(true);
+    act(() => result.current.hush());
+    expect(isCurrent()).toBe(false);
+    vi.mocked(deps.sendTurn).mockResolvedValueOnce(reply('What trade are you in?'));
+    await act(() => result.current.sendText('Walsh Plumbing'));
+    expect(vi.mocked(deps.speak).mock.calls[1][1]()).toBe(true);
   });
 
   it('omits the zone when the device does not know it, so the server asks', async () => {

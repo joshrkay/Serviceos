@@ -31,12 +31,12 @@ export function useOnboardingTalkController(): UseOnboardingTalk {
       sendTurn: (req) => postOnboardingTurn(apiFetch, req),
       transcribe: (uri) => transport.transcribe(uri),
       // The device's "speak answers" preference applies here too; the text always stays on screen.
-      speak: async (text) => {
+      speak: async (text, isCurrent) => {
         if (!(await loadSpeakAnswers())) return;
         const audio = await fetchAnswerSpeech(apiFetch, text);
-        if (!audio) return;
+        if (!audio || !isCurrent()) return;
         try {
-          await assistantAudioPlayer.play(audio);
+          await assistantAudioPlayer.play(audio, isCurrent);
         } catch {
           // Playback is additive: the reply is on screen either way.
         }

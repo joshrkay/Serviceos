@@ -3,14 +3,14 @@ import { cleanup, fireEvent, render, screen } from '@testing-library/react';
 import { createElement } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PendingProposalSummary } from '../proposals/proposalEvents';
-import type { UseOnboardingTalk } from '../onboarding/useOnboardingTalk';
+import { MIC_DENIED_COPY, MIC_FAILED_COPY, type UseOnboardingTalk } from '../onboarding/useOnboardingTalk';
 
 const h = vi.hoisted(() => ({
   push: vi.fn(),
   replace: vi.fn(),
   skip: vi.fn(),
   refresh: vi.fn().mockResolvedValue(undefined),
-  startRecording: vi.fn().mockResolvedValue('recording'),
+  startRecording: vi.fn(),
   stopRecording: vi.fn().mockResolvedValue('file:///clip.m4a'),
   proposals: [] as PendingProposalSummary[],
   talk: null as unknown as UseOnboardingTalk,
@@ -31,9 +31,7 @@ vi.mock('../onboarding/useOnboardingTalkController', () => ({
   useOnboardingTalkController: () => h.talk,
 }));
 
-// eslint-disable-next-line import/first
 import SetupVoiceScreen from '../../app/(onboarding)/setup-voice';
-// eslint-disable-next-line import/first
 import Onboarding from '../../app/(onboarding)/onboarding';
 
 function talk(overrides: Partial<UseOnboardingTalk> = {}): UseOnboardingTalk {
@@ -45,6 +43,7 @@ function talk(overrides: Partial<UseOnboardingTalk> = {}): UseOnboardingTalk {
     sttUnavailable: false,
     sendText: vi.fn().mockResolvedValue(undefined),
     sendAudio: vi.fn().mockResolvedValue(undefined),
+    hush: vi.fn(),
     recover: vi.fn().mockResolvedValue(undefined),
     save: vi.fn().mockResolvedValue(undefined),
     ...overrides,
@@ -55,6 +54,7 @@ const button = (name: string) => screen.getByText(name).closest('button') as HTM
 
 beforeEach(() => {
   vi.clearAllMocks();
+  h.startRecording.mockResolvedValue('recording');
   h.proposals = [];
   h.talk = talk();
 });
@@ -77,6 +77,19 @@ describe('spoken setup screen', () => {
     fireEvent.mouseUp(mic);
     await vi.waitFor(() => expect(h.talk.sendAudio).toHaveBeenCalledWith('file:///clip.m4a'));
     expect(h.startRecording).toHaveBeenCalled();
+    expect(h.talk.hush).toHaveBeenCalled();
+  });
+
+  it.each([
+    ['denied', MIC_DENIED_COPY],
+    ['error', MIC_FAILED_COPY],
+  ])('a mic that will not open (%s) says why and stops "listening"', async (outcome, copy) => {
+    h.startRecording.mockResolvedValue(outcome);
+    render(createElement(SetupVoiceScreen));
+    fireEvent.mouseDown(button('Hold to talk'));
+    await vi.waitFor(() => expect(screen.getByText(copy)).toBeTruthy());
+    expect(screen.getByText('Hold to talk')).toBeTruthy();
+    expect(screen.getByPlaceholderText('Or type your answer')).toBeTruthy();
   });
 
   it('a typed answer is sent and the field clears', () => {
