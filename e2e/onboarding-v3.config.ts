@@ -132,6 +132,9 @@ export default defineConfig({
         STRIPE_STARTER_PRICE_ID: '',
         STRIPE_GROWTH_PRICE_ID: '',
         STRIPE_PRICE_ID: '',
+        // The synthetic key would send pay-link requests to Stripe (401), and an invoice send now
+        // needs its pay link made first (D-045), so links come from the dev-only mock provider.
+        PAYMENT_LINK_PROVIDER: 'mock',
         // No live transcription in the lane (blanked so a developer's own key cannot open a real socket):
         // POST /api/voice/stream-token answers 503 and the shell's tap-only path is what is proven.
         DEEPGRAM_API_KEY: '',
