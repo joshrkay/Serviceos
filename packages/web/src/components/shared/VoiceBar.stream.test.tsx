@@ -4,10 +4,11 @@
  * carrying the record on screen, and a browser/server that cannot stream
  * falls back to record-then-transcribe.
  */
+import { createRef } from 'react';
 import { render, screen, fireEvent, act, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { VoiceBar } from './VoiceBar';
+import { VoiceBar, type VoiceBarHandle } from './VoiceBar';
 
 vi.mock('../../hooks/useTTS', () => ({
   useTTS: () => ({ speak: vi.fn(), stop: vi.fn() }),
@@ -156,6 +157,32 @@ describe('VoiceBar — live words', () => {
     await waitFor(() => expect(screen.getByTestId('where').textContent).toContain('/assistant?'));
     const params = new URLSearchParams(screen.getByTestId('where').textContent!.split('?')[1]);
     expect(params.get('ctx')).toBe(`job:${JOB}`);
+  });
+
+  it('the keyboard shortcut reads the page the operator moved to', async () => {
+    const OTHER = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+    const bar = createRef<VoiceBarHandle>();
+    function GoElsewhere() {
+      const navigate = useNavigate();
+      return <button onClick={() => navigate(`/jobs/${OTHER}`)}>go elsewhere</button>;
+    }
+    render(
+      <MemoryRouter initialEntries={[`/jobs/${JOB}`]}>
+        <Routes>
+          <Route path="*" element={<><VoiceBar ref={bar} /><GoElsewhere /><Where /></>} />
+        </Routes>
+      </MemoryRouter>,
+    );
+    fireEvent.click(screen.getByRole('button', { name: 'go elsewhere' }));
+    act(() => bar.current?.activate());
+    await screen.findByText('Listening…');
+    fake.finalText = 'add a note: gate code 4471';
+    fireEvent.click(screen.getByRole('button', { name: 'Done talking' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+
+    await waitFor(() => expect(screen.getByTestId('where').textContent).toContain('/assistant?'));
+    const params = new URLSearchParams(screen.getByTestId('where').textContent!.split('?')[1]);
+    expect(params.get('ctx')).toBe(`job:${OTHER}`);
   });
 
   it('sends a detailed create to the assistant instead of opening a blank form', async () => {

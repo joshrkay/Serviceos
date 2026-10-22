@@ -14,6 +14,7 @@ import type {
 } from '../../lookup-events/lookup-event-service';
 import { t, type Language } from '../i18n/i18n';
 import { formatCents } from './spoken-format';
+import { customerJobsForLookup } from './customer-jobs';
 
 export interface LookupBalanceInput {
   tenantId: string;
@@ -91,10 +92,9 @@ export async function lookupBalance(
 
   let jobs;
   try {
-    jobs = await deps.jobRepo.findByCustomer(input.tenantId, input.customerId, {
+    jobs = await customerJobsForLookup(deps.jobRepo, input.tenantId, input.customerId, input.jobId, {
       includeArchived: true,
     });
-    if (input.jobId) jobs = jobs.filter((job) => job.id === input.jobId);
   } catch (err) {
     const message = t('lookup.balance.error', lang);
     await recordEvent({ resultStatus: 'error', resultCount: 0, summary: message });

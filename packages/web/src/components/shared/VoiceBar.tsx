@@ -197,10 +197,6 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
     return () => window.clearInterval(interval);
   }, [reducedMotion, phase, examples.length]);
 
-  // Expose imperative handle so parent (Shell) can trigger via keyboard shortcut
-  useImperativeHandle(ref, () => ({
-    activate: () => { if (phase === 'idle') startListening(); },
-  }), [phase]);
   const stoppingRef = useRef(false);
 
   const stopStream = useCallback(() => {
@@ -390,6 +386,13 @@ export const VoiceBar = forwardRef<VoiceBarHandle, VoiceBarProps>(function Voice
     }
     await startBatchRecording();
   }, [dictation, startBatchRecording, pathname]);
+
+  // Expose imperative handle so parent (Shell) can trigger via keyboard
+  // shortcut. Rebuilt with startListening so the shortcut reads the page the
+  // operator is on now, not the one the bar first rendered on.
+  useImperativeHandle(ref, () => ({
+    activate: () => { if (phase === 'idle') startListening(); },
+  }), [phase, startListening]);
 
   useEffect(() => {
     if (phase !== 'listening') return;

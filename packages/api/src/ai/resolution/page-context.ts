@@ -338,19 +338,22 @@ export function pageLookupIds(input: PageLookupInput): PageLookupIds {
   // install") is theirs to resolve, even in a question that also says "this".
   const out: PageLookupIds = {};
   if (
-    page.ids.customerId &&
-    CUSTOMER_SCOPED_LOOKUP_INTENTS.has(intent as IntentType) &&
-    !isExplicitReference(entities?.customerName) &&
-    (pointsAtPage || points('customerName', POINTS_AT_CUSTOMER_RE))
-  ) {
-    out.customerId = page.ids.customerId;
-  }
-  if (
     page.ids.jobId &&
     !isExplicitReference(entities?.jobReference) &&
     (pointsAtPage || points('jobReference', POINTS_AT_JOB_RE))
   ) {
     out.jobId = page.ids.jobId;
+  }
+  // "Which invoices are on this job?" on an invoice page reads the page's job,
+  // so it reads that job's customer too: the lookup is scoped by customer
+  // before the job narrows it.
+  if (
+    page.ids.customerId &&
+    CUSTOMER_SCOPED_LOOKUP_INTENTS.has(intent as IntentType) &&
+    !isExplicitReference(entities?.customerName) &&
+    (pointsAtPage || out.jobId !== undefined || points('customerName', POINTS_AT_CUSTOMER_RE))
+  ) {
+    out.customerId = page.ids.customerId;
   }
   // Only a question about that kind of record reads it by number: "what
   // invoices are on this job?" lists the job's invoices, not the job's status.

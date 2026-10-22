@@ -259,6 +259,17 @@ describe('pageLookupIds on a document page', () => {
     });
   });
 
+  it('"which invoices are on this job?" on a document page carries the job\'s customer too', () => {
+    const estimatePage = { ids: { estimateId: OTHER, jobId: JOB, customerId: CUSTOMER }, documentNumber: 'EST-0007', context: { entityType: 'estimate' as const } };
+    expect(
+      pageLookupIds({ intent: 'lookup_invoices', entities: {}, text: 'which invoices are on this job?', page: estimatePage }),
+    ).toEqual({ customerId: CUSTOMER, jobId: JOB });
+    // A named customer still wins over the page's.
+    expect(
+      pageLookupIds({ intent: 'lookup_invoices', entities: { customerName: 'Maria Alvarez' }, text: 'which invoices does Maria Alvarez have on this job?', page: estimatePage }),
+    ).toEqual({ jobId: JOB });
+  });
+
   it('"what does this invoice owe?" reads that invoice by its number', () => {
     const invoicePage = { ids: { invoiceId: OTHER, jobId: JOB, customerId: CUSTOMER }, documentNumber: 'INV-0042', context: { entityType: 'invoice' as const } };
     expect(

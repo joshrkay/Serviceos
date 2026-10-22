@@ -18,6 +18,7 @@ import type {
   LookupEventService,
   RecordLookupEventInput,
 } from '../../lookup-events/lookup-event-service';
+import { customerJobsForLookup } from './customer-jobs';
 
 export interface LookupEstimatesInput {
   tenantId: string;
@@ -145,10 +146,9 @@ export async function lookupEstimates(
 
   let jobs;
   try {
-    jobs = await deps.jobRepo.findByCustomer(input.tenantId, input.customerId, {
+    jobs = await customerJobsForLookup(deps.jobRepo, input.tenantId, input.customerId, input.jobId, {
       includeArchived: true,
     });
-    if (input.jobId) jobs = jobs.filter((job) => job.id === input.jobId);
   } catch (err) {
     const message = "I'm having trouble pulling up your estimates right now.";
     await recordEvent({ resultStatus: 'error', resultCount: 0, summary: message });

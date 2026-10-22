@@ -19,6 +19,7 @@ import type {
   RecordLookupEventInput,
 } from '../../lookup-events/lookup-event-service';
 import { t, type Language } from '../i18n/i18n';
+import { customerJobsForLookup } from './customer-jobs';
 
 export interface LookupAppointmentsInput {
   tenantId: string;
@@ -178,11 +179,7 @@ export async function lookupAppointments(
 
   let jobs: Awaited<ReturnType<NonNullable<JobRepository['findByCustomer']>>>;
   try {
-    if (!deps.jobRepo.findByCustomer) {
-      throw new Error('JobRepository.findByCustomer is required for voice lookups');
-    }
-    jobs = await deps.jobRepo.findByCustomer(input.tenantId, input.customerId);
-    if (input.jobId) jobs = jobs.filter((job) => job.id === input.jobId);
+    jobs = await customerJobsForLookup(deps.jobRepo, input.tenantId, input.customerId, input.jobId);
   } catch (err) {
     const message = t('lookup.appointments.error', lang);
     await recordEvent({
