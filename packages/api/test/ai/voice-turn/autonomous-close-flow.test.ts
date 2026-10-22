@@ -30,6 +30,8 @@ import {
 import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice-session-store';
 import { InMemoryProposalRepository } from '../../../src/proposals/proposal';
 import { approveChainSet } from '../../../src/proposals/actions';
+import { verifyOneTapApproveToken, createInMemoryNonceStore } from '../../../src/proposals/auto-approve';
+import type { ResolvedApprover } from '../../../src/proposals/approver-identity';
 import { isInUndoWindow } from '../../../src/proposals/lifecycle';
 import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import { InMemoryAppointmentRepository } from '../../../src/appointments/in-memory-appointment';
@@ -168,6 +170,8 @@ async function makeHarness(opts: {
   settings?: Partial<TenantSettings>;
   ownerSms?: boolean;
   feasibilityDeps?: FeasibilityDependencies;
+  /** B1 — who the owner-phone recipient's link approves as. */
+  linkApprover?: ResolvedApprover;
 } = {}) {
   const store = new VoiceSessionStore({ startInterval: false });
   const proposalRepo = new InMemoryProposalRepository();
@@ -218,6 +222,7 @@ async function makeHarness(opts: {
       },
       oneTapSecret: 'close-secret',
       buildApproveUrl: (token) => `https://x/approve?token=${token}`,
+      ...(opts.linkApprover ? { resolveLinkApprover: async () => opts.linkApprover! } : {}),
     },
   });
 
@@ -327,6 +332,22 @@ describe('WS2 — on-call close staged for owner approval', () => {
       expect(p.approvedAt!.getTime()).toBeLessThanOrEqual(after);
       expect(isInUndoWindow(p, Date.now())).toBe(true);
     }
+  });
+
+  // B1 — a tenant with no owner phone texts the close chain to the backup
+  // supervisor; that link must approve as them, not as 'owner'.
+  it("the staged chain's link to the backup supervisor carries their role", async () => {
+    const h = await makeHarness({
+      linkApprover: { role: 'dispatcher', userId: 'clerk-backup', via: 'backup_supervisor' },
+    });
+    await reachClosing(h);
+    await turn(h, 'yes book it');
+    await turn(h, 'yes that is fine');
+
+    const token = h.ownerSmsBodies[0]!.body.match(/token=([A-Za-z0-9._-]+)/)![1];
+    await expect(
+      verifyOneTapApproveToken({ token, secret: 'close-secret', consumeNonce: createInMemoryNonceStore() }),
+    ).resolves.toMatchObject({ ok: true, approver: { userId: 'clerk-backup', role: 'dispatcher' } });
   });
 
   it('a repeated affirmative after staging does NOT re-stage or re-text', async () => {

@@ -463,6 +463,16 @@ export async function approveProposal(
 /** The parent is agreed to: the executor will run it before this step. */
 const PARENT_AGREED_STATUSES: ReadonlySet<Proposal['status']> = new Set(['approved', 'executing']);
 
+/**
+ * B4 follow-up — why the linked-step gate held a tap (`details.linkedStepReason`
+ * beside `missingFields: ['linkedStep']`), so a surface that cannot show the
+ * message (the one-tap page) can say the right next step:
+ *   'approve_parent_first' — the earlier step is not approved yet;
+ *   'issue_invoice_first'  — the earlier step drafts the invoice this sends;
+ *   'parent_did_not_run'   — the earlier step was rejected / failed / missing.
+ */
+export type LinkedStepHoldReason = 'approve_parent_first' | 'issue_invoice_first' | 'parent_did_not_run';
+
 async function linkedStepGate(
   proposalRepo: ProposalRepository,
   tenantId: string,
@@ -483,7 +493,11 @@ async function linkedStepGate(
     if (proposal.proposalType === 'send_invoice' && parent.proposalType === 'draft_invoice') {
       throw new ValidationError(
         `Cannot approve proposal: the invoice linked ${step} creates will be a draft — once it exists, issue it, then approve the send`,
-        { missingFields: ['linkedStep'], parentProposalId: parent.id },
+        {
+          missingFields: ['linkedStep'],
+          parentProposalId: parent.id,
+          linkedStepReason: 'issue_invoice_first' satisfies LinkedStepHoldReason,
+        },
       );
     }
     return proposal;
@@ -492,7 +506,13 @@ async function linkedStepGate(
     resolution.reason === 'parent_pending'
       ? `Cannot approve proposal: it acts on what linked ${step} creates, which does not exist yet — approve ${step} first; this one unlocks once it has run`
       : `Cannot approve proposal: linked ${step}, which it depends on, did not run — there is nothing for this one to act on`,
-    { missingFields: ['linkedStep'], parentProposalId: resolution.parentId },
+    {
+      missingFields: ['linkedStep'],
+      parentProposalId: resolution.parentId,
+      linkedStepReason: (resolution.reason === 'parent_pending'
+        ? 'approve_parent_first'
+        : 'parent_did_not_run') satisfies LinkedStepHoldReason,
+    },
   );
 }
 

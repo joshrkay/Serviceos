@@ -64,7 +64,10 @@ import {
   rejectProposal,
   summarizeChainSetResult,
 } from '../../proposals/actions';
-import { routeUnsupervisedProposal } from '../../proposals/auto-approve';
+import {
+  routeUnsupervisedProposal,
+  type RouteUnsupervisedProposalDeps,
+} from '../../proposals/auto-approve';
 import { renderProposalSms, renderReapprovalSms } from '../../proposals/sms/render';
 import { payloadHeadlineCents } from '../../proposals/payload-money';
 import {
@@ -94,7 +97,9 @@ import {
   voiceApprovalPinMatches,
   weakPinReason,
 } from '../../settings/voice-approval-pin';
-import { ValidationError } from '../../shared/errors';
+import { ForbiddenError, ValidationError } from '../../shared/errors';
+import { hasPermission, type Role } from '../../auth/rbac';
+import type { ResolvedApprover } from '../../proposals/approver-identity';
 import {
   attemptWithinBudget,
   decideTenantPinLock,
@@ -257,6 +262,12 @@ export interface OneTapFallbackDeps {
   buildApproveUrl?: (token: string) => string;
   /** Owner/backup mobile resolver (same as unsupervised routing). */
   resolveOwnerPhone?: (tenantId: string) => Promise<string | null | undefined>;
+  /**
+   * B1 — who that phone's link approves as (same as unsupervised routing):
+   * the owner link for the owner phone, the backup's own role and id for
+   * theirs, no link for an unrecognised recipient.
+   */
+  resolveLinkApprover?: RouteUnsupervisedProposalDeps['resolveLinkApprover'];
   /** Records the outbound render so SMS Y/N replies anchor to it (P2-034). */
   recordSmsEvent?: (args: {
     tenantId: string;
@@ -315,8 +326,36 @@ export interface VoiceApprovalSessionRef {
   sessionId: string;
   /** RV-070 — MUST be true; re-checked here as defense in depth. */
   ownerSession: boolean;
+  /**
+   * B1 — who this line approves AS, resolved from the caller-ID
+   * (`resolveApproverRole`) — at establishment, and again by the turn
+   * processor before every approval turn (B1 follow-up): the owner
+   * phone is the owner, the backup supervisor's mobile is their own role and
+   * user. Every approve / reject / edit acts with it, so a backup dispatcher
+   * cannot clear the owner-only settings:update gate or attribute their
+   * edits to the owner, and a role without proposals:approve is turned away.
+   * Absent on an owner session that no caller-ID established (the in-app
+   * surface, where only an authenticated owner gets `ownerSession`) — that is
+   * the owner, as before.
+   */
+  approver?: Pick<ResolvedApprover, 'role' | 'userId'>;
   /** Session-level state (challenge lockout etc.) carried from previous turns. */
   sessionState?: VoiceApprovalSessionState;
+}
+
+/**
+ * B1 — the actor and role an approval on this line acts with. The owner keeps
+ * the synthetic voice actor; a backup supervisor acts as themselves.
+ */
+function lineActor(ref: VoiceApprovalSessionRef): { actorId: string; role: Role } {
+  return ref.approver
+    ? { actorId: ref.approver.userId ?? VOICE_APPROVAL_ACTOR_ID, role: ref.approver.role }
+    : { actorId: VOICE_APPROVAL_ACTOR_ID, role: 'owner' };
+}
+
+/** An owner line whose approver can approve at all (B1: not a technician backup). */
+function lineMayApprove(ref: VoiceApprovalSessionRef): boolean {
+  return ref.ownerSession && hasPermission(lineActor(ref).role, 'proposals:approve');
 }
 
 // ─── Readback (payload-derived, never utterance-derived) ────────────────────
@@ -1028,6 +1067,7 @@ async function sendOneTapFallback(
         ...(fallback.sendSms ? { sendSms: fallback.sendSms } : {}),
         ...(fallback.secret ? { secret: fallback.secret } : {}),
         ...(fallback.buildApproveUrl ? { buildApproveUrl: fallback.buildApproveUrl } : {}),
+        ...(fallback.resolveLinkApprover ? { resolveLinkApprover: fallback.resolveLinkApprover } : {}),
         ...(fallback.recordSmsEvent
           ? {
               onSmsSent: async ({
@@ -1060,14 +1100,15 @@ async function sendOneTapFallback(
         confirmNonCapture: true,
         ...(ownerPhone ? { ownerPhone } : {}),
         summaryText: proposal.summary,
-        renderSmsBody: (approveUrl: string) =>
+        renderSmsBody: (approveUrl: string, { recipientCannotApprove }) =>
           renderProposalSms(
             {
               proposalType: proposal.proposalType,
               summary: proposal.summary,
               payload: proposal.payload,
             },
-            { approveUrl: approveUrl || undefined },
+            // B1 follow-up — a recipient who cannot approve is asked for no reply.
+            { approveUrl: approveUrl || undefined, recipientCannotApprove },
           ),
         // RV-074 (F-4) — pass payload so the routing site can guard
         // low/very_low proposals against one-tap Y-able links.
@@ -1246,13 +1287,14 @@ async function executeApprove(
   let approvedCount = 0;
   let skippedCount = 0;
   let skipped: ApproveChainSetResult['skipped'] = [];
+  const actor = lineActor(ref);
   try {
     const result = await approveChainSet(
       deps.proposalRepo,
       ref.tenantId,
       proposalId,
-      VOICE_APPROVAL_ACTOR_ID,
-      'owner',
+      actor.actorId,
+      actor.role,
       deps.auditRepo,
       'voice', // RV-073 — voice approval channel
       deps.smsEventRepo
@@ -1273,6 +1315,17 @@ async function executeApprove(
       return {
         speak:
           "Can't approve that yet — it's missing required info. Finish it in your review queue.",
+        pending: null,
+        outcome: 'approve_failed',
+        proposalId,
+      };
+    }
+    if (err instanceof ForbiddenError) {
+      // B1 — this line's approver (a backup dispatcher) does not reach this
+      // card (a settings change). Truthful, and nothing was approved.
+      await audit(deps, ref, 'proposal.voice_approve_forbidden', proposalId, { role: actor.role });
+      return {
+        speak: 'You can’t approve that one — the owner needs to. It’s still in the review queue.',
         pending: null,
         outcome: 'approve_failed',
         proposalId,
@@ -1311,13 +1364,14 @@ async function executeReject(
   proposalId: string,
 ): Promise<VoiceApprovalTurnResult> {
   let rejected: Proposal;
+  const actor = lineActor(ref);
   try {
     rejected = await rejectProposal(
       deps.proposalRepo,
       ref.tenantId,
       proposalId,
-      VOICE_APPROVAL_ACTOR_ID,
-      'owner',
+      actor.actorId,
+      actor.role,
       'Rejected by voice approval',
       undefined,
       deps.appointmentRepo,
@@ -1363,9 +1417,11 @@ export async function startVoiceApproval(
   input: StartVoiceApprovalInput,
 ): Promise<VoiceApprovalTurnResult> {
   // Defense in depth — routing already gates on ownerSession (RV-070).
-  if (!input.ownerSession) {
+  // B1 — and the line's approver must be able to approve at all.
+  if (!lineMayApprove(input)) {
     await audit(deps, input, 'proposal.voice_approval_denied_not_owner', '', {
       action: input.action,
+      ...(input.ownerSession ? { role: lineActor(input).role } : {}),
     });
     return {
       speak: 'I can’t take approvals on this line. How else can I help?',
@@ -1597,7 +1653,7 @@ export async function startVoiceEdit(
   deps: VoiceApprovalDeps,
   input: StartVoiceEditInput,
 ): Promise<VoiceApprovalTurnResult> {
-  if (!input.ownerSession) {
+  if (!lineMayApprove(input)) {
     await audit(deps, input, 'proposal.voice_edit_denied_not_owner', '');
     return {
       speak: 'I can’t take changes to pending work on this line. How else can I help?',
@@ -1705,8 +1761,8 @@ export async function startVoiceEdit(
           deps.proposalRepo,
           input.tenantId,
           proposal.id,
-          VOICE_APPROVAL_ACTOR_ID,
-          'owner',
+          lineActor(input).actorId,
+          lineActor(input).role,
           delta,
           deps.auditRepo,
         );
@@ -1784,8 +1840,9 @@ export async function continueVoiceApproval(
   deps: VoiceApprovalDeps,
   input: ContinueVoiceApprovalInput,
 ): Promise<VoiceApprovalTurnResult> {
-  if (!input.ownerSession) {
-    // The session flag cannot change mid-call, but fail closed anyway.
+  if (!lineMayApprove(input)) {
+    // B1 follow-up — the line is re-checked every turn: a backup demoted,
+    // deactivated or replaced since the readback is refused here.
     return {
       speak: 'I can’t take approvals on this line. How else can I help?',
       pending: null,
@@ -2367,7 +2424,7 @@ export async function startVoiceBatchApproval(
   deps: VoiceApprovalDeps,
   input: StartVoiceBatchApprovalInput,
 ): Promise<VoiceApprovalTurnResult> {
-  if (!input.ownerSession) {
+  if (!lineMayApprove(input)) {
     await audit(deps, input, 'proposal.voice_approval_denied_not_owner', '', {
       action: 'approve',
       batch: true,
@@ -2414,7 +2471,7 @@ export async function continueVoiceBatchApproval(
   deps: VoiceApprovalDeps,
   input: ContinueVoiceApprovalInput,
 ): Promise<VoiceApprovalTurnResult> {
-  if (!input.ownerSession) {
+  if (!lineMayApprove(input)) {
     return {
       speak: 'I can’t take approvals on this line. How else can I help?',
       pending: null,
@@ -2457,6 +2514,7 @@ export async function continueVoiceBatchApproval(
         tenantId: input.tenantId,
         sessionId: input.sessionId,
         ownerSession: input.ownerSession,
+        ...(input.approver ? { approver: input.approver } : {}),
         sessionState: state,
         reference: referenceForProposal(proposal),
         instruction: utterance,
