@@ -8,7 +8,7 @@ import { installClerkStub } from '../../../e2e/helpers/clerk-stub';
  *
  * Signed in without network: the shared window.Clerk stub (e2e/helpers/
  * clerk-stub.ts) is adopted by clerk-react on web before any Clerk script loads
- * (with a delayed load(); see signedInWithApi), and every API call is answered by page.route. The export needs
+ * (with a delayed load(); see loadDelayMs), and every API call is answered by page.route. The export needs
  * EXPO_PUBLIC_API_URL and a syntactically valid EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY
  * at build time (see playwright.config.ts); the key is never contacted.
  */
@@ -36,15 +36,8 @@ interface Api {
 }
 
 async function signedInWithApi(page: Page, api: Api): Promise<void> {
-  await installClerkStub(page, { signedIn: true });
-  // The shared stub's load() resolves in a microtask, so clerk-react emits its
-  // "ready" status before ClerkProvider's effect subscribes to it and
-  // <ClerkLoaded> never renders (the web app doesn't hit this race). Real
-  // Clerk always loads over the network, so a short delay matches production.
-  await page.addInitScript(() => {
-    const clerk = (window as unknown as { Clerk: { load: () => Promise<void> } }).Clerk;
-    clerk.load = () => new Promise((resolve) => setTimeout(resolve, 50));
-  });
+  // A load() that resolves at once leaves <ClerkLoaded> blank in this export (see loadDelayMs).
+  await installClerkStub(page, { signedIn: true, loadDelayMs: 50 });
   let turnIndex = 0;
   await page.route('**/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
@@ -71,11 +64,13 @@ async function expectFitsAndTappable(page: Page, width: number): Promise<void> {
   const count = await buttons.count();
   expect(count).toBeGreaterThan(0);
   for (let i = 0; i < count; i++) {
-    const box = await buttons.nth(i).boundingBox();
-    if (box && box.height > 0) {
-      expect(box.height, `control #${i} height`).toBeGreaterThanOrEqual(44);
-      expect(box.x + box.width, `control #${i} right edge`).toBeLessThanOrEqual(width + 1);
-    }
+    // Every control on these screens is one the owner needs: hidden or collapsed fails, never skips.
+    const control = buttons.nth(i);
+    await expect(control, `control #${i} is visible`).toBeVisible();
+    const box = await control.boundingBox();
+    expect(box, `control #${i} has a box`).not.toBeNull();
+    expect(box!.height, `control #${i} height`).toBeGreaterThanOrEqual(44);
+    expect(box!.x + box!.width, `control #${i} right edge`).toBeLessThanOrEqual(width + 1);
   }
 }
 

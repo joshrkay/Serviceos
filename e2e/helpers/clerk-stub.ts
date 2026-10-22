@@ -60,6 +60,14 @@ export interface InstallClerkStubOptions {
    * running in DEV_AUTH_BYPASS mode (which decodes the sub without verifying).
    */
   token?: string;
+  /**
+   * Milliseconds before `load()` resolves. Default 0 (resolves at once). The
+   * mobile web export needs a delay: there clerk-react emits its "ready" status
+   * before ClerkProvider's effect subscribes to it, so a load that resolves in a
+   * microtask leaves <ClerkLoaded> blank. Real Clerk always loads over the
+   * network. Part of the one init script, so it can never run before the stub.
+   */
+  loadDelayMs?: number;
 }
 
 /**
@@ -73,8 +81,8 @@ export async function installClerkStub(
   const sub = opts.sub ?? 'user_e2e_stub';
   const token = opts.token ?? 'e2e.stub.jwt';
   await page.addInitScript(
-    (args: { signedIn: boolean; sub: string; token: string }) => {
-    const { signedIn, sub, token } = args;
+    (args: { signedIn: boolean; sub: string; token: string; loadDelayMs: number }) => {
+    const { signedIn, sub, token, loadDelayMs } = args;
     const counters = { signOutCalls: 0, getTokenCalls: 0 };
     type Listener = (resources: unknown) => void;
     const listeners: Listener[] = [];
@@ -138,7 +146,9 @@ export async function installClerkStub(
       loaded: true,
       // Deliberately NO `status` field — see file header.
       version: 'e2e-stub',
-      load: async () => undefined,
+      load: async () => {
+        if (loadDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, loadDelayMs));
+      },
 
       addListener: (fn: Listener) => {
         listeners.push(fn);
@@ -190,7 +200,7 @@ export async function installClerkStub(
       buildAfterSignOutUrl: () => '/login',
     };
     },
-    { signedIn: opts.signedIn, sub, token },
+    { signedIn: opts.signedIn, sub, token, loadDelayMs: opts.loadDelayMs ?? 0 },
   );
 }
 
