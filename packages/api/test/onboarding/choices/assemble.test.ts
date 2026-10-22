@@ -77,8 +77,9 @@ describe('assembleTypicalShop', () => {
     expect(price.options[1].label).toBe('$129 to come out, then $185 an hour');
     expect(price.options[0].rivetLine).toContain('$89');
     expect(price.supportLine).toContain('Cleveland');
-    // "Give me an example" quotes the usual (standard) trip fee.
-    expect(price.example).toContain("it's $89 for the visit");
+    // "Give me an example" quotes the usual (standard) trip fee, and says what the second card does.
+    expect(price.example).toContain("With the first, I say it's $89 for the visit");
+    expect(price.example).toContain('With the second, I quote the higher fee');
     for (const c of shop.choices) {
       if (c.settingKey !== 'trip_fee_and_rate') {
         for (const o of c.options) expect(o.prices).toBeUndefined();
