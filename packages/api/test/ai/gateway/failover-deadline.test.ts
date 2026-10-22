@@ -281,31 +281,45 @@ describe('GATEWAY-03 — one deadline across failover', () => {
   // decides whether to advance. A reserve carved 50ms (3s budget -> 750ms) or
   // 100ms (3.2s -> 800ms) above a viable attempt was then below
   // MIN_RETRY_BUDGET_MS, and the fallback it was carved for never ran.
+  //
+  // A3-7 — on a fake clock (setTimeout, clearTimeout, Date, hrtime) with the
+  // lateness injected, not on real timers with a busy loop: every timer due
+  // while the loop is "busy" (from 10ms before the slice ends, for lateMs +
+  // 10ms) fires when it frees up, exactly as a blocked event loop delivers
+  // them. The outcome no longer depends on how loaded the machine is.
   it.each([
     [3_000, 60],
     [3_200, 120],
   ])(
     'a %ims budget whose primary slice timer fires %ims late still runs the fallback inside the budget',
     async (budgetMs, lateMs) => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date', 'hrtime'] });
       const start = Date.now();
       const elapsed = () => Date.now() - start;
-      const primary = new HangingProvider('api.openai.com', elapsed);
-      let fallbackCall: { deadlineMs?: number; at: number } | undefined;
-      const fallback = answering('openrouter.ai', { input: 1, output: 1, total: 2 }, (req) => {
-        fallbackCall = { deadlineMs: req.deadlineMs, at: elapsed() };
-      });
       const sliceMs = budgetMs - fallbackReserveFor(budgetMs, 2_500);
-      // Block the event loop across the moment the slice timer is due.
-      const blocker = setTimeout(() => {
-        const until = Date.now() + lateMs + 10;
-        while (Date.now() < until) {
-          /* busy: the slice timer cannot fire */
-        }
-      }, sliceMs - 10);
-
+      const restoreTimers = busyEventLoop(elapsed, sliceMs - 10, sliceMs + lateMs);
       try {
-        const res = await stack(primary, [fallback]).complete(request(budgetMs));
+        const primary = new HangingProvider('api.openai.com', elapsed);
+        let fallbackCall: { deadlineMs?: number; at: number } | undefined;
+        const fallback = answering('openrouter.ai', { input: 1, output: 1, total: 2 }, (req) => {
+          fallbackCall = { deadlineMs: req.deadlineMs, at: elapsed() };
+        });
 
+        let settledAt = Number.NaN;
+        const settled = stack(primary, [fallback])
+          .complete(request(budgetMs))
+          .then(
+            (res) => ({ res }),
+            (err: unknown) => ({ err }),
+          )
+          .finally(() => {
+            settledAt = elapsed();
+          });
+        await vi.advanceTimersByTimeAsync(budgetMs + 1_000);
+        const outcome = await settled;
+
+        expect(outcome).not.toHaveProperty('err');
+        const res = (outcome as { res: LLMResponse }).res;
         expect(res.content).toBe('answer from openrouter.ai');
         expect(res.providerPath).toEqual(['api.openai.com:gpt-4o-mini', 'openrouter.ai:gpt-4o-mini']);
         expect(primary.calls).toHaveLength(1);
@@ -315,13 +329,33 @@ describe('GATEWAY-03 — one deadline across failover', () => {
         expect(fallbackCall!.at).toBeGreaterThanOrEqual(sliceMs + lateMs - 5);
         expect(fallbackCall!.deadlineMs!).toBeGreaterThanOrEqual(MIN_RETRY_BUDGET_MS);
         expect(fallbackCall!.deadlineMs!).toBeLessThanOrEqual(budgetMs - fallbackCall!.at + 5);
-        expect(elapsed()).toBeLessThan(budgetMs);
+        expect(settledAt).toBeLessThan(budgetMs);
       } finally {
-        clearTimeout(blocker);
+        restoreTimers();
+        vi.useRealTimers();
       }
     },
   );
 });
+
+/**
+ * On a fake clock, make the event loop "busy" from `fromMs` to `untilMs`
+ * (measured by `elapsed`): a timer that falls due in that window fires when
+ * it ends, the way a blocked loop delivers it, while the clock reads the
+ * real (late) time. Returns the restore function.
+ */
+function busyEventLoop(elapsed: () => number, fromMs: number, untilMs: number): () => void {
+  const fakeSetTimeout = globalThis.setTimeout;
+  globalThis.setTimeout = ((fn: (...args: unknown[]) => void, delayMs?: number, ...args: unknown[]) => {
+    const now = elapsed();
+    const dueAt = now + (delayMs ?? 0);
+    const wait = dueAt >= fromMs && dueAt < untilMs ? untilMs - now : delayMs;
+    return fakeSetTimeout(fn, wait, ...args);
+  }) as typeof setTimeout;
+  return () => {
+    globalThis.setTimeout = fakeSetTimeout;
+  };
+}
 
 // ── C-1699-P2 — a provider that ignores its abort must not eat the reserve ──
 //
