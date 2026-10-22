@@ -78,7 +78,8 @@ import {
   EntityResolver,
 } from '../ai/resolution/entity-resolver';
 import { resolveVoiceEntityReferences } from '../ai/agents/customer-calling/entity-resolution';
-import { TaskHandler, TaskContext, TaskResult, withClassifierRun } from '../ai/tasks/task-handlers';
+import { TaskHandler, TaskContext } from '../ai/tasks/task-handlers';
+import { draftProposal } from '../ai/drafting/draft-proposal';
 import type { StandingInstruction } from '../instructions/standing-instructions';
 import { selectInjectedStandingInstructions } from '../ai/standing-instructions-context';
 // B5 — the "core" intent taxonomy's task handlers are now built by the
@@ -772,6 +773,23 @@ export function entitiesForProposal(
   return payload;
 }
 
+/**
+ * The ids this memo's pipeline verified by lookup: the resolver's matches,
+ * the caller-ID customer (wins over a spoken name, as in drafting), and the
+ * job the memo was recorded on. Never classifier output.
+ */
+function voiceVerifiedIds(
+  resolved: EntityAnnotation['resolved'],
+  callerCustomerId: string | undefined,
+  recordedOnJobId: string | undefined,
+): Record<string, string> {
+  const ids: Record<string, string> = {};
+  for (const [key, id] of Object.entries(resolved)) if (id) ids[key] = id;
+  if (callerCustomerId) ids.customerId = callerCustomerId;
+  if (recordedOnJobId) ids.jobId = recordedOnJobId;
+  return ids;
+}
+
 /** Resolved-entity annotation for one utterance (see annotateResolvedEntities). */
 interface EntityAnnotation {
   kind: 'ok';
@@ -1004,13 +1022,20 @@ async function emitClarification(
        */
       additionalAmbiguities?: SingleEntityAmbiguity[];
     };
+    /**
+     * The intent classified fine but its handler drafted nothing. The card
+     * says so in drafting's own words instead of "didn't catch that".
+     */
+    notDrafted?: { explanation: string };
   },
   log: Logger
 ): Promise<void> {
   const { tenantId, userId, transcript, classification, conversationId, recordingId } = input;
   const reason = input.entityAmbiguity
     ? 'ambiguous_entity'
-    : (classification.unknownReason ?? 'unknown_intent');
+    : input.notDrafted
+      ? 'missing_entities'
+      : (classification.unknownReason ?? 'unknown_intent');
 
   const suggestedIntents: string[] = [];
   if (classification.lowConfidenceIntent) {
@@ -1074,7 +1099,9 @@ async function emitClarification(
       (moreAmbiguitiesCount > 0
         ? ` (${moreAmbiguitiesCount} more reference${moreAmbiguitiesCount === 1 ? '' : 's'} will need picking after this.)`
         : '')
-    : clarificationExplanation(classification);
+    : input.notDrafted
+      ? input.notDrafted.explanation
+      : clarificationExplanation(classification);
 
   const proposal = createProposal({
     tenantId,
@@ -1918,10 +1945,47 @@ async function processSegment(
     ...(supervisorMode ? { supervisorMode } : {}),
   };
 
-  const { proposal: drafted } = await handler.handle(context);
-  // OBS-2 — the drafting run is the proposal's aiRunId; keep the classifier
-  // run that routed this segment reachable too.
-  const proposal = withClassifierRun(drafted, classification.aiRunId);
+  // D-045 point 8 — the same drafting checks chat runs: ids the resolver or
+  // caller-ID verified are recorded and filled in, an id nobody said and no
+  // lookup verified is scrubbed, and the payload's contract gates the card.
+  const drafted = await draftProposal({
+    handler,
+    context,
+    operatorText: segmentText,
+    entities: entitiesForProposal(classification.intentType, classification.extractedEntities) ?? {},
+    verifiedIds: voiceVerifiedIds(annotation.resolved, customerId, jobId),
+    // OBS-2 — the drafting run is the proposal's aiRunId; keep the classifier
+    // run that routed this segment reachable too.
+    classifierAiRunId: classification.aiRunId,
+    // Held like every other memo hold, so the owner still hears about it.
+    heldStatus: 'ready_for_review',
+  });
+  if (drafted.kind === 'refusal') {
+    // Never silent: the memo still gets a card saying it wasn't acted on.
+    log.warn('voice-action-router: handler drafted nothing', {
+      proposalType: handler.taskType,
+      recordingId,
+    });
+    await emitClarification(
+      deps,
+      {
+        tenantId,
+        userId,
+        transcript: segmentText,
+        classification,
+        conversationId,
+        recordingId,
+        ...(params.sourceChannel ? { sourceChannel: params.sourceChannel } : {}),
+        ...(params.applyDedup && recordingId
+          ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
+          : {}),
+        notDrafted: { explanation: drafted.reason },
+      },
+      log,
+    );
+    return { kind: 'clarified', classification };
+  }
+  const { proposal } = drafted;
   // P8 — references that matched nothing are stamped on sourceContext so
   // the review UI prompts "pick from the list or create new" instead of
   // the operator discovering a dangling name at execution time.
