@@ -344,6 +344,9 @@ import {
   type LowSttStrikeCause,
 } from './shared/low-stt-ladder';
 import { createLogger } from '../../logging/logger';
+import { resolveOwnerLineApprover } from './shared/owner-session';
+import type { UserRepository } from '../../users/user';
+import type { VoiceApprovalSessionRef } from '../tasks/proposal-approval-task';
 import {
   detectConfirmTurnQuestion,
   type ConfirmTurnQuestionKind,
@@ -929,6 +932,13 @@ export interface VoiceTurnProcessorDeps {
    * Optional: when absent, all three channels default to enabled.
    */
   settingsRepo?: SettingsRepository;
+  /**
+   * B1 follow-up — with `settingsRepo`, re-resolves the owner line's approver
+   * (role + active membership, `resolveOwnerLineApprover`) at every voice
+   * approve / reject / edit turn. The Gather adapter passes its own through
+   * the deps spread. Absent → a caller-ID-established line approves nothing.
+   */
+  userRepo?: Pick<UserRepository, 'findById'>;
   /**
    * #1331 — clock for spoken-time resolution ("Tuesday at 2pm"), passed to
    * `resolveSchedulingEntities` as its existing `now` seam. Production leaves
@@ -4061,6 +4071,35 @@ export function createVoiceTurnProcessor(
     return [{ type: 'tts_play', payload: { text: result.speak, source: 'voice_approval' } }];
   }
 
+  /**
+   * B1 follow-up — who the line approves as AT THIS TURN. The telephony
+   * establishment stamps `ownerLineApprover` from the caller-ID once; a line
+   * carrying it is re-resolved from that same caller-ID (role + active
+   * membership) before every approve / reject / edit step — the way a one-tap
+   * link re-checks when tapped — so a backup demoted, deactivated or replaced
+   * mid-call acts as who they are now: a technician is turned away, and a
+   * caller-ID that no longer names an approver (or cannot be looked up) is no
+   * owner line for approvals at all. A session whose owner authority did not
+   * come from caller-ID (in-app) carries no stamp and is the owner, as before.
+   */
+  async function currentApprovalLine(
+    session: VoiceSession,
+    tenantId: string,
+  ): Promise<Pick<VoiceApprovalSessionRef, 'ownerSession' | 'approver'>> {
+    const ownerSession = session.machine.currentContext.ownerSession === true;
+    if (!ownerSession || !session.ownerLineApprover) return { ownerSession };
+    const now = await resolveOwnerLineApprover(
+      {
+        ...(deps.settingsRepo ? { settingsRepo: deps.settingsRepo } : {}),
+        ...(deps.userRepo ? { userRepo: deps.userRepo } : {}),
+      },
+      tenantId,
+      session.callerPhone,
+    );
+    if (!now) return { ownerSession: false };
+    return { ownerSession: true, approver: { role: now.role, ...(now.userId ? { userId: now.userId } : {}) } };
+  }
+
   async function handlePendingVoiceApproval(
     session: VoiceSession,
     speechResult: string,
@@ -4083,9 +4122,9 @@ export function createVoiceTurnProcessor(
     const result = await continueTurn(approvalDeps, {
       tenantId,
       sessionId: session.id,
-      ownerSession: session.machine.currentContext.ownerSession === true,
-      // B1 — who the line approves as (the backup supervisor as their role).
-      ...(session.ownerLineApprover ? { approver: session.ownerLineApprover } : {}),
+      // B1 — who the line approves as (the backup supervisor as their role),
+      // re-checked now: the yes that executes is this turn.
+      ...(await currentApprovalLine(session, tenantId)),
       // Session-level lockout / fail-counter state — without this the
       // challenge lockout is dead code (the task can't see prior failures).
       sessionState: session.voiceApprovalState,
@@ -4144,12 +4183,13 @@ export function createVoiceTurnProcessor(
     // stays single-target — a batch is an approve-all pass.
     const isApprove = args.intentType !== 'reject_proposal';
     const batchTrigger = /\b(all|everything|queue|what'?s\s+waiting|go\s+through)\b/i;
+    // B1 follow-up — the line's approver as of this turn.
+    const line = await currentApprovalLine(session, args.tenantId);
     if (isApprove && (batchTrigger.test(reference) || batchTrigger.test(args.utterance))) {
       const batchResult = await startVoiceBatchApproval(approvalDeps, {
         tenantId: args.tenantId,
         sessionId: session.id,
-        ownerSession,
-        ...(session.ownerLineApprover ? { approver: session.ownerLineApprover } : {}),
+        ...line,
         sessionState: session.voiceApprovalState,
       });
       return applyVoiceApprovalResult(session, batchResult);
@@ -4158,8 +4198,7 @@ export function createVoiceTurnProcessor(
     const result = await startVoiceApproval(approvalDeps, {
       tenantId: args.tenantId,
       sessionId: session.id,
-      ownerSession,
-      ...(session.ownerLineApprover ? { approver: session.ownerLineApprover } : {}),
+      ...line,
       // Session-level lockout state: a locked session refuses fresh
       // money/irreversible dialogues immediately (capture-class still works).
       sessionState: session.voiceApprovalState,
@@ -4223,8 +4262,8 @@ export function createVoiceTurnProcessor(
     const result = await startVoiceEdit(approvalDeps, {
       tenantId: args.tenantId,
       sessionId: session.id,
-      ownerSession,
-      ...(session.ownerLineApprover ? { approver: session.ownerLineApprover } : {}),
+      // B1 follow-up — the line's approver as of this turn.
+      ...(await currentApprovalLine(session, args.tenantId)),
       sessionState: session.voiceApprovalState,
       reference,
       instruction,

@@ -391,10 +391,13 @@ export interface VoiceSession {
    * for the owner phone, the backup supervisor as their own role and user.
    * Stamped by the telephony establishment core
    * (`TwilioGatherAdapter.establishInboundSession`, both transports) together
-   * with `ownerSession`, from the caller-ID — never from utterance content —
-   * and read by every voice approve / reject / edit. Absent on a session whose
-   * owner authority came from an authenticated owner (in-app) or a harness
-   * fixture: that is the owner.
+   * with `ownerSession`, from the caller-ID — never from utterance content.
+   * B1 follow-up — it marks the line as caller-ID-established: the turn
+   * processor re-resolves the approver from that caller-ID at every voice
+   * approve / reject / edit (`currentApprovalLine`), so a backup demoted,
+   * deactivated or replaced mid-call acts as who they are now. Absent on a
+   * session whose owner authority came from an authenticated owner (in-app)
+   * or a harness fixture: that is the owner.
    */
   ownerLineApprover?: Pick<ResolvedApprover, 'role' | 'userId'>;
   /**

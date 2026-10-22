@@ -692,3 +692,116 @@ describe('B1 — a backup supervisor on the owner line approves as themselves (G
     expect((await h.proposalRepo.findById(TENANT, proposal.id))?.executedByRole).toBe('owner');
   });
 });
+
+// B1 follow-up — the line's approver was resolved once, at establishment, so a
+// backup demoted, deactivated or replaced mid-call kept approving with the old
+// role until hang-up. Each approve / reject / edit turn now re-resolves it from
+// the same caller-ID, the way a one-tap link re-checks when tapped.
+describe('B1 follow-up — the owner line re-checks its approver at every approval turn (Gather)', () => {
+  const BACKUP_MOBILE = '+15125550111';
+  const BACKUP_ID = 'user-backup-recheck';
+  const REFUSED = 'take approvals on this line';
+
+  function mutableBackupHarness(classifications: string[]) {
+    const backup: { role: string; status: 'active' | 'suspended' } = { role: 'dispatcher', status: 'active' };
+    const tenantSettings = { ownerPhone: OWNER_PHONE, backupSupervisorUserId: BACKUP_ID, escalationSettings: {} };
+    const h = makeHarness({
+      gateway: gatewayReturning(classifications),
+      settingsRepo: { findByTenant: async () => ({ ...tenantSettings }) } as unknown as SettingsRepository,
+      userRepo: {
+        findById: async (t: string, id: string) =>
+          t === TENANT && id === BACKUP_ID
+            ? {
+                id: BACKUP_ID,
+                tenantId: TENANT,
+                role: backup.role,
+                status: backup.status,
+                clerkUserId: 'clerk-backup-recheck',
+                mobileNumber: BACKUP_MOBILE,
+              }
+            : null,
+        findByMobileNumber: async () => null,
+        findByTenant: async () => [],
+      } as unknown as UserRepository,
+    });
+    return { ...h, backup, tenantSettings };
+  }
+
+  const say = (h: ReturnType<typeof makeHarness>, sessionId: string, callSid: string, speechResult: string) =>
+    h.adapter.handleGather({ sessionId, callSid, speechResult, confidence: 0.9, tenantId: TENANT });
+
+  it.each([
+    ['demoted to technician', (m: ReturnType<typeof mutableBackupHarness>) => (m.backup.role = 'technician')],
+    ['deactivated', (m: ReturnType<typeof mutableBackupHarness>) => (m.backup.status = 'suspended')],
+    ['replaced as backup', (m: ReturnType<typeof mutableBackupHarness>) => (m.tenantSettings.backupSupervisorUserId = 'someone-else')],
+  ])('a backup %s between the readback and the yes is refused; nothing is approved', async (_label, change) => {
+    const m = mutableBackupHarness([APPROVE_CLASSIFICATION]);
+    const proposal = await seedPending(m.proposalRepo);
+    const callSid = `CA-recheck-${_label.replace(/\W+/g, '-')}`;
+    const sessionId = await startCall(m, BACKUP_MOBILE, callSid);
+    expect(m.store.get(sessionId)!.ownerLineApprover).toEqual({ role: 'dispatcher', userId: 'clerk-backup-recheck' });
+
+    const readback = await say(m, sessionId, callSid, 'approve the Henderson estimate');
+    expect(readback).toContain('Henderson Family LLC');
+    change(m);
+    const answer = await say(m, sessionId, callSid, 'yes');
+
+    expect(answer).toContain(REFUSED);
+    expect((await m.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
+    expect(m.auditRepo.getAll().map((e) => e.eventType)).not.toContain('proposal.approved');
+    expect(m.store.get(sessionId)!.pendingVoiceApproval).toBeUndefined();
+  });
+
+  it('a backup demoted after the call began cannot start a reject', async () => {
+    const m = mutableBackupHarness([
+      JSON.stringify({
+        intentType: 'reject_proposal',
+        confidence: 0.95,
+        reasoning: 'caller asked to reject the Henderson estimate',
+        extractedEntities: { proposalReference: 'the Henderson estimate' },
+      }),
+    ]);
+    const proposal = await seedPending(m.proposalRepo);
+    const sessionId = await startCall(m, BACKUP_MOBILE, 'CA-recheck-reject');
+    m.backup.role = 'technician';
+
+    const answer = await say(m, sessionId, 'CA-recheck-reject', 'reject the Henderson estimate');
+
+    expect(answer).toContain(REFUSED);
+    expect(answer).not.toContain('Henderson Family LLC');
+    expect((await m.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('ready_for_review');
+  });
+
+  it('a backup demoted after the call began cannot start an edit', async () => {
+    const m = mutableBackupHarness([
+      JSON.stringify({
+        intentType: 'edit_proposal',
+        confidence: 0.95,
+        reasoning: 'caller asked to change the Henderson estimate',
+        extractedEntities: { proposalReference: 'the Henderson estimate', editInstruction: 'make it $400' },
+      }),
+    ]);
+    const proposal = await seedPending(m.proposalRepo);
+    const sessionId = await startCall(m, BACKUP_MOBILE, 'CA-recheck-edit');
+    m.backup.role = 'technician';
+
+    const answer = await say(m, sessionId, 'CA-recheck-edit', 'change the Henderson estimate to $400');
+
+    expect(answer).toContain('take changes to pending work on this line');
+    expect((await m.proposalRepo.findById(TENANT, proposal.id))?.payload).toEqual(proposal.payload);
+  });
+
+  it('a backup re-roled mid-call acts with the role they hold at the yes', async () => {
+    const m = mutableBackupHarness([APPROVE_CLASSIFICATION]);
+    m.backup.role = 'owner';
+    const proposal = await seedPending(m.proposalRepo);
+    const sessionId = await startCall(m, BACKUP_MOBILE, 'CA-recheck-reroled');
+    await say(m, sessionId, 'CA-recheck-reroled', 'approve the Henderson estimate');
+    m.backup.role = 'dispatcher';
+    await say(m, sessionId, 'CA-recheck-reroled', 'yes');
+
+    const stored = (await m.proposalRepo.findById(TENANT, proposal.id))!;
+    expect(stored.status).toBe('approved');
+    expect(stored.executedByRole).toBe('dispatcher');
+  });
+});

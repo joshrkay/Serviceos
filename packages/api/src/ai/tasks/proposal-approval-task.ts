@@ -327,8 +327,9 @@ export interface VoiceApprovalSessionRef {
   /** RV-070 — MUST be true; re-checked here as defense in depth. */
   ownerSession: boolean;
   /**
-   * B1 — who this line approves AS, resolved once at telephony session
-   * establishment from the caller-ID (`resolveApproverRole`): the owner
+   * B1 — who this line approves AS, resolved from the caller-ID
+   * (`resolveApproverRole`) — at establishment, and again by the turn
+   * processor before every approval turn (B1 follow-up): the owner
    * phone is the owner, the backup supervisor's mobile is their own role and
    * user. Every approve / reject / edit acts with it, so a backup dispatcher
    * cannot clear the owner-only settings:update gate or attribute their
@@ -1840,7 +1841,8 @@ export async function continueVoiceApproval(
   input: ContinueVoiceApprovalInput,
 ): Promise<VoiceApprovalTurnResult> {
   if (!lineMayApprove(input)) {
-    // The session flag cannot change mid-call, but fail closed anyway.
+    // B1 follow-up — the line is re-checked every turn: a backup demoted,
+    // deactivated or replaced since the readback is refused here.
     return {
       speak: 'I can’t take approvals on this line. How else can I help?',
       pending: null,
