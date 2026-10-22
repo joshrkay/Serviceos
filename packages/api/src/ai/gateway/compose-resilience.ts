@@ -100,7 +100,8 @@ function isFailoverEligible(err: unknown): boolean {
 /**
  * Default cap on the slice of the shared deadline held back for the next
  * provider in a failover chain (GATEWAY-03). Tunable per deploy with
- * AI_FALLBACK_RESERVE_MS (0 disables the reserve).
+ * AI_FALLBACK_RESERVE_MS: below 700 (or 0) disables the reserve, and 700–999
+ * acts as 1000 (`fallbackReserveFor`'s floor).
  */
 export const DEFAULT_FALLBACK_RESERVE_MS = 2_500;
 
