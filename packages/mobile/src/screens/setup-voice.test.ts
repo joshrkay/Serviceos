@@ -19,7 +19,7 @@ const h = vi.hoisted(() => ({
 vi.mock('expo-router', () => ({
   useRouter: () => ({ push: h.push, replace: h.replace, back: vi.fn() }),
 }));
-vi.mock('@clerk/clerk-expo', () => ({ useAuth: () => ({ userId: 'user_owner' }) }));
+vi.mock('@clerk/expo', () => ({ useAuth: () => ({ userId: 'user_owner' }) }));
 vi.mock('../hooks/useOnboardingStatus', () => ({ skipSetupGateForSession: h.skip }));
 vi.mock('../hooks/usePendingProposals', () => ({
   usePendingProposals: () => ({ proposals: h.proposals, count: h.proposals.length, isLoading: false, error: null, refresh: h.refresh }),
@@ -99,6 +99,13 @@ describe('spoken setup screen', () => {
     fireEvent.click(button('Send'));
     expect(h.talk.sendText).toHaveBeenCalledWith('Walsh Plumbing');
     expect(input.value).toBe('');
+  });
+
+  it('the answer box can shrink so Send stays on screen at 320px', () => {
+    // A web <input> has an intrinsic width; without min-w-0 flex-1 can't
+    // shrink below it and pushes Send past the edge (e2e/setup-voice-mobile).
+    render(createElement(SetupVoiceScreen));
+    expect(screen.getByPlaceholderText('Or type your answer').className).toMatch(/\bmin-w-0\b/);
   });
 
   it('without transcription only typing is offered', () => {

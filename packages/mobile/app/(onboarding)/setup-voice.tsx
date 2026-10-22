@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, ScrollView, Text, TextInput, View } from 'react-native';
-import { useAuth } from '@clerk/clerk-expo';
+import { useAuth } from '@clerk/expo';
 import { useRouter } from 'expo-router';
 import { PrimaryButton } from '../../src/components/Buttons';
 import { skipSetupGateForSession } from '../../src/hooks/useOnboardingStatus';
@@ -194,7 +194,7 @@ export default function SetupVoiceScreen() {
         <View>
           <View className="flex-row items-end">
             <TextInput
-              className="mr-2 min-h-11 flex-1 rounded-md border border-border bg-card px-3 py-2 text-base text-foreground"
+              className="mr-2 min-h-11 min-w-0 flex-1 rounded-md border border-border bg-card px-3 py-2 text-base text-foreground"
               placeholder="Or type your answer"
               value={draft}
               onChangeText={setDraft}

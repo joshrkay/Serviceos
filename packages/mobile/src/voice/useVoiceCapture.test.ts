@@ -29,7 +29,7 @@ vi.mock('expo-audio', () => ({
   RecordingPresets: { HIGH_QUALITY: {} },
   useAudioRecorder: () => h.recorder,
 }));
-vi.mock('expo-file-system', () => ({ getInfoAsync: h.getInfo }));
+vi.mock('expo-file-system/legacy', () => ({ getInfoAsync: h.getInfo }));
 vi.mock('../lib/useApiClient', () => ({ useApiClient: () => h.apiFn }));
 vi.mock('./nativeVoiceDeps', () => ({ makeIdempotencyKey: () => 'idem-key', uploadFile: vi.fn() }));
 vi.mock('./uploadAndTranscribe', () => ({ uploadAndTranscribe: h.upload }));

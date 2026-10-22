@@ -9,7 +9,7 @@ const h = vi.hoisted(() => ({
 }));
 
 vi.mock('../lib/useApiClient', () => ({ useApiClient: () => h.api }));
-vi.mock('@clerk/clerk-expo', () => ({ useAuth: () => ({ signOut: h.signOut }) }));
+vi.mock('@clerk/expo', () => ({ useAuth: () => ({ signOut: h.signOut }) }));
 vi.mock('./nativePushDeps', () => ({ getExpoPushToken: h.getExpoPushToken }));
 
 // eslint-disable-next-line import/first

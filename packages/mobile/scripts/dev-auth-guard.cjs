@@ -3,7 +3,7 @@
  *
  * Mirrors web's `VITE_AUTH_MODE=dev` (packages/web/vite.config.ts →
  * src/dev/clerk-dev-shim.tsx): when `EXPO_PUBLIC_AUTH_MODE=dev`, Metro swaps
- * `@clerk/clerk-expo` for `src/dev/clerk-expo-dev-shim.tsx`, which mints the
+ * `@clerk/expo` for `src/dev/clerk-expo-dev-shim.tsx`, which mints the
  * unsigned JWT the API's `DEV_AUTH_BYPASS` middleware decodes
  * (packages/api/src/auth/dev-auth-bypass.ts). That lets the Maestro device
  * flows (.maestro/) reach signed-in screens without a Clerk cloud instance.

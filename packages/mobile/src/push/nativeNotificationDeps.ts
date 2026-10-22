@@ -16,9 +16,11 @@ Notifications.setNotificationHandler({
     const type = notification.request.content.data?.type as NotificationType | undefined;
     const highPriority = type ? isHighPriorityNotification(type) : false;
     return {
-      // Present the banner for every foreground notification — the owner sees
-      // what just happened without leaving the current screen.
-      shouldShowAlert: true,
+      // Present the banner (and list it in Notification Center) for every
+      // foreground notification — the owner sees what just happened without
+      // leaving the current screen.
+      shouldShowBanner: true,
+      shouldShowList: true,
       // Only interrupt with a sound for time-critical types.
       shouldPlaySound: highPriority,
       shouldSetBadge: true,
