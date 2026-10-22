@@ -136,6 +136,30 @@ describe('Postgres integration — estimate texts and emails are message records
     expect(delivery.sentSms.length).toBe(sentBefore + 1);
   });
 
+  it('a reminder email that failed is retried by the next sweep instead of colliding with its failed row', async () => {
+    const { jobId, estimate } = await seed('email-nudge', false);
+    const reminder = {
+      tenantId,
+      estimateId: estimate.id,
+      channel: 'email' as const,
+      quietHours: 'defer' as const,
+      idempotencyContext: `estimate_nudge:${estimate.id}:v1:1`,
+    };
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-22T15:00:10.000Z'));
+    const sendEmail = vi.spyOn(delivery, 'sendEmail').mockRejectedValueOnce(new Error('provider down'));
+
+    await expect(sendService.sendEstimate(reminder)).rejects.toThrow(/provider down/);
+    vi.setSystemTime(new Date('2026-10-22T15:15:10.000Z'));
+    const retried = await sendService.sendEstimate(reminder);
+
+    expect(retried.channelsSent.map((c) => c.channel)).toEqual(['email']);
+    expect(sendEmail).toHaveBeenCalledTimes(2);
+    const rows = (await dispatchRepo.listByTenant(tenantId, { jobId })).dispatches;
+    expect(rows.map((r) => r.status).sort()).toEqual(['failed', 'sent']);
+    sendEmail.mockRestore();
+  });
+
   it('a same-minute resend of a text replays the record and texts nobody twice', async () => {
     const { jobId, estimate } = await seed('resend', true);
     const send = () => sendService.sendEstimate({ tenantId, estimateId: estimate.id, channel: 'sms', idempotencyContext: 'owner' });

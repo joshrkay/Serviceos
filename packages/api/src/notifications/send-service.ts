@@ -317,15 +317,17 @@ export class SendService {
         purpose,
         customerId: customer.id,
         jobId: job.id,
-        // An automatic reminder's context already names its occurrence, so it
-        // keeps one key (and one message record) across the sweeps that retry
-        // it after quiet hours; a send now dedupes within its minute.
+        // An automatic reminder's context already names its occurrence, so its
+        // text keeps one key (and one message record, which each outcome
+        // replaces) across the sweeps that retry it after quiet hours. An email
+        // row is never replaced, so a reminder email, like a send now, keeps
+        // its minute and a retried failure gets a fresh row.
         dedupe: this.buildDedupe(
           'estimate',
           estimate.id,
           target,
           input.idempotencyContext ?? 'default',
-          purpose === 'automated_nudge' ? undefined : sendStartedAt,
+          purpose === 'automated_nudge' && target.channel === 'sms' ? undefined : sendStartedAt,
         ),
         render: () =>
           target.channel === 'sms'
