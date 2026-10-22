@@ -702,7 +702,6 @@ export function SettingsPage() {
       params.delete('quickbooks_connected');
       params.delete('quickbooks_error');
       params.delete('googlebusiness_connected');
-      params.delete('googlebusiness_pick');
       params.delete('googlebusiness_error');
       params.delete('googlebusiness_review_link');
       params.delete('open');

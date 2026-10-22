@@ -521,33 +521,6 @@ const locationSchema = z
   })
   .passthrough();
 
-/**
- * Business Information API v1 — the surface that exposes a location's
- * title, place ID and the `newReviewUri` write-a-review link. (The v4
- * location listing carries none of them.)
- */
-export const GOOGLE_BUSINESS_INFORMATION_HOST =
-  'https://mybusinessbusinessinformation.googleapis.com';
-
-const listLocationDetailsResponseSchema = z
-  .object({
-    locations: z
-      .array(
-        z
-          .object({
-            name: z.string().min(1),
-            title: z.string().optional(),
-            metadata: z
-              .object({
-                placeId: z.string().optional(),
-                newReviewUri: z.string().optional(),
-              })
-              .passthrough()
-              .optional(),
-          })
-          .passthrough(),
-      )
-      .optional(),
 const listLocationsResponseSchema = z
   .object({
     locations: z.array(locationSchema).optional(),

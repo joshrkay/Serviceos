@@ -13,18 +13,18 @@ import {
   GoogleBusinessLocation,
   discoverLocations,
   exchangeAuthorizationCode,
-  listAccounts,
-  listLocationDetails,
-  GoogleLocationDetail,
 } from '../reputation/google-business-client';
 import {
   GoogleBusinessIntegrationRepository,
+  GoogleBusinessIntegrationSummary,
+  GoogleBusinessLocationSelection,
   callWithGoogleBusinessAuthRetry,
+  googleBusinessLocationState,
 } from '../reputation/google-business-integration';
+import { applyDerivedGoogleReviewUrl } from '../reputation/google-review-link';
 import type { SettingsRepository } from '../settings/settings';
-import { ReviewPollStateRepository } from '../reputation/poll-state';
+import { ReviewPollState, ReviewPollStateRepository } from '../reputation/poll-state';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
-import { z } from 'zod';
 
 /**
  * Review-monitoring self-serve — per-tenant Google Business Profile
@@ -33,8 +33,6 @@ import { z } from 'zod';
  *   GET    /api/googlebusiness-integrations                    — tenant status
  *   POST   /api/googlebusiness-integrations/google/connect     — initiate OAuth
  *   GET    /api/googlebusiness-integrations/google/callback    — OAuth landing
- *   GET    /api/googlebusiness-integrations/google/locations   — live location list (picker)
- *   PUT    /api/googlebusiness-integrations/google/location    — choose / switch location
  *   DELETE /api/googlebusiness-integrations/google             — disconnect
  *   GET    /api/googlebusiness-integrations/google/locations   — location picker
  *   PUT    /api/googlebusiness-integrations/google/location    — choose a location
@@ -75,12 +73,10 @@ export interface GoogleBusinessIntegrationsRouteDeps {
    */
   pollStateRepo?: ReviewPollStateRepository | undefined;
   /**
-   * When wired, choosing a location fills `googleReviewUrl` from the
-   * listing — only when the setting is empty or still holds the link
-   * we auto-filled for the previous location. A hand-entered link is
-   * never overwritten.
+   * D-044 — when wired, connecting a location fills the tenant's Google
+   * review link from the listing (never over a link the owner typed).
    */
-  settingsRepo?: SettingsRepository | undefined;
+  settingsRepo?: Pick<SettingsRepository, 'findByTenant' | 'update'> | undefined;
 }
 
 /**
@@ -95,67 +91,103 @@ function isSafeRelativePath(value: string | undefined): value is string {
   return true;
 }
 
-const pickLocationBodySchema = z.object({ locationId: z.string().min(1) });
+function toSelection(location: GoogleBusinessLocation): GoogleBusinessLocationSelection {
+  return {
+    accountId: location.accountId,
+    locationId: location.locationId,
+    placeId: location.placeId,
+    reviewUrl: location.reviewUrl,
+    locationTitle: location.title,
+  };
+}
 
-type LocationDiscovery =
-  | { kind: 'none'; accountId?: string }
-  | { kind: 'single'; accountId: string; location: GoogleLocationDetail }
-  | { kind: 'many'; accountId: string };
+function previousSelection(
+  previous: GoogleBusinessIntegrationSummary,
+): GoogleBusinessLocationSelection | undefined {
+  if (!previous.accountId || !previous.locationId) return undefined;
+  return {
+    accountId: previous.accountId,
+    locationId: previous.locationId,
+    placeId: previous.placeId,
+    reviewUrl: previous.reviewUrl,
+    locationTitle: previous.locationTitle,
+  };
+}
 
 /**
- * Best-effort discovery of the tenant's GBP account + locations. We
- * use the first account (SMB tenants have one). With exactly one
- * location it is connected directly; with several the owner picks
- * (`many`); with none the integration lands in an explicit
- * `no_location` state. A discovery hiccup must not fail the OAuth
- * round-trip — the tokens are still stored and the status endpoint
- * shows `no_location`, so the operator can reconnect.
+ * The review-poll cursor is a timestamp watermark for one listing: a
+ * different listing's older unread reviews would sit behind it and never
+ * be ingested. Start the new listing from scratch (ingest is idempotent).
+ * The worker also binds each cursor to its listing, so a sweep for the old
+ * listing that finishes after this reset cannot hand its watermark to the
+ * new one. A previous integration of null means the tenant disconnected, so the
+ * cursor's listing is unknown and it is reset too.
  */
-async function discoverLocations(
-  accessToken: string,
-  fetchFn: GoogleFetch,
-): Promise<LocationDiscovery> {
+async function resetReviewCursorIfMoved(
+  deps: GoogleBusinessIntegrationsRouteDeps,
+  tenantId: string,
+  previous: GoogleBusinessIntegrationSummary | null,
+  selection: GoogleBusinessLocationSelection,
+): Promise<boolean> {
+  if (!deps.pollStateRepo) return false;
+  if (
+    previous?.locationId === selection.locationId &&
+    previous.accountId === selection.accountId
+  ) {
+    return false;
+  }
+  await deps.pollStateRepo.resetCursor(tenantId);
+  return true;
+}
+
+/**
+ * Fill the review link from the chosen listing. Best-effort on the OAuth
+ * callback (the tokens are already stored and the owner can still pick or
+ * paste a link); the outcome is recorded on the audit event either way.
+ */
+async function fillReviewUrl(
+  deps: GoogleBusinessIntegrationsRouteDeps,
+  tenantId: string,
+  derived: string | null,
+): Promise<{ reviewUrlFilled: boolean; reviewUrlCleared?: boolean; reviewUrlError?: string }> {
+  if (!deps.settingsRepo) return { reviewUrlFilled: false };
   try {
-    const accounts = await listAccounts(accessToken, fetchFn);
-    const accountId = accounts.length > 0 ? trailingId(accounts[0]) : undefined;
-    if (!accountId) return { kind: 'none' };
-    const locations = await listLocationDetails(accessToken, accountId, fetchFn);
-    if (locations.length === 0) return { kind: 'none', accountId };
-    if (locations.length === 1) {
-      return { kind: 'single', accountId, location: locations[0] };
-    }
-    return { kind: 'many', accountId };
-  } catch {
-    return { kind: 'none' };
+    const outcome = await applyDerivedGoogleReviewUrl(
+      deps.settingsRepo,
+      tenantId,
+      derived,
+    );
+    return {
+      reviewUrlFilled: outcome === 'set',
+      ...(outcome === 'cleared' ? { reviewUrlCleared: true } : {}),
+    };
+  } catch (err) {
+    return {
+      reviewUrlFilled: false,
+      reviewUrlError: err instanceof Error ? err.message : String(err),
+    };
   }
 }
 
-function trailingId(resourceName: string): string | undefined {
-  const idx = resourceName.lastIndexOf('/');
-  const tail = idx === -1 ? resourceName : resourceName.slice(idx + 1);
-  return tail.length > 0 ? tail : undefined;
-}
-
-/**
- * Fill the tenant's Google review link from the listing. Skips when
- * the setting holds something other than the link we auto-filled for
- * the previous location (`previousAutoUrl`) — i.e. a hand-entered
- * value always wins. Returns whether the setting was written.
- */
-async function fillReviewUrl(
-  settingsRepo: SettingsRepository | undefined,
-  tenantId: string,
-  reviewUrl: string | null,
-  previousAutoUrl: string | null,
-): Promise<boolean> {
-  if (!settingsRepo || !reviewUrl) return false;
-  const settings = await settingsRepo.findByTenant(tenantId);
-  if (!settings) return false;
-  const current = settings.googleReviewUrl?.trim() ?? '';
-  if (current === reviewUrl) return false;
-  if (current !== '' && current !== previousAutoUrl) return false;
-  await settingsRepo.update(tenantId, { googleReviewUrl: reviewUrl });
-  return true;
+function statusView(
+  integration: GoogleBusinessIntegrationSummary,
+  pollState: Pick<ReviewPollState, 'lastSuccessfulPollAt' | 'backoffUntil' | 'backoffReason'> | null,
+) {
+  return {
+    id: integration.id,
+    provider: 'google_business' as const,
+    status: integration.status,
+    accountId: integration.accountId,
+    locationId: integration.locationId,
+    locationTitle: integration.locationTitle,
+    placeId: integration.placeId,
+    reviewUrl: integration.reviewUrl,
+    locationState: googleBusinessLocationState(integration),
+    updatedAt: integration.updatedAt.toISOString(),
+    lastSuccessfulPollAt: pollState?.lastSuccessfulPollAt?.toISOString() ?? null,
+    backoffUntil: pollState?.backoffUntil?.toISOString() ?? null,
+    backoffReason: pollState?.backoffReason ?? null,
+  };
 }
 
 /**
@@ -199,32 +231,49 @@ export function createGoogleBusinessOAuthCallbackRouter(
         fetchFn,
       );
 
-      const discovery = await discoverLocations(tokens.accessToken, fetchFn);
-      const location = discovery.kind === 'single' ? discovery.location : undefined;
-
+      // Discovery hiccups must not fail the round-trip: the tokens are
+      // stored with no location and the owner picks one from Settings
+      // (GET /google/locations retries discovery).
+      let locations: GoogleBusinessLocation[] | null;
+      try {
+        locations = await discoverLocations(tokens.accessToken, fetchFn);
+      } catch {
+        locations = null;
+      }
+      // A reconnect keeps the location the owner already chose; otherwise
+      // a single location is chosen for them, and several wait for a pick.
+      // When discovery is down, a reconnect keeps the saved location as
+      // is rather than dropping it (polling needs it).
       const previous = await deps.integrationRepo.get(consumed.tenantId);
+      let selection: GoogleBusinessLocationSelection | undefined;
+      if (locations === null) {
+        selection = previous ? previousSelection(previous) : undefined;
+      } else {
+        const kept = previous?.locationId
+          ? locations.find(
+              (l) =>
+                l.locationId === previous.locationId &&
+                l.accountId === previous.accountId,
+            )
+          : undefined;
+        const chosen = kept ?? (locations.length === 1 ? locations[0] : undefined);
+        selection = chosen ? toSelection(chosen) : undefined;
+      }
+      const locationCount = locations ? locations.length : previous?.locationCount;
+
+      // Reset the old listing's cursor before the new listing is saved: if
+      // the reset failed after, a retry would see no move and keep it.
+      const reviewCursorReset = selection
+        ? await resetReviewCursorIfMoved(deps, consumed.tenantId, previous, selection)
+        : false;
       const upserted = await deps.integrationRepo.upsert({
         tenantId: consumed.tenantId,
         accessToken: tokens.accessToken,
         refreshToken: tokens.refreshToken,
         accessTokenExpiresAt: tokens.expiresAt,
-        ...(discovery.accountId !== undefined ? { accountId: discovery.accountId } : {}),
-        ...(location
-          ? {
-              locationId: location.locationId,
-              locationTitle: location.title,
-              placeId: location.placeId,
-              reviewUrl: location.reviewUrl,
-            }
-          : {}),
-        needsSelection: discovery.kind === 'many',
+        ...(selection ? { selection } : {}),
+        ...(locationCount != null ? { locationCount } : {}),
       });
-      const reviewUrlFilled = await fillReviewUrl(
-        deps.settingsRepo,
-        consumed.tenantId,
-        upserted.reviewUrl,
-        previous?.reviewUrl ?? null,
-      );
 
       // New credentials: a pause for rejected ones no longer applies, and
       // a sweep still running on the old ones can't record a new one.
@@ -260,8 +309,11 @@ export function createGoogleBusinessOAuthCallbackRouter(
               originatingUserId: consumed.userId,
               accountId: upserted.accountId,
               locationId: upserted.locationId,
-              locationStatus: upserted.locationStatus,
-              reviewUrlFilled,
+              locationCount: locations?.length ?? null,
+              discoveryFailed: locations === null,
+              reviewCursorReset,
+              authBackoffCleared,
+              ...reviewUrl,
               ipAddress: extractIp(req),
               userAgent: req.headers['user-agent'],
             },
@@ -269,16 +321,21 @@ export function createGoogleBusinessOAuthCallbackRouter(
         );
       }
 
-      // A multi-location account lands on Settings (where the picker
-      // lives) regardless of where the connect started.
-      const back =
-        upserted.locationStatus !== 'needs_selection' &&
-        isSafeRelativePath(consumed.redirectAfter)
-          ? `${deps.appBaseUrl ?? ''}${consumed.redirectAfter}`
-          : `${deps.appBaseUrl ?? ''}/settings?googlebusiness_connected=1${
-              upserted.locationStatus === 'needs_selection' ? '&googlebusiness_pick=1' : ''
-            }`;
-      res.redirect(back);
+      const back = isSafeRelativePath(consumed.redirectAfter)
+        ? `${deps.appBaseUrl ?? ''}${consumed.redirectAfter}`
+        : `${deps.appBaseUrl ?? ''}/settings?googlebusiness_connected=1`;
+      // The connection succeeded either way; a review link that could not
+      // be written, or was removed, is told to the owner, not just audited.
+      const reviewLinkNote = reviewUrl.reviewUrlError
+        ? 'failed'
+        : reviewUrl.reviewUrlCleared
+          ? 'cleared'
+          : null;
+      res.redirect(
+        reviewLinkNote
+          ? `${back}${back.includes('?') ? '&' : '?'}googlebusiness_review_link=${reviewLinkNote}`
+          : back,
+      );
     } catch (err) {
       const { statusCode, body } = toErrorResponse(err);
       res.status(statusCode).json(body);
@@ -314,23 +371,7 @@ export function createGoogleBusinessIntegrationsRouter(
         const pollState = deps.pollStateRepo
           ? await deps.pollStateRepo.getPollState(req.auth!.tenantId)
           : null;
-        res.json({
-          data: {
-            id: integration.id,
-            provider: 'google_business',
-            status: integration.status,
-            accountId: integration.accountId,
-            locationId: integration.locationId,
-            locationTitle: integration.locationTitle,
-            placeId: integration.placeId,
-            reviewUrl: integration.reviewUrl,
-            locationStatus: integration.locationStatus,
-            updatedAt: integration.updatedAt.toISOString(),
-            lastSuccessfulPollAt:
-              pollState?.lastSuccessfulPollAt?.toISOString() ?? null,
-            backoffUntil: pollState?.backoffUntil?.toISOString() ?? null,
-          },
-        });
+        res.json({ data: statusView(integration, pollState) });
       } catch (err) {
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
@@ -389,29 +430,30 @@ export function createGoogleBusinessIntegrationsRouter(
     },
   );
 
-  /** Live location list for the picker — never cached, never stored. */
-  async function listLiveLocations(
-    tenantId: string,
-  ): Promise<{ accountId: string; locations: GoogleLocationDetail[] }> {
-    const auth = await deps.integrationRepo.getAuth(tenantId);
-    if (!auth) throw new NotFoundError('Google Business integration', 'google_business');
+  /** Discovery with the stored tokens (refresh-on-401, retry once). */
+  async function discoverForTenant(tenantId: string): Promise<GoogleBusinessLocation[]> {
+    const tokens = await deps.integrationRepo.getTokens(tenantId);
+    if (!tokens) {
+      throw new NotFoundError('Google Business integration', 'google_business');
+    }
     const fetchFn = deps.googleFetch ?? boundedGoogleFetch;
-    return callWithGoogleBusinessAuthRetry({
-      tenantId,
-      tokens: auth.tokens,
-      config: deps.googleConfig,
-      store: deps.integrationRepo,
-      fetchFn,
-      call: async (accessToken) => {
-        const accountId =
-          auth.accountId ?? trailingId((await listAccounts(accessToken, fetchFn))[0] ?? '');
-        if (!accountId) return { accountId: '', locations: [] };
-        return {
-          accountId,
-          locations: await listLocationDetails(accessToken, accountId, fetchFn),
-        };
-      },
-    });
+    try {
+      return await callWithGoogleBusinessAuthRetry({
+        tenantId,
+        tokens,
+        config: deps.googleConfig,
+        store: deps.integrationRepo,
+        fetchFn,
+        call: (accessToken) => discoverLocations(accessToken, fetchFn),
+      });
+    } catch (err) {
+      if (err instanceof GoogleBusinessAuthError) {
+        throw new ValidationError(
+          'Google no longer accepts this connection. Reconnect Google Business.',
+        );
+      }
+      throw err;
+    }
   }
 
   router.get(
@@ -626,7 +668,7 @@ export function createGoogleBusinessIntegrationsRouter(
               tenantId,
               actorId: req.auth!.userId,
               actorRole: req.auth!.role,
-              eventType: 'googlebusiness_integration.location_changed',
+              eventType: 'googlebusiness_integration.location_selected',
               entityType: 'googlebusiness_integration',
               entityId: updated.id,
               metadata: {

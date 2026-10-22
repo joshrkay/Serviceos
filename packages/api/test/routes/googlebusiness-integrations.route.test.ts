@@ -29,11 +29,6 @@ import { InMemorySettingsRepository } from '../../src/settings/settings';
 import { runGoogleReviewsSweep } from '../../src/workers/google-reviews';
 import { createLogger } from '../../src/logging/logger';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
-import {
-  InMemorySettingsRepository,
-  type SettingsRepository,
-  type TenantSettings,
-} from '../../src/settings/settings';
 
 const TENANT = 'tenant-gbp-1';
 const USER = 'user-gbp-1';
@@ -108,31 +103,6 @@ function makeConnectFetch(
     }
     return jsonRes({}, 404);
   });
-}
-
-function seedSettings(
-  tenantId: string,
-  googleReviewUrl?: string,
-): Promise<InMemorySettingsRepository> {
-  const repo = new InMemorySettingsRepository();
-  const now = new Date();
-  return repo
-    .create({
-      id: 'settings-1',
-      tenantId,
-      businessName: 'Acme',
-      timezone: 'America/New_York',
-      estimatePrefix: 'EST',
-      invoicePrefix: 'INV',
-      nextEstimateNumber: 1,
-      nextInvoiceNumber: 1,
-      defaultPaymentTermDays: 30,
-      terminologyPreferences: {},
-      createdAt: now,
-      updatedAt: now,
-      ...(googleReviewUrl !== undefined ? { googleReviewUrl } : {}),
-    } as TenantSettings)
-    .then(() => repo);
 }
 
 function buildApp(opts: {
@@ -347,9 +317,6 @@ describe('Google Business integrations routes', () => {
     const summary = await integrationRepo.get(TENANT);
     expect(summary?.accountId).toBe('123');
     expect(summary?.locationId).toBe('999');
-    expect(summary?.placeId).toBe('PID-999');
-    expect(summary?.reviewUrl).toBe(REVIEW_URL_999);
-    expect(summary?.locationStatus).toBe('connected');
 
     // Audit: callback consumed by the system actor (no Clerk session).
     const events = await auditRepo.findByEntity(
@@ -565,9 +532,7 @@ describe('Google Business integrations routes', () => {
         tenantId: TENANT,
         userId: USER,
         provider: 'google_business',
-        ...(redirectAfter ? { redirectAfter } : {}),
       });
-      const auditRepo = new InMemoryAuditRepository();
       const app = buildApp({
         integrationRepo,
         stateRepo,

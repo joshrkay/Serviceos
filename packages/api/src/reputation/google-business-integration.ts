@@ -90,14 +90,7 @@ interface StoredGoogleBusinessCredentials {
   accessTokenEnc?: string;
   refreshTokenEnc?: string;
   accessTokenExpiresAt?: string;
-  providerData?: {
-    accountId?: string;
-    locationId?: string;
-    locationTitle?: string;
-    placeId?: string;
-    reviewUrl?: string;
-    locationStatus?: 'needs_selection';
-  };
+  providerData?: StoredProviderData;
   /** dev/test + legacy hand-seeded plaintext fallbacks */
   accessToken?: string;
   refreshToken?: string;
@@ -246,17 +239,6 @@ export async function callWithGoogleBusinessAuthRetry<T>(
 
 /* ───────────────────── Integration repository ───────────────────── */
 
-/**
- * Where the connected Google account stands on location choice:
- * `connected` (a location is stored), `needs_selection` (several
- * locations, owner has not picked) or `no_location` (the account has
- * none — the guided create-your-profile state).
- */
-export type GoogleBusinessLocationStatus =
-  | 'connected'
-  | 'needs_selection'
-  | 'no_location';
-
 export interface GoogleBusinessIntegrationSummary {
   /** tenant_integrations.id (audit entity id). */
   id: string;
@@ -264,20 +246,21 @@ export interface GoogleBusinessIntegrationSummary {
   status: string;
   accountId: string | null;
   locationId: string | null;
-  locationTitle: string | null;
   placeId: string | null;
   reviewUrl: string | null;
-  locationStatus: GoogleBusinessLocationStatus;
+  locationTitle: string | null;
+  /** Locations discovery saw at connect time; null when unknown. */
+  locationCount: number | null;
   updatedAt: Date;
 }
 
-/** The location facts stored on the integration row. */
-export interface GoogleBusinessLocationFields {
-  accountId?: string;
-  locationId?: string;
-  locationTitle?: string | null;
-  placeId?: string | null;
-  reviewUrl?: string | null;
+/** The chosen location's listing fields (D-044 "Google listing"). */
+export interface GoogleBusinessLocationSelection {
+  accountId: string;
+  locationId: string;
+  placeId: string | null;
+  reviewUrl: string | null;
+  locationTitle: string | null;
 }
 
 export interface UpsertGoogleBusinessIntegrationInput {
@@ -285,13 +268,24 @@ export interface UpsertGoogleBusinessIntegrationInput {
   accessToken: string;
   refreshToken: string;
   accessTokenExpiresAt: Date;
-  accountId?: string;
-  locationId?: string;
-  locationTitle?: string | null;
-  placeId?: string | null;
-  reviewUrl?: string | null;
-  /** Set when the account has several locations and none is chosen yet. */
-  needsSelection?: boolean;
+  /** Present when exactly one location was discovered. */
+  selection?: GoogleBusinessLocationSelection;
+  /** How many locations discovery saw; omitted when discovery failed. */
+  locationCount?: number;
+}
+
+/**
+ * Whether the connected listing is usable: `connected` (a location is
+ * chosen), `needs_pick` (several, or discovery failed — the owner chooses),
+ * or `no_location` (the Google account has no Business Profile yet).
+ */
+export type GoogleBusinessLocationState = 'connected' | 'needs_pick' | 'no_location';
+
+export function googleBusinessLocationState(
+  summary: Pick<GoogleBusinessIntegrationSummary, 'locationId' | 'locationCount'>,
+): GoogleBusinessLocationState {
+  if (summary.locationId) return 'connected';
+  return summary.locationCount === 0 ? 'no_location' : 'needs_pick';
 }
 
 export interface GoogleBusinessIntegrationRepository
@@ -339,25 +333,6 @@ export interface GoogleBusinessIntegrationRepository
    * disconnect. The audit event is the durable record.
    */
   disconnect(tenantId: string): Promise<boolean>;
-  /**
-   * Stored tokens + account id for calls made on the tenant's behalf
-   * outside the poll worker (the location picker). Null when no row or
-   * no recoverable access token.
-   */
-  getAuth(tenantId: string): Promise<GoogleBusinessStoredAuth | null>;
-  /**
-   * Record the owner's chosen location (clears `needs_selection`).
-   * Null when the tenant has no integration row.
-   */
-  setLocation(
-    tenantId: string,
-    fields: GoogleBusinessLocationFields & { accountId: string; locationId: string },
-  ): Promise<GoogleBusinessIntegrationSummary | null>;
-}
-
-export interface GoogleBusinessStoredAuth {
-  tokens: GoogleBusinessTokens;
-  accountId: string | null;
 }
 
 function buildCredentialsJson(
@@ -369,41 +344,32 @@ function buildCredentialsJson(
     refreshTokenEnc: encrypt(input.refreshToken, key),
     accessTokenExpiresAt: input.accessTokenExpiresAt.toISOString(),
     providerData: {
-      ...(input.accountId !== undefined ? { accountId: input.accountId } : {}),
-      ...providerLocationData(input),
-      ...(input.needsSelection ? { locationStatus: 'needs_selection' } : {}),
+      ...(input.selection ? selectionProviderData(input.selection) : {}),
+      ...(input.locationCount !== undefined
+        ? { locationCount: input.locationCount }
+        : {}),
     },
   };
 }
 
-/** Location keys of `providerData`; undefined / null values are omitted. */
-function providerLocationData(
-  f: GoogleBusinessLocationFields,
-): Record<string, string> {
-  return {
-    ...(f.locationId ? { locationId: f.locationId } : {}),
-    ...(f.locationTitle ? { locationTitle: f.locationTitle } : {}),
-    ...(f.placeId ? { placeId: f.placeId } : {}),
-    ...(f.reviewUrl ? { reviewUrl: f.reviewUrl } : {}),
-  };
-}
+const FORGOTTEN_LISTING: StoredProviderData = {
+  accountId: null,
+  locationId: null,
+  placeId: null,
+  reviewUrl: null,
+  locationTitle: null,
+};
 
-/** The `providerData` object after the owner picks a location. */
-function providerDataAfterPick(
-  existing: Record<string, unknown> | undefined,
-  fields: GoogleBusinessLocationFields & { accountId: string },
-): Record<string, unknown> {
-  const next: Record<string, unknown> = { ...existing };
-  for (const key of [
-    'locationId',
-    'locationTitle',
-    'placeId',
-    'reviewUrl',
-    'locationStatus',
-  ]) {
-    delete next[key];
-  }
-  return { ...next, accountId: fields.accountId, ...providerLocationData(fields) };
+function selectionProviderData(
+  selection: GoogleBusinessLocationSelection,
+): StoredProviderData {
+  return {
+    accountId: selection.accountId,
+    locationId: selection.locationId,
+    placeId: selection.placeId,
+    reviewUrl: selection.reviewUrl,
+    locationTitle: selection.locationTitle,
+  };
 }
 
 function summaryFromCredentials(
@@ -419,31 +385,20 @@ function summaryFromCredentials(
     credentials,
     credential_version: 0,
   });
-  const data = (credentials as StoredGoogleBusinessCredentials).providerData;
+  const listing =
+    ((credentials as StoredGoogleBusinessCredentials).providerData ?? {});
   return {
     id,
     tenantId,
     status,
     accountId: accountId ?? null,
     locationId: locationId ?? null,
-    locationTitle: data?.locationTitle ?? null,
-    placeId: data?.placeId ?? null,
-    reviewUrl: data?.reviewUrl ?? null,
-    locationStatus: locationId
-      ? 'connected'
-      : data?.locationStatus === 'needs_selection'
-        ? 'needs_selection'
-        : 'no_location',
+    placeId: listing.placeId ?? null,
+    reviewUrl: listing.reviewUrl ?? null,
+    locationTitle: listing.locationTitle ?? null,
+    locationCount:
+      typeof listing.locationCount === 'number' ? listing.locationCount : null,
     updatedAt,
-  };
-}
-
-function storedAuthFromRow(row: CredentialRow): GoogleBusinessStoredAuth | null {
-  const tokens = resolveGoogleBusinessTokens(row, process.env[ENCRYPTION_KEY_VAR]);
-  if (!tokens) return null;
-  return {
-    tokens,
-    accountId: resolveGoogleBusinessLocation(row).accountId ?? null,
   };
 }
 
@@ -508,25 +463,46 @@ export class InMemoryGoogleBusinessIntegrationRepository
     return this.rows.delete(tenantId);
   }
 
-  async getAuth(tenantId: string): Promise<GoogleBusinessStoredAuth | null> {
+  async getTokens(tenantId: string): Promise<GoogleBusinessTokens | null> {
     const entry = this.rows.get(tenantId);
-    return entry ? storedAuthFromRow(entry.row) : null;
+    return entry ? resolveGoogleBusinessTokens(entry.row, getKey()) : null;
   }
 
-  async setLocation(
+  async selectLocation(
     tenantId: string,
-    fields: GoogleBusinessLocationFields & { accountId: string; locationId: string },
+    selection: GoogleBusinessLocationSelection,
   ): Promise<GoogleBusinessIntegrationSummary | null> {
+    return this.mergeProviderData(tenantId, selectionProviderData(selection));
+  }
+
+  async recordLocationCount(
+    tenantId: string,
+    locationCount: number,
+  ): Promise<GoogleBusinessIntegrationSummary | null> {
+    return this.mergeProviderData(tenantId, { locationCount });
+  }
+
+  async forgetLocation(
+    tenantId: string,
+    locationCount: number,
+  ): Promise<GoogleBusinessIntegrationSummary | null> {
+    return this.mergeProviderData(tenantId, { ...FORGOTTEN_LISTING, locationCount });
+  }
+
+  private mergeProviderData(
+    tenantId: string,
+    patch: Partial<StoredProviderData>,
+  ): GoogleBusinessIntegrationSummary | null {
     const entry = this.rows.get(tenantId);
     if (!entry) return null;
-    const existing = (entry.row.credentials as StoredGoogleBusinessCredentials)
-      .providerData;
+    const creds = entry.row.credentials as StoredGoogleBusinessCredentials;
+    const credentials: Record<string, unknown> = {
+      ...entry.row.credentials,
+      providerData: { ...creds.providerData, ...patch },
+    };
     entry.row = {
       ...entry.row,
-      credentials: {
-        ...entry.row.credentials,
-        providerData: providerDataAfterPick(existing, fields),
-      },
+      credentials,
       credential_version: entry.row.credential_version + 1,
     };
     entry.updatedAt = new Date();
@@ -534,7 +510,7 @@ export class InMemoryGoogleBusinessIntegrationRepository
       entry.id,
       tenantId,
       entry.status,
-      entry.row.credentials,
+      credentials,
       entry.updatedAt,
     );
   }
@@ -667,47 +643,78 @@ export class PgGoogleBusinessIntegrationRepository
     });
   }
 
-  async getAuth(tenantId: string): Promise<GoogleBusinessStoredAuth | null> {
+  async getTokens(tenantId: string): Promise<GoogleBusinessTokens | null> {
     return this.withTenant(tenantId, async (client) => {
       const result = await client.query(
-        `SELECT tenant_id, provider, credentials, credential_version
+        `SELECT credentials, credential_version
            FROM tenant_integrations
           WHERE tenant_id = $1 AND provider = $2`,
         [tenantId, GOOGLE_BUSINESS_PROVIDER],
       );
       if (result.rows.length === 0) return null;
-      return storedAuthFromRow(result.rows[0] as CredentialRow);
+      const row = result.rows[0] as {
+        credentials: Record<string, unknown>;
+        credential_version: number;
+      };
+      return resolveGoogleBusinessTokens(
+        {
+          tenant_id: tenantId,
+          provider: GOOGLE_BUSINESS_PROVIDER,
+          credentials: row.credentials,
+          credential_version: row.credential_version,
+        },
+        getKey(),
+      );
     });
   }
 
-  async setLocation(
+  async selectLocation(
     tenantId: string,
-    fields: GoogleBusinessLocationFields & { accountId: string; locationId: string },
+    selection: GoogleBusinessLocationSelection,
+  ): Promise<GoogleBusinessIntegrationSummary | null> {
+    return this.mergeProviderData(tenantId, selectionProviderData(selection));
+  }
+
+  async recordLocationCount(
+    tenantId: string,
+    locationCount: number,
+  ): Promise<GoogleBusinessIntegrationSummary | null> {
+    return this.mergeProviderData(tenantId, { locationCount });
+  }
+
+  async forgetLocation(
+    tenantId: string,
+    locationCount: number,
+  ): Promise<GoogleBusinessIntegrationSummary | null> {
+    return this.mergeProviderData(tenantId, { ...FORGOTTEN_LISTING, locationCount });
+  }
+
+  private async mergeProviderData(
+    tenantId: string,
+    patch: Partial<StoredProviderData>,
   ): Promise<GoogleBusinessIntegrationSummary | null> {
     return this.withTenant(tenantId, async (client) => {
-      // Read-modify-write under FOR UPDATE so a concurrent token
-      // rotation (which merges into credentials) cannot be lost.
-      const current = await client.query(
-        `SELECT credentials FROM tenant_integrations
-          WHERE tenant_id = $1 AND provider = $2 FOR UPDATE`,
-        [tenantId, GOOGLE_BUSINESS_PROVIDER],
-      );
-      if (current.rows.length === 0) return null;
-      const existing = (current.rows[0].credentials as StoredGoogleBusinessCredentials)
-        .providerData;
+      // Merge into providerData: the patched fields are replaced, the
+      // tokens and every other field are kept.
       const result = await client.query(
         `UPDATE tenant_integrations
-            SET credentials = jsonb_set(credentials, '{providerData}', $3::jsonb),
+            SET credentials = jsonb_set(
+                  credentials,
+                  '{providerData}',
+                  COALESCE(credentials->'providerData', '{}'::jsonb) || $3::jsonb
+                ),
                 credential_version = credential_version + 1,
                 updated_at = NOW()
           WHERE tenant_id = $1 AND provider = $2
-        RETURNING id, status, credentials, updated_at`,
+          RETURNING id, status, credentials, updated_at`,
         [
           tenantId,
           GOOGLE_BUSINESS_PROVIDER,
-          JSON.stringify(providerDataAfterPick(existing, fields)),
+          JSON.stringify(patch),
         ],
       );
+      if (result.rows.length === 0) return null;
+      // The poll worker caches credential rows; the new location must reach it.
       await client.query(`SELECT pg_notify('tenant_integration_rotated', $1)`, [
         `${tenantId}:${GOOGLE_BUSINESS_PROVIDER}`,
       ]);
