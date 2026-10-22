@@ -5456,6 +5456,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           store: voiceSessionStore,
           gateway: llmGateway,
           ...(pool ? { pool } : {}),
+          // A4-2 — without it the summary call still runs at the end of a
+          // chat but its call_summaries row is never written (A2).
+          ...(callSummaryRepo ? { callSummaryRepo } : {}),
           auditRepo,
           proposalRepo,
           customerRepo,
