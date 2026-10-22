@@ -3890,7 +3890,8 @@ export function createVoiceTurnProcessor(
         outcome,
         state: session.machine.currentState,
         channel:
-          session.channel === 'telephony' ? 'voice_inbound' : 'inapp_voice',
+          session.persistChannel ??
+          (session.channel === 'telephony' ? 'voice_inbound' : 'inapp_voice'),
         ...(session.callSid !== undefined ? { callSid: session.callSid } : {}),
         // 15.8/15.9 — persist the in-memory transcript so /api/interactions
         // can surface the full conversation without relying on the

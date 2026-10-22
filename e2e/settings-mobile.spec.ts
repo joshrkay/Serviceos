@@ -309,4 +309,46 @@ test.describe('settings — mobile viewport', () => {
     const sheet = await dialog.locator('> div').first().evaluate((el) => ({ sw: el.scrollWidth, cw: el.clientWidth }));
     expect(sheet.sw).toBeLessThanOrEqual(sheet.cw + 1);
   });
+
+  // #1737 — the Web chat sheet (snippet, allowed sites, caps, kill switch) fits
+  // 320px; every control clears 44px. A long snippet is the worst case.
+  test('Web chat sheet fits 320px and its controls clear 44px (#1737)', async ({ page }) => {
+    const token = `11111111-1111-4111-8111-111111111111.${'a'.repeat(24)}`;
+    await page.route('**/api/webchat', async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          data: {
+            enabled: true,
+            killed: false,
+            allowedOrigins: ['https://www.northwest-heating-cooling-and-plumbing.example.com'],
+            dailyTurnCap: 200,
+            dailyCostCapCents: 500,
+            snippet: `<script async src="https://api.example.com/api/public/webchat/widget.js" data-token="${token}"></script>`,
+            available: true,
+            usageToday: { turns: 12, costCents: 34 },
+          },
+        }),
+      });
+    });
+    await openSettingsSettled(page);
+
+    await page.getByRole('button', { name: /web chat/i }).first().click();
+    const dialog = page.getByRole('dialog', { name: /Web chat/i });
+    await expect(dialog.getByTestId('webchat-snippet')).toBeVisible();
+    const controls = dialog.locator('button, textarea:not([readonly]), input');
+    const count = await controls.count();
+    expect(count).toBeGreaterThanOrEqual(7);
+    for (let i = 0; i < count; i++) {
+      expect((await controls.nth(i).boundingBox())?.height ?? 0).toBeGreaterThanOrEqual(44);
+    }
+    const { scrollWidth, clientWidth } = await page.evaluate(() => ({
+      scrollWidth: document.documentElement.scrollWidth,
+      clientWidth: document.documentElement.clientWidth,
+    }));
+    await expectNoHorizontalOverflow(scrollWidth, clientWidth);
+    const sheet = await dialog.locator('> div').first().evaluate((el) => ({ sw: el.scrollWidth, cw: el.clientWidth }));
+    expect(sheet.sw).toBeLessThanOrEqual(sheet.cw + 1);
+  });
 });

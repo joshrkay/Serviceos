@@ -8250,173 +8250,342 @@ export const MIGRATIONS = {
       ADD COLUMN IF NOT EXISTS auth_generation INTEGER NOT NULL DEFAULT 0;
   `,
 
-  // #1750 (D-044) — Get found online checklist facts on tenant_settings,
-  // read by /api/get-found. Restored: it was dropped resolving the merge with
-  // 331_get_found_online (#1752), leaving the route reading columns no
-  // migration created.
-  //   presence_path           — the owner's "do you have a website?" answer; NULL = unanswered
-  //   forwarding_mode         — missed calls only (NULL reads as this default) or all calls
-  //   get_found_skipped_items — checklist item ids the owner skipped
-  // The forwarded line and its forwarding check are NOT new: they are 318's
-  // forwarding_source_number / forwarding_verified_at, bound to the line by
-  // forwarding_generation. Skipped-item ids are not CHECKed: the set grows
-  // with each slice and is validated at the request boundary.
-  '332_tenant_settings_get_found': `
+  // D-044 / #1765 — how the owner forwards their own number to their Rivet
+  // line: carrier and mode (missed calls only, or all calls). NULL carrier
+  // means forwarding was never set up; verified_at is the last passing check
+  // (#1766), cleared whenever the carrier or mode changes. Codes live in
+  // shared call-forwarding.
+  '332_call_forwarding_setup': `
     ALTER TABLE tenant_settings
-      ADD COLUMN IF NOT EXISTS presence_path TEXT,
-      ADD COLUMN IF NOT EXISTS forwarding_mode TEXT,
-      ADD COLUMN IF NOT EXISTS get_found_skipped_items TEXT[] NOT NULL DEFAULT '{}';
+      ADD COLUMN IF NOT EXISTS call_forwarding_carrier TEXT
+        CHECK (call_forwarding_carrier IN ('verizon', 'att', 'tmobile', 'other'));
     ALTER TABLE tenant_settings
-      DROP CONSTRAINT IF EXISTS tenant_settings_presence_path_check,
-      ADD CONSTRAINT tenant_settings_presence_path_check
-        CHECK (presence_path IN ('own_website', 'google_only', 'neither')) NOT VALID;
+      ADD COLUMN IF NOT EXISTS call_forwarding_mode TEXT
+        CHECK (call_forwarding_mode IN ('missed', 'all'));
     ALTER TABLE tenant_settings
-      DROP CONSTRAINT IF EXISTS tenant_settings_forwarding_mode_check,
-      ADD CONSTRAINT tenant_settings_forwarding_mode_check
-        CHECK (forwarding_mode IN ('missed_calls', 'all_calls')) NOT VALID;
-  `,
-  // D-045 (Josh, 2026-10-22: "write both") — the owner may keep one wording
-  // per language, so a business with English and Spanish customers writes
-  // each text twice. Key moves from (tenant, purpose) to (tenant, purpose,
-  // language); existing rows keep the language they were written in.
-  '333_customer_text_wording_per_language': `
-    ALTER TABLE customer_text_wording DROP CONSTRAINT IF EXISTS customer_text_wording_pkey;
-    ALTER TABLE customer_text_wording ADD PRIMARY KEY (tenant_id, purpose, language);
+      ADD COLUMN IF NOT EXISTS call_forwarding_verified_at TIMESTAMPTZ;
   `,
 
-  // #1750 (D-044) — Get found online checklist facts on tenant_settings.
-  //   presence_path           — the owner's "do you have a website?" answer; NULL = unanswered
-  //   forwarding_mode         — missed calls only (NULL reads as this default) or all calls
-  //   get_found_skipped_items — checklist item ids the owner skipped
-  // The forwarded line and its forwarding check are NOT new: they are 318's
-  // forwarding_source_number / forwarding_verified_at, bound to the line by
-  // forwarding_generation. Skipped-item ids are not CHECKed: the set grows
-  // with each slice and is validated at the request boundary.
-  '334_tenant_settings_get_found': `
-    ALTER TABLE tenant_settings
-      ADD COLUMN IF NOT EXISTS presence_path TEXT,
-      ADD COLUMN IF NOT EXISTS forwarding_mode TEXT,
-      ADD COLUMN IF NOT EXISTS get_found_skipped_items TEXT[] NOT NULL DEFAULT '{}';
-    ALTER TABLE tenant_settings
-      DROP CONSTRAINT IF EXISTS tenant_settings_presence_path_check,
-      ADD CONSTRAINT tenant_settings_presence_path_check
-        CHECK (presence_path IN ('own_website', 'google_only', 'neither')) NOT VALID;
-    ALTER TABLE tenant_settings
-      DROP CONSTRAINT IF EXISTS tenant_settings_forwarding_mode_check,
-      ADD CONSTRAINT tenant_settings_forwarding_mode_check
-        CHECK (forwarding_mode IN ('missed_calls', 'all_calls')) NOT VALID;
+  // D-044 / #1766 — the forwarding check: a short-lived correlation record
+  // between the test call we place and the call that comes back through the
+  // owner's carrier. The inbound voice webhook matches on (tenant, Rivet
+  // number as caller, still pending, not expired). One row per attempt; the
+  // result is audited, and tenant_settings.call_forwarding_verified_at keeps
+  // the last pass.
+  '333_call_forwarding_checks': `
+    CREATE TABLE IF NOT EXISTS call_forwarding_checks (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      status TEXT NOT NULL DEFAULT 'pending'
+        CHECK (status IN ('pending', 'passed', 'timed_out', 'failed')),
+      mode TEXT NOT NULL CHECK (mode IN ('missed', 'all')),
+      rivet_number TEXT NOT NULL,
+      business_number TEXT NOT NULL,
+      call_sid TEXT,
+      failure_reason TEXT CHECK (failure_reason IN ('call_not_placed')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      expires_at TIMESTAMPTZ NOT NULL,
+      completed_at TIMESTAMPTZ
+    );
+    CREATE INDEX IF NOT EXISTS idx_call_forwarding_checks_tenant_created
+      ON call_forwarding_checks (tenant_id, created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_call_forwarding_checks_pending
+      ON call_forwarding_checks (tenant_id, rivet_number) WHERE status = 'pending';
+    ALTER TABLE call_forwarding_checks ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE call_forwarding_checks FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_call_forwarding_checks ON call_forwarding_checks;
+    CREATE POLICY tenant_isolation_call_forwarding_checks ON call_forwarding_checks
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
-  // 335 — Dispatch FR-2 phase 3c, review round 2: consent is pinned to the
-  // visits it was given for. 332 let an accepted row overlap anything; this
-  // adds overlap_accepted_with, backfills rows 332 already marked, and
-  // re-creates the guard so an accepted row may overlap ONLY those visits
-  // while an unaccepted row may still overlap nothing active. 333 and 334
-  // are taken by other work in flight.
-  '335_assignment_overlap_accepted_with': `
-    -- The visits (appointment ids) the dispatcher accepted the overlap with.
-    ALTER TABLE appointment_assignments
-      ADD COLUMN IF NOT EXISTS overlap_accepted_with UUID[] NOT NULL DEFAULT '{}';
 
-    -- Backfill: a database that ran 332 before this migration holds accepted
-    -- rows with an empty overlap_accepted_with. The guard below would refuse
-    -- the next status change on them, so pin each one to the active visits
-    -- it overlaps today (the ones the dispatcher saw and accepted). A row
-    -- with nothing left to overlap keeps its empty list, which the guard
-    -- treats as "accepted nothing". No-op once filled.
-    UPDATE appointment_assignments a
-       SET overlap_accepted_with = filled.ids
-      FROM (
-        SELECT acc.id, array_agg(DISTINCT other.appointment_id) AS ids
-          FROM appointment_assignments acc
-          JOIN appointment_assignments other
-            ON other.tenant_id = acc.tenant_id
-           AND other.technician_id = acc.technician_id
-           AND other.id <> acc.id
-           AND other.appointment_status NOT IN ('canceled', 'no_show')
-           AND other.scheduled_start IS NOT NULL AND other.scheduled_end IS NOT NULL
-           AND tstzrange(other.scheduled_start, other.scheduled_end)
-               && tstzrange(acc.scheduled_start, acc.scheduled_end)
-         WHERE acc.overlap_accepted
-           AND acc.overlap_accepted_with = '{}'::uuid[]
-           AND acc.appointment_status NOT IN ('canceled', 'no_show')
-           AND acc.scheduled_start IS NOT NULL AND acc.scheduled_end IS NOT NULL
-         GROUP BY acc.id
-      ) filled
-     WHERE a.id = filled.id;
+  // D-044 / #1768 — the hosted tenant site: one row per business holding its
+  // chosen address (slug) and whether it is live, plus the owner's website URL
+  // on tenant settings ("I have one", or the published tenant site). The slug
+  // is the subdomain on TENANT_SITE_BASE_DOMAIN, unique across tenants.
+  '334_tenant_sites': `
+    CREATE TABLE IF NOT EXISTS tenant_sites (
+      tenant_id UUID PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+      slug TEXT NOT NULL CHECK (slug ~ '^[a-z0-9]([a-z0-9-]{1,40}[a-z0-9])$'),
+      published BOOLEAN NOT NULL DEFAULT FALSE,
+      published_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tenant_sites_slug ON tenant_sites (slug);
+    ALTER TABLE tenant_sites ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE tenant_sites FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_tenant_sites ON tenant_sites;
+    CREATE POLICY tenant_isolation_tenant_sites ON tenant_sites
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS website_url TEXT;
+  `,
 
-    -- An EXCLUDE constraint is symmetric, so a row outside its WHERE is also
-    -- invisible to every later row: without this guard a plain booking that
-    -- overlapped ONLY an accepted visit would slip past Postgres. This
-    -- trigger is the asymmetric, consent-aware half:
-    --   * an UNaccepted row may overlap nothing active, accepted rows included;
-    --   * an accepted row may overlap only the visits it was accepted with
-    --     (overlap_accepted_with), so a clash that appeared after the
-    --     dispatcher looked is still refused.
-    -- Every writer, accepted or not, takes the per-(tenant, technician)
-    -- advisory lock first and holds it to the end of the transaction, so two
-    -- racing bookings for the same tech are checked one after the other.
-    CREATE OR REPLACE FUNCTION check_overlap_accepted_guard()
-    RETURNS TRIGGER LANGUAGE plpgsql AS $guard$
-    BEGIN
-      IF NEW.appointment_status IN ('canceled', 'no_show')
-         OR NEW.scheduled_start IS NULL OR NEW.scheduled_end IS NULL THEN
-        RETURN NEW;
-      END IF;
-      PERFORM pg_advisory_xact_lock(hashtext(NEW.tenant_id::text), hashtext(NEW.technician_id::text));
-      IF EXISTS (
-        SELECT 1 FROM appointment_assignments aa
-        WHERE aa.tenant_id = NEW.tenant_id
-          AND aa.technician_id = NEW.technician_id
-          AND aa.id <> NEW.id
-          AND aa.appointment_status NOT IN ('canceled', 'no_show')
-          AND aa.scheduled_start IS NOT NULL AND aa.scheduled_end IS NOT NULL
-          AND tstzrange(aa.scheduled_start, aa.scheduled_end)
-              && tstzrange(NEW.scheduled_start, NEW.scheduled_end)
-          AND NOT (NEW.overlap_accepted AND aa.appointment_id = ANY (NEW.overlap_accepted_with))
-      ) THEN
-        -- Raised as the no_double_booking violation it is (same SQLSTATE and
-        -- constraint name as the EXCLUDE constraint), so every caller that
-        -- recognised the constraint keeps recognising the guard.
-        RAISE EXCEPTION 'DOUBLE_BOOKING: technician % already has an active assignment overlapping [%, %]%',
-          NEW.technician_id, NEW.scheduled_start, NEW.scheduled_end,
-          CASE WHEN NEW.overlap_accepted THEN ' that the dispatcher did not accept' ELSE '' END
-          USING ERRCODE = 'exclusion_violation', CONSTRAINT = 'no_double_booking';
-      END IF;
-      RETURN NEW;
-    END;
-    $guard$;
+  // D-044 / #1769 — the hosted tenant site's AI-drafted, owner-approved "about"
+  // copy. Written only by approving an update_tenant_site_about proposal.
+  '335_tenant_site_about': `
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS site_about_text TEXT;
+  `,
 
-    DROP TRIGGER IF EXISTS trg_overlap_accepted_guard ON appointment_assignments;
-    CREATE TRIGGER trg_overlap_accepted_guard
-      BEFORE INSERT OR UPDATE OF scheduled_start, scheduled_end, appointment_status,
-        overlap_accepted, overlap_accepted_with, technician_id
-      ON appointment_assignments
-      FOR EACH ROW EXECUTE FUNCTION check_overlap_accepted_guard();
+  // #1735 — outbound multi-step drip campaigns (SMS | call | email). A
+  // sequence is an ordered list of steps (JSONB, validated by the Zod
+  // contract in src/marketing/drip/sequence.ts); an enrollment is one target
+  // customer walking it. Off by default behind the 'drip_campaigns' tenant
+  // flag. booked_* columns are the attribution of a booking to the campaign.
+  '336_drip_campaigns': `
+    CREATE TABLE IF NOT EXISTS drip_sequences (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      name TEXT NOT NULL,
+      target_kind TEXT NOT NULL CHECK (target_kind IN ('lapsed_customers', 'unsold_estimates')),
+      target_days INTEGER NOT NULL DEFAULT 180 CHECK (target_days BETWEEN 1 AND 3650),
+      steps JSONB NOT NULL,
+      status TEXT NOT NULL DEFAULT 'paused' CHECK (status IN ('active', 'paused')),
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_drip_sequences_tenant ON drip_sequences(tenant_id);
+    ALTER TABLE drip_sequences ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE drip_sequences FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_drip_sequences ON drip_sequences;
+    CREATE POLICY tenant_isolation_drip_sequences ON drip_sequences
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
 
-    -- 332's sync plus the array reset: a new window drops the acceptance
-    -- and the visits it named.
-    CREATE OR REPLACE FUNCTION sync_appointment_to_assignments()
-    RETURNS TRIGGER AS $$
-    BEGIN
-      IF (NEW.scheduled_start IS DISTINCT FROM OLD.scheduled_start
-          OR NEW.scheduled_end IS DISTINCT FROM OLD.scheduled_end
-          OR NEW.status IS DISTINCT FROM OLD.status) THEN
-        UPDATE appointment_assignments
-           SET scheduled_start = NEW.scheduled_start,
-               scheduled_end = NEW.scheduled_end,
-               appointment_status = NEW.status,
-               overlap_accepted = overlap_accepted
-                 AND NEW.scheduled_start IS NOT DISTINCT FROM OLD.scheduled_start
-                 AND NEW.scheduled_end IS NOT DISTINCT FROM OLD.scheduled_end,
-               overlap_accepted_with = CASE
-                 WHEN NEW.scheduled_start IS NOT DISTINCT FROM OLD.scheduled_start
-                  AND NEW.scheduled_end IS NOT DISTINCT FROM OLD.scheduled_end
-                 THEN overlap_accepted_with ELSE '{}'::uuid[] END
-         WHERE appointment_id = NEW.id AND tenant_id = NEW.tenant_id;
-      END IF;
-      RETURN NEW;
-    END;
-    $$ LANGUAGE plpgsql;
+    CREATE TABLE IF NOT EXISTS drip_enrollments (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      sequence_id UUID NOT NULL REFERENCES drip_sequences(id),
+      customer_id UUID NOT NULL REFERENCES customers(id),
+      source_entity_type TEXT,
+      source_entity_id UUID,
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'completed', 'exited')),
+      exit_reason TEXT CHECK (exit_reason IN ('completed', 'booked', 'replied', 'opted_out', 'customer_unavailable', 'cancelled')),
+      current_step INTEGER NOT NULL DEFAULT 0,
+      step_attempts INTEGER NOT NULL DEFAULT 0,
+      next_run_at TIMESTAMPTZ NOT NULL,
+      enrolled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      finished_at TIMESTAMPTZ,
+      booked_at TIMESTAMPTZ,
+      booked_appointment_id UUID,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, sequence_id, customer_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_drip_enrollments_due
+      ON drip_enrollments(tenant_id, next_run_at) WHERE status = 'active';
+    CREATE INDEX IF NOT EXISTS idx_drip_enrollments_sequence ON drip_enrollments(tenant_id, sequence_id);
+    ALTER TABLE drip_enrollments ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE drip_enrollments FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_drip_enrollments ON drip_enrollments;
+    CREATE POLICY tenant_isolation_drip_enrollments ON drip_enrollments
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // #1735 — append-only per-step outcome log (what the engine did for each
+  // step of each enrollment; the audit trail is separate).
+  '337_drip_step_events': `
+    CREATE TABLE IF NOT EXISTS drip_step_events (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      enrollment_id UUID NOT NULL REFERENCES drip_enrollments(id),
+      step_index INTEGER NOT NULL,
+      channel TEXT NOT NULL CHECK (channel IN ('sms', 'call', 'email')),
+      outcome TEXT NOT NULL CHECK (outcome IN ('sent', 'skipped', 'failed')),
+      reason TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_drip_step_events_enrollment
+      ON drip_step_events(tenant_id, enrollment_id, step_index);
+    ALTER TABLE drip_step_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE drip_step_events FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_drip_step_events ON drip_step_events;
+    CREATE POLICY tenant_isolation_drip_step_events ON drip_step_events
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // #1736 — post-call scoring. One row per scored production call: a 0-100
+  // score from the four-item rubric (booked / price grounded / escalation
+  // handled / follow-up set), the per-item verdicts (items JSONB) and the
+  // flagged moments (flags JSONB). Written by the call-scoring worker, read by
+  // GET /api/voice/scoring (owner-only). tenant_settings.call_scoring_enabled
+  // is the per-tenant OFF-by-default switch the worker honours.
+  '338_voice_call_scores': `
+    CREATE TABLE IF NOT EXISTS voice_call_scores (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      session_id UUID NOT NULL REFERENCES voice_sessions(id) ON DELETE CASCADE,
+      scored_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      score INTEGER NOT NULL CHECK (score BETWEEN 0 AND 100),
+      rubric_version TEXT NOT NULL DEFAULT 'v1',
+      items JSONB NOT NULL,
+      flags JSONB NOT NULL DEFAULT '[]'::jsonb,
+      summary TEXT NOT NULL DEFAULT '',
+      model TEXT NOT NULL,
+      cost_micro_cents BIGINT NOT NULL DEFAULT 0 CHECK (cost_micro_cents >= 0),
+      call_ended_at TIMESTAMPTZ NOT NULL,
+      UNIQUE (tenant_id, session_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_voice_call_scores_tenant_call_ended
+      ON voice_call_scores (tenant_id, call_ended_at DESC);
+    ALTER TABLE voice_call_scores ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE voice_call_scores FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_voice_call_scores ON voice_call_scores;
+    CREATE POLICY tenant_isolation_voice_call_scores ON voice_call_scores
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    ALTER TABLE tenant_settings
+      ADD COLUMN IF NOT EXISTS call_scoring_enabled BOOLEAN NOT NULL DEFAULT FALSE;
+  `,
+
+  // #1736 — the owner's "correct this call". One correction per call (a second
+  // one replaces the first and re-queues it for export). exported_at /
+  // corpus_script_id are stamped when an operator exports the correction into
+  // ai/voice-quality/corpus as a regression case (PII-redacted).
+  '339_voice_call_corrections': `
+    CREATE TABLE IF NOT EXISTS voice_call_corrections (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      session_id UUID NOT NULL REFERENCES voice_sessions(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL CHECK (kind IN (
+        'should_have_booked', 'should_have_escalated', 'should_not_have_escalated',
+        'wrong_price', 'other'
+      )),
+      turn_index INTEGER CHECK (turn_index IS NULL OR turn_index >= 0),
+      note TEXT NOT NULL DEFAULT '' CHECK (length(note) <= 500),
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      exported_at TIMESTAMPTZ,
+      corpus_script_id TEXT,
+      UNIQUE (tenant_id, session_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_voice_call_corrections_tenant_pending
+      ON voice_call_corrections (tenant_id, created_at) WHERE exported_at IS NULL;
+    ALTER TABLE voice_call_corrections ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE voice_call_corrections FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_voice_call_corrections ON voice_call_corrections;
+    CREATE POLICY tenant_isolation_voice_call_corrections ON voice_call_corrections
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // #1737 — per-tenant web chat widget settings (webchat/webchat-config.ts).
+  // No row means the widget is off. embed_token is a public id, not a secret.
+  '340_webchat_config': `
+    CREATE TABLE IF NOT EXISTS webchat_config (
+      tenant_id UUID PRIMARY KEY REFERENCES tenants(id) ON DELETE CASCADE,
+      enabled BOOLEAN NOT NULL DEFAULT FALSE,
+      embed_token TEXT NOT NULL,
+      allowed_origins TEXT[] NOT NULL DEFAULT '{}',
+      daily_turn_cap INTEGER NOT NULL DEFAULT 200 CHECK (daily_turn_cap BETWEEN 1 AND 5000),
+      daily_cost_cap_cents INTEGER NOT NULL DEFAULT 500 CHECK (daily_cost_cap_cents BETWEEN 1 AND 20000),
+      killed_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    ALTER TABLE webchat_config ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE webchat_config FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_webchat_config ON webchat_config;
+    CREATE POLICY tenant_isolation_webchat_config ON webchat_config
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // #1737 — per-tenant per-UTC-day web chat usage; the daily turn and cost caps
+  // are enforced against this row (webchat/webchat-usage.ts). Cost is integer cents.
+  '341_webchat_usage_daily': `
+    CREATE TABLE IF NOT EXISTS webchat_usage_daily (
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      day DATE NOT NULL,
+      turns INTEGER NOT NULL DEFAULT 0,
+      cost_cents INTEGER NOT NULL DEFAULT 0,
+      PRIMARY KEY (tenant_id, day)
+    );
+    ALTER TABLE webchat_usage_daily ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE webchat_usage_daily FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_webchat_usage_daily ON webchat_usage_daily;
+    CREATE POLICY tenant_isolation_webchat_usage_daily ON webchat_usage_daily
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // #1738 — Google Local Services Ads lead intake. One row per linked tenant:
+  // the per-tenant webhook secret (AES-GCM, never plaintext) that authenticates
+  // inbound LSA lead deliveries. `enabled` and `auto_respond` default FALSE —
+  // the feature is off until an owner links it and opts in.
+  '342_lsa_integrations': `
+    CREATE TABLE IF NOT EXISTS lsa_integrations (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      enabled BOOLEAN NOT NULL DEFAULT false,
+      auto_respond BOOLEAN NOT NULL DEFAULT false,
+      webhook_secret_enc TEXT NOT NULL,
+      secret_hint TEXT NOT NULL,
+      account_id TEXT,
+      linked_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id)
+    );
+    ALTER TABLE lsa_integrations ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE lsa_integrations FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_lsa_integrations ON lsa_integrations;
+    CREATE POLICY tenant_isolation_lsa_integrations ON lsa_integrations
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // #1738 — one row per LSA lead received. UNIQUE (tenant_id, external_lead_id)
+  // is the durable idempotency key: a replayed delivery cannot create a second
+  // row, and the speed-to-lead text is only sent by the delivery that inserted
+  // it. No PII is stored here — the lead itself lives in `leads`.
+  '343_lsa_leads': `
+    CREATE TABLE IF NOT EXISTS lsa_leads (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      external_lead_id TEXT NOT NULL,
+      lead_id UUID NOT NULL,
+      lead_type TEXT NOT NULL CHECK (lead_type IN ('phone_call', 'message', 'booking')),
+      received_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      speed_to_lead_outcome TEXT,
+      disposition TEXT CHECK (disposition IN ('booked', 'not_booked', 'spam')),
+      disposition_reported_at TIMESTAMPTZ,
+      UNIQUE (tenant_id, external_lead_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_lsa_leads_tenant_received
+      ON lsa_leads (tenant_id, received_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_lsa_leads_tenant_lead
+      ON lsa_leads (tenant_id, lead_id);
+    ALTER TABLE lsa_leads ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE lsa_leads FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_lsa_leads ON lsa_leads;
+    CREATE POLICY tenant_isolation_lsa_leads ON lsa_leads
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // D-044 / #1770 — a domain the owner already owns, pointed at their tenant
+  // site by one CNAME. The row tracks the claim through verification
+  // (pending_dns -> pending_certificate -> verified, or failed after the
+  // backoff gives up). Only a VERIFIED domain is unique across tenants and
+  // served by Host header: an unverified claim cannot squat a name, and a
+  // domain only verifies for the tenant whose slug its CNAME names.
+  '344_tenant_site_custom_domain': `
+    ALTER TABLE tenant_sites
+      ADD COLUMN IF NOT EXISTS custom_domain TEXT,
+      ADD COLUMN IF NOT EXISTS custom_domain_status TEXT,
+      ADD COLUMN IF NOT EXISTS custom_domain_error TEXT,
+      ADD COLUMN IF NOT EXISTS custom_domain_provider_ref TEXT,
+      ADD COLUMN IF NOT EXISTS custom_domain_attempts INTEGER NOT NULL DEFAULT 0,
+      ADD COLUMN IF NOT EXISTS custom_domain_next_check_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS custom_domain_checked_at TIMESTAMPTZ,
+      ADD COLUMN IF NOT EXISTS custom_domain_verified_at TIMESTAMPTZ;
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_tenant_sites_custom_domain_verified
+      ON tenant_sites (custom_domain)
+      WHERE custom_domain_status = 'verified';
+  `,
+
+  // The verification sweep's work list: claims still waiting on DNS or a
+  // certificate, soonest due first.
+  '345_tenant_site_custom_domain_due': `
+    CREATE INDEX IF NOT EXISTS idx_tenant_sites_custom_domain_due
+      ON tenant_sites (custom_domain_next_check_at)
+      WHERE custom_domain_status IN ('pending_dns', 'pending_certificate');
   `,
 };
 

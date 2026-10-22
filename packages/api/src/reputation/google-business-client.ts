@@ -539,11 +539,30 @@ async function getJson<T>(
   schema: z.ZodType<T>,
   fetchFn: GoogleFetch,
 ): Promise<T> {
+  return requestJson(url, { accessToken, op, schema, fetchFn });
+}
+
+/** One JSON call with the shared error taxonomy (429 / 401 / non-2xx / schema drift). */
+async function requestJson<T>(
+  url: string,
+  opts: {
+    accessToken: string;
+    op: string;
+    schema: z.ZodType<T>;
+    fetchFn: GoogleFetch;
+    method?: 'GET' | 'POST' | 'PATCH';
+    body?: unknown;
+  },
+): Promise<T> {
+  const { accessToken, op, schema, fetchFn } = opts;
   const res = await fetchFn(url, {
+    ...(opts.method ? { method: opts.method } : {}),
     headers: {
       Authorization: `Bearer ${accessToken}`,
       Accept: 'application/json',
+      ...(opts.body !== undefined ? { 'Content-Type': 'application/json' } : {}),
     },
+    ...(opts.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
   });
   if (res.status === 429) {
     const retryAfterRaw = res.headers.get('Retry-After');
@@ -671,4 +690,108 @@ export async function discoverLocations(
     all.push(...(await listLocations(accessToken, accountId, fetchFn)));
   }
   return all;
+}
+
+// ─── Listing website + booking link (D-044 / #1771) ─────────────────────────
+//
+// Documented surfaces (Google Business Profile APIs):
+//  - Business Information API v1: `PATCH
+//    https://mybusinessbusinessinformation.googleapis.com/v1/locations/{locationId}?updateMask=websiteUri`
+//    with a `Location` body. `updateMask` is required and names the fields
+//    written; `websiteUri` is the location's website
+//    (https://developers.google.com/my-business/reference/businessinformation/rest/v1/locations/patch).
+//  - Place Actions API v1: booking links are NOT a Location field. They are
+//    `locations/{locationId}/placeActionLinks` (host
+//    `mybusinessplaceactions.googleapis.com`), each `{ uri, placeActionType,
+//    isPreferred }`; `placeActionType: APPOINTMENT` is "book an appointment".
+//    Only one link may exist per (uri, placeActionType, location), so we list
+//    first and create only when missing
+//    (https://developers.google.com/my-business/reference/placeactions/rest/v1/locations.placeActionLinks).
+// Both need the Google project's APIs enabled; the `business.manage` scope
+// the connect flow already requests covers them.
+
+export const GOOGLE_PLACE_ACTIONS_HOST = 'https://mybusinessplaceactions.googleapis.com';
+
+const locationNameSchema = z.object({ name: z.string().optional() }).passthrough();
+
+const placeActionLinksResponseSchema = z
+  .object({
+    placeActionLinks: z
+      .array(
+        z
+          .object({
+            uri: z.string().optional(),
+            placeActionType: z.string().optional(),
+          })
+          .passthrough(),
+      )
+      .optional(),
+    nextPageToken: z.string().optional(),
+  })
+  .passthrough();
+
+/** Set the listing's website (writes `websiteUri` only, via `updateMask`). */
+export async function updateLocationWebsite(
+  accessToken: string,
+  locationId: string,
+  websiteUri: string,
+  fetchFn: GoogleFetch = boundedGoogleFetch,
+): Promise<void> {
+  const url = new URL(
+    `${GOOGLE_BUSINESS_INFORMATION_HOST}/v1/locations/${encodeURIComponent(locationId)}`,
+  );
+  url.searchParams.set('updateMask', 'websiteUri');
+  await requestJson(url.toString(), {
+    accessToken,
+    op: 'updateLocationWebsite',
+    schema: locationNameSchema,
+    fetchFn,
+    method: 'PATCH',
+    body: { websiteUri },
+  });
+}
+
+/**
+ * Make `uri` the listing's preferred "book an appointment" link. Idempotent:
+ * an identical link already on the location is left alone (Google allows one
+ * per uri + type + location). Returns whether a link was created.
+ */
+export async function ensureAppointmentLink(
+  accessToken: string,
+  locationId: string,
+  uri: string,
+  fetchFn: GoogleFetch = boundedGoogleFetch,
+): Promise<{ created: boolean }> {
+  const base = `${GOOGLE_PLACE_ACTIONS_HOST}/v1/locations/${encodeURIComponent(locationId)}/placeActionLinks`;
+  let pageToken: string | undefined;
+  for (let page = 0; page < MAX_DISCOVERY_PAGES; page++) {
+    const url = new URL(base);
+    url.searchParams.set('filter', 'placeActionType=APPOINTMENT');
+    if (pageToken) url.searchParams.set('pageToken', pageToken);
+    const data = await getJson(
+      url.toString(),
+      accessToken,
+      'listPlaceActionLinks',
+      placeActionLinksResponseSchema,
+      fetchFn,
+    );
+    if (
+      (data.placeActionLinks ?? []).some(
+        (l) => l.uri === uri && l.placeActionType === 'APPOINTMENT',
+      )
+    ) {
+      return { created: false };
+    }
+    pageToken = data.nextPageToken;
+    if (!pageToken) break;
+  }
+  await requestJson(base, {
+    accessToken,
+    op: 'createPlaceActionLink',
+    schema: z.object({}).passthrough(),
+    fetchFn,
+    method: 'POST',
+    body: { uri, placeActionType: 'APPOINTMENT', isPreferred: true },
+  });
+  return { created: true };
 }
