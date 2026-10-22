@@ -91,6 +91,8 @@ describe('/api/settings/text-wording (D-045)', () => {
 
     const invoice = res.body.texts.find((t: { purpose: string }) => t.purpose === 'invoice_text');
     expect(invoice.ours).toMatch(/Acme collects payment in person/);
+    expect(invoice.addedLines).toEqual(['Acme collects payment in person. Settle up when the work is done.']);
+    expect(res.body.texts[0].addedLines).toEqual([]);
   });
 
   it('refuses a wording without the link, saying why, and saves nothing', async () => {

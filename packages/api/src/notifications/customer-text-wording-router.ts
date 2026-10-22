@@ -24,6 +24,7 @@ import {
   renderInvoiceSms,
   renderPortalLinkSms,
   renderThankYouSms,
+  smsInvoiceCollectOnSiteLine,
 } from './templates';
 
 // Generous: the real limit is checked after trimming, with a reason the owner can act on.
@@ -123,6 +124,7 @@ export function createCustomerTextWordingRouter(deps: {
       ]);
       const businessName = settings?.businessName ?? 'Your service team';
       const language = resolveCustomerLanguage({ tenantDefaultLanguage: settings?.defaultLanguage });
+      const paymentCollectionMode = settings?.paymentCollectionMode ?? 'pay_link';
       res.json({
         language,
         maxLength: MAX_WORDING_LENGTH,
@@ -136,8 +138,14 @@ export function createCustomerTextWordingRouter(deps: {
               businessName,
               language,
               baseUrl,
-              paymentCollectionMode: settings?.paymentCollectionMode ?? 'pay_link',
+              paymentCollectionMode,
             }),
+            // Lines every send adds after the owner's wording (an invoice paid
+            // in person says so), so the preview shows what customers get.
+            addedLines:
+              purpose === 'invoice_text'
+                ? smsInvoiceCollectOnSiteLine({ businessName, language, paymentCollectionMode })
+                : [],
             saved: mine
               ? { body: mine.body, language: mine.language, updatedAt: mine.updatedAt.toISOString() }
               : null,

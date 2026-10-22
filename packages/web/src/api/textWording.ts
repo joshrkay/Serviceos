@@ -21,6 +21,8 @@ export interface WordingText {
   sampleValues: Record<string, string>;
   /** Our wording, with the sample values, in the business's language. */
   ours: string;
+  /** Lines every send adds after the owner's wording (e.g. "we collect payment in person"). */
+  addedLines: string[];
   saved: SavedWording | null;
 }
 

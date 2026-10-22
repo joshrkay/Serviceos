@@ -20,6 +20,7 @@ function state(over: Partial<TextWordingState> = {}): TextWordingState {
           link: 'https://app.example.com/e/sample',
         },
         ours: 'Hi Sam Rivera, your estimate from Acme HVAC is ready.',
+        addedLines: [],
         saved: null,
       },
       {
@@ -27,6 +28,7 @@ function state(over: Partial<TextWordingState> = {}): TextWordingState {
         fillIns: ['customer_name', 'business_name'],
         sampleValues: { customer_name: 'Sam Rivera', business_name: 'Acme HVAC' },
         ours: 'Thanks for choosing Acme HVAC!',
+        addedLines: [],
         saved: { body: 'Thanks {{customer_name}}!', language: 'en', updatedAt: '2026-10-22T12:00:00Z' },
       },
     ],
@@ -162,6 +164,19 @@ describe('D-045 — TextWordingSheet', () => {
     );
     fireEvent.click(within(thanks).getByRole('button', { name: /^save$/i }));
     await waitFor(() => expect(api.save).toHaveBeenCalledWith('thank_you_text', 'Thanks {{customer_name}}!'));
+  });
+
+  it("the preview ends with the lines every send adds (an invoice paid in person)", async () => {
+    const invoice = {
+      ...state().texts[0],
+      purpose: 'invoice_text' as const,
+      addedLines: ['Acme HVAC collects payment in person.'],
+      saved: { body: 'Invoice {{number}}: {{link}}', language: 'en', updatedAt: '2026-10-22T12:00:00Z' },
+    };
+    render(<TextWordingSheet onClose={() => {}} api={mockApi({ fetch: vi.fn().mockResolvedValue(state({ texts: [invoice] })) })} />);
+
+    const preview = await screen.findByTestId('wording-invoice_text-preview');
+    expect(preview.textContent).toBe('Invoice EST-1042: https://app.example.com/e/sample\nAcme HVAC collects payment in person.');
   });
 
   it('every button is at least 44px tall (min-h-11)', async () => {

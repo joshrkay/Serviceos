@@ -110,11 +110,8 @@ function WordingCard({
 
   // An emptied box saves nothing: what customers get is still the saved
   // wording (or ours) until the owner saves or resets.
-  const preview = draft.trim()
-    ? previewWording(draft, text.sampleValues)
-    : text.saved
-      ? previewWording(text.saved.body, text.sampleValues)
-      : text.ours;
+  const withAdded = (body: string) => [previewWording(body, text.sampleValues), ...text.addedLines].join('\n');
+  const preview = draft.trim() ? withAdded(draft) : text.saved ? withAdded(text.saved.body) : text.ours;
 
   return (
     <section aria-labelledby={`${id}-title`} className="rounded-xl border border-border p-3 space-y-2 min-w-0">
