@@ -250,16 +250,13 @@ describe('A1 — resolve-entity holds no connection across its LLM call and comm
       '/api/proposals',
       createProposalsRouter(
         proposalRepo,
+        new PgTenantTransactionRunner(pool),
         undefined,
         auditRepo,
         undefined,
         undefined,
         undefined,
         createRedraftHandlerFactory({ gateway }),
-        undefined,
-        undefined,
-        undefined,
-        new PgTenantTransactionRunner(pool),
       ),
     );
 

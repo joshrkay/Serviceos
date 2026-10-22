@@ -19,6 +19,7 @@ import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
 import { buildEstimate } from '../factories/estimate.factory';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
+import { InMemoryTransactionRunner } from '../../src/db/tenant-transaction';
 
 const TENANT = 'tenant-1405-pick';
 const USER = 'user-1405-pick';
@@ -83,6 +84,7 @@ describe('#1405 — PUT /api/proposals/:id picking the accepted estimate re-draf
       '/api/proposals',
       createProposalsRouter(
         proposalRepo,
+        new InMemoryTransactionRunner(),
         undefined,
         undefined,
         undefined,

@@ -42,6 +42,7 @@ import { noSkillConstraints } from '../helpers/no-skill-constraints';
 import { FeasibilityDependencies } from '../../src/scheduling/feasibility-types';
 import { createProposalsRouter } from '../../src/routes/proposals';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
+import { PgTenantTransactionRunner } from '../../src/db/tenant-transaction';
 
 const NOW = new Date('2026-08-10T14:00:00.000Z');
 
@@ -166,7 +167,7 @@ describe('Postgres integration — dispatch drag → proposal (row 4.2)', () => 
     });
     app.use(
       '/api/proposals',
-      createProposalsRouter(proposalRepo, appointmentRepo, auditRepo, feasibilityDeps),
+      createProposalsRouter(proposalRepo, new PgTenantTransactionRunner(pool), appointmentRepo, auditRepo, feasibilityDeps),
     );
     return app;
   }

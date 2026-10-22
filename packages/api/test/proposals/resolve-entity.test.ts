@@ -15,7 +15,7 @@ import type { TaskHandler, TaskContext } from '../../src/ai/tasks/task-handlers'
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import { createExecutionHandlerRegistry } from '../../src/proposals/execution/handlers';
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../../src/shared/errors';
-import type { TenantTransactionRunner } from '../../src/db/tenant-transaction';
+import { InMemoryTransactionRunner, type TenantTransactionRunner } from '../../src/db/tenant-transaction';
 import type { EntityAliasCandidateCapture } from '../../src/learning/entity-aliases/candidate-service';
 
 const TENANT = 't-resolve-entity';
@@ -72,7 +72,7 @@ describe('U8 — resolveProposalEntity', () => {
   const call = (candidateId: string, actorRole: 'owner' | 'technician' = 'owner') =>
     resolveProposalEntity(
       { tenantId: TENANT, proposalId: PROPOSAL, candidateId, actorId: OWNER, actorRole },
-      { proposalRepo: repo, auditRepo },
+      { proposalRepo: repo, auditRepo, transactionRunner: new InMemoryTransactionRunner() },
     );
 
   it('re-drafts the original action with the chosen entity, moves to ready_for_review (never approves), clears candidates, audits', async () => {
@@ -183,6 +183,7 @@ describe('U8 — resolveProposalEntity', () => {
       {
         proposalRepo: repo,
         auditRepo,
+        transactionRunner: new InMemoryTransactionRunner(),
         entityAliasCandidateCapture: {
           capture: async (input) => {
             captures.push(input);
@@ -217,6 +218,7 @@ describe('U8 — resolveProposalEntity', () => {
       {
         proposalRepo: repo,
         auditRepo,
+        transactionRunner: new InMemoryTransactionRunner(),
         entityAliasCandidateCapture: {
           capture: async () => {
             throw new Error('candidate capture unavailable');
@@ -334,7 +336,7 @@ describe('U8/U1 — resolveProposalEntity re-draft', () => {
   ) =>
     resolveProposalEntity(
       { tenantId: TENANT, proposalId: PROPOSAL, candidateId, actorId: OWNER, actorRole },
-      { proposalRepo: repo, auditRepo, redraftHandlerFactory: factory },
+      { proposalRepo: repo, auditRepo, transactionRunner: new InMemoryTransactionRunner(), redraftHandlerFactory: factory },
     );
 
   it('re-drafts an ambiguous draft_invoice to a real draft_invoice carrying the resolved customerId, capped at ready_for_review', async () => {
@@ -583,7 +585,7 @@ describe('U8/U1 — resolveProposalEntity re-draft', () => {
     await repo.create(ambiguousWithIntent());
     const result = await resolveProposalEntity(
       { tenantId: TENANT, proposalId: PROPOSAL, candidateId: CUST_A, actorId: OWNER, actorRole: 'owner' },
-      { proposalRepo: repo, auditRepo }, // no redraftHandlerFactory
+      { proposalRepo: repo, auditRepo, transactionRunner: new InMemoryTransactionRunner() }, // no redraftHandlerFactory
     );
     expect(result.proposalType).toBe('voice_clarification');
     expect((result.payload as Record<string, unknown>).customerId).toBe(CUST_A);
@@ -699,7 +701,7 @@ describe('U8/U1 — resolveProposalEntity multi-ambiguity chain (P8/U-multi)', (
   const call = (candidateId: string, factory: RedraftHandlerFactory) =>
     resolveProposalEntity(
       { tenantId: TENANT, proposalId: PROPOSAL, candidateId, actorId: OWNER, actorRole: 'owner' },
-      { proposalRepo: repo, auditRepo, redraftHandlerFactory: factory },
+      { proposalRepo: repo, auditRepo, transactionRunner: new InMemoryTransactionRunner(), redraftHandlerFactory: factory },
     );
 
   it('first pick surfaces a NEW voice_clarification for the second ambiguity — no redraft yet', async () => {
@@ -920,7 +922,7 @@ describe('U8/U1 — resolveProposalEntity re-draft via REAL handler factory', ()
   const callReal = (candidateId: string, factory: RedraftHandlerFactory) =>
     resolveProposalEntity(
       { tenantId: TENANT, proposalId: PROPOSAL, candidateId, actorId: OWNER, actorRole: 'owner' },
-      { proposalRepo: repo, auditRepo, redraftHandlerFactory: factory },
+      { proposalRepo: repo, auditRepo, transactionRunner: new InMemoryTransactionRunner(), redraftHandlerFactory: factory },
     );
 
   it('customer-name ambiguity → real draft_invoice (no jobId): no 400, ready_for_review, no jobId gate (B6)', async () => {
@@ -1130,7 +1132,7 @@ describe('B2 — resolveProposalEntity on a typed money proposal (gate + candida
   const call = (candidateId: string) =>
     resolveProposalEntity(
       { tenantId: TENANT, proposalId: PROPOSAL, candidateId, actorId: OWNER, actorRole: 'owner' },
-      { proposalRepo: repo, auditRepo }, // no redraftHandlerFactory — money proposals never carry originalIntent
+      { proposalRepo: repo, auditRepo, transactionRunner: new InMemoryTransactionRunner() }, // no redraftHandlerFactory — money proposals never carry originalIntent
     );
 
   it('picking a candidate stamps payload.invoiceId, clears the invoiceId gate, promotes to ready_for_review, and audits', async () => {

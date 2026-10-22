@@ -40,6 +40,7 @@ import { PgProposalExecutionRepository } from '../../src/proposals/pg-proposal-e
 import type { ExecutionHandler } from '../../src/proposals/execution/handlers';
 import { runExecutionSweep } from '../../src/workers/execution-worker';
 import type { Logger } from '../../src/logging/logger';
+import { PgTenantTransactionRunner } from '../../src/db/tenant-transaction';
 
 const BASE = '/api/onboarding/draft';
 const CREATE = {
@@ -77,7 +78,7 @@ describe('POST /draft/reset (real DB)', () => {
     });
     a.use('/api', withTenantTransaction(pool));
     a.use(BASE, createOnboardingDraftRouter({ draftRepo, tierRepo: new PgRegionalPriceTierRepository(pool), proposalRepo: repo, auditRepo }));
-    a.use('/api/proposals', createProposalsRouter(repo, undefined, auditRepo));
+    a.use('/api/proposals', createProposalsRouter(repo, new PgTenantTransactionRunner(pool), undefined, auditRepo));
     return a;
   }
 

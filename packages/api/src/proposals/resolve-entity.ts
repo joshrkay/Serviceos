@@ -74,7 +74,7 @@ import { entitiesForProposal } from '../workers/voice-action-router';
 import type { RedraftHandlerFactory } from './redraft-handler-factory';
 import { clearSatisfiedMissingFields } from './missing-fields';
 import type { EntityAliasCandidateCapture } from '../learning/entity-aliases/candidate-service';
-import { InMemoryTransactionRunner, type TenantTransactionRunner } from '../db/tenant-transaction';
+import type { TenantTransactionRunner } from '../db/tenant-transaction';
 
 interface EntityCandidate {
   id: string;
@@ -114,14 +114,14 @@ export interface ResolveEntityDeps {
    * A1 — commits each path's writes (proposal patch, status promotion, audit
    * row) as one unit. The route holds no request transaction, so without it
    * a failed second write would leave the first one committed. Production:
-   * PgTenantTransactionRunner on the app pool. Absent (in-memory repos) →
-   * the writes run directly.
+   * PgTenantTransactionRunner on the app pool; InMemoryTransactionRunner
+   * with the in-memory repos.
+   *
+   * A3-3 — required: the row lock (findByIdsForUpdate) runs inside it, and
+   * the Pg repository refuses a lock taken outside a tenant transaction, so a
+   * pick wired with the Pg repos and no runner could only ever fail.
    */
-  transactionRunner?: TenantTransactionRunner;
-}
-
-function transactionRunnerOf(deps: ResolveEntityDeps): TenantTransactionRunner {
-  return deps.transactionRunner ?? new InMemoryTransactionRunner();
+  transactionRunner: TenantTransactionRunner;
 }
 
 /**
@@ -558,7 +558,7 @@ export async function resolveProposalEntity(
   const stillGated = remainingMissingFields !== undefined && remainingMissingFields.length > 0;
   const movedToReview = proposal.status === 'draft' && !stillGated;
 
-  await transactionRunnerOf(deps).run(tenantId, async () => {
+  await deps.transactionRunner.run(tenantId, async () => {
     await lockOpenForPick(deps, tenantId, proposalId);
     await deps.proposalRepo.update(tenantId, proposalId, {
       payload: nextPayload,
@@ -768,7 +768,7 @@ async function redraftResolvedProposal(args: {
   //
   // A1 — the LLM call is over; these three writes commit together, so a failed
   // status write or audit row never leaves a re-drafted payload behind.
-  await transactionRunnerOf(deps).run(tenantId, async () => {
+  await deps.transactionRunner.run(tenantId, async () => {
     await deps.proposalRepo.update(tenantId, proposalId, {
       proposalType: drafted.proposalType,
       payload: drafted.payload,
@@ -949,7 +949,7 @@ async function advanceToNextAmbiguity(args: {
   nextSourceContext.resolvedEntities = resolvedEntities;
   nextSourceContext.resolvedEntity = resolvedEntities[resolvedEntities.length - 1];
 
-  await transactionRunnerOf(deps).run(tenantId, async () => {
+  await deps.transactionRunner.run(tenantId, async () => {
     await lockOpenForPick(deps, tenantId, proposalId);
     await deps.proposalRepo.update(tenantId, proposalId, {
       payload: nextPayload,

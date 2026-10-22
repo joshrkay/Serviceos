@@ -7017,6 +7017,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     '/api/proposals',
     createProposalsRouter(
       proposalRepo,
+      // A1 / A3-3 — resolve-entity runs outside the request transaction; its
+      // row lock and writes commit together in one short transaction after
+      // the re-draft's LLM call. Matches the repos: Pg with a pool.
+      pool ? new PgTenantTransactionRunner(pool) : new InMemoryTransactionRunner(),
       appointmentRepo,
       auditRepo,
       feasibilityDeps,
@@ -7041,9 +7045,6 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // #1405 — the card's "which accepted estimate?" pick re-drafts the
       // invoice's lines, discount and tax from the picked estimate.
       estimateRepo,
-      // A1 — resolve-entity runs outside the request transaction; its writes
-      // commit together in one short transaction after the re-draft's LLM call.
-      pool ? new PgTenantTransactionRunner(pool) : undefined,
     ),
   );
   if (entityAliasRepo) {

@@ -4,6 +4,7 @@ import request from 'supertest';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
 import { createProposalsRouter } from '../../src/routes/proposals';
 import { InMemoryProposalRepository, createProposal } from '../../src/proposals/proposal';
+import { InMemoryTransactionRunner } from '../../src/db/tenant-transaction';
 
 function buildApp() {
   const proposalRepo = new InMemoryProposalRepository();
@@ -18,7 +19,7 @@ function buildApp() {
     };
     next();
   });
-  app.use('/api/proposals', createProposalsRouter(proposalRepo));
+  app.use('/api/proposals', createProposalsRouter(proposalRepo, new InMemoryTransactionRunner()));
   return { app, proposalRepo };
 }
 
