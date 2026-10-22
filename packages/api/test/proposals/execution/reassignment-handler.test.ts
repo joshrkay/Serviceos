@@ -283,6 +283,78 @@ describe('P6-012 — Execution for reassignment proposals', () => {
     expect(result.error).toMatch(/Overlaps with/);
   });
 
+  // Dispatch FR-2 phase 3c — the board's explicit "Book anyway" rides the
+  // payload as acceptOverlap: true; the approval then books the clash and
+  // marks the assignment row. Nothing else may set it (contract: literal true).
+  it('books the overlapping tech when the payload pins that visit as accepted, marking the assignment', async () => {
+    const localAssignmentRepo = new InMemoryAssignmentRepository();
+    const appt = await createAppointment({
+      tenantId, jobId: 'job-1',
+      scheduledStart: new Date('2026-05-17T10:00:00Z'),
+      scheduledEnd: new Date('2026-05-17T11:00:00Z'),
+      timezone: 'UTC', createdBy: 'user-1',
+    }, appointmentRepo);
+    const conflict = await createAppointment({
+      tenantId, jobId: 'job-2',
+      scheduledStart: new Date('2026-05-17T10:30:00Z'),
+      scheduledEnd: new Date('2026-05-17T11:30:00Z'),
+      timezone: 'UTC', createdBy: 'user-1',
+    }, appointmentRepo);
+    await localAssignmentRepo.create({
+      id: 'as-2', tenantId, appointmentId: conflict.id,
+      technicianId: techB, isPrimary: true, assignedBy: 'user-1', assignedAt: new Date(),
+    });
+    const feasibilityDeps: FeasibilityDependencies = {
+      assignmentRepo: localAssignmentRepo, appointmentRepo,
+      jobRepo: { findById: async () => null } as any,
+      locationRepo: { findById: async () => null } as any,
+      workingHoursRepo: { findByTechnician: async () => [] } as any,
+      unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
+      travelTimeProvider: new HaversineFallbackProvider(),
+      skillMatcher: noSkillConstraints(),
+    };
+    const handlerWithFeasibility = new ReassignAppointmentExecutionHandler(
+      appointmentRepo, localAssignmentRepo, undefined, feasibilityDeps,
+    );
+
+    const refused = await handlerWithFeasibility.execute(
+      makeProposal({ appointmentId: appt.id, toTechnicianId: techB }), context,
+    );
+    expect(refused.success).toBe(false);
+
+    // The flag alone (no pinned visits) accepts nothing.
+    const bareFlag = await handlerWithFeasibility.execute(
+      makeProposal({ appointmentId: appt.id, toTechnicianId: techB, acceptOverlap: true }), context,
+    );
+    expect(bareFlag.success).toBe(false);
+
+    // A clash the dispatcher never saw (a visit added after they accepted) still blocks, loudly.
+    const later = await createAppointment({
+      tenantId, jobId: 'job-3',
+      scheduledStart: new Date('2026-05-17T10:45:00Z'),
+      scheduledEnd: new Date('2026-05-17T11:15:00Z'),
+      timezone: 'UTC', createdBy: 'user-1',
+    }, appointmentRepo);
+    await localAssignmentRepo.create({
+      id: 'as-3', tenantId, appointmentId: later.id,
+      technicianId: techB, isPrimary: true, assignedBy: 'user-1', assignedAt: new Date(),
+    });
+    const unseen = await handlerWithFeasibility.execute(
+      makeProposal({ appointmentId: appt.id, toTechnicianId: techB, acceptOverlap: true, acceptedOverlapAppointmentIds: [conflict.id] }), context,
+    );
+    expect(unseen.success).toBe(false);
+    expect(unseen.error).toContain(later.id);
+    await localAssignmentRepo.delete(tenantId, 'as-3');
+
+    const result = await handlerWithFeasibility.execute(
+      makeProposal({ appointmentId: appt.id, toTechnicianId: techB, acceptOverlap: true, acceptedOverlapAppointmentIds: [conflict.id] }), context,
+    );
+    expect(result.success).toBe(true);
+    const rows = await localAssignmentRepo.findByAppointment(tenantId, appt.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({ technicianId: techB, overlapAccepted: true });
+  });
+
   // Foundation gate F2 / contract #12-#13: out-of-hours is a PRECONDITION
   // violation, so it now blocks the reassignment instead of warning.
   it('rejects when the target tech is outside modeled working hours', async () => {
