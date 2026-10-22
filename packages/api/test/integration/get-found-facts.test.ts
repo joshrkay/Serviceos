@@ -9,6 +9,9 @@ import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { loadGetFoundFacts } from '../../src/get-found/load-facts';
 
+/** Twilio numbers are unique across tenants, and every integration file shares one DB. */
+const uniqueE164 = () => `+1602${String(Math.floor(Math.random() * 1e7)).padStart(7, '0')}`;
+
 async function seedEverything(pool: Pool, tenantId: string): Promise<void> {
   await pool.query(
     `INSERT INTO tenant_settings (id, tenant_id, business_name, terminology_preferences, estimate_prefix, invoice_prefix,
@@ -28,7 +31,7 @@ async function seedEverything(pool: Pool, tenantId: string): Promise<void> {
   await pool.query(
     `INSERT INTO tenant_integrations (id, tenant_id, provider, status, provider_data)
      VALUES (gen_random_uuid(), $1, 'twilio', 'full_readiness', $2::jsonb)`,
-    [tenantId, JSON.stringify({ phoneE164: '+16025550199' })],
+    [tenantId, JSON.stringify({ phoneE164: uniqueE164() })],
   );
 }
 

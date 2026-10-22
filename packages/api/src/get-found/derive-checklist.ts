@@ -27,7 +27,10 @@ export interface GetFoundFacts {
   skippedItems: GetFoundItemId[];
 }
 
-export type GetFoundItemId = 'google_profile' | 'review_link' | 'call_routing';
+/** Every item, in the order the card shows them. */
+export const GET_FOUND_ITEM_IDS = ['google_profile', 'review_link', 'call_routing'] as const;
+
+export type GetFoundItemId = (typeof GET_FOUND_ITEM_IDS)[number];
 
 export type GetFoundItemStatus = 'done' | 'pending' | 'waiting' | 'skipped';
 
@@ -39,8 +42,6 @@ export interface GetFoundItem {
   status: GetFoundItemStatus;
   waitingOn?: GetFoundWaitingOn;
 }
-
-const ITEM_ORDER: GetFoundItemId[] = ['google_profile', 'review_link', 'call_routing'];
 
 export interface GetFoundChecklist {
   presencePath: PresencePath | null;
@@ -63,7 +64,7 @@ export function deriveGetFoundChecklist(f: GetFoundFacts): GetFoundChecklist {
     review_link: f.googleReviewUrl !== null,
     call_routing: isCallRoutingDone(f),
   };
-  const items = ITEM_ORDER.map((id): GetFoundItem => {
+  const items = GET_FOUND_ITEM_IDS.map((id): GetFoundItem => {
     if (done[id]) return { id, status: 'done' };
     if (f.skippedItems.includes(id)) return { id, status: 'skipped' };
     if (id === 'google_profile' && f.googleProfile === 'pending_verification') {

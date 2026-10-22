@@ -132,7 +132,9 @@ const OWNER_REQUIRED_ONBOARDING_WEB_ACTIONS = 16;
 // phone/retry now require owner — previously open to any member).
 // "Pick, don't build" S4: +1 onboarding (PUT /api/onboarding/draft/metro).
 // "Pick, don't build" S4: +2 onboarding (POST /api/onboarding/draft/undo, /reset).
-const OWNER_ONLY_ROUTES = 81;
+// #1750 Get-found (D-044): +4 occasional (PUT presence-path, PUT call-routing-mode,
+// PUT/DELETE items/:id/skip) — optional setup, never gates activation.
+const OWNER_ONLY_ROUTES = 85;
 
 // ── Derivation ──────────────────────────────────────────────────────────────
 

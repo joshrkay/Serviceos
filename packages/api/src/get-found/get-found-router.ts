@@ -1,0 +1,170 @@
+/**
+ * #1750 slice 1 (D-044) — the Get-found checklist.
+ *
+ * Mounted at /api/get-found. The checklist is derived on every read from
+ * facts (`loadGetFoundFacts` → `deriveGetFoundChecklist`); nothing here
+ * stores an item's status.
+ *
+ *   GET    /                 → the checklist
+ *   PUT    /presence-path    → the owner's "do you have a website?" answer
+ *   PUT    /call-routing-mode → forward all / forward when unanswered / Rivet number only
+ *   PUT    /items/:id/skip   → fold an item into the hidden row (idempotent)
+ *   DELETE /items/:id/skip   → bring it back
+ *
+ * Every write emits an audit event and answers with the re-derived checklist.
+ */
+import { Router, Response } from 'express';
+import { z } from 'zod';
+import type { Pool } from 'pg';
+import { AuthenticatedRequest } from '../auth/clerk';
+import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
+import { currentTenantContext } from '../middleware/tenant-context';
+import { toErrorResponse } from '../shared/errors';
+import { createAuditEvent, type AuditRepository } from '../audit/audit';
+import { ensureTenantSettings, type SettingsRepository } from '../settings/settings';
+import { GET_FOUND_ITEM_IDS, deriveGetFoundChecklist } from './derive-checklist';
+import { loadGetFoundFacts } from './load-facts';
+
+export interface GetFoundRouterDeps {
+  pool: Pool;
+  settingsRepo: SettingsRepository;
+  auditRepo: AuditRepository;
+}
+
+const presencePathSchema = z.object({
+  presencePath: z.enum(['own_website', 'google_only', 'neither']),
+});
+
+const itemIdSchema = z.enum(GET_FOUND_ITEM_IDS);
+
+const callRoutingModeSchema = z.object({
+  callRoutingMode: z.enum(['forward_all', 'forward_unanswered', 'rivet_only']),
+});
+
+export function createGetFoundRouter(deps: GetFoundRouterDeps): Router {
+  const router = Router();
+  // The request's tenant-bound client under /api; the raw pool in tests.
+  const db = () => currentTenantContext()?.client ?? deps.pool;
+
+  router.get(
+    '/',
+    requireAuth,
+    requireTenant,
+    requirePermission('settings:view'),
+    async (req: AuthenticatedRequest, res: Response) => {
+      try {
+        const facts = await loadGetFoundFacts(db(), req.auth!.tenantId);
+        res.json(deriveGetFoundChecklist(facts));
+      } catch (err) {
+        const { statusCode, body } = toErrorResponse(err);
+        res.status(statusCode).json(body);
+      }
+    },
+  );
+
+  /** Every write: audit it, then answer with the re-derived checklist. */
+  async function auditAndRespond(
+    req: AuthenticatedRequest,
+    res: Response,
+    eventType: string,
+    metadata: Record<string, unknown>,
+  ): Promise<void> {
+    const { tenantId, userId, role } = req.auth!;
+    await deps.auditRepo.create(
+      createAuditEvent({
+        tenantId,
+        actorId: userId,
+        actorRole: role,
+        eventType,
+        entityType: 'get_found',
+        entityId: tenantId,
+        metadata,
+      }),
+    );
+    res.json(deriveGetFoundChecklist(await loadGetFoundFacts(db(), tenantId)));
+  }
+
+  /**
+   * One owner answer: write `column`, audit the change with the previous
+   * value, answer with the re-derived checklist. `column` is only ever one
+   * of the literals below — never request input.
+   */
+  function answerRoute<K extends string>(
+    path: string,
+    column: 'presence_path' | 'call_routing_mode',
+    eventType: string,
+    schema: z.ZodType<Record<K, string>>,
+    key: K,
+  ) {
+    router.put(
+      path,
+      requireAuth,
+      requireTenant,
+      requirePermission('settings:update'),
+      async (req: AuthenticatedRequest, res: Response) => {
+        try {
+          const value = schema.parse(req.body ?? {})[key];
+          const { tenantId } = req.auth!;
+          await ensureTenantSettings(tenantId, deps.settingsRepo);
+          const { rows } = await db().query<{ previous: string | null }>(
+            `UPDATE tenant_settings ts SET ${column} = $2, updated_at = NOW()
+               FROM (SELECT ${column} AS previous FROM tenant_settings WHERE tenant_id = $1 FOR UPDATE) old
+              WHERE ts.tenant_id = $1
+              RETURNING old.previous`,
+            [tenantId, value],
+          );
+          await auditAndRespond(req, res, eventType, { [key]: value, previous: rows[0]?.previous ?? null });
+        } catch (err) {
+          const { statusCode, body } = toErrorResponse(err);
+          res.status(statusCode).json(body);
+        }
+      },
+    );
+  }
+
+  answerRoute('/presence-path', 'presence_path', 'get_found.presence_path.set', presencePathSchema, 'presencePath');
+  answerRoute(
+    '/call-routing-mode',
+    'call_routing_mode',
+    'get_found.call_routing_mode.set',
+    callRoutingModeSchema,
+    'callRoutingMode',
+  );
+
+  function skipRoute(method: 'put' | 'delete') {
+    router[method](
+      '/items/:id/skip',
+      requireAuth,
+      requireTenant,
+      requirePermission('settings:update'),
+      async (req: AuthenticatedRequest, res: Response) => {
+        try {
+          const item = itemIdSchema.parse(req.params.id);
+          const { tenantId } = req.auth!;
+          await ensureTenantSettings(tenantId, deps.settingsRepo);
+          await db().query(
+            method === 'put'
+              ? `UPDATE tenant_settings
+                    SET get_found_skipped_items = array_append(array_remove(get_found_skipped_items, $2), $2),
+                        updated_at = NOW()
+                  WHERE tenant_id = $1`
+              : `UPDATE tenant_settings
+                    SET get_found_skipped_items = array_remove(get_found_skipped_items, $2), updated_at = NOW()
+                  WHERE tenant_id = $1`,
+            [tenantId, item],
+          );
+          const eventType = method === 'put' ? 'get_found.item.skipped' : 'get_found.item.unskipped';
+          await auditAndRespond(req, res, eventType, { item });
+        } catch (err) {
+          const { statusCode, body } = toErrorResponse(err);
+          res.status(statusCode).json(body);
+        }
+      },
+    );
+  }
+
+  skipRoute('put');
+  skipRoute('delete');
+
+  return router;
+}
