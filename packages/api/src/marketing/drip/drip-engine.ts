@@ -415,6 +415,7 @@ export function createDripEngine(deps: DripEngineDeps): DripEngine {
         days,
         now,
         DRIP_MAX_ENROLL_PER_RUN,
+        sequence.id,
       );
       const enrolled = await deps.repo.enroll(tenantId, sequence.id, targets, firstRunAt(sequence.steps, now));
       await deps.auditRepo.create(

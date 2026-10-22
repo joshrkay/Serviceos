@@ -89,6 +89,8 @@ export interface DripSignals {
     days: number,
     now: Date,
     limit: number,
+    /** Customers already enrolled in this sequence are excluded before `limit` applies. */
+    sequenceId: string,
   ): Promise<DripTarget[]>;
   /** First non-cancelled appointment booked for the customer's jobs after `since`. */
   findBookingSince(tenantId: string, customerId: string, since: Date): Promise<DripBooking | null>;

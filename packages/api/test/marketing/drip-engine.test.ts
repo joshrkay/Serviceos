@@ -322,5 +322,7 @@ describe('drip engine — enrollment', () => {
     expect(await engine.enrollTargets(TENANT, SEQ, { userId: 'owner', role: 'owner' })).toBe(1);
     expect(await engine.enrollTargets(TENANT, SEQ, { userId: 'owner', role: 'owner' })).toBe(0);
     expect(await auditTypes(h)).toContain('drip.targets_enrolled');
+    // The sequence id is passed so already-enrolled customers are skipped before the cap.
+    expect(h.signals.findTargets).toHaveBeenCalledWith(TENANT, 'lapsed_customers', 180, NOW, 200, SEQ);
   });
 });
