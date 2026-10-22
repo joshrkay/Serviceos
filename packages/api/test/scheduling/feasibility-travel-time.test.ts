@@ -152,7 +152,7 @@ describe('checkFeasibility — travel-time sub-check', () => {
       }),
     );
     expect(r.travelTime).toEqual({
-      fromPrevSeconds: null, toNextSeconds: null,
+      fromPrevSeconds: null, prevEndsAt: null, toNextSeconds: null,
       estimateSource: 'unknown', degraded: false,
     });
   });
