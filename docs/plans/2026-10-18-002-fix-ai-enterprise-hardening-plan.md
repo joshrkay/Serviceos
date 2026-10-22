@@ -730,6 +730,20 @@ flowchart LR
         - For a voicemail, that means the receipt-guarded lead leg (provider
           `twilio_voicemail_lead`, keyed on RecordingSid) as well as the recording and hand-off legs.
           A sweep that only inserts the recording would lose the lead.
+      - **Ingestion is serialized per recording, because the sweep can overlap a late callback.**
+        `recordInboundCall` (`voice/voice-service.ts:556-583`) dedupes with
+        `SELECT … FOR UPDATE` and then an `INSERT`. Postgres locks no row that doesn't exist yet, and
+        nothing is unique on `(tenant_id, call_sid, recording_url)`. A sweep replay racing a delayed
+        Twilio callback, or two overlapping callback retries, can therefore both insert, which
+        creates duplicate file and recording rows and two transcription hand-offs. So:
+        - Inside the same transaction, before the SELECT, it takes
+          `pg_advisory_xact_lock(hashtext(tenant_id || call_sid || recording_url))`. Concurrent
+          ingests of one recording then run one at a time, and the second finds the first's row.
+        - It needs no migration, so it can't fail at boot on duplicates that already exist.
+        - A partial unique index is the follow-up, once a one-time job has deduped existing rows.
+        - Test: a callback and a sweep replay of the same recording run concurrently on real
+          Postgres. Exactly one `voice_recordings` row, one `files` row and one hand-off result.
+        - This applies to the callback path already on `main`, not only to the sweep.
       - also resumes recordings that do have a `voice_recordings` row but no success receipt. The
         upload and insert succeeded, then the transcription hand-off failed, and Twilio does not
         retry the resulting 5xx. The sweep picks up from the stored S3 object and re-runs only the
@@ -1442,6 +1456,13 @@ flowchart LR
         - **this physical attempt's own pricing inputs:** the `model`, the worst-case input-token
           bound and `maxTokens` it reserved against, and its actual `token_usage` when the provider
           returned one
+        - **a snapshot of the rates it reserved at:** the concrete input, output and per-image rates
+          in micro-cents, and the pricing source's version. `AI_MODEL_PRICING_JSON` or a built-in
+          price can change between reserve and settle, and settling at newer rates could charge
+          more than was reserved and push a capped tenant over its ceiling. So settle, the
+          worst-case charge and any later reconciliation or repricing of an attempt all use that
+          snapshot. Only an attempt reserved while unpriced (`settled_unpriced`) takes the first
+          verified price, and that price is then written into its snapshot.
         The logical `ai_runs` row keeps only the final attempt's usage. A timed-out first attempt
         followed by a successful retry would otherwise leave nothing to price the first attempt
         from.
@@ -1519,7 +1540,14 @@ flowchart LR
     the worst-case charge.
   - **Unit:** a capped tenant's request to an unpriced model is rejected with a typed error.
   - **Unit:** enabling a cap is refused while any configured model is unpriced.
-  - **Integration:** the monthly window resets and the spend sum matches `ai_runs`.
+  - **Integration:** the monthly window resets. The ledger's `spent` equals the sum of the month's
+    reservation transitions (the amounts charged by `settled` and `charged_unreconciled`), not the
+    `ai_runs` costs. A timed-out attempt followed by a successful retry is charged twice by
+    design, while `ai_runs` keeps only the retry. Each `settled` amount equals
+    `computeCostMicroCents` of that attempt's own stored usage at its snapshot rates.
+  - **Integration (price change):** a price changes between an attempt's reserve and its settle.
+    The settle charges at the snapshot rates, and a capped tenant can't be pushed over by the
+    change.
   - **Integration (per-attempt reservations, real Postgres):**
     - Two concurrent attempts reserve different amounts, and one process dies. The reaper charges
       exactly that attempt's amount, and the other attempt settles normally.
