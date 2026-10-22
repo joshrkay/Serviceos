@@ -15,10 +15,12 @@ marketing site; enforced at connect, manual sync and the sync sweep).
 |---|---|---|
 | Software (monthly) | $79 | $199 |
 | Users (every login, incl. technicians) | 2 | 5 |
-| AI answering minutes included / period | 20 (≈5 calls) | 60 (≈15 calls) |
+| AI answering minutes included / period | 60 (≈15 calls) | 200 (≈50 calls) |
 | Extra AI minutes | $1.25 / min | $1.25 / min |
 | Default overage cap | $79 / period | $199 / period |
 
+- Included minutes raised 2026-10-16 (owner decision, #1686) from 20 / 60:
+  twenty minutes was about five calls a month, below comparable products.
 - Flat public rate, same on both plans. At an estimated ~$0.25/min all-in
   provider cost (Twilio + STT + TTS + LLM) that is 5x cost; measured cost
   per call is recorded and reviewed quarterly against the rate.
@@ -75,13 +77,13 @@ dormant and is not the integration point.
 
 | # | Change | Where |
 |---|---|---|
-| 1 | ✅→🔁 `priceCallUsage` built for calls (`d40dd2478`); rework to minutes: included 20/60 min, $1.25/min, round up once per period, cap | `billing/call-usage-pricing.ts` |
+| 1 | ✅→🔁 `priceCallUsage` built for calls (`d40dd2478`); rework to minutes: included 20/60 min (raised to 60/200, #1686), $1.25/min, round up once per period, cap | `billing/call-usage-pricing.ts` |
 | 2 | ✅→🔁 `decideTrialCall` built for calls (`753be39db`); rework to 60 trial minutes, nudge at 40, concurrency → forward — unwired | `voice/trial-limits.ts` |
 | 3 | ✅→🔁 Ledger `call_usage_events` + caller E.164 on the session-ended hook + hook fix (`d3b55f27f`, `3fc0eb751`, `c1e3fd9fe`); rework: billable seconds = full AI-answered duration (drop the 30s floor and 10-min merge), keep own-number/in-app exclusions; sum seconds per period | `billing/call-usage-events.ts`, `twilio-adapter`, migration 282 |
 | 4 | ✅→🔁 Settlement on `invoice.created` (`d08f2eac3`); rework: settle billable seconds → minutes | `billing/call-usage-billing.ts`, `webhooks/routes.ts`, migration 283 |
 | 5 | Plans: `BILLING_PLAN_IDS = ['starter','growth']`, `STRIPE_STARTER_PRICE_ID` / `STRIPE_GROWTH_PRICE_ID` at 7_900 / 19_900; persist the plan on `tenants` from checkout/subscription webhooks; enforce 2/5 users at invite (`users/invite-team-member.ts`) | `billing/subscription.ts`, `routes/onboarding.ts`, migration |
 | 6 | Wire `decideTrialCall` + overage cap into the voice gate; forward-to-owner TwiML with voicemail fallback | `voice/voice-gate.ts`, `routes/telephony.ts` |
-| 7 | `GET /api/billing/call-usage`; settings page shows AI minutes (used / included, overage so far, projected charge); BillingStep plan cards ("$79/mo · 2 users · 20 AI minutes · then $1.25/min") | `routes/billing.ts`, `SettingsPage.tsx`, `BillingStep.tsx` |
+| 7 | `GET /api/billing/call-usage`; settings page shows AI minutes (used / included, overage so far, projected charge); BillingStep plan cards ("$79/mo · 2 users · 60 AI minutes · then $1.25/min") | `routes/billing.ts`, `SettingsPage.tsx`, `BillingStep.tsx` |
 | 8 | Alerts (80/100/cap) and trial emails ("You've used X of 60 trial AI minutes") | `workers/trial-reminder-sweep.ts`, upgrade-nudge path |
 | 9 | Delete per-minute code: `voice-usage-pricing.ts`, `voice-usage-billing.ts`, `/api/billing/voice-usage`, minutes UI, `evaluateTrialCap` minute caps. Keep `ai_voice_usage_costs` recording for margin reporting. Do **not** drop `ai_voice_usage_settlements` (migration runner has no ledger). | |
 | 10 | PostHog: `plan_selected`, `trial_minutes_milestone`, `overage_threshold`, `minute_overage_invoiced` | `analytics/posthog.ts` |

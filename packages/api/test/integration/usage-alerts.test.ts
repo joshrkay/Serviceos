@@ -62,16 +62,16 @@ describe('Postgres integration — AI minute usage alerts', () => {
     const sendEmail = vi.fn(async (_email: { to: string; subject: string; text: string }) => undefined);
     const check = () => checkUsageAlerts({ pool, sendEmail, appBaseUrl: 'https://app.test' }, tenantId);
 
-    await use(tenantId, 15);
+    await use(tenantId, 47);
     await check();
     expect(sendEmail).not.toHaveBeenCalled();
 
-    await use(tenantId, 1); // 16 of 20 = 80%
+    await use(tenantId, 1); // 48 of 60 = 80%
     await check();
     await check();
-    await use(tenantId, 4); // 20 of 20
+    await use(tenantId, 12); // 60 of 60
     await check();
-    await use(tenantId, 64); // 84 min: 64 over x $1.25 = $80 >= $79
+    await use(tenantId, 64); // 124 min: 64 over x $1.25 = $80 >= $79
     await check();
     await check();
 
@@ -90,7 +90,7 @@ describe('Postgres integration — AI minute usage alerts', () => {
     const tenantId = await paidTenant(OCT);
     const sendEmail = vi.fn(async (_email: { to: string; subject: string; text: string }) => undefined);
 
-    await use(tenantId, 25);
+    await use(tenantId, 65);
     await checkUsageAlerts({ pool, sendEmail, appBaseUrl: 'https://app.test' }, tenantId);
 
     expect(subjects(sendEmail)).toEqual(["You've used all your included AI answering minutes"]);
@@ -99,14 +99,14 @@ describe('Postgres integration — AI minute usage alerts', () => {
   it('alerts again in the next billing period', async () => {
     const tenantId = await paidTenant(OCT);
     const sendEmail = vi.fn(async (_email: { to: string; subject: string; text: string }) => undefined);
-    await use(tenantId, 16);
+    await use(tenantId, 48);
     await checkUsageAlerts({ pool, sendEmail, appBaseUrl: 'https://app.test' }, tenantId);
 
     await pool.query(
       `UPDATE tenants SET current_period_start = $2, current_period_end = $3 WHERE id = $1`,
       [tenantId, NOV[0], NOV[1]],
     );
-    await use(tenantId, 16, NOV);
+    await use(tenantId, 48, NOV);
     await checkUsageAlerts({ pool, sendEmail, appBaseUrl: 'https://app.test' }, tenantId);
 
     expect(sendEmail).toHaveBeenCalledTimes(2);
@@ -117,7 +117,7 @@ describe('Postgres integration — AI minute usage alerts', () => {
     await new PgOverageCapStore(pool).set(tenantId, 0);
     const sendEmail = vi.fn(async (_email: { to: string; subject: string; text: string }) => undefined);
 
-    await use(tenantId, 17); // 85% of 20
+    await use(tenantId, 51); // 85% of 60
     await checkUsageAlerts({ pool, sendEmail, appBaseUrl: 'https://app.test' }, tenantId);
 
     expect(subjects(sendEmail)).toEqual(["You've used 80% of your AI answering minutes"]);
@@ -138,7 +138,7 @@ describe('Postgres integration — AI minute usage alerts', () => {
     const posthog = capturePostHog();
     try {
       const tenantId = await paidTenant(OCT);
-      await use(tenantId, 25);
+      await use(tenantId, 65);
       await checkUsageAlerts({ pool, appBaseUrl: 'https://app.test' }, tenantId);
       await checkUsageAlerts({ pool, appBaseUrl: 'https://app.test' }, tenantId);
 
