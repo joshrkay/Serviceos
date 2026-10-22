@@ -350,6 +350,33 @@ describe('GoogleBusinessSheet', () => {
       expect(screen.queryByText('Acme Plumbing (current)')).toBeNull();
     });
 
+    it('connected: a review link Google added to the saved listing is picked up', async () => {
+      const onReviewUrlChange = vi.fn();
+      apiFetchMock
+        .mockResolvedValueOnce(
+          jsonResponse({
+            data: connectedIntegration({ locationTitle: 'Acme Plumbing', locationState: 'connected' }),
+          }),
+        )
+        .mockResolvedValueOnce(
+          jsonResponse({
+            data: LOCATIONS,
+            reviewUrlFilled: true,
+            reviewUrlCleared: false,
+            integration: connectedIntegration({
+              locationTitle: 'Acme Plumbing',
+              locationState: 'connected',
+              reviewUrl: 'https://g.page/r/new',
+            }),
+          }),
+        );
+      render(<GoogleBusinessSheet onClose={() => {}} onReviewUrlChange={onReviewUrlChange} />);
+      fireEvent.click(await screen.findByTestId('googlebusiness-change-location'));
+      await screen.findByTestId('googlebusiness-location-picker');
+      expect(onReviewUrlChange).toHaveBeenCalledWith('https://g.page/r/new');
+      expect(toastSuccess).toHaveBeenCalledWith(expect.stringContaining('review link'));
+    });
+
     it('a failed save shows the API reason', async () => {
       apiFetchMock
         .mockResolvedValueOnce(

@@ -748,6 +748,49 @@ describe('Google Business integrations routes', () => {
       );
     });
 
+    it('the picker picks up a review link Google added to the saved listing', async () => {
+      const settingsRepo = await settingsWith();
+      await connect({ '123': [{ name: 'locations/999', title: 'Acme Plumbing' }] }, { settingsRepo });
+      expect((await integrationRepo.get(TENANT))?.reviewUrl ?? null).toBeNull();
+      const auditRepo = new InMemoryAuditRepository();
+      const app = buildApp({
+        integrationRepo,
+        stateRepo,
+        googleConfig: GOOGLE_CONFIG,
+        googleFetch: makeConnectFetch({ '123': ONE_LOCATION }) as unknown as typeof fetch,
+        settingsRepo,
+        auditRepo,
+      });
+      const res = await request(app).get('/api/googlebusiness-integrations/google/locations');
+      expect(res.body).toMatchObject({
+        reviewUrlFilled: true,
+        integration: { locationState: 'connected', reviewUrl: 'https://g.page/r/review-999' },
+      });
+      expect(res.body.listingRemoved).toBeUndefined();
+      expect((await settingsRepo.findByTenant(TENANT))?.googleReviewUrl).toBe(
+        'https://g.page/r/review-999',
+      );
+      const summary = await integrationRepo.get(TENANT);
+      expect(summary).toMatchObject({ locationId: '999', placeId: 'ChIJplace' });
+      const events = await auditRepo.findByEntity(TENANT, 'googlebusiness_integration', summary!.id);
+      expect(events.map((e) => e.eventType)).toContain('googlebusiness_integration.location_refreshed');
+    });
+
+    it('a reconnect lifts a pause for rejected credentials but keeps a Google quota pause', async () => {
+      const pollStateRepo = new InMemoryReviewPollStateRepository(() => new Date());
+      await connect({ '123': ONE_LOCATION }, { pollStateRepo });
+      await pollStateRepo.recordQuotaError(TENANT, 3600, 'auth');
+      await connect({ '123': ONE_LOCATION }, { pollStateRepo });
+      expect(await pollStateRepo.getPollState(TENANT)).toMatchObject({
+        backoffUntil: null,
+        backoffReason: null,
+      });
+
+      await pollStateRepo.recordQuotaError(TENANT, 3600);
+      await connect({ '123': ONE_LOCATION }, { pollStateRepo });
+      expect((await pollStateRepo.getPollState(TENANT))?.backoffReason).toBe('quota');
+    });
+
     it('the picker leaves a saved listing Google still lists alone', async () => {
       await connect({ '123': ONE_LOCATION });
       const app = buildApp({

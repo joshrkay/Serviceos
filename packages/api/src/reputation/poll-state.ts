@@ -55,6 +55,13 @@ export interface ReviewPollStateRepository {
   resetCursor(tenantId: string): Promise<void>;
 
   /**
+   * The owner reconnected with fresh credentials: lift a backoff that
+   * rejected credentials caused (or one recorded before the reason was).
+   * A Google quota backoff is kept. True when one was lifted.
+   */
+  clearAuthBackoff(tenantId: string): Promise<boolean>;
+
+  /**
    * Persist a 429: increment `consecutive_429_count`, set
    * `backoff_until = now + max(exponential delay, retryAfter)`.
    * Cursor untouched — we'll retry from the same watermark once the
@@ -176,6 +183,22 @@ export class PgReviewPollStateRepository
     });
   }
 
+  async clearAuthBackoff(tenantId: string): Promise<boolean> {
+    const now = this.now();
+    return this.withTenant(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE review_poll_state
+            SET backoff_until = NULL, backoff_reason = NULL,
+                consecutive_429_count = 0, updated_at = $2
+          WHERE tenant_id = $1
+            AND backoff_until IS NOT NULL
+            AND backoff_reason IS DISTINCT FROM 'quota'`,
+        [tenantId, now],
+      );
+      return (result.rowCount ?? 0) > 0;
+    });
+  }
+
   async recordQuotaError(
     tenantId: string,
     retryAfterSeconds?: number,
@@ -268,6 +291,19 @@ export class InMemoryReviewPollStateRepository
     const existing = this.store.get(tenantId);
     if (!existing) return;
     this.store.set(tenantId, { ...existing, cursor: null, updatedAt: this.now() });
+  }
+
+  async clearAuthBackoff(tenantId: string): Promise<boolean> {
+    const existing = this.store.get(tenantId);
+    if (!existing?.backoffUntil || existing.backoffReason === 'quota') return false;
+    this.store.set(tenantId, {
+      ...existing,
+      backoffUntil: null,
+      backoffReason: null,
+      consecutive429Count: 0,
+      updatedAt: this.now(),
+    });
+    return true;
   }
 
   async recordQuotaError(

@@ -83,9 +83,19 @@ export function GoogleBusinessSheet({ onClose, onReviewUrlChange }: GoogleBusine
         data?: GoogleBusinessLocationView[];
         listingRemoved?: boolean;
         integration?: GoogleBusinessIntegrationView;
+        reviewUrlFilled?: boolean;
         reviewUrlCleared?: boolean;
       };
       setLocations(json.data ?? []);
+      if (json.integration && !json.listingRemoved) {
+        // Google updated the saved listing (e.g. a review link after
+        // verification); the server saved it.
+        setIntegration(json.integration);
+        if (json.reviewUrlFilled || json.reviewUrlCleared) {
+          onReviewUrlChange?.(json.integration.reviewUrl ?? null);
+        }
+        if (json.reviewUrlFilled) toast.success('Google now has a review link for your location. It is set.');
+      }
       if (json.listingRemoved) {
         // The saved listing is no longer on this Google account; the
         // server dropped it, so the owner must pick again.

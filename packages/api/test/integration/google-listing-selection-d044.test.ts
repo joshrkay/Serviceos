@@ -221,4 +221,19 @@ describe('D-044 Google listing selection (real Postgres)', () => {
     await repo.recordSuccess(tenantId, '2026-10-01T00:00:00.000Z');
     expect((await repo.getPollState(tenantId))?.backoffReason).toBeNull();
   });
+
+  it('clearAuthBackoff lifts a credentials pause and keeps a quota pause', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    const repo = new PgReviewPollStateRepository(pool);
+    await repo.recordQuotaError(tenantId, 3600, 'auth');
+    expect(await repo.clearAuthBackoff(tenantId)).toBe(true);
+    expect(await repo.getPollState(tenantId)).toMatchObject({
+      backoffUntil: null,
+      backoffReason: null,
+      consecutive429Count: 0,
+    });
+    await repo.recordQuotaError(tenantId, 30);
+    expect(await repo.clearAuthBackoff(tenantId)).toBe(false);
+    expect((await repo.getPollState(tenantId))?.backoffReason).toBe('quota');
+  });
 });
