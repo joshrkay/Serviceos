@@ -19,10 +19,19 @@ import type {
   RecordLookupEventInput,
 } from '../../lookup-events/lookup-event-service';
 import { t, type Language } from '../i18n/i18n';
+import { customerJobsForLookup } from './customer-jobs';
 
 export interface LookupAppointmentsInput {
   tenantId: string;
   customerId: string;
+  /** Only this job's records: the job on screen, or one the operator named and the resolver verified. */
+  jobId?: string;
+  /**
+   * The one visit the operator had open and asked about ("when is this
+   * appointment?"). Answers for that visit whatever its date or status, and
+   * says so when it can't be found.
+   */
+  appointmentId?: string;
   /** Inclusive lower bound — defaults to now. */
   dateFrom?: Date;
   /** Inclusive upper bound — defaults to no upper bound. */
@@ -110,12 +119,67 @@ export async function lookupAppointments(
     }
   };
 
+  if (input.appointmentId) {
+    // Read the visit and its job directly: the customer's job list is capped
+    // and leaves out canceled jobs, and the visit on screen may be on either.
+    let visit: Appointment | null;
+    let job: Awaited<ReturnType<JobRepository['findById']>> = null;
+    try {
+      visit = await deps.appointmentRepo.findById(input.tenantId, input.appointmentId);
+      if (visit) job = await deps.jobRepo.findById(input.tenantId, visit.jobId);
+    } catch (err) {
+      const message = t('lookup.appointments.error', lang);
+      await recordEvent({ resultStatus: 'error', resultCount: 0, summary: message });
+      return {
+        status: 'error',
+        summary: message,
+        data: { error: err instanceof Error ? err.message : String(err) },
+      };
+    }
+    if (
+      !visit ||
+      !job ||
+      job.customerId !== input.customerId ||
+      (input.jobId !== undefined && job.id !== input.jobId)
+    ) {
+      const summary = t('lookup.appointments.this_visit_missing', lang);
+      await recordEvent({ resultStatus: 'none', resultCount: 0, summary });
+      return { status: 'none', summary, data: { appointments: [] } };
+    }
+    const key =
+      visit.status === 'canceled' || visit.status === 'no_show'
+        ? 'lookup.appointments.this_visit_canceled'
+        : visit.status === 'completed' || visit.scheduledStart.getTime() < dateFrom.getTime()
+          ? 'lookup.appointments.this_visit_past'
+          : 'lookup.appointments.this_visit_upcoming';
+    const summary = t(key, lang, {
+      when: formatWhen(visit.scheduledStart, input.timezone, lang),
+      summary: job.summary,
+    });
+    await recordEvent({ resultStatus: 'found', resultCount: 1, summary });
+    return {
+      status: 'found',
+      summary,
+      data: {
+        appointments: [
+          {
+            appointmentId: visit.id,
+            jobId: visit.jobId,
+            jobNumber: job.jobNumber,
+            jobSummary: job.summary,
+            scheduledStart: visit.scheduledStart,
+            scheduledEnd: visit.scheduledEnd,
+            technicianId: job.assignedTechnicianId,
+            status: visit.status,
+          },
+        ],
+      },
+    };
+  }
+
   let jobs: Awaited<ReturnType<NonNullable<JobRepository['findByCustomer']>>>;
   try {
-    if (!deps.jobRepo.findByCustomer) {
-      throw new Error('JobRepository.findByCustomer is required for voice lookups');
-    }
-    jobs = await deps.jobRepo.findByCustomer(input.tenantId, input.customerId);
+    jobs = await customerJobsForLookup(deps.jobRepo, input.tenantId, input.customerId, input.jobId);
   } catch (err) {
     const message = t('lookup.appointments.error', lang);
     await recordEvent({
@@ -136,6 +200,7 @@ export async function lookupAppointments(
   );
 
   const jobById = new Map(jobs.map((j) => [j.id, j] as const));
+
   const items: LookupAppointmentsItem[] = [];
   for (const list of apptLists) {
     for (const a of list) {
