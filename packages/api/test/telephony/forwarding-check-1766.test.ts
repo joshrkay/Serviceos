@@ -16,7 +16,6 @@ import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-se
 import type { LLMGateway } from '../../src/ai/gateway/gateway';
 import {
   FORWARDING_CHECK_TTL_MS,
-  describeForwardingCheck,
   ForwardingCheckService,
   InMemoryForwardingCheckRepository,
 } from '../../src/onboarding/forwarding-check';
@@ -141,7 +140,7 @@ describe('forwarding check — inbound webhook', () => {
     ]);
   });
 
-  it('a pass the line no longer backs (number changed mid-check) is voided: hangs up, owner told to test again', async () => {
+  it('a pass the line no longer backs (number changed mid-check) reads as test again: hangs up, refusal audited', async () => {
     const { check } = await service.start(TENANT, OWNER);
     now = new Date(now.getTime() + 20_000);
     // The repoint landed between the check settling and the stamp.
@@ -151,17 +150,33 @@ describe('forwarding check — inbound webhook', () => {
 
     expect(res.text).toContain('<Hangup');
     expect(handleInbound).not.toHaveBeenCalled();
-    const latest = await repo.latest(TENANT);
-    expect(latest?.status).toBe('failed');
-    expect(describeForwardingCheck(latest!, 'missed').guidance).not.toMatch(/Forwarding works/);
+    const view = await service.latestView(TENANT, OWNER);
+    expect(view?.status).toBe('failed');
+    expect(view?.guidance).not.toMatch(/Forwarding works/);
+    expect(view?.guidance).toMatch(/test again/i);
     expect((await forwardingRepo.get(TENANT))?.checkPassedAt).toBeNull();
     const events = await auditRepo.findByEntity(TENANT, 'call_forwarding_check', check.id);
     expect(events.map((e) => e.eventType)).toEqual([
       'call_forwarding.check_started',
       'call_forwarding.check_passed',
-      'call_forwarding.check_failed',
+      'call_forwarding.check_voided',
     ]);
     expect(events[2].metadata).toMatchObject({ reason: 'number_changed' });
+  });
+
+  it('a pass the setup later stops carrying (number changed after it) no longer reads as "Forwarding works"', async () => {
+    await service.start(TENANT, OWNER);
+    now = new Date(now.getTime() + 20_000);
+    await inbound(forwarded);
+    expect((await service.latestView(TENANT, OWNER))?.guidance).toMatch(/Forwarding works/);
+
+    // The number-change worker clears the proof after the pass stamped it.
+    await forwardingRepo.save(TENANT, { carrier: 'att', mode: 'missed' });
+
+    const view = await service.latestView(TENANT, OWNER);
+    expect(view?.status).toBe('failed');
+    expect(view?.checkedAt).toBeNull();
+    expect(view?.guidance).toMatch(/test again/i);
   });
 
   it('a second call with the same caller id after the pass goes to the AI as normal', async () => {
