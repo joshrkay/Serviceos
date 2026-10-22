@@ -64,7 +64,7 @@ export interface MintDeepgramTokenDeps {
   apiKey?: string;
   /** `fixture` mints FIXTURE_STREAM_TOKEN without Deepgram (dev and test only). */
   sttProvider?: string;
-  /** Refuses the fixture in production (boot validation refuses it first; this is depth). */
+  /** Refuses the fixture in production and staging (production boot validation refuses it first). */
   nodeEnv?: string;
   /** Injectable for tests; defaults to the global fetch. */
   fetchImpl?: typeof fetch;
@@ -82,8 +82,8 @@ export async function mintDeepgramStreamToken(
   deps: MintDeepgramTokenDeps,
 ): Promise<DeepgramStreamToken> {
   if (deps.sttProvider === 'fixture') {
-    if (deps.nodeEnv === 'production' || deps.nodeEnv === 'prod') {
-      throw new DeepgramTokenUnavailableError('STT_PROVIDER=fixture is refused in production');
+    if (deps.nodeEnv === 'production' || deps.nodeEnv === 'prod' || deps.nodeEnv === 'staging') {
+      throw new DeepgramTokenUnavailableError('STT_PROVIDER=fixture is refused outside dev and test');
     }
     return { token: FIXTURE_STREAM_TOKEN, expiresInSeconds: STREAM_TOKEN_TTL_SECONDS, model: FIXTURE_STREAM_MODEL };
   }

@@ -33,7 +33,7 @@ describe('STT_PROVIDER=fixture (the e2e lane\'s scripted transcription)', () => 
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
-  it.each(['production', 'prod'])('is refused when NODE_ENV=%s (→503), even with a key', async (nodeEnv) => {
+  it.each(['production', 'prod', 'staging'])('is refused when NODE_ENV=%s (→503), even with a key', async (nodeEnv) => {
     await expect(
       mintDeepgramStreamToken({ apiKey: 'real-key', sttProvider: 'fixture', nodeEnv, fetchImpl: okFetch({ access_token: 'x' }) }),
     ).rejects.toBeInstanceOf(DeepgramTokenUnavailableError);
