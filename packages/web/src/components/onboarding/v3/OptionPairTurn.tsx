@@ -1,8 +1,8 @@
 import { useContext, useEffect, useMemo, useRef, useState, type FormEvent } from 'react';
 import { Mic } from 'lucide-react';
-import { narrateTurn, type AssembledOnboardingChoice, type OnboardingOptionKey, type StagedOnboardingChoice } from '@ai-service-os/shared';
+import { answerHelp, narrateTurn, type AssembledOnboardingChoice, type OnboardingOptionKey, type StagedOnboardingChoice } from '@ai-service-os/shared';
 import { RivetVoiceContext, useRivetNarration, useRivetTurnListener } from '../../../hooks/useRivetVoice';
-import type { UtteranceScreen } from '../../../lib/onboarding-utterance';
+import type { HelpRequest, UtteranceScreen } from '../../../lib/onboarding-utterance';
 import { Button, OptionCard } from '../../ui';
 import { cn } from '../../ui/utils';
 import { withoutListeningPromise } from './listening-copy';
@@ -17,6 +17,9 @@ import {
   type TypedField,
   type TypedOverride,
 } from './typed-answer';
+
+/** Every choice turn answers all four ("say that again", "what does that mean?", "give me an example", "what do most shops do?"). */
+const CHOICE_HELP: readonly HelpRequest[] = ['repeat', 'explain', 'example', 'most_shops'];
 
 export interface OptionPairTurnProps {
   /** Rivet's question, its support line and the two options, all from the assembled draft. */
@@ -44,9 +47,12 @@ export interface OptionPairTurnProps {
  * listen, the turn listens too: the mic is live, what the owner is saying fills
  * the transcript card, and "first", "the second one" or words from a label pick
  * that card at once with `Heard: "…"` under it (the read-back is where it is
- * changed). A miss says what was heard and how to answer; quiet for 6 s stops
- * the mic with "Take your time". Where nothing listens there is no mic and no
- * banner: the cards and Next are the turn.
+ * changed). "Say that again", "what does that mean?", "give me an example"
+ * and "what do most shops do?" are answered out loud and in the transcript
+ * card, ending on "Which one?", and the turn keeps listening. A miss says what
+ * was heard and how to answer; quiet for 6 s stops the mic with "Take your
+ * time". Where nothing listens there is no mic and no banner: the cards and
+ * Next are the turn.
  */
 export function OptionPairTurn({ choice, staged, busy, error, notice, onPick, onTypeInstead, editing }: OptionPairTurnProps) {
   const kind = onTypeInstead ? typedKind(choice.settingKey) : null;
@@ -72,14 +78,26 @@ export function OptionPairTurn({ choice, staged, busy, error, notice, onPick, on
   useEffect(() => {
     if (!busy && (error || notice)) setSent(false);
   }, [busy, error, notice]);
-  // The cards only, for now: help phrases arrive with Rivet's longer explanations (build plan PR 3).
-  const listenFor = useMemo<UtteranceScreen>(() => ({ options: choice.options }), [choice.options]);
+  const listenFor = useMemo<UtteranceScreen>(() => ({ options: choice.options, help: CHOICE_HELP }), [choice.options]);
+  // Rivet's answer to the owner's last question, shown while it is the last thing said.
+  const [helped, setHelped] = useState<{ help: HelpRequest; text: string } | null>(null);
+  const answer = (help: HelpRequest) => {
+    const said = answerHelp(choice, help);
+    // "Say that again" replays the turn the cards already show; the card says so rather than repeat them.
+    setHelped({ help, text: help === 'repeat' ? 'Saying it again.' : said.join(' ') });
+    if (voice) void voice.speakAll(said, { turn: choice.settingKey, with: said });
+  };
   const listen = useRivetTurnListener(voice, {
     turn: choice.settingKey,
     screen: listenFor,
     enabled: !busy && !typing && !sent,
     onResult: (said) => {
       if (sentRef.current) return;
+      if (said.kind === 'help') {
+        answer(said.help);
+        return;
+      }
+      setHelped(null);
       if (said.kind !== 'pick') {
         setHeard(null);
         return;
@@ -94,6 +112,7 @@ export function OptionPairTurn({ choice, staged, busy, error, notice, onPick, on
 
   const pick = (key: OnboardingOptionKey) => {
     setSelected(key);
+    setHelped(null);
     if (heard && heard.key !== key) setHeard(null);
     const line = choice.options.find((o) => o.key === key)?.rivetLine;
     if (voice && line) void voice.speak(line, { turn: choice.settingKey });
@@ -122,7 +141,9 @@ export function OptionPairTurn({ choice, staged, busy, error, notice, onPick, on
     ? listen.partial
     : listen.missed
       ? listen.missed.reply
-      : showsQuiet
+      : helped
+        ? helped.text
+        : showsQuiet
         ? "Take your time. Tap the mic when you're ready."
         : '';
   const tapMic = () => {

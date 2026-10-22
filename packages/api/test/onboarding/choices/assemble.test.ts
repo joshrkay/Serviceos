@@ -53,7 +53,9 @@ describe('assembleTypicalShop', () => {
     expect(keys).toContain('existing_number');
 
     for (const c of shop.choices) {
-      for (const text of [c.question, c.supportLine ?? '', ...c.options.flatMap((o) => [o.label, o.detail ?? '', o.rivetLine])]) {
+      expect(c.explain, `${c.settingKey} explains itself`).toBeTruthy();
+      expect(c.example, `${c.settingKey} has an example`).toBeTruthy();
+      for (const text of [c.question, c.supportLine ?? '', c.explain ?? '', c.example ?? '', ...c.options.flatMap((o) => [o.label, o.detail ?? '', o.rivetLine])]) {
         expect(text, `${c.settingKey}: ${text}`).not.toMatch(/[{}]/);
       }
     }
@@ -75,6 +77,8 @@ describe('assembleTypicalShop', () => {
     expect(price.options[1].label).toBe('$129 to come out, then $185 an hour');
     expect(price.options[0].rivetLine).toContain('$89');
     expect(price.supportLine).toContain('Cleveland');
+    // "Give me an example" quotes the usual (standard) trip fee.
+    expect(price.example).toContain("it's $89 for the visit");
     for (const c of shop.choices) {
       if (c.settingKey !== 'trip_fee_and_rate') {
         for (const o of c.options) expect(o.prices).toBeUndefined();

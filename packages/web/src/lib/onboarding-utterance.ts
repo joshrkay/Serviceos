@@ -21,10 +21,10 @@
  * Pure and deterministic: no DOM, no network, no AI. It wraps the card matcher
  * (`option-matcher.ts`) and adds plain word lists.
  */
-import type { OnboardingOptionKey } from '@ai-service-os/shared';
+import type { OnboardingHelpRequest, OnboardingOptionKey } from '@ai-service-os/shared';
 import { matchOption, spokenWords, type MatchableOptions, type OptionMatch } from './option-matcher';
 
-export type HelpRequest = 'repeat' | 'explain' | 'example' | 'most_shops';
+export type HelpRequest = OnboardingHelpRequest;
 
 export interface ScreenCommand {
   /** What the screen does with it ("make_it_mine"). */
@@ -120,7 +120,9 @@ function accepts(screen: UtteranceScreen): string[] {
 }
 
 function example(screen: UtteranceScreen): string | null {
-  if (screen.options) return 'For example, say “first”.';
+  if (screen.options) {
+    return screen.help?.includes('explain') ? 'For example, say “first”, or ask “what does that mean?”' : 'For example, say “first”.';
+  }
   const phrase = screen.commands?.[0]?.phrases[0];
   return phrase ? `For example, say “${phrase}”.` : null;
 }
