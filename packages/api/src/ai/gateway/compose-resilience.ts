@@ -150,6 +150,16 @@ function settleByDeadline<T>(work: Promise<T>, signal: AbortSignal): Promise<T> 
  * Wraps an LLMProvider with retry (exponential backoff + jitter) and a
  * per-request deadline (AbortSignal).
  *
+ * Every attempt settles no later than this wrapper's deadline, even when the
+ * provider ignores the abort (C-1699-P2). Inside a failover chain that
+ * deadline is the provider's SLICE: the chain only bounds itself by the whole
+ * budget, so without this a deaf primary held the chain until the whole
+ * budget was gone and the fallback's reserved window was never used. It also
+ * returns the breaker's half-open probe slot, which a never-settling attempt
+ * would otherwise hold for good. The abandoned attempt's late result is
+ * dropped here, so it never reaches the breaker, the quota lease or the
+ * gateway's ai_runs row.
+ *
  * Exposed as a named class (not an anonymous object literal) so the test
  * suite can traverse the wrapper chain for structural assertions.
  */
@@ -170,7 +180,11 @@ export class ProviderRetryDeadlineWrapper implements LLMProvider {
 
     try {
       return await runWithRetry(
-        () => this.inner.complete({ ...request, signal: deadline.signal }),
+        () =>
+          settleByDeadline(
+            this.inner.complete({ ...request, signal: deadline.signal }),
+            deadline.signal,
+          ),
         {
           policy: this.retryPolicy,
           deadline,
