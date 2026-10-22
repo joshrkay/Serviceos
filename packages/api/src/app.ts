@@ -25,6 +25,16 @@ import { PgLsaIntegrationRepository } from './lsa/pg-lsa-integration';
 import { createIntegrationResolver, createVapiSecretResolver } from './webhooks/integration-resolver';
 import { createTelephonyRouter, createDidTenantResolver } from './routes/telephony';
 import { createCallsRouter, createCallBridgeRouter } from './routes/calls';
+import { createDripCampaignsRouter } from './routes/drip-campaigns';
+import { createDripEngine } from './marketing/drip/drip-engine';
+import { PgDripRepository, PgDripSignals } from './marketing/drip/pg-drip-repository';
+import { DRIP_FEATURE_FLAG } from './marketing/drip/sequence';
+import { runDripCampaignSweep, DRIP_SWEEP_INTERVAL_MS } from './workers/drip-campaign-worker';
+import { initiateOutboundCall } from './telephony/outbound-call-service';
+import { recipientQuietHours } from './compliance/jurisdiction';
+import { standingContactRevocation } from './compliance/resolve-outbound-consent';
+import { normalizePhone as normalizeDncPhone } from './compliance/dnc';
+import { normalizeMobileE164 } from './shared/phone/normalize';
 import { TwilioGatherAdapter } from './telephony/twilio-adapter';
 import {
   createEmergencyPageWorker,
@@ -2611,6 +2621,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     paymentLinkReconciliation: 590034,
     // Dispatch FR-2 — service-location geocode sweep. DISTINCT key.
     geocodeLocations: 590035,
+    // #1735 — outbound drip campaign step sweep. DISTINCT key.
+    dripCampaigns: 590036,
   } as const;
   // #1090 — every leader-gated sweep run is registered here so `runShutdown`
   // can wait for the tick that is ALREADY RUNNING before it closes the pool.
@@ -6335,6 +6347,73 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           : null,
       }),
     );
+  }
+  // #1735 — outbound multi-step drip campaigns (SMS | call | email). Off by
+  // default behind the per-tenant `drip_campaigns` flag; owner-only routes and
+  // a leader-locked step sweep. Every step is consent-gated inside the engine.
+  if (pool) {
+    const dripLogger = createLogger({
+      service: 'drip-campaigns',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    const a2pStore = new PgA2pRegistrationStore(pool);
+    const dripRecipientLocale = createRecipientLocaleResolver({ settingsRepo, locationRepo });
+    const dripRepo = new PgDripRepository(pool);
+    const dripE164 = (phone: string): string => {
+      try {
+        return normalizeMobileE164(phone);
+      } catch {
+        return phone; // unparseable: the consent gate classifies it malformed
+      }
+    };
+    const dripEngine = createDripEngine({
+      repo: dripRepo,
+      signals: new PgDripSignals(pool),
+      customerRepo,
+      messaging: outboundMessaging,
+      sendEmail: messageDelivery
+        ? (message) => messageDelivery!.sendEmail(message)
+        : null,
+      placeCall: callDeps
+        ? (input) => initiateOutboundCall(callDeps, input)
+        : null,
+      checkCallConsent: (ctx: OutboundConsentContext) => checkOutboundConsent({ pool, auditRepo }, ctx),
+      isSmsRegistered: async (tenantId) =>
+        (await a2pStore.get(tenantId))?.progress.status === 'approved',
+      quietHours: async ({ tenantId, customerId, phone }) =>
+        recipientQuietHours(await dripRecipientLocale({ tenantId, customerId, to: phone ?? '' })),
+      isOptedOut: async (tenantId, phone) =>
+        (await dncRepo.isOnDnc(tenantId, normalizeDncPhone(phone))) ||
+        standingContactRevocation(await consentEventRepo.listByPhone(tenantId, phone)).revoked,
+      normalizePhone: dripE164,
+      auditRepo,
+      logger: dripLogger,
+    });
+    app.use(
+      '/api/drip-campaigns',
+      createDripCampaignsRouter({
+        repo: dripRepo,
+        engine: dripEngine,
+        isEnabledForTenant: isFlagEnabledForTenant,
+        auditRepo,
+      }),
+    );
+    if (shouldRunWorkers) {
+      registerInterval(setInterval(() => {
+        void runAsLeader(SWEEP_LOCK.dripCampaigns, async () => {
+          await runDripCampaignSweep({
+            listTenantIds: () => listAllTenantIds(pool),
+            isEnabledForTenant: (tenantId) => isFlagEnabledForTenant(tenantId, DRIP_FEATURE_FLAG),
+            engine: dripEngine,
+            logger: dripLogger,
+          });
+        }).catch((err) => {
+          dripLogger.error('Drip campaign sweep failed', {
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }, DRIP_SWEEP_INTERVAL_MS));
+    }
   }
   // D-045 — Settings → Text wording (owner's own wording for customer texts).
   app.use(

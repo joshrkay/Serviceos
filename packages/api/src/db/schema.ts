@@ -8249,6 +8249,79 @@ export const MIGRATIONS = {
     ALTER TABLE review_poll_state
       ADD COLUMN IF NOT EXISTS auth_generation INTEGER NOT NULL DEFAULT 0;
   `,
+  // #1735 — outbound multi-step drip campaigns (SMS | call | email). A
+  // sequence is an ordered list of steps (JSONB, validated by the Zod
+  // contract in src/marketing/drip/sequence.ts); an enrollment is one target
+  // customer walking it. Off by default behind the 'drip_campaigns' tenant
+  // flag. booked_* columns are the attribution of a booking to the campaign.
+  '336_drip_campaigns': `
+    CREATE TABLE IF NOT EXISTS drip_sequences (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      name TEXT NOT NULL,
+      target_kind TEXT NOT NULL CHECK (target_kind IN ('lapsed_customers', 'unsold_estimates')),
+      target_days INTEGER NOT NULL DEFAULT 180 CHECK (target_days BETWEEN 1 AND 3650),
+      steps JSONB NOT NULL,
+      status TEXT NOT NULL DEFAULT 'paused' CHECK (status IN ('active', 'paused')),
+      created_by TEXT NOT NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_drip_sequences_tenant ON drip_sequences(tenant_id);
+    ALTER TABLE drip_sequences ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE drip_sequences FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_drip_sequences ON drip_sequences;
+    CREATE POLICY tenant_isolation_drip_sequences ON drip_sequences
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+
+    CREATE TABLE IF NOT EXISTS drip_enrollments (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      sequence_id UUID NOT NULL REFERENCES drip_sequences(id),
+      customer_id UUID NOT NULL REFERENCES customers(id),
+      source_entity_type TEXT,
+      source_entity_id UUID,
+      status TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'completed', 'exited')),
+      exit_reason TEXT CHECK (exit_reason IN ('completed', 'booked', 'replied', 'opted_out', 'customer_unavailable', 'cancelled')),
+      current_step INTEGER NOT NULL DEFAULT 0,
+      step_attempts INTEGER NOT NULL DEFAULT 0,
+      next_run_at TIMESTAMPTZ NOT NULL,
+      enrolled_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      finished_at TIMESTAMPTZ,
+      booked_at TIMESTAMPTZ,
+      booked_appointment_id UUID,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (tenant_id, sequence_id, customer_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_drip_enrollments_due
+      ON drip_enrollments(tenant_id, next_run_at) WHERE status = 'active';
+    CREATE INDEX IF NOT EXISTS idx_drip_enrollments_sequence ON drip_enrollments(tenant_id, sequence_id);
+    ALTER TABLE drip_enrollments ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE drip_enrollments FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_drip_enrollments ON drip_enrollments;
+    CREATE POLICY tenant_isolation_drip_enrollments ON drip_enrollments
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+  // #1735 — append-only per-step outcome log (what the engine did for each
+  // step of each enrollment; the audit trail is separate).
+  '337_drip_step_events': `
+    CREATE TABLE IF NOT EXISTS drip_step_events (
+      id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+      tenant_id UUID NOT NULL REFERENCES tenants(id),
+      enrollment_id UUID NOT NULL REFERENCES drip_enrollments(id),
+      step_index INTEGER NOT NULL,
+      channel TEXT NOT NULL CHECK (channel IN ('sms', 'call', 'email')),
+      outcome TEXT NOT NULL CHECK (outcome IN ('sent', 'skipped', 'failed')),
+      reason TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_drip_step_events_enrollment
+      ON drip_step_events(tenant_id, enrollment_id, step_index);
+    ALTER TABLE drip_step_events ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE drip_step_events FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_drip_step_events ON drip_step_events;
+    CREATE POLICY tenant_isolation_drip_step_events ON drip_step_events
 
   // #1738 — Google Local Services Ads lead intake. One row per linked tenant:
   // the per-tenant webhook secret (AES-GCM, never plaintext) that authenticates
