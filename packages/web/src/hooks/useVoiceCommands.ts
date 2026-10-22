@@ -2,6 +2,13 @@
  * Voice command matching for navigation and common actions.
  * Returns a matched route if the transcript matches a known command,
  * otherwise returns null to fall through to the assistant.
+ *
+ * Every pattern is anchored to the WHOLE utterance. A command only navigates
+ * when navigating is all it says: "open invoices", "new customer". As soon as
+ * the sentence carries anything else ("New customer Maria Alvarez,
+ * 480-555-0102", "Show me the jobs Carlos has today", "Create an estimate for
+ * the Khan install") it is a request for the assistant, which can draft or
+ * answer it. Navigating to a blank form threw those details away.
  */
 
 interface CommandMatch {
@@ -10,43 +17,42 @@ interface CommandMatch {
 }
 
 // Filler words allowed between a creation verb and its noun ("add a new
-// customer", "create another estimate"). Kept tight and contiguous so that
-// dictated prose like "add a note that the customer wasn't home" does NOT
-// read as "add … customer" — the run of fillers breaks at "note".
+// customer", "create another estimate").
 const FILLER = String.raw`(?:(?:a|an|the|new|another)\s+)*`;
+// Politeness and punctuation a spoken command may carry without saying more.
+const LEAD = String.raw`^(?:(?:please|ok(?:ay)?|hey rivet|rivet)[,\s]+)?`;
+const TAIL = String.raw`(?:\s+(?:page|list|screen|tab))?(?:[,\s]+please)?[.!?]*$`;
+const NAV_VERB = String.raw`(?:show(?:\s+me)?|open(?:\s+up)?|go\s+to|take\s+me\s+to|see|view|pull\s+up)\s+(?:(?:the|my|all|all\s+the)\s+)?`;
+
+function nav(nouns: string): RegExp {
+  return new RegExp(`${LEAD}${NAV_VERB}${nouns}${TAIL}`, 'i');
+}
+function create(nouns: string): RegExp {
+  return new RegExp(String.raw`${LEAD}(?:new|create|add|start)\s+${FILLER}${nouns}(?:[,\s]+please)?[.!?]*$`, 'i');
+}
+function bare(nouns: string): RegExp {
+  return new RegExp(`${LEAD}${nouns}${TAIL}`, 'i');
+}
 
 const COMMANDS: { patterns: RegExp; route: string; label: string }[] = [
-  // Navigation — an explicit navigation verb is required, and every noun
-  // alternation is grouped. Previously the alternations were unparenthesized
-  // (e.g. `.*schedule\b|calendar\b`), so the trailing branch matched the bare
-  // keyword anywhere in a sentence and hijacked ordinary dictation.
-  { patterns: /\b(show|open|go to|see)\b.*(today'?s?\s+)?jobs?\b/i,          route: '/jobs',      label: 'Opening jobs' },
-  { patterns: /\b(show|open|go to|see)\b.*\b(schedule|calendar)\b/i,        route: '/schedule',  label: 'Opening schedule' },
-  { patterns: /\b(show|open|go to|see)\b.*\b(customers?|clients?)\b/i,      route: '/customers', label: 'Opening customers' },
-  { patterns: /\b(show|open|go to|see)\b.*\b(estimates?|quotes?)\b/i,       route: '/estimates', label: 'Opening estimates' },
-  { patterns: /\b(show|open|go to|see)\b.*\b(invoices?|billing)\b/i,        route: '/invoices',  label: 'Opening invoices' },
-  // Home/dashboard: anchored to the whole phrase. "home" is too common a word
-  // to match mid-sentence ("the customer wasn't home" must NOT navigate).
-  { patterns: /^(go\s+(to\s+)?)?(home|dashboard)$/i,                        route: '/',          label: 'Going home' },
+  { patterns: nav(String.raw`(?:today'?s\s+)?jobs?`),           route: '/jobs',      label: 'Opening jobs' },
+  { patterns: nav(String.raw`(?:today'?s\s+)?(?:schedule|calendar)`), route: '/schedule', label: 'Opening schedule' },
+  { patterns: nav(String.raw`(?:customers?|clients?)`),          route: '/customers', label: 'Opening customers' },
+  { patterns: nav(String.raw`(?:estimates?|quotes?)`),           route: '/estimates', label: 'Opening estimates' },
+  { patterns: nav(String.raw`(?:invoices?|billing)`),            route: '/invoices',  label: 'Opening invoices' },
+  { patterns: /^(go\s+(to\s+)?)?(home|dashboard)[.!?]*$/i,      route: '/',          label: 'Going home' },
 
-  // Creation shortcuts — the verb must be followed (through optional fillers)
-  // directly by the noun, so long dictated notes that merely contain the noun
-  // don't trigger a create navigation.
-  { patterns: new RegExp(String.raw`\b(new|create|add)\s+${FILLER}job\b`, 'i'),                 route: '/jobs/new',      label: 'Creating new job' },
-  { patterns: new RegExp(String.raw`\b(new|create|add)\s+${FILLER}(estimate|quote)\b`, 'i'),    route: '/estimates/new', label: 'Creating new estimate' },
-  { patterns: new RegExp(String.raw`\b(new|create|add)\s+${FILLER}(customer|client)\b`, 'i'),   route: '/customers/new', label: 'Adding new customer' },
-  // #881: the Home "New invoice" quick action submits "Create a new invoice";
-  // without this row it fell through to the assistant chat while the other
-  // three creates navigated. `\bbill\b` cannot match "billing" (word boundary),
-  // so dictation like "billing is on hold" still falls through.
-  { patterns: new RegExp(String.raw`\b(new|create|add)\s+${FILLER}(invoice|bill)\b`, 'i'),       route: '/invoices/new',  label: 'Creating new invoice' },
+  { patterns: create('job'),                 route: '/jobs/new',      label: 'Creating new job' },
+  { patterns: create('(?:estimate|quote)'),  route: '/estimates/new', label: 'Creating new estimate' },
+  { patterns: create('(?:customer|client)'), route: '/customers/new', label: 'Adding new customer' },
+  // #881: the Home "New invoice" quick action submits "Create a new invoice".
+  { patterns: create('(?:invoice|bill)'),    route: '/invoices/new',  label: 'Creating new invoice' },
 
-  // Direct page matches (less specific — checked last)
-  { patterns: /^jobs?$/i,                                               route: '/jobs',        label: 'Opening jobs' },
-  { patterns: /^schedule$/i,                                            route: '/schedule',    label: 'Opening schedule' },
-  { patterns: /^customers?$/i,                                          route: '/customers',   label: 'Opening customers' },
-  { patterns: /^estimates?$/i,                                          route: '/estimates',   label: 'Opening estimates' },
-  { patterns: /^invoices?$/i,                                           route: '/invoices',    label: 'Opening invoices' },
+  { patterns: bare('jobs?'),                 route: '/jobs',      label: 'Opening jobs' },
+  { patterns: bare('schedule'),              route: '/schedule',  label: 'Opening schedule' },
+  { patterns: bare('customers?'),            route: '/customers', label: 'Opening customers' },
+  { patterns: bare('estimates?'),            route: '/estimates', label: 'Opening estimates' },
+  { patterns: bare('invoices?'),             route: '/invoices',  label: 'Opening invoices' },
 ];
 
 export function matchVoiceCommand(transcript: string): CommandMatch | null {

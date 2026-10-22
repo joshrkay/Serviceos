@@ -304,6 +304,11 @@ describe('TechJobView status flow', () => {
       if (path === '/api/voice/transcribe') {
         return Promise.resolve(new Response(JSON.stringify({ transcript }), { status: 200 }));
       }
+      if (path === '/api/assistant/chat') {
+        return Promise.resolve(
+          new Response(JSON.stringify({ message: { content: 'Got it — noted on the job.' } }), { status: 200 }),
+        );
+      }
       return Promise.resolve(new Response(JSON.stringify([]), { status: 200 }));
     });
   }
@@ -391,7 +396,7 @@ describe('TechJobView status flow', () => {
 
       fireEvent.click(await screen.findByText('Tap to add by voice'));
       fireEvent.click(await screen.findByRole('button', { name: /Done talking/ }));
-      fireEvent.click(await screen.findByRole('button', { name: /Add all/ }));
+      fireEvent.click(await screen.findByRole('button', { name: /Send to Rivet/ }));
 
       const [resume] = await screen.findAllByRole('button', { name: /Resume Job/ });
       // Entering the waiting branch posted no self-transition.
