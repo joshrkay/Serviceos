@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import { useAuth, useUser } from '@clerk/clerk-react';
-import type { CreateOnboardingDraftBody, OnboardingCoreChoiceKey, OnboardingMetroCode, StagedOnboardingChoice } from '@ai-service-os/shared';
+import { narrateTurn, type CreateOnboardingDraftBody, type OnboardingCoreChoiceKey, type OnboardingMetroCode, type StagedOnboardingChoice } from '@ai-service-os/shared';
 import { useOnboardingDraft } from '../../../hooks/useOnboardingDraft';
 import { useOnboardingStatus } from '../../../hooks/useOnboardingStatus';
 import { RivetVoiceContext, useRivetVoice } from '../../../hooks/useRivetVoice';
@@ -23,7 +23,6 @@ import {
   landingTarget,
   makeItMineTarget,
   nextUnanswered,
-  spokenLines,
   type CoreTurn,
   type TurnTarget,
 } from './turns';
@@ -155,7 +154,7 @@ function Conversation() {
           ? nextUnanswered(draft, turnKey)
           : null;
   const aheadTurn = aheadKey ? turns.find((t) => t.settingKey === aheadKey) : undefined;
-  const aheadLines = aheadTurn ? spokenLines(aheadTurn).join('\n') : '';
+  const aheadLines = aheadTurn ? narrateTurn(aheadTurn).join('\n') : '';
   const { prefetch } = voice;
   useEffect(() => {
     if (aheadLines) prefetch(aheadLines.split('\n'));

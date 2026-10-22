@@ -8228,6 +8228,23 @@ export const MIGRATIONS = {
     ALTER TABLE review_poll_state
       ADD COLUMN IF NOT EXISTS backoff_reason TEXT
         CHECK (backoff_reason IN ('quota', 'auth'));
+  // D-045 — the owner's own wording for the texts customers get, one row per
+  // text (notifications/customer-text-wording.ts). No row means our wording.
+  '330_customer_text_wording': `
+    CREATE TABLE IF NOT EXISTS customer_text_wording (
+      tenant_id UUID NOT NULL REFERENCES tenants(id) ON DELETE CASCADE,
+      purpose TEXT NOT NULL CHECK (purpose IN ('estimate_text', 'invoice_text', 'portal_link_text', 'thank_you_text')),
+      body TEXT NOT NULL CHECK (length(body) BETWEEN 1 AND 480),
+      language TEXT NOT NULL CHECK (language IN ('en', 'es')),
+      updated_by TEXT NOT NULL,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (tenant_id, purpose)
+    );
+    ALTER TABLE customer_text_wording ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE customer_text_wording FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_customer_text_wording ON customer_text_wording;
+    CREATE POLICY tenant_isolation_customer_text_wording ON customer_text_wording
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
   `,
 };
 

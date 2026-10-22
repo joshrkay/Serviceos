@@ -22,6 +22,10 @@ import {
 } from '../../src/workers/thank-you-sms-worker';
 import { createRecipientLocaleResolver } from '../../src/notifications/recipient-locale';
 import { InMemoryLocationRepository } from '../../src/locations/location';
+import {
+  createCustomerTextWording,
+  InMemoryCustomerTextWordingRepository,
+} from '../../src/notifications/customer-text-wording';
 
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
 
@@ -272,6 +276,24 @@ describe('runThankYouSmsSweep', () => {
 
     const events = await auditRepo.findByEntity(TENANT, 'job', job.id);
     expect(events.some((e) => e.eventType === 'notification.thank_you_sms.sent')).toBe(true);
+  });
+
+  it("texts the owner's own thank-you wording when they wrote one (D-045)", async () => {
+    const job = makeJob({});
+    await jobRepo.create(job);
+    await customerRepo.create(makeCustomer());
+    const wordingRepo = new InMemoryCustomerTextWordingRepository();
+    await wordingRepo.save(TENANT, 'thank_you_text', 'Thanks {{customer_name}}, from all of us at {{business_name}}!', 'en', 'user-1');
+
+    const result = await runThankYouSmsSweep(
+      deps([{ id: job.id, tenant_id: TENANT }], {
+        wording: createCustomerTextWording({ repo: wordingRepo, logger }),
+      }),
+    );
+
+    expect(result.sent).toBe(1);
+    const customer = await customerRepo.findById(TENANT, 'cust-1');
+    expect(send.mock.calls[0][0].body).toBe(`Thanks ${customer!.displayName}, from all of us at Acme Plumbing!`);
   });
 
   it('suppresses when the customer has no primary phone, sets the stamp, audits the reason', async () => {

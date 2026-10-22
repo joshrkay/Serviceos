@@ -10,7 +10,7 @@
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
-import type { OnboardingDraft } from '@ai-service-os/shared';
+import { narrateTurn, type OnboardingDraft } from '@ai-service-os/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fullyAnsweredDraft, plumbingCleDraft, plumbingCmhDraft, withChoices } from './__fixtures__';
 import { PLANS, statusAt } from './__fixtures__/after';
@@ -497,10 +497,9 @@ describe('ConversationShell', () => {
   });
 
   describe('Rivet speaks', () => {
-    const lines = (i: number) => {
-      const t = draftJson.assembled.choices.find((c) => c.settingKey === turn(i).key)!;
-      return [t.question, t.options[0].rivetLine, t.options[1].rivetLine];
-    };
+    const choiceAt = (i: number) => draftJson.assembled.choices.find((c) => c.settingKey === turn(i).key)!;
+    /** The turn's narration: what one batch asks for, less any line already fetched for an earlier turn. */
+    const lines = (i: number) => narrateTurn(choiceAt(i));
 
     it('the "Make it mine" tap plays the audio inside the tap, then the first question is spoken in the server voice', async () => {
       stubNetwork({ draft: draftJson, status: statusBody(), tts: 'ok' });
@@ -512,7 +511,7 @@ describe('ConversationShell', () => {
       expect(play).toHaveBeenCalled();
       await onTurn(0);
       await waitFor(() => expect(played).toContain(srcFor(turn(0).question)));
-      // The turn's three lines came in one request (fetched while Ready was on screen).
+      // The turn's narration came in one request (fetched while Ready was on screen).
       expect(ttsBatches()).toContainEqual(lines(0));
       await waitFor(() =>
         expect(track.trackFunnel).toHaveBeenCalledWith(
@@ -536,7 +535,7 @@ describe('ConversationShell', () => {
       await waitFor(() => expect(screen.queryByText('Speaking')).not.toBeInTheDocument());
     });
 
-    it('tapping an option plays what Rivet would say, from the turn already fetched', async () => {
+    it('tapping an option plays what Rivet would say to a caller, as one clip of its own', async () => {
       stubNetwork({ draft: draftJson, status: statusBody(), tts: 'ok' });
       renderShell();
       await makeItMine();
@@ -549,12 +548,12 @@ describe('ConversationShell', () => {
       await waitFor(() => expect(played.at(-1)).toBe(srcFor(turn(2).question)));
       const before = ttsPosts().length;
       await userEvent.click(screen.getByRole('radio', { name: turn(2).b }));
-      await waitFor(() => expect(played.at(-1)).toBe(srcFor(lines(2)[2])));
+      await waitFor(() => expect(played.at(-1)).toBe(srcFor(choiceAt(2).options[1].rivetLine)));
       expect(screen.getByRole('radio', { name: turn(2).b })).toHaveAttribute('aria-checked', 'true');
-      expect(ttsPosts().length).toBe(before);
+      expect(ttsPosts().length).toBe(before + 1);
     });
 
-    it('counts the clips of a full pass: one request a turn, at most three clips each, never two turns ahead', async () => {
+    it('counts the clips of a full pass: one request a turn, at most four clips each, a shared line fetched once, never two turns ahead', async () => {
       stubNetwork({ draft: draftJson, status: statusBody(), tts: 'ok' });
       renderShell();
       await makeItMine();
@@ -573,9 +572,16 @@ describe('ConversationShell', () => {
       }
       expect(await screen.findByRole('heading', READBACK)).toBeInTheDocument();
       const batches = ttsBatches();
-      expect(batches).toEqual(TURNS.map((_, i) => lines(i)));
-      expect(batches.every((items) => items.length <= 3)).toBe(true);
-      expect(batches.flat()).toHaveLength(21);
+      const seen = new Set<string>();
+      const expected = TURNS.map((_, i) => {
+        const fresh = lines(i).filter((l) => !seen.has(l));
+        fresh.forEach((l) => seen.add(l));
+        return fresh;
+      });
+      expect(batches).toEqual(expected);
+      expect(batches.every((items) => items.length <= 4)).toBe(true);
+      // Seven questions, fourteen option lines, and "Most shops pick the first. Which one?" once.
+      expect(batches.flat()).toHaveLength(22);
     });
 
     it.each([429, 501, 502] as const)('a %s from the voice routes still leaves every turn answerable by tap, with no alert', async (status) => {

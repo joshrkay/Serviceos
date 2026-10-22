@@ -124,6 +124,7 @@ describe('v3 mobile layout contract', () => {
     const speaking: RivetVoice = {
       unlock: vi.fn(),
       speak: vi.fn(),
+      speakAll: vi.fn(),
       prefetch: vi.fn(),
       stop: vi.fn(),
       speaking: true,

@@ -4,11 +4,13 @@ import { MemoryRouter } from 'react-router';
 import { SettingsPage } from './SettingsPage';
 import { expectTapTarget } from '../../test-utils/tap-target';
 
+const meRole = vi.hoisted(() => ({ value: 'owner' }));
+
 vi.mock('../../hooks/useMe', () => ({
   useMe: () => ({
     me: {
       tenant_id: '11111111-1111-4111-8111-111111111111',
-      role: 'owner',
+      role: meRole.value,
     },
     isLoading: false,
     error: null,
@@ -20,6 +22,26 @@ vi.mock('../../hooks/useMe', () => ({
 describe('SettingsPage', () => {
   afterEach(() => {
     vi.restoreAllMocks();
+    meRole.value = 'owner';
+  });
+
+  // D-045 — Text wording is owner-only, like its settings:update save.
+  it('lists Text wording for an owner with a 44px row, and not for a dispatcher', () => {
+    const { unmount } = render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>
+    );
+    expectTapTarget(screen.getByText('Text wording').closest('button')!, 'Text wording row');
+    unmount();
+
+    meRole.value = 'dispatcher';
+    render(
+      <MemoryRouter>
+        <SettingsPage />
+      </MemoryRouter>
+    );
+    expect(screen.queryByText('Text wording')).not.toBeInTheDocument();
   });
 
   it('renders Price book settings item', () => {

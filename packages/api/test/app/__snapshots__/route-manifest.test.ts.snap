@@ -501,6 +501,8 @@ exports[`createApp route manifest > matches the committed route manifest 1`] = `
 118  authenticated use    /api/assistant    [router: router]
          └─ POST /chat
 119  authenticated use    /api/dispatch    [router: router]
+118  authenticated use    /api/dispatch    [router: router]
+         └─ GET /appointments/:id/suggested-technicians
          └─ GET /availability
          └─ POST /check-feasibility
 120  authenticated use    /api/proposals    [router: router]

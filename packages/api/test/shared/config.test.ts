@@ -1105,6 +1105,11 @@ describe('P0-026 — validateEnvSchema (Zod startup validation)', () => {
     ).not.toThrow();
   });
 
+  it('validateEnvSchema — STT_PROVIDER=fixture is forbidden in production, allowed in dev', () => {
+    expect(() => validateEnvSchema({ ...fullProdEnv, STT_PROVIDER: 'fixture' })).toThrow(/STT_PROVIDER/);
+    expect(() => validateEnvSchema({ NODE_ENV: 'dev', DATABASE_URL: '', STT_PROVIDER: 'fixture' })).not.toThrow();
+  });
+
   it('validateEnvSchema — DEV_AUTH_BYPASS=true is forbidden in production', () => {
     expect(() =>
       validateEnvSchema({ ...fullProdEnv, DEV_AUTH_BYPASS: 'true' }),

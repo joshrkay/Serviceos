@@ -1,8 +1,15 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { v4 as uuidv4 } from 'uuid';
-import { SendService } from '../../src/notifications/send-service';
+import {
+  NotDeliveredError,
+  SendService,
+  TextInFlightError,
+  textNotSentError,
+} from '../../src/notifications/send-service';
+import type { MessageBlockReason, OutboundMessaging } from '../../src/notifications/outbound-messaging';
+import { ConflictError } from '../../src/shared/errors';
 import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
-import { GatedMessageDelivery } from '../../src/notifications/gated-message-delivery';
+import { GatedMessageDelivery, SmsSuppressedError } from '../../src/notifications/gated-message-delivery';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryDispatchRepository } from '../../src/notifications/dispatch-repository';
 import {
@@ -25,6 +32,11 @@ import {
   InMemorySettingsRepository,
 } from '../../src/settings/settings';
 import { InMemoryDncRepository, normalizePhone } from '../../src/compliance/dnc';
+import { withOutbound } from '../helpers/outbound-messaging';
+import {
+  createCustomerTextWording,
+  InMemoryCustomerTextWordingRepository,
+} from '../../src/notifications/customer-text-wording';
 
 const TENANT = 'tenant-test-1';
 
@@ -156,7 +168,7 @@ async function buildHarness(): Promise<Harness> {
     enforcement: 'block',
   });
 
-  const send = new SendService({
+  const send = new SendService(withOutbound({
     delivery: gatedDelivery,
     estimateRepo: estimate,
     invoiceRepo: invoice,
@@ -166,7 +178,7 @@ async function buildHarness(): Promise<Harness> {
     dispatchRepo: dispatch,
     publicBaseUrl: 'https://app.example.com',
     ensureInvoicePayLink: async () => undefined,
-  });
+  }));
   return { send, delivery, dispatch, customer, job, estimate, invoice, settings, dnc };
 }
 
@@ -480,7 +492,7 @@ describe('SendService — failure audit and idempotency', () => {
         channel: 'email' as const,
       }),
     };
-    const send = new SendService({
+    const send = new SendService(withOutbound({
       delivery: failingDelivery,
       estimateRepo: h.estimate,
       invoiceRepo: h.invoice,
@@ -490,7 +502,7 @@ describe('SendService — failure audit and idempotency', () => {
       dispatchRepo: h.dispatch,
       publicBaseUrl: 'https://app.example.com',
       ensureInvoicePayLink: async () => undefined,
-    });
+    }));
 
     const result = await send.sendEstimate({
       tenantId: TENANT,
@@ -502,14 +514,23 @@ describe('SendService — failure audit and idempotency', () => {
     expect(result.channelsSent).toHaveLength(1);
     expect(result.channelsSent[0].channel).toBe('email');
 
-    // BOTH a failed (sms) and a sent (email) dispatch were written.
-    const dispatches = await h.dispatch.findByEntity(TENANT, 'estimate', est.id);
+    // BOTH channels have a message record: the text not sent (the provider
+    // refused it, retryable, its words kept) and the email sent, each linked
+    // to the customer and job so the status bubble finds them.
+    const { dispatches } = await h.dispatch.listByTenant(TENANT, { entityType: 'estimate' });
     expect(dispatches).toHaveLength(2);
-    const failed = dispatches.find((d) => d.status === 'failed');
-    expect(failed?.channel).toBe('sms');
+    const failed = dispatches.find((d) => d.channel === 'sms');
+    expect(failed).toMatchObject({
+      status: 'blocked',
+      blockReason: 'send_failed',
+      blockPermanent: false,
+      customerId: c.id,
+      jobId: j.id,
+      purpose: 'transactional',
+    });
     expect(failed?.errorMessage).toContain('invalid phone');
-    const succeeded = dispatches.find((d) => d.status === 'sent');
-    expect(succeeded?.channel).toBe('email');
+    const succeeded = dispatches.find((d) => d.channel === 'email');
+    expect(succeeded).toMatchObject({ status: 'sent', customerId: c.id, jobId: j.id, purpose: 'transactional' });
   });
 
   it('passes a stable idempotency key to the delivery provider', async () => {
@@ -562,10 +583,9 @@ describe('SendService SMS suppression (§7 phase 1)', () => {
     expect(h.delivery.sentEmails).toHaveLength(1);
     expect(result.channelsSent.map((c) => c.channel)).toEqual(['email']);
 
-    const rows = await h.dispatch.findByEntity(TENANT, 'invoice', inv.id);
+    const { dispatches: rows } = await h.dispatch.listByTenant(TENANT, { entityType: 'invoice' });
     const smsRow = rows.find((r) => r.channel === 'sms');
-    expect(smsRow?.status).toBe('failed');
-    expect(smsRow?.errorMessage ?? '').toMatch(/suppressed|DNC|opt[- ]?out/i);
+    expect(smsRow).toMatchObject({ status: 'blocked', blockReason: 'dnc', blockPermanent: true, customerId: c.id });
   });
 
   it('SMS to a customer with sms_consent=false is blocked even when channel=sms only', async () => {
@@ -592,5 +612,281 @@ describe('SendService SMS suppression (§7 phase 1)', () => {
 
     await h.send.sendInvoice({ tenantId: TENANT, invoiceId: inv.id, channel: 'sms' });
     expect(h.delivery.sentSms).toHaveLength(1);
+  });
+});
+
+describe('SendService edge cases (PR #1778 reviews)', () => {
+  let h: Harness;
+  beforeEach(async () => {
+    h = await buildHarness();
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  async function seedEstimate(customer: Partial<Customer> = {}) {
+    const c = makeCustomer(customer);
+    await h.customer.create(c);
+    const j = makeJob(c.id);
+    await h.job.create(j);
+    const est = makeEstimate(j.id);
+    await h.estimate.create(est);
+    return { c, j, est };
+  }
+
+  function sendServiceWith(outbound: OutboundMessaging): SendService {
+    return new SendService({
+      delivery: h.delivery,
+      outbound,
+      estimateRepo: h.estimate,
+      invoiceRepo: h.invoice,
+      jobRepo: h.job,
+      customerRepo: h.customer,
+      settingsRepo: h.settings,
+      dispatchRepo: h.dispatch,
+      publicBaseUrl: 'https://app.example.com',
+      ensureInvoicePayLink: async () => undefined,
+    });
+  }
+
+  it('a blank number override texts the number on file, and the result names that number', async () => {
+    const { est } = await seedEstimate();
+
+    const result = await h.send.sendEstimate({
+      tenantId: TENANT, estimateId: est.id, channel: 'sms', recipientPhone: '   ',
+    });
+
+    expect(h.delivery.sentSms[0].to).toBe('+15555550199');
+    expect(result.channelsSent[0].recipient).toBe('+15555550199');
+  });
+
+  it('does not resend, or claim "sent", a text the carrier just reported failed', async () => {
+    const { est } = await seedEstimate();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-22T17:04:10.000Z'));
+    const first = await h.send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'sms' });
+    await h.dispatch.updateStatus(TENANT, first.channelsSent[0].dispatchId!, 'failed');
+
+    vi.setSystemTime(new Date('2026-10-22T17:04:40.000Z'));
+    await expect(
+      h.send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'sms' }),
+    ).rejects.toThrow(/carrier reported it failed/);
+    expect(h.delivery.sentSms).toHaveLength(1);
+  });
+
+  it('replays an email that bounced in the same minute instead of colliding with its row', async () => {
+    const { est } = await seedEstimate();
+    vi.useFakeTimers({ toFake: ['Date'] });
+    vi.setSystemTime(new Date('2026-10-22T18:04:10.000Z'));
+    const first = await h.send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'email' });
+    await h.dispatch.updateStatus(TENANT, first.channelsSent[0].dispatchId!, 'bounced');
+
+    vi.setSystemTime(new Date('2026-10-22T18:04:40.000Z'));
+    const second = await h.send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'email' });
+
+    expect(second.channelsSent[0].dispatchId).toBe(first.channelsSent[0].dispatchId);
+    expect(h.delivery.sentEmails).toHaveLength(1);
+  });
+
+  it('a send another tap is already making is a 409, not a delivery failure', async () => {
+    const { est } = await seedEstimate();
+    const send = sendServiceWith({
+      sendText: async () => ({ status: 'blocked', reason: 'in_flight', permanent: false }),
+    });
+
+    const err = await send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'sms' }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(ConflictError);
+    expect(err.statusCode).toBe(409);
+  });
+
+  it('a send no channel delivered is a NotDeliveredError, which owner routes commit with', async () => {
+    const { est } = await seedEstimate({ smsConsent: false });
+
+    const err = await h.send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'sms' }).catch((e) => e);
+
+    expect(err).toBeInstanceOf(NotDeliveredError);
+    expect(err.message).toMatch(/Estimate send failed on all channels: sms to \+15555550199: SMS suppressed: no_consent/);
+  });
+
+  it('tells the owner when the text provider rejected the credentials', async () => {
+    const { est } = await seedEstimate();
+    const send = sendServiceWith({
+      sendText: async () => ({
+        status: 'blocked', reason: 'send_failed', permanent: false, detail: 'Twilio 401', errorCode: 'AUTH_FAILED',
+      }),
+    });
+
+    await expect(
+      send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'sms' }),
+    ).rejects.toThrow(/sms to \+15555550199: delivery authentication failed/);
+  });
+});
+
+describe('textNotSentError', () => {
+  const block = (reason: MessageBlockReason, extra: Partial<{ errorCode: string }> = {}) =>
+    textNotSentError({ status: 'blocked', reason, permanent: false, ...extra });
+
+  it('turns every gate refusal into a suppression, so an auto send can fall back to email', () => {
+    for (const reason of [
+      'no_consent', 'dnc', 'missing_consent_context', 'revoked', 'channel_disabled', 'recipient_volume_cap',
+    ] as const) {
+      const err = block(reason);
+      expect(err).toBeInstanceOf(SmsSuppressedError);
+      expect((err as SmsSuppressedError).reason).toBe(reason);
+    }
+  });
+
+  it('names the other reasons plainly', () => {
+    expect(block('in_flight')).toBeInstanceOf(TextInFlightError);
+    expect(block('send_failed')).toMatchObject({ code: 'PROVIDER_FAILED' });
+    expect(block('send_failed', { errorCode: 'AUTH_FAILED' })).toMatchObject({ code: 'AUTH_FAILED' });
+    expect(block('lookup_failed').message).toMatch(/couldn't be checked/);
+    expect(block('no_phone').message).toBe('text not sent: no phone');
+  });
+});
+
+describe("SendService — the owner's own text wording (D-045)", () => {
+  let h: Harness;
+  let wordingRepo: InMemoryCustomerTextWordingRepository;
+  let send: SendService;
+  beforeEach(async () => {
+    h = await buildHarness();
+    wordingRepo = new InMemoryCustomerTextWordingRepository();
+    send = new SendService(
+      withOutbound({
+        delivery: h.delivery,
+        estimateRepo: h.estimate,
+        invoiceRepo: h.invoice,
+        jobRepo: h.job,
+        customerRepo: h.customer,
+        settingsRepo: h.settings,
+        dispatchRepo: h.dispatch,
+        publicBaseUrl: 'https://app.example.com',
+        ensureInvoicePayLink: async () => undefined,
+        wording: createCustomerTextWording({ repo: wordingRepo, logger: { warn: () => {} } }),
+      }),
+    );
+  });
+
+  async function seedJob(customer: Partial<Customer> = {}) {
+    const c = makeCustomer(customer);
+    await h.customer.create(c);
+    const j = makeJob(c.id);
+    await h.job.create(j);
+    return { c, j };
+  }
+
+  it("an estimate text uses the owner's wording, with the per-send note on the second line", async () => {
+    const { j } = await seedJob();
+    const est = makeEstimate(j.id);
+    await h.estimate.create(est);
+    await wordingRepo.save(TENANT, 'estimate_text', 'Hi {{customer_name}}! {{business_name}} quote {{number}}: {{total}}\n{{link}}', 'en', 'user-1');
+
+    await send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'sms', customMessage: 'Good for 30 days' });
+
+    const body = h.delivery.sentSms[0].body;
+    expect(body).toMatch(/^Hi Sarah Johnson! Acme HVAC quote EST-1042: \$875\.00\nGood for 30 days\nhttps:\/\/app\.example\.com\/e\/[\w-]+$/);
+  });
+
+  it('reads the wording once, before any channel goes out (channels share the request connection)', async () => {
+    const { j } = await seedJob();
+    const est = makeEstimate(j.id);
+    await h.estimate.create(est);
+    const events: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    const sendEmail = vi.spyOn(h.delivery, 'sendEmail');
+    sendEmail.mockImplementation(async () => {
+      events.push('email');
+      return { provider: 'mem', providerMessageId: 'e-1', channel: 'email' } as never;
+    });
+    const ordered = new SendService(
+      withOutbound({
+        delivery: h.delivery,
+        estimateRepo: h.estimate,
+        invoiceRepo: h.invoice,
+        jobRepo: h.job,
+        customerRepo: h.customer,
+        settingsRepo: h.settings,
+        dispatchRepo: h.dispatch,
+        publicBaseUrl: 'https://app.example.com',
+        ensureInvoicePayLink: async () => undefined,
+        wording: {
+          textFor: async (args) => {
+            events.push('wording:start');
+            await gate;
+            events.push('wording:end');
+            return args.builtIn();
+          },
+        },
+      }),
+    );
+
+    const sending = ordered.sendEstimate(
+      { tenantId: TENANT, estimateId: est.id, channel: 'both' },
+      { onProviderStarting: () => void events.push('claim:sending') },
+    );
+    await new Promise((r) => setTimeout(r, 10));
+    expect(events).toEqual(['wording:start']);
+    release();
+    await sending;
+
+    // The wording read is prep: it ends before an automatic reminder's claim
+    // turns 'sending' (never reclaimed), and before any channel goes out.
+    expect(events.slice(0, 4)).toEqual(['wording:start', 'wording:end', 'claim:sending', 'email']);
+  });
+
+  it('the email is untouched by the text wording', async () => {
+    const { j } = await seedJob();
+    const est = makeEstimate(j.id);
+    await h.estimate.create(est);
+    await wordingRepo.save(TENANT, 'estimate_text', 'OWNER {{link}}', 'en', 'user-1');
+
+    await send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'email' });
+
+    expect(h.delivery.sentEmails[0].text).not.toContain('OWNER');
+  });
+
+  it('a customer who reads Spanish gets our Spanish text, not the English wording', async () => {
+    const { j } = await seedJob({ preferredLanguage: 'es-MX' });
+    const est = makeEstimate(j.id);
+    await h.estimate.create(est);
+    await wordingRepo.save(TENANT, 'estimate_text', 'OWNER {{link}}', 'en', 'user-1');
+
+    await send.sendEstimate({ tenantId: TENANT, estimateId: est.id, channel: 'sms' });
+
+    expect(h.delivery.sentSms[0].body).not.toContain('OWNER');
+    expect(h.delivery.sentSms[0].body).toMatch(/estimado|presupuesto|cotizaci/i);
+  });
+
+  it("an invoice paid in person keeps our in-person line after the owner's wording", async () => {
+    await h.settings.update(TENANT, { paymentCollectionMode: 'collect_on_site' });
+    const { j } = await seedJob();
+    const inv = makeInvoice(j.id);
+    await h.invoice.create(inv);
+    await wordingRepo.save(TENANT, 'invoice_text', 'Invoice {{number}} for {{total}}: {{link}}', 'en', 'user-1');
+
+    await send.sendInvoice({ tenantId: TENANT, invoiceId: inv.id, channel: 'sms' });
+
+    const lines = h.delivery.sentSms[0].body.split('\n');
+    expect(lines[0]).toMatch(/^Invoice INV-2042 for \$1250\.00: https:\/\/app\.example\.com\/pay\//);
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toMatch(/Acme HVAC/);
+  });
+
+  it('a portal-link text uses the owner wording with the portal link', async () => {
+    const { c } = await seedJob();
+    await wordingRepo.save(TENANT, 'portal_link_text', 'Your {{business_name}} account: {{link}}', 'en', 'user-1');
+
+    await send.sendPortalLink({
+      tenantId: TENANT,
+      customerId: c.id,
+      portalSessionId: uuidv4(),
+      portalUrl: 'https://app.example.com/portal/tok',
+      channel: 'sms',
+    });
+
+    expect(h.delivery.sentSms[0].body).toBe('Your Acme HVAC account: https://app.example.com/portal/tok');
   });
 });
