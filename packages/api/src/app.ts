@@ -503,6 +503,7 @@ export { detectLanguage } from './ai/orchestration/language-detector';
 // through detectLanguage (which applies the supported_languages gate).
 import { detectLanguage as detectInitialCallLanguage } from './ai/orchestration/language-detector';
 import { identifyCaller } from './ai/skills/identify-caller';
+import { PgCallSummaryRepository } from './ai/skills/pg-call-summary';
 import type { EmbeddingProvider } from './ai/providers/openai-compatible';
 import {
   autonomousBookingSettingsFrom,
@@ -4157,6 +4158,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   voiceExtendedIntentsFlagResolver = voiceFlags.extendedIntentsEnabled;
   voiceMultiActionFlagResolver = voiceFlags.multiActionEnabled;
 
+  // A2 — end-of-call summaries (telephony processor + in-app adapter) write
+  // call_summaries through the tenant RLS context, not a raw pool.query.
+  const callSummaryRepo = pool ? new PgCallSummaryRepository(pool) : undefined;
+
   // WS18d — assembled as a VARIABLE (not an inline literal) deliberately: the
   // adapter spreads its deps into createVoiceTurnProcessor, and the processor-
   // only WS18 keys below (consentEventRepo, autonomousClose) are not part of
@@ -4170,6 +4175,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // U5 — absolute per-call duration cap, checked on every Gather turn.
     maxCallDurationMs: config.VOICE_MAX_CALL_DURATION_MS,
     ...(pool ? { pool } : {}),
+    ...(callSummaryRepo ? { callSummaryRepo } : {}),
     proposalRepo,
     ...(customerNegotiationContextProvider ? { customerNegotiationContextProvider } : {}),
     // P2-036 V2 — live-call discount engine (fail-closed; dormant until a tenant
@@ -7008,6 +7014,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // #1405 — the card's "which accepted estimate?" pick re-drafts the
       // invoice's lines, discount and tax from the picked estimate.
       estimateRepo,
+      // A1 — resolve-entity runs outside the request transaction; its writes
+      // commit together in one short transaction after the re-draft's LLM call.
+      pool ? new PgTenantTransactionRunner(pool) : undefined,
     ),
   );
   if (entityAliasRepo) {
@@ -8204,6 +8213,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     auditRepo,
     onCallRepo: sharedOnCallRepo,
     ...(pool ? { pool } : {}),
+    ...(callSummaryRepo ? { callSummaryRepo } : {}),
     // #1509 — the SAME alias-first resolver chat, memo and phone use (see
     // `sharedEntityResolver` above). Without it the adapter self-built a bare
     // PgEntityResolver from `pool` and an approved tenant alias ("Bobby")
