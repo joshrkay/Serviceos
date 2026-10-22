@@ -387,8 +387,12 @@ export class CancelAppointmentTaskHandler implements TaskHandler {
         customerId: context.customerId,
         jobRepo: this.jobRepo,
       }));
+    // Both sources are repo lookups, so the id is stamped verified and the
+    // drafting scrub keeps it (reschedule's shape above).
+    let verifiedIds: Record<string, string> | undefined;
     if (resolvedId) {
       payload.appointmentId = resolvedId;
+      verifiedIds = { appointmentId: resolvedId };
     } else if (ee.appointmentReference) {
       payload.appointmentReference = ee.appointmentReference;
       missing.push('appointmentId');
@@ -403,7 +407,11 @@ export class CancelAppointmentTaskHandler implements TaskHandler {
     }
 
     return {
-      proposal: createProposal(inputFor(context, this.taskType, payload, missing)),
+      proposal: createProposal(
+        inputFor(context, this.taskType, payload, missing, {
+          ...(verifiedIds ? { sourceContext: { verifiedIds } } : {}),
+        }),
+      ),
       taskType: this.taskType,
     };
   }

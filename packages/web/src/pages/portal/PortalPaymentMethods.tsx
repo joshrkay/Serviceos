@@ -8,7 +8,7 @@
  */
 import { useEffect, useMemo, useState } from 'react';
 import { Elements, PaymentElement, useElements, useStripe } from '@stripe/react-stripe-js';
-import type { Stripe } from '@stripe/stripe-js';
+import type { SetupIntentResult, Stripe } from '@stripe/stripe-js';
 import { portalApi, PortalPaymentMethod } from '../../api/portal';
 import { getRuntimeConfigValue } from '../../lib/runtimeConfig';
 import { loadStripeForAccount } from '../../lib/stripeConnect';
@@ -27,7 +27,16 @@ function AddCardForm({ onSaved }: { onSaved: () => void }): JSX.Element {
     if (!stripe || !elements) return;
     setSubmitting(true);
     setError(null);
-    const result = await stripe.confirmSetup({ elements, redirect: 'if_required' });
+    // confirmSetup can REJECT (network drop, Stripe.js load failure) instead
+    // of resolving with { error } — without this the button stays "Saving…".
+    let result: SetupIntentResult;
+    try {
+      result = await stripe.confirmSetup({ elements, redirect: 'if_required' });
+    } catch {
+      setSubmitting(false);
+      setError('Could not save your card. Please check your connection and try again.');
+      return;
+    }
     setSubmitting(false);
     if (result.error) {
       setError(result.error.message ?? 'Could not save your card.');

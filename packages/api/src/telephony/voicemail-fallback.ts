@@ -32,7 +32,7 @@ export interface VoicemailTwimlOptions {
    * owner-line gate (approver-identity match) or attach a phone to the
    * voicemail lead. The callback URL is part of what Twilio signs, so the
    * value rides back tamper-proof; trust level is carrier caller-ID, the
-   * same boundary as `resolveOwnerSession` / the SMS reply transport.
+   * same boundary as `resolveOwnerLineApprover` / the SMS reply transport.
    */
   callerPhone?: string;
   /**

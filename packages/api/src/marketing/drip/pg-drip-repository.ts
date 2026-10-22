@@ -14,6 +14,7 @@ import type {
   DripSequence,
   DripSequenceStatus,
   DripStep,
+  DripSourceEntityType,
   DripTargetKind,
 } from './sequence';
 
@@ -44,7 +45,7 @@ function mapEnrollment(row: Record<string, unknown>): DripEnrollment {
     tenantId: row.tenant_id as string,
     sequenceId: row.sequence_id as string,
     customerId: row.customer_id as string,
-    sourceEntityType: (row.source_entity_type as 'estimate' | null) ?? null,
+    sourceEntityType: (row.source_entity_type as DripSourceEntityType | null) ?? null,
     sourceEntityId: (row.source_entity_id as string | null) ?? null,
     status: row.status as DripEnrollment['status'],
     exitReason: (row.exit_reason as DripEnrollment['exitReason']) ?? null,
@@ -156,10 +157,10 @@ export class PgDripRepository extends PgBaseRepository implements DripRepository
       for (const t of targets) {
         const r = await client.query(
           `INSERT INTO drip_enrollments
-             (tenant_id, sequence_id, customer_id, source_entity_type, source_entity_id, next_run_at)
-           VALUES ($1, $2, $3, $4, $5, $6)
+             (tenant_id, sequence_id, customer_id, source_entity_type, source_entity_id, source_due_on, next_run_at)
+           VALUES ($1, $2, $3, $4, $5, $6::date, $7)
            ON CONFLICT (tenant_id, sequence_id, customer_id) DO NOTHING`,
-          [tenantId, sequenceId, t.customerId, t.sourceEntityType, t.sourceEntityId, firstRunAt],
+          [tenantId, sequenceId, t.customerId, t.sourceEntityType, t.sourceEntityId, t.sourceDueOn ?? null, firstRunAt],
         );
         added += r.rowCount ?? 0;
       }
@@ -254,7 +255,13 @@ export class PgDripSignals extends PgBaseRepository implements DripSignals {
     days: number,
     now: Date,
     limit: number,
+    sequenceId: string,
   ): Promise<DripTarget[]> {
+    // Customers already in this campaign are skipped BEFORE the cap, so each
+    // "add matching customers" reaches past the ones the last run enrolled.
+    const notEnrolled = (customerCol: string) =>
+      `NOT EXISTS (SELECT 1 FROM drip_enrollments de
+                    WHERE de.tenant_id = $1 AND de.sequence_id = $5::uuid AND de.customer_id = ${customerCol})`;
     return this.withTenant(tenantId, async (client) => {
       if (kind === 'lapsed_customers') {
         // Had a completed job once, none (of any status) created within the window.
@@ -266,14 +273,49 @@ export class PgDripSignals extends PgBaseRepository implements DripSignals {
               AND NOT EXISTS (SELECT 1 FROM jobs j WHERE j.tenant_id = c.tenant_id
                                 AND j.customer_id = c.id
                                 AND j.created_at > $2::timestamptz - make_interval(days => $3))
+              AND ${notEnrolled('c.id')}
             ORDER BY c.created_at ASC
             LIMIT $4`,
-          [tenantId, now, days, limit],
+          [tenantId, now, days, limit, sequenceId],
         );
         return r.rows.map((row) => ({
           customerId: row.id as string,
           sourceEntityType: null,
           sourceEntityId: null,
+        }));
+      }
+      if (kind === 'membership_renewals') {
+        // An active membership that will NOT renew itself and ends within
+        // `days`, for a customer with no other active membership that both
+        // starts by the day after it ends (no gap) and runs past the window.
+        // One row per customer: the soonest-ending membership.
+        const r = await client.query(
+          `SELECT DISTINCT ON (a.customer_id) a.customer_id, a.id AS agreement_id, a.ends_on::text AS ends_on
+             FROM service_agreements a
+             JOIN customers c ON c.id = a.customer_id AND c.tenant_id = a.tenant_id
+            WHERE a.tenant_id = $1 AND a.status = 'active' AND a.auto_renew = false
+              AND c.is_archived = false
+              AND a.ends_on IS NOT NULL
+              -- a term that has not started yet is not up for renewal
+              AND a.starts_on <= ($2::timestamptz)::date
+              AND a.ends_on >= ($2::timestamptz)::date
+              AND a.ends_on <= ($2::timestamptz + make_interval(days => $3))::date
+              AND NOT EXISTS (SELECT 1 FROM service_agreements o
+                               WHERE o.tenant_id = a.tenant_id AND o.customer_id = a.customer_id
+                                 AND o.id <> a.id AND o.status = 'active'
+                                 AND o.starts_on <= a.ends_on + 1
+                                 AND (o.auto_renew = true OR o.ends_on IS NULL
+                                      OR o.ends_on > ($2::timestamptz + make_interval(days => $3))::date))
+              AND ${notEnrolled('a.customer_id')}
+            ORDER BY a.customer_id, a.ends_on ASC
+            LIMIT $4`,
+          [tenantId, now, days, limit, sequenceId],
+        );
+        return r.rows.map((row) => ({
+          customerId: row.customer_id as string,
+          sourceEntityType: 'service_agreement' as const,
+          sourceEntityId: row.agreement_id as string,
+          sourceDueOn: row.ends_on as string,
         }));
       }
       // Unsold: an estimate still 'sent' for `days`, and the customer has no accepted estimate since.
@@ -287,9 +329,10 @@ export class PgDripSignals extends PgBaseRepository implements DripSignals {
             AND NOT EXISTS (SELECT 1 FROM estimates e2 JOIN jobs j2 ON j2.id = e2.job_id AND j2.tenant_id = e2.tenant_id
                              WHERE e2.tenant_id = e.tenant_id AND j2.customer_id = j.customer_id
                                AND e2.status = 'accepted' AND e2.updated_at >= e.updated_at)
+            AND ${notEnrolled('j.customer_id')}
           ORDER BY j.customer_id, e.updated_at DESC
           LIMIT $4`,
-        [tenantId, now, days, limit],
+        [tenantId, now, days, limit, sequenceId],
       );
       return r.rows.map((row) => ({
         customerId: row.customer_id as string,
@@ -317,6 +360,34 @@ export class PgDripSignals extends PgBaseRepository implements DripSignals {
       return row
         ? { appointmentId: row.id as string, bookedAt: new Date(row.created_at as string) }
         : null;
+    });
+  }
+
+  async hasRenewedMembership(tenantId: string, enrollmentId: string): Promise<boolean> {
+    return this.withTenant(tenantId, async (client) => {
+      const r = await client.query(
+        `SELECT 1 FROM drip_enrollments e
+           JOIN drip_sequences s ON s.tenant_id = e.tenant_id AND s.id = e.sequence_id
+           JOIN service_agreements a
+             ON a.tenant_id = e.tenant_id AND a.status = 'active'
+            AND (a.id = e.source_entity_id
+                 OR (a.customer_id = e.customer_id
+                     -- another membership only counts if it starts by the day after the old term ends
+                     AND a.starts_on <= e.source_due_on + 1))
+          WHERE e.tenant_id = $1 AND e.id = $2 AND e.source_entity_type = 'service_agreement'
+            AND (a.auto_renew = true OR a.ends_on IS NULL
+                 OR a.ends_on > CASE
+                      -- the enrolled membership, or one added since: any end past the old one
+                      WHEN a.id = e.source_entity_id OR a.created_at > e.enrolled_at THEN e.source_due_on
+                      -- one that already existed at enrollment: targeting proved it ended inside
+                      -- the window then, so it counts once it runs past that window
+                      -- (target_days is fixed once the campaign is created)
+                      ELSE (e.enrolled_at + make_interval(days => s.target_days))::date
+                    END)
+          LIMIT 1`,
+        [tenantId, enrollmentId],
+      );
+      return (r.rowCount ?? 0) > 0;
     });
   }
 

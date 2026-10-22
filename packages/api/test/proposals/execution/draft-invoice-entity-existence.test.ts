@@ -233,6 +233,48 @@ describe('CreateInvoiceExecutionHandler — tenant-scoped entity existence check
     expect(await invoiceRepo.findByTenant(TENANT)).toHaveLength(0);
   });
 
+  // B4 — OWNERSHIP, the same rule DraftEstimateExecutionHandler applies: the
+  // job is the invoice's container and decides whose bill it is, so a real
+  // job of a DIFFERENT customer than the draft's must not be billed.
+  it("refuses a real job that belongs to a different customer than the invoice's, writing nothing", async () => {
+    const otherCustomer = await createCustomer(
+      { tenantId: TENANT, firstName: 'Second', lastName: 'Customer', createdBy: EXECUTOR },
+      customerRepo,
+    );
+    const otherLocation = await createLocation(
+      {
+        tenantId: TENANT,
+        customerId: otherCustomer.id,
+        street1: '2 Side St',
+        city: 'Springfield',
+        state: 'IL',
+        postalCode: '62701',
+        isPrimary: true,
+      },
+      locationRepo,
+    );
+    const otherJob = await createJob(
+      {
+        tenantId: TENANT,
+        customerId: otherCustomer.id,
+        locationId: otherLocation.id,
+        summary: 'Their furnace',
+        createdBy: EXECUTOR,
+      },
+      jobRepo,
+    );
+
+    const result = await handler.execute(
+      makeProposal({ customerId: realCustomerId, jobId: otherJob.id, lineItems: LINE_ITEMS }),
+      CONTEXT,
+    );
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain(otherJob.id);
+    expect(result.error).toMatch(/belongs to a different customer/i);
+    expect(await invoiceRepo.findByTenant(TENANT)).toHaveLength(0);
+  });
+
   // ── happy paths ───────────────────────────────────────────────────────────
   it('happy path — a real tenant customer + real job executes and persists', async () => {
     const result = await handler.execute(

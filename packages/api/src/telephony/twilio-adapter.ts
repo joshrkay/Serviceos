@@ -81,7 +81,7 @@ import {
   injectSafetySayLines,
 } from './shared/safety-say-lines';
 import { isBlockedCallerId } from '../ai/voice-turn/shared/blocked-caller-id';
-import { resolveOwnerSession } from '../ai/voice-turn/shared/owner-session';
+import { resolveOwnerLineApprover } from '../ai/voice-turn/shared/owner-session';
 import { switchSessionLanguage } from '../ai/voice-turn/shared/language-switch';
 import {
   queueCallbackProposal as queueCallbackProposalShared,
@@ -1194,7 +1194,10 @@ export class TwilioGatherAdapter {
     // untrusted caller (no ownerSession, no phone actor, S1 profile).
     const attested = isOwnerLineAttested(opts.stirVerstat);
     // #1601 step 2 — the shared RV-070 resolver (`ai/voice-turn/shared/owner-session.ts`).
-    const approverCallerId = await resolveOwnerSession(this.deps, opts.tenantId, opts.from);
+    // B1 — it also says WHO the line approves as (owner, or the backup as
+    // their own role), carried on the session for every voice approval turn.
+    const lineApprover = await resolveOwnerLineApprover(this.deps, opts.tenantId, opts.from);
+    const approverCallerId = lineApprover !== null;
     const ownerSession = approverCallerId && attested;
     // Owner extended lookups (day/digest/pending) stay owner+flag gated.
     const extendedIntents = extendedIntentsFlag && ownerSession;
@@ -1228,6 +1231,12 @@ export class TwilioGatherAdapter {
     // stays as defense-in-depth but is no longer the sole source.
     if (opts.from) session.callerPhone = opts.from;
     if (opts.stirVerstat) session.stirVerstat = opts.stirVerstat;
+    if (ownerSession && lineApprover) {
+      session.ownerLineApprover = {
+        role: lineApprover.role,
+        ...(lineApprover.userId ? { userId: lineApprover.userId } : {}),
+      };
+    }
     if (approverCallerId) {
       if (!ownerSession) session.ownerLineUnverified = true;
       this.auditOwnerLineAttestation(session, opts.stirVerstat, ownerSession);

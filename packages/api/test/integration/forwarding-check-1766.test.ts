@@ -19,7 +19,17 @@ import {
   type ForwardingCheck,
 } from '../../src/onboarding/forwarding-check';
 
-const RIVET = '+15125550123';
+// Unique per run: migration 274 makes a Twilio DID unique across tenants and
+// the suite's database is shared.
+const RIVET = `+1512${String(Math.floor(Math.random() * 1e7)).padStart(7, '0')}`;
+
+async function liveLine(pool: Pool, tenantId: string, phoneE164: string): Promise<void> {
+  await pool.query(
+    `INSERT INTO tenant_integrations (id, tenant_id, provider, status, provider_data)
+     VALUES (gen_random_uuid(), $1, 'twilio', 'full_readiness', $2::jsonb)`,
+    [tenantId, JSON.stringify({ phoneE164 })],
+  );
+}
 
 function check(tenantId: string, over: Partial<ForwardingCheck> = {}): ForwardingCheck {
   const createdAt = new Date('2026-10-22T12:00:00Z');
@@ -101,12 +111,39 @@ describe('#1766 forwarding check (real Postgres)', () => {
       },
       now: () => now,
     });
+    await liveLine(pool, tenantId, RIVET);
     await repo.create(check(tenantId));
 
     expect(await service.recognizeInbound({ tenantId, from: RIVET, callSid: 'CA-back' })).toBe(true);
     expect((await forwardingRepo.get(tenantId))?.checkPassedAt).toEqual(now);
     // Already settled: the same call again is an ordinary call.
     expect(await service.recognizeInbound({ tenantId, from: RIVET, callSid: 'CA-back-2' })).toBe(false);
+  });
+
+  it('a check placed from a number the tenant no longer has does not restore the proof', async () => {
+    const { tenantId } = await createTestTenant(pool);
+    await new PgSettingsRepository(pool).upsertIdentityFields(tenantId, { businessName: 'Acme' });
+    const forwardingRepo = new PgCallForwardingRepository(pool);
+    await forwardingRepo.save(tenantId, { carrier: 'verizon', mode: 'missed' });
+    // The line was repointed to a new number after this check was placed.
+    const newNumber = `+1737${String(Math.floor(Math.random() * 1e7)).padStart(7, '0')}`;
+    await liveLine(pool, tenantId, newNumber);
+    const repo = new PgForwardingCheckRepository(pool);
+    const service = new ForwardingCheckService({
+      repo,
+      forwardingRepo,
+      getBusinessPhone: async () => null,
+      getCreds: async () => {
+        throw new Error('unused');
+      },
+      now: () => new Date('2026-10-22T12:00:30Z'),
+    });
+    await repo.create(check(tenantId));
+
+    // Still the check call, so it hangs up rather than reach the AI...
+    expect(await service.recognizeInbound({ tenantId, from: RIVET, callSid: 'CA-old' })).toBe(true);
+    // ...but forwarding to the released number proves nothing about the new one.
+    expect((await forwardingRepo.get(tenantId))?.checkPassedAt).toBeNull();
   });
 
   it('rejects a status outside the allowed set', async () => {

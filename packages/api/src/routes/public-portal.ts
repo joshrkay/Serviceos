@@ -34,7 +34,9 @@ import { LeadRepository } from '../leads/lead';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { SettingsRepository } from '../settings/settings';
 import { ProposalRepository, createProposal } from '../proposals/proposal';
-import { createLead } from '../leads/lead-service';
+import { captureLead } from '../leads/lead-service';
+import type { NewLeadAutoReply } from '../leads/new-lead-auto-reply';
+import { normalizePhone } from '../shared/phone';
 import {
   findBookableSlots,
   isWithinBusinessHours,
@@ -108,6 +110,8 @@ export interface PublicPortalDeps {
   customerPaymentMethodRepo?: CustomerPaymentMethodRepository;
   stripeConfig?: { apiKey: string };
   connectAccountResolver?: ConnectAccountResolver;
+  /** #1738 — instant reply text for a new service request (owner opt-in). */
+  autoReplyToNewLead?: NewLeadAutoReply;
   /** Test override for the Stripe fetch impl. */
   stripeFetch?: StripeFetch;
   /** Test override for the token middleware (rate limit / clock). */
@@ -128,6 +132,8 @@ const requestServiceSchema = z.object({
    * "anything else?". Both end up concatenated into `notes`.
    */
   summary: z.string().trim().min(1).max(2000),
+  /** #1738 — the request form's unticked "text me about this request" box. */
+  smsConsent: z.boolean().optional(),
 });
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -569,7 +575,7 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
       // so we drop the prior workaround (`source='web_form' +
       // sourceDetail='Customer Portal'`) in favor of the dedicated enum.
       // The DB CHECK constraint accepts it via migration 068.
-      const lead = await createLead(
+      const { lead, outcome } = await captureLead(
         {
           tenantId,
           firstName: parsed.firstName ?? customer.firstName,
@@ -585,6 +591,42 @@ export function createPublicPortalRouter(deps: PublicPortalDeps): Router {
         deps.leadRepo,
         deps.auditRepo,
       );
+
+      if (deps.autoReplyToNewLead) {
+        // Consent covers only the number it was given for.
+        //  - A contact-bound link (a secondary contact, e.g. an on-site
+        //    tenant): the tick counts only for a number they typed. A blank
+        //    phone falls back to the account holder's number, which the
+        //    contact cannot consent for, and the holder's stored consent is
+        //    not consent to texts about a request they didn't make.
+        //  - The account holder: the tick, or their stored consent when the
+        //    lead's number is their saved one.
+        const contactBound = !!req.portal!.contactId;
+        const tickApplies = parsed.smsConsent === true && (!contactBound || !!parsed.primaryPhone);
+        const storedConsentApplies =
+          !contactBound &&
+          customer.smsConsent === true &&
+          !!customer.primaryPhone &&
+          !!lead.primaryPhone &&
+          normalizePhone(customer.primaryPhone) === normalizePhone(lead.primaryPhone);
+        // The text greets whoever asked: on a contact-bound link that is the
+        // contact, not the account holder the lead's name fell back to.
+        let greetAs = lead;
+        if (contactBound && !parsed.firstName) {
+          const contactRepo = deps.middlewareOptions?.contactRepo ?? deps.contactRepo;
+          // A failed lookup must not fail a request already captured; "there" greets instead.
+          const contact = await contactRepo?.findById(tenantId, req.portal!.contactId!).catch(() => null);
+          // The whole name comes from the contact: the account holder's
+          // surname must not ride along into the owner's follow-up alert.
+          const [first = '', ...rest] = contact?.name.trim().split(/\s+/) ?? [];
+          greetAs = { ...lead, firstName: first, lastName: rest.join(' ') };
+        }
+        await deps.autoReplyToNewLead({
+          lead: greetAs,
+          outcome,
+          smsConsent: tickApplies || storedConsentApplies,
+        });
+      }
 
       res.status(201).json({
         leadId: lead.id,

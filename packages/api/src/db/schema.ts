@@ -8857,6 +8857,25 @@ export const MIGRATIONS = {
     END;
     $$ LANGUAGE plpgsql;
   `,
+
+  // #1735 — membership renewals as a drip target: an active, non-auto-renewing
+  // membership ending within the sequence's window. An enrollment leaves with
+  // 'renewed' once the membership is extended (or a new one starts), judged
+  // against source_due_on (its end date at enrollment). Widens the two inline
+  // CHECKs from 336; NOT VALID per check-constraints-not-valid.
+  '350_drip_membership_renewals': `
+    ALTER TABLE drip_sequences
+      DROP CONSTRAINT IF EXISTS drip_sequences_target_kind_check,
+      ADD CONSTRAINT drip_sequences_target_kind_check
+      CHECK (target_kind IN ('lapsed_customers', 'unsold_estimates', 'membership_renewals')) NOT VALID;
+    ALTER TABLE drip_enrollments
+      DROP CONSTRAINT IF EXISTS drip_enrollments_exit_reason_check,
+      ADD CONSTRAINT drip_enrollments_exit_reason_check
+      CHECK (exit_reason IN ('completed', 'booked', 'replied', 'opted_out', 'customer_unavailable', 'cancelled', 'renewed')) NOT VALID;
+    -- The membership's end date when it was targeted: any later extension,
+    -- even one still inside the campaign window, reads as renewed.
+    ALTER TABLE drip_enrollments ADD COLUMN IF NOT EXISTS source_due_on DATE;
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {
