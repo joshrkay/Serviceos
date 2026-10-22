@@ -1838,3 +1838,62 @@ and the card renders whenever there are enough such attempts, so a window where 
 failed shows 100 % rather than "not enough calls"; `voice_turn_latency_ms` keeps its
 "first audible, filler included" meaning and is not reused for the SLO. The number in (3) is
 replaced, with the run date and instance size, by whoever runs the first staging sweep.
+
+## D-044 — "Get found online": a hosted tenant site, a guided Google profile, call forwarding only, and a home checklist outside onboarding
+
+**Date:** 2026-10-21
+**Status:** Accepted (owner decisions 2026-10-21, grilled in the "Google reviews integration flows" project thread)
+
+**Context.** An owner should be able to go from "no web presence" to "customers find me on
+Google, leave reviews, and their calls reach the AI" without leaving the app. What already
+ships: connecting an existing Google Business Profile (first account and first location only),
+the 15-minute review sweep and AI reply drafts, the post-job rating text that sends 4★+ to a
+review link the owner pastes by hand, the public lead and booking pages, and number
+provisioning (D-037). What does not: any website, any path for an owner with no Google
+profile, a location picker, forwarding instructions in the current onboarding, a check that
+forwarding works, and anything that tracks setup after activation.
+
+**Decision.**
+
+1. **Tenant site.** An owner without a website gets a one-page site we host, on a subdomain of
+   a **separate domain reserved for tenant sites**, never the app's domain, so a flagged
+   tenant site cannot hurt the app's login or mail reputation. The page is built from tenant
+   settings (name, services, service area, hours, phone, the booking and lead forms). Its
+   "about" copy is AI-drafted through the gateway as a **proposal**; nothing on the page goes
+   live until the owner approves it.
+2. **Connected domain, no registrar.** An owner who already owns a domain can point it at their
+   tenant site: we show the one DNS record, verify it, and issue HTTPS. We do not sell, buy or
+   renew domains.
+3. **Google profile is guided, not created.** Google requires the owner to verify a profile
+   themselves, so for an owner with none we deep-link them through creating it, then connect it
+   once verified. A connection picks **one location** from a picker (no more first-location
+   default); multi-location tenants are out of scope.
+4. **Derived from the connection.** Once connected, the Google review link is filled in from the
+   location instead of being pasted. Setting the location's website (tenant site or connected
+   domain) and booking link on Google is an outward-facing write, so it is an **approval card**
+   the owner taps, never automatic.
+5. **Call forwarding only — no porting.** The owner keeps their number and forwards it with
+   carrier codes. Two **forwarding modes**: *missed calls only* (default — their phone rings
+   first) and *all calls*. A **forwarding check** places a call from our line to their business
+   number and passes when it arrives back on our number (for missed-calls-only the owner lets
+   it ring out). Porting is a later add-on.
+6. **Chat is the lead form for now.** The tenant site's chat bubble opens the existing lead /
+   booking form. A real AI chatbot needs a public, unauthenticated path into the AI with abuse
+   and per-tenant cost caps, and is its own decision later.
+7. **A home checklist, not onboarding steps.** Progress lives in a "Get found online" checklist
+   on the home page, derived from tenant facts. It is **not** added to the onboarding steps,
+   because activation and the setup-reminder email gate on that list and a Google postcard can
+   take weeks.
+
+**Alternatives rejected.** Linking out to Wix/Squarespace (the owner leaves the app and the
+booking form is not on the site); buying domains for tenants (registrar account, renewals and
+support for little gain); hosting sites on the app's own domain (shared reputation); creating
+Google profiles on the owner's behalf (Google does not allow third-party verification); porting
+in v1 (weeks of carrier paperwork); an AI web chatbot in v1 (needs its own abuse and cost model).
+
+**Consequences.** Ops must buy the tenant-site domain and point a wildcard record at the
+deploy. Every checklist item is derived, so a tenant who disconnects Google or unpublishes their
+site sees the item reopen rather than a stale tick. Forwarding is the exception: turning it off at
+the carrier sends us nothing, so the forwarding check is a point-in-time proof. The forwarding item
+shows the date of the last passing check, reopens when the owner changes carrier or forwarding mode
+in the app, and offers a re-check; detecting carrier-side changes is not promised.
