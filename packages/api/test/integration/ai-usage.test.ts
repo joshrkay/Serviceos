@@ -56,7 +56,7 @@ describe('Postgres integration — AI minute usage summary', () => {
 
   it("reports this period's minutes, overage and projected charge for a paid plan", async () => {
     const tenantId = await tenantOn('active', 'starter');
-    await use(tenantId, 1_469); // 24.5 min → 25
+    await use(tenantId, 3_869); // 64.5 min → 65
     await use(tenantId, 600, new Date(PERIOD_START.getTime() - 86_400_000)); // last period
 
     expect(await reader.getUsage(tenantId)).toEqual({
@@ -64,8 +64,8 @@ describe('Postgres integration — AI minute usage summary', () => {
       planId: 'starter',
       periodStart: PERIOD_START,
       periodEnd: PERIOD_END,
-      usedMinutes: 25,
-      includedMinutes: 20,
+      usedMinutes: 65,
+      includedMinutes: 60,
       overageMinutes: 5,
       overageCentsPerMinute: 125,
       projectedChargeCents: 625,
@@ -80,7 +80,7 @@ describe('Postgres integration — AI minute usage summary', () => {
     expect(await reader.getUsage(tenantId)).toMatchObject({ projectedChargeCents: 7_900, capCents: 7_900, capReached: true });
 
     await caps.set(tenantId, null);
-    expect(await reader.getUsage(tenantId)).toMatchObject({ projectedChargeCents: 22_500, capCents: null, capReached: false });
+    expect(await reader.getUsage(tenantId)).toMatchObject({ projectedChargeCents: 17_500, capCents: null, capReached: false });
   });
 
   it('reports trial minutes against the 60-minute trial', async () => {

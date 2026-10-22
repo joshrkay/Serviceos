@@ -12,8 +12,8 @@ export function json(status: number, body: unknown): Response {
  * (BillingPlanView, billing/subscription.ts; the numbers are CALL_PLAN_USAGE).
  */
 export const PLANS = [
-  { id: 'starter', name: 'Starter', amountCents: 7_900, currency: 'usd', interval: 'month', includedUsers: 2, includedAiMinutes: 20, overageCentsPerAiMinute: 125 },
-  { id: 'growth', name: 'Growth', amountCents: 19_900, currency: 'usd', interval: 'month', includedUsers: 5, includedAiMinutes: 60, overageCentsPerAiMinute: 125 },
+  { id: 'starter', name: 'Starter', amountCents: 7_900, currency: 'usd', interval: 'month', includedUsers: 2, includedAiMinutes: 60, overageCentsPerAiMinute: 125 },
+  { id: 'growth', name: 'Growth', amountCents: 19_900, currency: 'usd', interval: 'month', includedUsers: 5, includedAiMinutes: 200, overageCentsPerAiMinute: 125 },
 ] as const;
 
 /**

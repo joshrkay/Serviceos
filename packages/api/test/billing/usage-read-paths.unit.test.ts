@@ -61,8 +61,8 @@ function world(w: World) {
 
 describe('AiUsageReader (unit)', () => {
   it('summarises a paid period, a trial, and a tenant with no period yet', async () => {
-    expect(await new AiUsageReader(world({ seconds: 1_469 }).pool).getUsage(TENANT)).toMatchObject({
-      kind: 'period', usedMinutes: 25, includedMinutes: 20, overageMinutes: 5, projectedChargeCents: 625, capCents: 7_900,
+    expect(await new AiUsageReader(world({ seconds: 3_869 }).pool).getUsage(TENANT)).toMatchObject({
+      kind: 'period', usedMinutes: 65, includedMinutes: 60, overageMinutes: 5, projectedChargeCents: 625, capCents: 7_900,
     });
     expect(await new AiUsageReader(world({ status: 'trialing', seconds: 45 * 60 }).pool).getUsage(TENANT)).toEqual({
       kind: 'trial', planId: 'starter', usedMinutes: 45, includedMinutes: 60,
@@ -70,7 +70,7 @@ describe('AiUsageReader (unit)', () => {
     expect(await new AiUsageReader(world({ period: false }).pool).getUsage(TENANT)).toEqual({ kind: 'none' });
     expect(
       await new AiUsageReader(world({ seconds: 200 * 60, uncapped: true }).pool).getUsage(TENANT),
-    ).toMatchObject({ capCents: null, projectedChargeCents: 22_500 });
+    ).toMatchObject({ capCents: null, projectedChargeCents: 17_500 });
   });
 });
 
@@ -79,14 +79,14 @@ describe('checkUsageAlerts (unit)', () => {
     const sendEmail = vi.fn(async () => undefined);
     const deps = (w: World) => ({ pool: world(w).pool, sendEmail, appBaseUrl: 'https://app.test' });
 
-    await checkUsageAlerts(deps({ seconds: 10 * 60 }), TENANT);
+    await checkUsageAlerts(deps({ seconds: 40 * 60 }), TENANT);
     await checkUsageAlerts(deps({ status: 'trialing', seconds: 30 * 60 }), TENANT);
     expect(sendEmail).not.toHaveBeenCalled();
 
-    await checkUsageAlerts(deps({ seconds: 16 * 60 }), TENANT);
-    await checkUsageAlerts(deps({ seconds: 25 * 60, alreadyAlerted: ['included_80'] }), TENANT);
-    await checkUsageAlerts(deps({ seconds: 84 * 60, alreadyAlerted: ['included_80', 'included_100'] }), TENANT);
-    await checkUsageAlerts(deps({ seconds: 84 * 60, alreadyAlerted: ['included_80', 'included_100', 'cap_reached'] }), TENANT);
+    await checkUsageAlerts(deps({ seconds: 48 * 60 }), TENANT);
+    await checkUsageAlerts(deps({ seconds: 65 * 60, alreadyAlerted: ['included_80'] }), TENANT);
+    await checkUsageAlerts(deps({ seconds: 124 * 60, alreadyAlerted: ['included_80', 'included_100'] }), TENANT);
+    await checkUsageAlerts(deps({ seconds: 124 * 60, alreadyAlerted: ['included_80', 'included_100', 'cap_reached'] }), TENANT);
 
     expect(sendEmail.mock.calls.map((c) => (c[0] as { subject: string }).subject)).toEqual([
       "You've used 80% of your AI answering minutes",
@@ -100,7 +100,7 @@ describe('checkUsageAlerts (unit)', () => {
       throw new Error('smtp down');
     });
     await expect(
-      checkUsageAlerts({ pool: world({ seconds: 20 * 60, uncapped: true }).pool, sendEmail, appBaseUrl: '' }, TENANT),
+      checkUsageAlerts({ pool: world({ seconds: 60 * 60, uncapped: true }).pool, sendEmail, appBaseUrl: '' }, TENANT),
     ).resolves.toBeUndefined();
     expect((sendEmail.mock.calls[0][0] as { text: string }).text).toContain('overage cap of no limit');
   });

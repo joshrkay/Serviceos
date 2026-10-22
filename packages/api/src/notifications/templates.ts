@@ -12,6 +12,7 @@
  * P11-002 — copy is localized via the notifications catalog (`tn`). Each
  * context carries an optional `language`; omitted → 'en' (back-compat).
  */
+import { CALL_PLAN_USAGE, OVERAGE_CENTS_PER_MINUTE } from '../billing/call-usage-pricing';
 import { TRIAL_MINUTE_LIMITS } from '../voice/trial-limits';
 import { tn } from './i18n';
 import type { Language } from '../ai/i18n/i18n';
@@ -605,7 +606,8 @@ export function renderTrialEndingEmail(ctx: TrialEndingEmailContext): RenderedEm
     `Your 14-day Rivet trial ends ${when}. To keep your AI dispatcher answering ` +
     'calls and chasing invoices without interruption, no action is needed — your ' +
     'selected plan starts automatically when the trial ends. Plans include ' +
-    '20 AI answering minutes a month on Starter (60 on Growth), then $1.25 a minute.';
+    `${CALL_PLAN_USAGE.starter.includedMinutes} AI answering minutes a month on Starter ` +
+    `(${CALL_PLAN_USAGE.growth.includedMinutes} on Growth), then ${formatUsdCentsPlain(OVERAGE_CENTS_PER_MINUTE)} a minute.`;
   const reassure =
     'Not ready? You can cancel anytime before then and you won’t be charged. ' +
     'Either way, your data stays yours.';
