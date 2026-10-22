@@ -319,6 +319,7 @@ async function sendOneThankYou(
     recipient: { kind: 'customer', customerId: job.customerId },
     purpose: 'automated_nudge',
     dedupe: { messageKind: THANK_YOU_MESSAGE_KIND, recordId: jobId },
+    about: { entityType: 'thank_you', entityId: jobId, jobId },
     body,
   });
 

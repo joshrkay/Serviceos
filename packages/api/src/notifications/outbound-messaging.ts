@@ -21,6 +21,10 @@
  *     when a lookup fails: sent,
  *     scheduled (with the time the window opens) or blocked (with the reason,
  *     and whether it can clear on its own). Nothing fails silently.
+ *   - Record. A customer text's outcome is recorded as one message record
+ *     (`message_dispatches`, keyed by the dedupe key) linked to the customer,
+ *     the record it is about and, when there is one, the job. That record
+ *     drives the status bubble and the owner's view of blocked texts.
  *
  * The consent + DNC + kill-switch + volume-cap gate itself stays in
  * `GatedMessageDelivery`; this module is what decides the inputs that gate
@@ -30,6 +34,7 @@ import type { Pool } from 'pg';
 import type { CustomerRepository } from '../customers/customer';
 import { normalizePhone, type DncRepository } from '../compliance/dnc';
 import type { Logger } from '../logging/logger';
+import type { DispatchEntityType, DispatchRepository } from './dispatch-repository';
 import type {
   DeliveryResult,
   MessageDeliveryProvider,
@@ -53,12 +58,25 @@ export type MessageRecipient =
   | { kind: 'reply'; phone: string; customerId?: string };
 
 /**
+ * What a customer text is about, for its message record: the record it
+ * concerns (an invoice, an estimate, a job's thank-you) and the job, if any.
+ */
+export interface MessageAbout {
+  entityType: DispatchEntityType;
+  entityId: string;
+  jobId?: string;
+}
+
+/**
  * A reply recipient carries only the consent its inbound message gave, which
  * covers a reply and nothing else, so the type pairs it with that purpose.
+ * A customer-facing text says what it is about; a text to the owner has no
+ * message record.
  */
 export type AddressedTo =
-  | { recipient: Extract<MessageRecipient, { kind: 'reply' }>; purpose: 'reply' }
-  | { recipient: Exclude<MessageRecipient, { kind: 'reply' }>; purpose: MessagePurpose };
+  | { recipient: Extract<MessageRecipient, { kind: 'reply' }>; purpose: 'reply'; about: MessageAbout }
+  | { recipient: Extract<MessageRecipient, { kind: 'customer' }>; purpose: MessagePurpose; about: MessageAbout }
+  | { recipient: Extract<MessageRecipient, { kind: 'owner' }>; purpose: MessagePurpose; about?: never };
 
 export type OutboundText = AddressedTo & {
   tenantId: string;
@@ -143,6 +161,8 @@ export interface OutboundMessagingDeps {
   consentLedger: ConsentLedgerLookup;
   /** Send-claim ledger pool. Null in dev/test without a DB: no dedupe claim. */
   pool: Pool | null;
+  /** Where each customer text's outcome is recorded. */
+  dispatchRepo: Pick<DispatchRepository, 'recordOutcome'>;
   logger: Pick<Logger, 'info' | 'warn'>;
 }
 
@@ -165,18 +185,25 @@ export function outboundClaimKey(dedupe: OutboundText['dedupe']): string {
 }
 
 export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMessaging {
-  /** Resolves the recipient into a gate-ready message, or a block. */
-  async function address(text: OutboundText): Promise<SmsMessage | SendOutcome> {
+  /**
+   * Resolves the recipient into a gate-ready message, or a block (with the
+   * number when one was found, for the message record).
+   */
+  async function address(
+    text: OutboundText,
+  ): Promise<{ message: SmsMessage } | { outcome: SendOutcome; to: string }> {
     const { tenantId, recipient, purpose, body } = text;
     const quietHours = WAITS_FOR_DAYTIME.has(purpose) ? ({ quietHours: 'defer' } as const) : {};
 
     if (recipient.kind === 'owner') {
       return {
-        to: recipient.phone,
-        body,
-        tenantId,
-        recipientClass: 'owner',
-        ...(recipient.alertClass ? { alertClass: recipient.alertClass } : {}),
+        message: {
+          to: recipient.phone,
+          body,
+          tenantId,
+          recipientClass: 'owner',
+          ...(recipient.alertClass ? { alertClass: recipient.alertClass } : {}),
+        },
       };
     }
 
@@ -184,41 +211,47 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
       // The customer started this thread, which is the consent for a reply —
       // and only a reply. The type forbids any other purpose; this holds for
       // a caller that got past it.
-      if (purpose !== 'reply') return blocked('no_consent');
+      const to = recipient.phone;
+      if (purpose !== 'reply') return { outcome: blocked('no_consent'), to };
       return {
-        to: recipient.phone,
-        body,
-        tenantId,
-        recipientClass: 'customer',
-        consent: {
-          smsConsent: true,
-          ...(recipient.customerId ? { customerId: recipient.customerId } : {}),
+        message: {
+          to,
+          body,
+          tenantId,
+          recipientClass: 'customer',
+          consent: {
+            smsConsent: true,
+            ...(recipient.customerId ? { customerId: recipient.customerId } : {}),
+          },
+          ...quietHours,
         },
-        ...quietHours,
       };
     }
 
     const customer = await deps.customerRepo.findById(tenantId, recipient.customerId);
-    if (!customer) return blocked('customer_not_found');
-    if (!customer.primaryPhone) return blocked('no_phone');
+    if (!customer) return { outcome: blocked('customer_not_found'), to: '' };
+    const to = customer.primaryPhone;
+    if (!to) return { outcome: blocked('no_phone'), to: '' };
     if (WAITS_FOR_DAYTIME.has(purpose)) {
       // A message nobody asked for needs the customer's own yes, whatever mode
       // the gate's enforcement is in.
-      if (customer.smsConsent !== true) return blocked('no_consent');
-      if (await deps.dncRepo.isOnDnc(tenantId, normalizePhone(customer.primaryPhone))) {
-        return blocked('dnc');
+      if (customer.smsConsent !== true) return { outcome: blocked('no_consent'), to };
+      if (await deps.dncRepo.isOnDnc(tenantId, normalizePhone(to))) {
+        return { outcome: blocked('dnc'), to };
       }
     }
-    if (purpose === 'marketing' && !(await hasMarketingGrant(tenantId, customer.primaryPhone))) {
-      return blocked('no_marketing_consent');
+    if (purpose === 'marketing' && !(await hasMarketingGrant(tenantId, to))) {
+      return { outcome: blocked('no_marketing_consent'), to };
     }
     return {
-      to: customer.primaryPhone,
-      body,
-      tenantId,
-      recipientClass: 'customer',
-      consent: { smsConsent: customer.smsConsent === true, customerId: customer.id },
-      ...quietHours,
+      message: {
+        to,
+        body,
+        tenantId,
+        recipientClass: 'customer',
+        consent: { smsConsent: customer.smsConsent === true, customerId: customer.id },
+        ...quietHours,
+      },
     };
   }
 
@@ -233,7 +266,7 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
 
   async function sendText(text: OutboundText): Promise<SendOutcome> {
     const claimKey = outboundClaimKey(text.dedupe);
-    let addressed: SmsMessage | SendOutcome;
+    let addressed: Awaited<ReturnType<typeof address>>;
     try {
       // A text that already went out is reported as sent before anything else
       // is looked up: the customer may have lost their number or opted out
@@ -248,14 +281,18 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
       // was sent, and a later attempt may get through.
       const outcome = blocked('send_failed', err instanceof Error ? err.message : String(err));
       deps.logger.warn('Outbound text recipient lookup failed', logFields(text, outcome));
-      return outcome;
+      return record(text, '', outcome);
     }
-    if ('status' in addressed) {
-      deps.logger.info('Outbound text blocked before sending', logFields(text, addressed));
-      return addressed;
+    if ('outcome' in addressed) {
+      deps.logger.info('Outbound text blocked before sending', logFields(text, addressed.outcome));
+      return record(text, addressed.to, addressed.outcome);
     }
-    const message: SmsMessage = { ...addressed, idempotencyKey: claimKey };
+    const message: SmsMessage = { ...addressed.message, idempotencyKey: claimKey };
+    return record(text, message.to, await deliver(text, claimKey, message));
+  }
 
+  /** Sends an addressed text under its dedupe claim. */
+  async function deliver(text: OutboundText, claimKey: string, message: SmsMessage): Promise<SendOutcome> {
     let outcome: SendOutcome;
     // Set the moment the provider accepts, so a ledger failure AFTER that
     // (finalizing the claim) is still reported as the delivery it was.
@@ -318,6 +355,54 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
       }
     }
     if (outcome.status !== 'sent') deps.logger.info('Outbound text not sent', logFields(text, outcome));
+    return outcome;
+  }
+
+  /**
+   * Records a customer text's outcome as its message record and returns the
+   * outcome unchanged. Not recorded: a text to the owner, a send another
+   * attempt already made (that attempt recorded it), and an 'in_flight' block
+   * (the attempt holding the key records its own outcome). A failed write is
+   * logged; it never turns a delivered text into a failure.
+   */
+  async function record(text: OutboundText, to: string, outcome: SendOutcome): Promise<SendOutcome> {
+    if (!text.about) return outcome;
+    if (outcome.status === 'sent' && outcome.duplicate) return outcome;
+    if (outcome.status === 'blocked' && outcome.reason === 'in_flight') return outcome;
+    const { about } = text;
+    try {
+      await deps.dispatchRepo.recordOutcome({
+        tenantId: text.tenantId,
+        idempotencyKey: outboundClaimKey(text.dedupe),
+        entityType: about.entityType,
+        entityId: about.entityId,
+        channel: 'sms',
+        recipient: to,
+        purpose: text.purpose,
+        customerId: text.recipient.customerId,
+        jobId: about.jobId,
+        outcome:
+          outcome.status === 'sent'
+            ? {
+                status: 'sent',
+                provider: outcome.delivery?.provider ?? 'unknown',
+                providerMessageId: outcome.delivery?.providerMessageId,
+              }
+            : outcome.status === 'scheduled'
+              ? { status: 'scheduled', scheduledFor: outcome.at }
+              : {
+                  status: 'blocked',
+                  reason: outcome.reason,
+                  permanent: outcome.permanent,
+                  ...(outcome.detail ? { detail: outcome.detail } : {}),
+                },
+      });
+    } catch (err) {
+      deps.logger.warn('Outbound text outcome was not recorded', {
+        ...logFields(text, outcome),
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
     return outcome;
   }
 

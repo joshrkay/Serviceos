@@ -1684,6 +1684,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         dncRepo,
         consentLedger: consentEventRepo,
         pool: pool ?? null,
+        dispatchRepo,
         logger: createLogger({
           service: 'outbound-messaging',
           environment: process.env.NODE_ENV || 'development',

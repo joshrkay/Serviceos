@@ -8,6 +8,7 @@ import {
 } from '../../src/notifications/gated-message-delivery';
 import type { MessageDeliveryProvider, SmsMessage } from '../../src/notifications/delivery-provider';
 import type { ConsentLedgerEventLike } from '../../src/compliance/resolve-outbound-consent';
+import { InMemoryDispatchRepository } from '../../src/notifications/dispatch-repository';
 import {
   createOutboundMessaging,
   type OutboundText,
@@ -40,6 +41,7 @@ describe('outbound messaging', () => {
   let sent: SmsMessage[];
   let sendSms: ReturnType<typeof vi.fn>;
   let ledger: ConsentLedgerEventLike[];
+  let dispatches: InMemoryDispatchRepository;
   const logger = { info: vi.fn(), warn: vi.fn() };
 
   beforeEach(() => {
@@ -47,6 +49,8 @@ describe('outbound messaging', () => {
     dncRepo = new InMemoryDncRepository();
     sent = [];
     ledger = [];
+    dispatches = new InMemoryDispatchRepository();
+    logger.warn.mockClear();
     sendSms = vi.fn(async (message: SmsMessage) => {
       sent.push(message);
       return { provider: 'test', providerMessageId: `m-${sent.length}`, channel: 'sms' as const };
@@ -63,6 +67,7 @@ describe('outbound messaging', () => {
       customerRepo,
       dncRepo,
       consentLedger: { listByPhone: async () => ledger },
+      dispatchRepo: dispatches,
       pool: null,
       logger,
     });
@@ -73,6 +78,7 @@ describe('outbound messaging', () => {
     recipient: { kind: 'customer', customerId: 'cust-1' },
     purpose,
     dedupe: { messageKind: 'test_message', recordId: 'job-1' },
+    about: { entityType: 'thank_you', entityId: 'job-1', jobId: 'job-1' },
     body: 'Hello',
   });
 
@@ -187,6 +193,7 @@ describe('outbound messaging', () => {
       recipient: { kind: 'reply', phone: '+15559876543' },
       purpose: 'reply',
       dedupe: { messageKind: 'reply', recordId: 'inbound-1' },
+      about: { entityType: 'conversation_reply', entityId: 'conv-1' },
       body: 'Thanks, see you at 3',
     });
 
@@ -204,6 +211,7 @@ describe('outbound messaging', () => {
       recipient: { kind: 'reply', phone: '+15559876543' },
       purpose: 'marketing',
       dedupe: { messageKind: 'promo', recordId: 'inbound-1' },
+      about: { entityType: 'conversation_reply', entityId: 'conv-1' },
       body: 'Fall special',
     } as unknown as OutboundText);
 
@@ -261,6 +269,7 @@ describe('outbound messaging', () => {
       customerRepo,
       dncRepo,
       consentLedger: { listByPhone: async () => [] },
+      dispatchRepo: dispatches,
       pool,
       logger,
     });
@@ -294,6 +303,7 @@ describe('outbound messaging', () => {
       customerRepo,
       dncRepo,
       consentLedger: { listByPhone: async () => [] },
+      dispatchRepo: dispatches,
       pool,
       logger,
     });
@@ -314,6 +324,7 @@ describe('outbound messaging', () => {
       customerRepo,
       dncRepo,
       consentLedger: { listByPhone: async () => [] },
+      dispatchRepo: dispatches,
       pool,
       logger,
     });
@@ -341,5 +352,115 @@ describe('outbound messaging', () => {
       detail: 'Twilio 503',
     });
     expect(logger.warn).toHaveBeenCalled();
+  });
+
+  describe('message record', () => {
+    const recorded = async () => (await dispatches.listByTenant(TENANT)).dispatches;
+
+    it('records a sent text with the provider id, customer, job and purpose', async () => {
+      await customerRepo.create(makeCustomer());
+
+      await messaging().sendText(toCustomer('transactional'));
+
+      expect(await recorded()).toMatchObject([
+        {
+          status: 'sent',
+          idempotencyKey: 'test_message:job-1',
+          entityType: 'thank_you',
+          entityId: 'job-1',
+          channel: 'sms',
+          recipient: '+15551234567',
+          provider: 'test',
+          providerMessageId: 'm-1',
+          customerId: 'cust-1',
+          jobId: 'job-1',
+          purpose: 'transactional',
+        },
+      ]);
+    });
+
+    it('records a blocked text with its reason and the number it would have gone to', async () => {
+      await customerRepo.create(makeCustomer({ smsConsent: false }));
+
+      await messaging().sendText(toCustomer('automated_nudge'));
+
+      expect(await recorded()).toMatchObject([
+        {
+          status: 'blocked',
+          blockReason: 'no_consent',
+          blockPermanent: true,
+          recipient: '+15551234567',
+          customerId: 'cust-1',
+          provider: 'none',
+        },
+      ]);
+    });
+
+    it('records a blocked send failure with the error, as retryable', async () => {
+      await customerRepo.create(makeCustomer());
+
+      await messaging(async () => {
+        throw new Error('Twilio 503');
+      }).sendText(toCustomer('transactional'));
+
+      expect(await recorded()).toMatchObject([
+        { status: 'blocked', blockReason: 'send_failed', blockPermanent: false, errorMessage: 'Twilio 503' },
+      ]);
+    });
+
+    it('keeps one record per message: a held text is replaced when it goes out', async () => {
+      await customerRepo.create(makeCustomer());
+      const opens = new Date('2026-10-23T15:00:00Z');
+
+      await messaging(async () => {
+        throw new SmsDeferredError(opens);
+      }).sendText(toCustomer('automated_nudge'));
+      expect(await recorded()).toMatchObject([{ status: 'scheduled', scheduledFor: opens }]);
+
+      await messaging().sendText(toCustomer('automated_nudge'));
+      const rows = await recorded();
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({ status: 'sent', providerMessageId: 'm-1' });
+      expect(rows[0].scheduledFor).toBeUndefined();
+    });
+
+    it('never replaces a sent record with a later block', async () => {
+      await customerRepo.create(makeCustomer());
+      await messaging().sendText(toCustomer('transactional'));
+
+      // Without a claim ledger the second attempt goes to the gate, which refuses it.
+      await messaging(async () => {
+        throw new SmsSuppressedError('channel_disabled');
+      }).sendText(toCustomer('transactional'));
+
+      expect(await recorded()).toMatchObject([{ status: 'sent' }]);
+    });
+
+    it('does not record a text to the owner', async () => {
+      await messaging().sendText({
+        tenantId: TENANT,
+        recipient: { kind: 'owner', phone: '+15550001111' },
+        purpose: 'transactional',
+        dedupe: { messageKind: 'digest', recordId: 'd-1' },
+        body: 'Your day',
+      });
+
+      expect(await recorded()).toEqual([]);
+    });
+
+    it('reports a sent text as sent when the record write fails, and logs it', async () => {
+      await customerRepo.create(makeCustomer());
+      dispatches.recordOutcome = async () => {
+        throw new Error('db down');
+      };
+
+      const outcome = await messaging().sendText(toCustomer('transactional'));
+
+      expect(outcome.status).toBe('sent');
+      expect(logger.warn).toHaveBeenCalledWith(
+        'Outbound text outcome was not recorded',
+        expect.objectContaining({ error: 'db down', status: 'sent' }),
+      );
+    });
   });
 });

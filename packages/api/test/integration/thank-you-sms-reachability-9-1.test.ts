@@ -46,6 +46,7 @@ import { createLogger } from '../../src/logging/logger';
 import { runThankYouSmsSweep } from '../../src/workers/thank-you-sms-worker';
 import { GatedMessageDelivery } from '../../src/notifications/gated-message-delivery';
 import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
+import { PgDispatchRepository } from '../../src/notifications/dispatch-repository';
 import { createOutboundMessaging } from '../../src/notifications/outbound-messaging';
 import { PgConsentEventRepository } from '../../src/compliance/consent-events';
 import { normalizePhone } from '../../src/compliance/dnc';
@@ -134,6 +135,7 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
       customerRepo,
       dncRepo,
       consentLedger: { listByPhone: async () => [] },
+      dispatchRepo: new PgDispatchRepository(pool),
       pool,
       logger,
     });
