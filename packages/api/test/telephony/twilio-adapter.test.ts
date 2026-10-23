@@ -3210,6 +3210,24 @@ describe('RV-140 — scanInterimForEmergency (streaming interims)', () => {
     expect(emergencyResults[0].value).toEqual([]);
   });
 
+  // PRIV-3 — an interim is no stored turn, so no transcript append scrubs it,
+  // but what it escalates with (the FSM event's utterance, the page and its
+  // emergency description) is the caller's words all the same.
+  it('scans an interim with any card number in it already replaced', async () => {
+    const { adapter, store } = makeAdapter();
+    const session = store.create('tenant-t1', 'telephony', { callSid: 'CA-int-5' });
+    const dispatchSpy = vi.spyOn(session.machine, 'dispatch');
+    const effects = await adapter.scanInterimForEmergency({
+      sessionId: session.id,
+      speechResult: 'the basement is flooding, my card is 4111 1111 1111 1111',
+      tenantId: 'tenant-t1',
+    });
+    expect(session.machine.currentState).toBe('escalating');
+    const event = dispatchSpy.mock.calls.map(([e]) => e).find((e) => e.type === 'emergency_detected') as { utterance: string };
+    expect(event.utterance).toBe('the basement is flooding, my card is [card number]');
+    expect(JSON.stringify({ effects, context: session.machine.currentContext })).not.toMatch(/4111/);
+  });
+
   it('returns null for an unknown session', async () => {
     const { adapter } = makeAdapter();
     expect(

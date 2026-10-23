@@ -1975,7 +1975,9 @@ export class TwilioGatherAdapter {
   }): Promise<SideEffect[] | null> {
     const session = this.deps.store.get(opts.sessionId);
     if (!session) return null;
-    const { effects } = await this.runEmergencyScan(session, opts.speechResult, opts.tenantId);
+    // PRIV-3 — an interim is never appended (no transcript scrub sees it), but
+    // the event's utterance, the page and its emergency description carry it.
+    const { effects } = await this.runEmergencyScan(session, redactCardNumbers(opts.speechResult), opts.tenantId);
     return effects;
   }
 
