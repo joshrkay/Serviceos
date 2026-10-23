@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { installClerkStub } from '../helpers/clerk-stub';
 import { blockExternalHosts } from '../helpers/api-mocks/shell';
 import { hasViteClerkKey } from '../helpers/clerk-key';
+import { clerkInviteeUserCreated } from '../helpers/clerk-invitee';
 
 /**
  * 4.3 — concurrent-drag presence, reached in TWO REAL BROWSERS (issue #1017).
@@ -214,14 +215,14 @@ async function seedTenantWithTwoOwners(
   const invitationId = invitation.id!;
 
   const owner2Sub = `user_e2e_${label}pres2_${randomUUID().replace(/-/g, '')}`;
-  const joinRes = await postSignedWebhook(page.request, {
-    type: 'user.created',
-    data: {
-      id: owner2Sub,
-      email_addresses: [{ email_address: owner2Email }],
-      public_metadata: { invitation_id: invitationId, tenant_id: tenantId, role: 'owner' },
-    },
-  });
+  const joinRes = await postSignedWebhook(
+    page.request,
+    clerkInviteeUserCreated({
+      sub: owner2Sub,
+      email: owner2Email,
+      invitation: { id: invitationId, tenantId, role: 'owner' },
+    }),
+  );
   expect(joinRes.status(), `owner2 invitee-join webhook (${label}) -> ${await joinRes.text()}`).toBe(200);
   const joinBody = (await joinRes.json()) as { joined?: string };
   expect(joinBody.joined, 'owner2 must join the SAME tenant as owner1').toBe(tenantId);

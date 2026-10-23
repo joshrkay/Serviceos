@@ -6,6 +6,7 @@ import { Pool } from 'pg';
 import { installClerkStub } from '../helpers/clerk-stub';
 import { blockExternalHosts } from '../helpers/api-mocks/shell';
 import { hasViteClerkKey } from '../helpers/clerk-key';
+import { clerkInviteeUserCreated } from '../helpers/clerk-invitee';
 import { runProposalExpirySweep } from '../../packages/api/src/workers/proposal-expiry-worker';
 import { PgProposalRepository } from '../../packages/api/src/proposals/pg-proposal';
 import { PgAuditRepository } from '../../packages/api/src/audit/pg-audit';
@@ -189,14 +190,14 @@ async function seedOwnerTechAndTwoAppointments(
   const invitationId = invitation.id!;
 
   const techSub = `user_e2e_${label}tech_${randomUUID().replace(/-/g, '')}`;
-  const joinRes = await postSignedWebhook(request, {
-    type: 'user.created',
-    data: {
-      id: techSub,
-      email_addresses: [{ email_address: techEmail }],
-      public_metadata: { invitation_id: invitationId, tenant_id: owner.tenantId, role: 'technician' },
-    },
-  });
+  const joinRes = await postSignedWebhook(
+    request,
+    clerkInviteeUserCreated({
+      sub: techSub,
+      email: techEmail,
+      invitation: { id: invitationId, tenantId: owner.tenantId, role: 'technician' },
+    }),
+  );
   expect(joinRes.status(), `invitee-join webhook (${label}) -> ${await joinRes.text()}`).toBe(200);
 
   const techToken = hmacToken(techSub, owner.tenantId, 'technician');

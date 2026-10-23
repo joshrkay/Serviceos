@@ -75,6 +75,7 @@ import { createHmac, randomUUID } from 'node:crypto';
 import { Pool } from 'pg';
 import { installClerkStub } from '../helpers/clerk-stub';
 import { hasViteClerkKey } from '../helpers/clerk-key';
+import { clerkInviteeUserCreated } from '../helpers/clerk-invitee';
 
 // Relative to the repo root (Playwright's cwd when run via `npx playwright test`).
 const SCREENSHOT_DIR = 'docs/audit/lane-reports/execute-8-5-r5';
@@ -262,14 +263,14 @@ test.describe('job-photo-attach (5.2) — real Postgres, real technician screen'
     const invitationId = ((await inviteRes.json()) as { id?: string }).id!;
 
     const techSub = `user_e2e_photo_tech_${randomUUID().replace(/-/g, '')}`;
-    const joinRes = await postSignedWebhook(page.request, {
-      type: 'user.created',
-      data: {
-        id: techSub,
-        email_addresses: [{ email_address: techEmail }],
-        public_metadata: { invitation_id: invitationId, tenant_id: tenantId, role: 'technician' },
-      },
-    });
+    const joinRes = await postSignedWebhook(
+      page.request,
+      clerkInviteeUserCreated({
+        sub: techSub,
+        email: techEmail,
+        invitation: { id: invitationId, tenantId, role: 'technician' },
+      }),
+    );
     expect(joinRes.status(), `invitee-join webhook -> ${await joinRes.text()}`).toBe(200);
     expect(((await joinRes.json()) as { joined?: string }).joined).toBe(tenantId);
 
