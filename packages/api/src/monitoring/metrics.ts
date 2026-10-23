@@ -485,6 +485,17 @@ export const knowledgeChunkDedupeCollisionsTotal = new Counter({
   registers: [metricsRegistry],
 });
 
+/**
+ * `shadow_comparisons` rows the retention sweep deleted past
+ * SHADOW_COMPARISON_RETENTION_DAYS (workers/shadow-comparison-retention-worker.ts).
+ * Flat while SHADOW_LLM_ENABLED has been off for longer than the window.
+ */
+export const shadowComparisonsPurgedTotal = new Counter({
+  name: 'shadow_comparisons_purged_total',
+  help: 'shadow_comparisons rows deleted by the retention sweep past SHADOW_COMPARISON_RETENTION_DAYS',
+  registers: [metricsRegistry],
+});
+
 export async function renderMetrics(): Promise<{
   contentType: string;
   body: string;

@@ -1782,7 +1782,12 @@ accepting unsigned traffic — a deliberate fail-closed.
   recording — object, transcript, derived summary, and embeddings — then
   tombstones and audits the per-class counts. Legal holds are unconditionally
   exempt. Tenant deletion discovers tables dynamically and purges object storage,
-  because *a deletion that misses derived data is not a deletion*.
+  because *a deletion that misses derived data is not a deletion*. Model
+  content has windows of its own: `ai_runs` prompt and reply content is
+  stripped past the tenant's `recording_retention_days` (default 365, rows
+  kept), and sampled `shadow_comparisons` rows are deleted past
+  `SHADOW_COMPARISON_RETENTION_DAYS` (default 365, the same default), flag on
+  or off.
 - **Transcripts are not retained at all** when no encryption key is configured.
 
 > **Two compliance gaps are named in §12:** the AI-identity disclosure module is
