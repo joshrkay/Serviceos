@@ -224,5 +224,39 @@ describe('PUT /api/settings — backupSupervisorUserId must be able to approve (
         unsupervisedProposalRouting: 'queue_only',
       });
     });
+
+    it('re-sending "no backup" unchanged does not clear a backup set while it was in flight', async () => {
+      const set = await member('dispatcher');
+      const write = settingsRepo.update.bind(settingsRepo);
+      vi.spyOn(settingsRepo, 'update').mockImplementationOnce(async (...args) => {
+        await write(TENANT, { backupSupervisorUserId: set });
+        return write(...args);
+      });
+
+      const res = await request(app)
+        .put('/api/settings')
+        .send({ backupSupervisorUserId: null, unsupervisedProposalRouting: 'queue_only' });
+
+      expect(res.status).toBe(200);
+      expect(await getSettings(TENANT, settingsRepo)).toMatchObject({
+        backupSupervisorUserId: set,
+        unsupervisedProposalRouting: 'queue_only',
+      });
+    });
+
+    it('the stored backup sent in upper case is still the same backup', async () => {
+      const backup = await member('dispatcher');
+      await settingsRepo.update(TENANT, { backupSupervisorUserId: backup });
+      await users.deactivateMember(TENANT, backup);
+      const write = vi.spyOn(settingsRepo, 'update');
+
+      const res = await request(app)
+        .put('/api/settings')
+        .send({ backupSupervisorUserId: backup.toUpperCase(), unsupervisedProposalRouting: 'queue_only' });
+
+      expect(res.status).toBe(200);
+      expect(write.mock.calls[0][1]).not.toHaveProperty('backupSupervisorUserId');
+      expect((await getSettings(TENANT, settingsRepo))?.backupSupervisorUserId).toBe(backup);
+    });
   });
 });
