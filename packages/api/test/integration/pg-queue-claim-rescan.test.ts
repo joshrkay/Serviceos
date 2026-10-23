@@ -9,15 +9,17 @@
  * NEXT n rows: `receiveBatch(3)` over five due messages claimed all five (seen
  * as a full-suite flake of queue.test.ts — `[0,1,2,3,4]` for a batch of 3 —
  * and it bumps attempts/visible_at on messages the caller never sized for).
+ * The orphan DLQ reap right after it had the same shape (`DELETE … WHERE id
+ * IN (… LIMIT 10)`), so a tick could reap past its per-tick bound.
  *
  * The planner picks that plan when its statistics say the table is tiny — an
  * autoanalyze while the table was nearly empty, then a burst of sends. Each
  * test here reproduces that deterministically: one row, ANALYZE (planner now
  * believes one row), then the rest. The queue under test also runs on its own
  * pool with hash join, merge join and materialize disabled, so the only joins
- * left to the planner are the nested loop ones. The control proves the forced
+ * left to the planner are the nested loop ones. The controls prove the forced
  * plan really is the rescanning one and really over-claims with the old
- * statement shape, so the PgQueue assertions can never pass vacuously.
+ * statement shapes, so the PgQueue assertions can never pass vacuously.
  */
 import { describe, it, expect, beforeAll, beforeEach, afterAll } from 'vitest';
 import { Pool } from 'pg';
@@ -38,6 +40,18 @@ const IN_SUBQUERY_CLAIM = `UPDATE _queue_messages
      ORDER BY created_at ASC
      FOR UPDATE SKIP LOCKED
      LIMIT $3
+   )
+   RETURNING *`;
+
+/** The orphan reap `receiveBatch` ran before the fix, verbatim (control only). */
+const IN_SUBQUERY_REAP = `DELETE FROM _queue_messages
+   WHERE id IN (
+     SELECT id FROM _queue_messages
+     WHERE visible_at <= NOW()
+       AND attempts >= max_attempts
+     ORDER BY created_at ASC
+     FOR UPDATE SKIP LOCKED
+     LIMIT 10
    )
    RETURNING *`;
 
@@ -73,11 +87,27 @@ describe('Postgres integration — PgQueue claims stay LIMIT-exact under a resca
     await queue.send('rescan.job', { i }, `rescan-${i}`);
   }
 
+  /** A message whose final attempt's worker died: attempts == max_attempts, visibility lapsed. */
+  async function insertOrphan(i: number): Promise<void> {
+    await pool.query(
+      `INSERT INTO _queue_messages (id, type, payload, attempts, max_attempts, idempotency_key, visible_at, created_at)
+       VALUES (gen_random_uuid(), 'orphan.job', $1, 3, 3, $2, NOW() - interval '1 second', NOW())`,
+      [JSON.stringify({ i }), `orphan-${i}`],
+    );
+  }
+
   /** Five due messages, planned as if the table held one. */
   async function seedFiveDueWithOneRowStats(): Promise<void> {
     await enqueue(0);
     await analyzeQueueTable();
     for (let i = 1; i < 5; i++) await enqueue(i);
+  }
+
+  /** Twelve orphans, planned as if the table held one. */
+  async function seedTwelveOrphansWithOneRowStats(): Promise<void> {
+    await insertOrphan(0);
+    await analyzeQueueTable();
+    for (let i = 1; i < 12; i++) await insertOrphan(i);
   }
 
   async function explain(sql: string, params: unknown[]): Promise<PlanNode> {
@@ -150,5 +180,28 @@ describe('Postgres integration — PgQueue claims stay LIMIT-exact under a resca
 
     const second = await queue.receiveBatch<{ i: number }>(3);
     expect(second.map((m) => m.payload.i)).toEqual([3, 4]);
+  });
+
+  it('control: the forced plan rescans the IN-subquery orphan reap and reaps past its bound', async () => {
+    await seedTwelveOrphansWithOneRowStats();
+
+    expect(rescansLockRows(await explain(IN_SUBQUERY_REAP, []))).toBe(true);
+    expect(await rowsTouchedThenRollBack(IN_SUBQUERY_REAP, [])).toBe(12);
+  });
+
+  it('a receiveBatch tick dead-letters at most 10 orphans, oldest first', async () => {
+    await seedTwelveOrphansWithOneRowStats();
+
+    expect(await queue.receiveBatch(5)).toEqual([]); // orphans are never claimable
+    const firstTick = (await queue.listDeadLetter()).map((d) => d.idempotencyKey);
+    expect(firstTick.sort()).toEqual(Array.from({ length: 10 }, (_, i) => `orphan-${i}`).sort());
+    const { rows } = await pool.query<{ idempotency_key: string }>(
+      'SELECT idempotency_key FROM _queue_messages ORDER BY created_at ASC',
+    );
+    expect(rows.map((r) => r.idempotency_key)).toEqual(['orphan-10', 'orphan-11']);
+
+    // The next tick reaps the rest.
+    expect(await queue.receiveBatch(5)).toEqual([]);
+    expect(await queue.depth()).toEqual({ pending: 0, deadLetter: 12 });
   });
 });

@@ -193,10 +193,11 @@ export class PgQueue extends PgBaseRepository implements Queue {
         // and it never reaches the DLQ — a silently stuck message. Move any
         // such expired rows to the DLQ (same redaction as moveToDeadLetter),
         // bounded per tick; SKIP LOCKED + ON CONFLICT keep concurrent
-        // replicas idempotent.
+        // replicas idempotent. The bound holds only because the locking pick
+        // is a MATERIALIZED CTE, for the same reason as the claim above: as an
+        // IN-subquery a rescan would lock and delete the next 10.
         const orphans = await client.query(
-          `DELETE FROM _queue_messages
-           WHERE id IN (
+          `WITH orphaned AS MATERIALIZED (
              SELECT id FROM _queue_messages
              WHERE visible_at <= NOW()
                AND attempts >= max_attempts
@@ -204,7 +205,10 @@ export class PgQueue extends PgBaseRepository implements Queue {
              FOR UPDATE SKIP LOCKED
              LIMIT 10
            )
-           RETURNING *`
+           DELETE FROM _queue_messages q
+           USING orphaned
+           WHERE q.id = orphaned.id
+           RETURNING q.*`
         );
         for (const row of orphans.rows) {
           const orphan: QueueMessage = {
