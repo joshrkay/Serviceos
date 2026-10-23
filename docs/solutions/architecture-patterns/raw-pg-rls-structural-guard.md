@@ -139,9 +139,11 @@ A Pool that reaches a `.query`/`.connect` the typed rule cannot classify is a
 `const db: Queryable = pool`, or a Pool passed into a function whose parameter
 (or a property of it, through object-literal arguments and pass-through
 parameters) is structurally typed (`{ query }`, a local interface,
-`ClientBase`) and queried. The escaped SQL is the site's SQL. Today's five
-(`routes/onboarding.ts` passing `db` to `isBillingLive` / `markPickPending`)
-are listed.
+`ClientBase`) and queried. The escaped SQL is the site's SQL. None is listed
+today: the five there were (`routes/onboarding.ts`'s phone routes passing their
+`currentTenantContext()?.client ?? pool` to `isBillingLive` /
+`markPickPending`) went when those routes moved onto `withTenantClient` to
+enqueue their provisioning job on the request client.
 
 ## Known limits
 
