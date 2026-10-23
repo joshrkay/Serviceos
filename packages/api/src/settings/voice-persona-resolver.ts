@@ -24,9 +24,10 @@ export interface VoicePersona {
   /**
    * Fully-custom greeting text. When set, this replaces the entire
    * default opener (including any "How can I help?" CTA) for the
-   * in-app channel. For telephony the recording-disclosure sentence
-   * is always appended afterward (compliance requirement) but no
-   * other text is added — the tenant owns the complete opening line.
+   * in-app channel. For telephony the virtual-assistant notice and the
+   * recording-disclosure sentence are always appended afterward
+   * (PRIV-4 / compliance requirement) but no other text is added — the
+   * tenant's opening line is kept verbatim.
    */
   greeting?: string;
   /**

@@ -65,6 +65,7 @@ import type { LeadRepository } from '../leads/lead';
 import type { GateReason } from '../voice/trial-limits';
 import type { ForwardingCheckService } from '../onboarding/forwarding-check';
 import { t, type Language } from '../ai/i18n/i18n';
+import { discloseAiIdentity } from '../ai/skills/disclose-ai-identity';
 import type { CallMeBackRepository } from '../voice/call-me-back/call-me-back';
 import { createAuditEvent } from '../audit/audit';
 import { isValidTenantId } from '../db/schema';
@@ -738,10 +739,26 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
           sessionId: session.id,
         });
       }
+      // PRIV-4 — a degrade before the caller heard the greeting (the STT
+      // socket never opened, or the stream dropped mid-greeting) must still
+      // tell them they are talking to a virtual assistant.
+      const speaksNotice = !session.assistantNoticeHeard;
+      const assistantNotice = discloseAiIdentity({
+        tenantId: session.tenantId,
+        businessName: deps.businessName ?? 'our team',
+        language: lang,
+        ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+        voiceSessionId: session.id,
+        actorId: 'system:inbound-call',
+        channel: session.channel,
+      });
       res
         .status(200)
         .type('text/xml')
-        .send(buildDegradeFallbackTwiml(session, action, lang));
+        .send(buildDegradeFallbackTwiml(session, action, lang, assistantNotice.disclosureText));
+      // Gather's point of evidence: the notice is a <Say> ahead of the
+      // <Gather> in the document just sent (as handleInbound commits).
+      if (speaksNotice) void assistantNotice.commitDisclosureLedger();
       return;
     }
 
@@ -1382,18 +1399,28 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
  * disclose-recording.ts (no caller state is available here). Latches
  * `recordingDisclosed` so a caller who degrades more than once is not
  * re-read the notice every turn.
+ *
+ * PRIV-4 — the same holds for the virtual-assistant notice: when the caller
+ * never heard the greeting that carries it (`assistantNoticeHeard` unset),
+ * `assistantNotice` is spoken first, then latched.
  */
 export function buildDegradeFallbackTwiml(
-  session: { recordingDisclosed?: boolean },
+  session: { recordingDisclosed?: boolean; assistantNoticeHeard?: boolean },
   actionUrl: string,
   lang: Language,
+  assistantNotice: string,
 ): string {
   // The disclosure must be a standalone <Say> BEFORE the <Gather>, not the
   // Gather's nested prompt: `<Gather input="speech">` starts recognizing at
   // the first millisecond, so a notice nested inside it plays while capture
   // is already armed — the exact ordering this gate exists to prevent.
-  const preambleText = session.recordingDisclosed ? undefined : t('disclose.two_party', lang);
+  const preambleParts = [
+    ...(session.assistantNoticeHeard ? [] : [assistantNotice]),
+    ...(session.recordingDisclosed ? [] : [t('disclose.two_party', lang)]),
+  ];
+  const preambleText = preambleParts.length > 0 ? preambleParts.join(' ') : undefined;
   session.recordingDisclosed = true;
+  session.assistantNoticeHeard = true;
   return buildCallbackGatherTwiml({
     promptText: t('realtime.degraded_repair', lang),
     actionUrl,
