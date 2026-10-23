@@ -1,6 +1,6 @@
 import { createHash } from 'crypto';
 import type { Pool, PoolClient } from 'pg';
-import { tenantContextStore, type TenantContext } from '../middleware/tenant-context';
+import { currentTenantContext, tenantContextStore, type TenantContext } from '../middleware/tenant-context';
 import { applyTenantContext } from './rls-runtime-role';
 
 /**
@@ -38,6 +38,25 @@ export async function withTenantConnection<T>(
   } finally {
     client.release();
   }
+}
+
+/**
+ * Run `fn` on the request transaction's client when the caller is inside a
+ * request scoped to `tenantId`, and otherwise in a transaction of its own
+ * (`withTenantConnection`). Either way the client carries tenant context and
+ * the RLS role. The same reuse rule as `PgBaseRepository.withTenantTransaction`,
+ * for route code that writes SQL directly: inside a request the work commits or
+ * rolls back with the request's other writes (its audit event included) and
+ * takes no second pooled connection.
+ */
+export async function withTenantClient<T>(
+  pool: Pool,
+  tenantId: string,
+  fn: (client: PoolClient) => Promise<T>,
+): Promise<T> {
+  const ctx = currentTenantContext();
+  if (ctx && ctx.tenantId === tenantId) return fn(ctx.client);
+  return withTenantConnection(pool, tenantId, fn);
 }
 
 /**

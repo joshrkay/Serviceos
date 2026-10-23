@@ -6,6 +6,7 @@ import { AuthenticatedRequest } from '../auth/clerk';
 import { resolveOwnerEmail } from '../auth/resolve-owner-email';
 import { requireAuth, requireTenant, requireRole } from '../middleware/auth';
 import { currentTenantContext } from '../middleware/tenant-context';
+import { withTenantClient } from '../db/tenant-transaction';
 import { toErrorResponse } from '../shared/errors';
 import { publicUrl } from '../shared/public-origins';
 import { SettingsRepository } from '../settings/settings';
@@ -117,20 +118,6 @@ export interface OnboardingRouterDeps {
   /** Injectable Vapi client for voice-config assistant pushes. Defaults to
    * getVapiClient() (off-by-default without VAPI_API_KEY). */
   vapiClient?: VapiClient | null;
-}
-
-/**
- * Runs a single tenant-scoped write. A lone UPDATE is already atomic, so no
- * explicit transaction is needed — just set the RLS tenant id and run it.
- */
-async function tenantWrite(pool: Pool, tenantId: string, sql: string, params: unknown[]): Promise<void> {
-  const client = await pool.connect();
-  try {
-    await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
-    await client.query(sql, params);
-  } finally {
-    client.release();
-  }
 }
 
 export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
@@ -979,15 +966,17 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           return;
         }
         const tenantId = req.auth!.tenantId;
-        await tenantWrite(
-          pool,
-          tenantId,
-          `UPDATE tenant_settings
-              SET ai_verification_status = 'pending',
-                  ai_verification_error = NULL,
-                  updated_at = now()
-            WHERE tenant_id = $1`,
-          [tenantId],
+        // In the request transaction, so the reset commits or rolls back with
+        // its audit event below.
+        await withTenantClient(pool, tenantId, (db) =>
+          db.query(
+            `UPDATE tenant_settings
+                SET ai_verification_status = 'pending',
+                    ai_verification_error = NULL,
+                    updated_at = now()
+              WHERE tenant_id = $1`,
+            [tenantId],
+          ),
         );
         const payload: VerifyAiPayload = { tenantId };
         await queue.send(VERIFY_AI_JOB_TYPE, payload, `verify-ai-retry-${tenantId}`);
@@ -1033,14 +1022,16 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           return;
         }
         const tenantId = req.auth!.tenantId;
-        await tenantWrite(
-          pool,
-          tenantId,
-          `UPDATE tenant_settings
-              SET ai_verification_skipped_at = now(),
-                  updated_at = now()
-            WHERE tenant_id = $1`,
-          [tenantId],
+        // In the request transaction, so the skip commits or rolls back with
+        // its audit event below.
+        await withTenantClient(pool, tenantId, (db) =>
+          db.query(
+            `UPDATE tenant_settings
+                SET ai_verification_skipped_at = now(),
+                    updated_at = now()
+              WHERE tenant_id = $1`,
+            [tenantId],
+          ),
         );
         await auditRepo.create(
           createAuditEvent({
