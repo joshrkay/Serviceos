@@ -13,6 +13,12 @@
  * The suite mounts the real `withTenantTransaction` middleware, forces
  * RLS_RUNTIME_ROLE on, and asks Postgres (statement-role-probe) which role and
  * tenant each UPDATE ran under.
+ *
+ * The retry's verify-ai job is enqueued on the same request client
+ * (`PgQueue.sendOn`, the P0-009 transactional enqueue). `queue.send` committed
+ * the job on its own connection before the audit write, so a request that then
+ * rolled back still ran the retry, with no audit row for it. The retry tests
+ * use a real PgQueue and read `_queue_messages` back.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import express, { NextFunction, Request, Response } from 'express';
@@ -26,7 +32,9 @@ import { withTenantTransaction } from '../../src/middleware/tenant-context';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { PgPackActivationRepository } from '../../src/settings/pg-pack-activation';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
-import { InMemoryQueue } from '../../src/queues/queue';
+import { InMemoryQueue, type Queue } from '../../src/queues/queue';
+import { PgQueue } from '../../src/queues/pg-queue';
+import { VERIFY_AI_JOB_TYPE } from '../../src/workers/verify-ai';
 import type { AuditRepository } from '../../src/audit/audit';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
@@ -61,7 +69,26 @@ async function readSettings(tenantId: string) {
   return rows[0];
 }
 
-function buildApp(auditRepo: AuditRepository, actingTenant: TestTenant) {
+/** The retry's verify-ai jobs for `tenantId` in the real queue table. */
+async function retryJobs(tenantId: string): Promise<Array<{ type: string; payload: unknown }>> {
+  const exists = await pool.query<{ t: string | null }>(`SELECT to_regclass('public._queue_messages')::text AS t`);
+  if (!exists.rows[0].t) return [];
+  const { rows } = await pool.query<{ type: string; payload: unknown }>(
+    `SELECT type, payload FROM _queue_messages WHERE idempotency_key = $1`,
+    [`verify-ai-retry-${tenantId}`],
+  );
+  return rows;
+}
+
+async function clearRetryJobs(...tenantIds: string[]): Promise<void> {
+  const exists = await pool.query<{ t: string | null }>(`SELECT to_regclass('public._queue_messages')::text AS t`);
+  if (!exists.rows[0].t) return;
+  await pool.query(`DELETE FROM _queue_messages WHERE idempotency_key = ANY($1::text[])`, [
+    tenantIds.map((id) => `verify-ai-retry-${id}`),
+  ]);
+}
+
+function buildApp(auditRepo: AuditRepository, actingTenant: TestTenant, queue: Queue = new InMemoryQueue()) {
   const app = express();
   app.use(express.json());
   app.use((req: Request, _res: Response, next: NextFunction) => {
@@ -81,7 +108,7 @@ function buildApp(auditRepo: AuditRepository, actingTenant: TestTenant) {
       packActivationRepo: new PgPackActivationRepository(probe.pool),
       auditRepo,
       pool: probe.pool,
-      queue: new InMemoryQueue(),
+      queue,
     }),
   );
   return app;
@@ -100,9 +127,10 @@ beforeEach(async () => {
   await seedSettings(b.tenantId);
 });
 
-afterEach(() => {
+afterEach(async () => {
   if (ORIGINAL_FLAG === undefined) delete process.env.RLS_RUNTIME_ROLE;
   else process.env.RLS_RUNTIME_ROLE = ORIGINAL_FLAG;
+  await clearRetryJobs(a.tenantId, b.tenantId);
 });
 
 afterAll(async () => {
@@ -139,9 +167,11 @@ describe('POST /api/onboarding/ai-check/skip (real Postgres, request transaction
 });
 
 describe('POST /api/onboarding/ai-check/retry (real Postgres, request transaction)', () => {
-  it('resets its own tenant to pending only, under rls_app_runtime, with its audit row', async () => {
+  it('resets its own tenant to pending only, under rls_app_runtime, with its audit row and its job', async () => {
     const auditRepo = new PgAuditRepository(probe.pool);
-    const res = await request(buildApp(auditRepo, a)).post('/api/onboarding/ai-check/retry').send({});
+    const res = await request(buildApp(auditRepo, a, new PgQueue(probe.pool)))
+      .post('/api/onboarding/ai-check/retry')
+      .send({});
 
     expect(res.status).toBe(200);
     expect(await readSettings(a.tenantId)).toMatchObject({
@@ -158,14 +188,19 @@ describe('POST /api/onboarding/ai-check/retry (real Postgres, request transactio
 
     const audit = await new PgAuditRepository(pool).findByEntity(a.tenantId, 'tenant_settings', a.tenantId);
     expect(audit.filter((e) => e.eventType === 'tenant.ai_verification_retry')).toHaveLength(1);
+
+    expect(await retryJobs(a.tenantId)).toEqual([{ type: VERIFY_AI_JOB_TYPE, payload: { tenantId: a.tenantId } }]);
+    expect(await retryJobs(b.tenantId)).toEqual([]);
   });
 
-  it('rolls the reset back when its audit write fails', async () => {
+  it('rolls the reset back and enqueues no job when its audit write fails', async () => {
     const auditRepo = new Tier2FailingAuditRepository(
       new PgAuditRepository(probe.pool),
       'tenant.ai_verification_retry',
     );
-    const res = await request(buildApp(auditRepo, a)).post('/api/onboarding/ai-check/retry').send({});
+    const res = await request(buildApp(auditRepo, a, new PgQueue(probe.pool)))
+      .post('/api/onboarding/ai-check/retry')
+      .send({});
 
     expect(res.status).toBe(500);
     expect(auditRepo.attemptedTier2).toBe(1);
@@ -173,5 +208,6 @@ describe('POST /api/onboarding/ai-check/retry (real Postgres, request transactio
       ai_verification_status: 'failed',
       ai_verification_error: 'boom',
     });
+    expect(await retryJobs(a.tenantId)).toEqual([]);
   });
 });

@@ -966,20 +966,23 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           return;
         }
         const tenantId = req.auth!.tenantId;
-        // In the request transaction, so the reset commits or rolls back with
-        // its audit event below.
-        await withTenantClient(pool, tenantId, (db) =>
-          db.query(
+        // In the request transaction, so the reset and its verify-ai job
+        // commit or roll back with the audit event below. The job goes in on
+        // the same client (sendOn, P0-009): `send` committed it on its own
+        // connection first, so a request that then rolled back still ran the
+        // retry, with no audit row for it.
+        await withTenantClient(pool, tenantId, async (db) => {
+          await db.query(
             `UPDATE tenant_settings
                 SET ai_verification_status = 'pending',
                     ai_verification_error = NULL,
                     updated_at = now()
               WHERE tenant_id = $1`,
             [tenantId],
-          ),
-        );
-        const payload: VerifyAiPayload = { tenantId };
-        await queue.send(VERIFY_AI_JOB_TYPE, payload, `verify-ai-retry-${tenantId}`);
+          );
+          const payload: VerifyAiPayload = { tenantId };
+          await queue.sendOn(db, VERIFY_AI_JOB_TYPE, payload, `verify-ai-retry-${tenantId}`);
+        });
         await auditRepo.create(
           createAuditEvent({
             tenantId,
