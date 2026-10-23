@@ -318,6 +318,52 @@ describe('/api/tenant-site', () => {
       expect((await request(app()).get('/api/tenant-site/about')).body.data.pending.proposalId).toBe(second.proposalId);
     });
 
+    it('two drafts whose LLM calls finish together leave exactly one awaiting approval (no pool: in-memory runner)', async () => {
+      // Both LLM calls return at the same moment, so both transactions start together.
+      const task = new TenantSiteAboutTask(gateway.gateway);
+      let returned = 0;
+      let bothReturned!: () => void;
+      const together = new Promise<void>((resolve) => {
+        bothReturned = resolve;
+      });
+      const aboutTask = {
+        draft: async (input: Parameters<TenantSiteAboutTask['draft']>[0]) => {
+          const drafted = await task.draft(input);
+          returned += 1;
+          if (returned === 2) bothReturned();
+          await together;
+          return drafted;
+        },
+      };
+      // A slow scan of the pending drafts: without the lock, each transaction
+      // reads them before the other has created its draft.
+      const realFindByStatus = proposalRepo.findByStatus.bind(proposalRepo);
+      proposalRepo.findByStatus = async (...args: Parameters<typeof realFindByStatus>) => {
+        await new Promise<void>((resolve) => {
+          setTimeout(resolve, 5);
+        });
+        return realFindByStatus(...args);
+      };
+      // One app, as createApp builds it without a pool.
+      const a = app('owner', { aboutTask, transactionRunner: new InMemoryTransactionRunner() });
+
+      const [one, two] = await Promise.all([
+        request(a).post('/api/tenant-site/about/draft'),
+        request(a).post('/api/tenant-site/about/draft'),
+      ]);
+
+      expect([one.status, two.status]).toEqual([201, 201]);
+      const pending = [
+        ...(await realFindByStatus(TENANT, 'draft')),
+        ...(await realFindByStatus(TENANT, 'ready_for_review')),
+      ].filter((p) => p.proposalType === 'update_tenant_site_about');
+      expect(pending).toHaveLength(1);
+      const statuses = await Promise.all(
+        [one, two].map(async (res) => (await proposalRepo.findById(TENANT, res.body.data.proposalId))?.status),
+      );
+      expect(statuses.sort()).toEqual(['draft', 'rejected']);
+    });
+
     /**
      * Stands in for PgTenantTransactionRunner. It records each unit of work,
      * the locks taken in it and how it ended: 'committed' when `fn` resolved,

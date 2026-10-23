@@ -67,13 +67,52 @@ export interface TenantTransactionRunner {
 }
 
 /**
- * No-op runner for in-memory repositories (tests / local dev without a pool).
- * In-memory repos don't participate in transactions and tests are
- * single-threaded, so the lock is a no-op and `fn` runs directly.
+ * The tail of each held in-memory lock's queue, keyed `tenantId\0key` like the
+ * Postgres advisory key. Module-wide rather than per runner, as advisory locks
+ * are database-wide: createApp gives public-booking and public-portal their
+ * own runners, and they lock the same key against each other.
+ */
+const inMemoryLockTails = new Map<string, Promise<void>>();
+
+/**
+ * Runner for in-memory repositories (tests / local dev without a pool).
+ * In-memory repos don't participate in transactions, so there is nothing to
+ * commit or roll back and `fn` runs directly. `lock` is a real keyed mutex,
+ * though: overlapping requests interleave at every await, so a unit of work
+ * that reads, decides and writes under a lock (the about draft's
+ * one-pending-draft rule, the self-service booking slot check) needs the
+ * second run to wait just as pg_advisory_xact_lock would make it. A lock is
+ * held until this run's `fn` settles, whether it resolves or throws, and
+ * locking a key the run already holds again returns at once.
  */
 export class InMemoryTransactionRunner implements TenantTransactionRunner {
-  async run<T>(_tenantId: string, fn: (scope: TransactionScope) => Promise<T>): Promise<T> {
-    return fn({ lock: async () => undefined, savepoint: (work) => work() });
+  async run<T>(tenantId: string, fn: (scope: TransactionScope) => Promise<T>): Promise<T> {
+    const held = new Map<string, () => void>();
+    const scope: TransactionScope = {
+      lock: async (key: string) => {
+        const lockKey = `${tenantId}\0${key}`;
+        if (held.has(lockKey)) return;
+        const prior = inMemoryLockTails.get(lockKey) ?? Promise.resolve();
+        let release!: () => void;
+        const released = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        const tail = prior.then(() => released);
+        inMemoryLockTails.set(lockKey, tail);
+        // Drop the entry once nobody holds or waits for the key.
+        void tail.then(() => {
+          if (inMemoryLockTails.get(lockKey) === tail) inMemoryLockTails.delete(lockKey);
+        });
+        held.set(lockKey, release);
+        await prior;
+      },
+      savepoint: (work) => work(),
+    };
+    try {
+      return await fn(scope);
+    } finally {
+      for (const release of held.values()) release();
+    }
   }
 }
 
