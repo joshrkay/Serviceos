@@ -353,21 +353,119 @@ function blankNonMentions(text: string, placeholder: string): string {
 const MAX_CUE_DISTANCE_WORDS = 12;
 
 /**
- * A digit or a number word anywhere in a text. Cheap pre-check: text with
- * neither cannot hold a card number, so most prose skips the tokenizer. It
- * is also what a card marker in a stored row's redacted text stands for
- * (the recording hook's `fitsRedaction`).
+ * What can stand for digits, and at most how many: written digits (each),
+ * a digit word (one), a ten or a teen (two), a repeat word ("triple", three).
+ * `candidateRegions` counts these to find the stretches of a text that could
+ * hold 13 digits at all; nothing else is tokenized.
  */
-export const HOLDS_DIGITS = new RegExp(
-  String.raw`\d|(?:^|[^\p{L}])(?:${[
+const REPEAT_WORD_DIGITS = 3;
+const DIGIT_LIKE = new RegExp(
+  String.raw`\d+|(?<![\p{L}\p{M}])(?:${[
     ...DIGIT_WORDS.keys(),
     ...ENGLISH_PAIR_WORDS.keys(),
     ...ENGLISH_TENS.keys(),
     ...SPANISH_PAIR_WORDS.keys(),
     ...SPANISH_TENS.keys(),
-  ].join('|')})(?![\p{L}])`,
-  'iu',
+    ...REPEAT_WORDS.keys(),
+  ].join('|')})(?![\p{L}\p{M}])`,
+  'giu',
 );
+
+/**
+ * A digit or a number word anywhere in a text (`DIGIT_LIKE`, one match: no
+ * `g` flag to carry a `lastIndex`): what a card marker in a stored row's
+ * redacted text stands for (the recording hook's `fitsRedaction`).
+ */
+export const HOLDS_DIGITS = new RegExp(DIGIT_LIKE.source, 'iu');
+
+function digitsAtMost(said: string): number {
+  if (isAsciiDigit(said[0])) return said.length;
+  const word = said.toLowerCase();
+  if (DIGIT_WORDS.has(word)) return 1;
+  return REPEAT_WORDS.has(word) ? REPEAT_WORD_DIGITS : 2;
+}
+
+/** Words of context kept around a stretch: past the furthest a mention of the card counts (`textCue`). */
+const CONTEXT_WORDS = MAX_CUE_DISTANCE_WORDS + 2;
+
+function isWordChar(ch: string | undefined): boolean {
+  return ch !== undefined && /[\p{L}\p{M}\p{N}]/u.test(ch);
+}
+
+/**
+ * The stretches of `text` that could hold a card, each with enough words
+ * around it for a mention of the card, cut at word boundaries: digit tokens
+ * chained by gaps a run can span, adding up to 13 digits or more. Text with
+ * none (most prose, and prompts whose numbers are dates, prices and times) is
+ * never tokenized, and long text is tokenized only around its numbers. Each
+ * stretch is searched exactly as the whole text would be: its runs and the
+ * words a mention is read in all lie inside it.
+ */
+function candidateRegions(text: string): Array<{ start: number; end: number }> {
+  const regions: Array<{ start: number; end: number }> = [];
+  let first = -1;
+  let last = -1;
+  let digits = 0;
+  const flush = (): void => {
+    if (digits < MIN_PAN_DIGITS) return;
+    let start = first;
+    for (let words = 0; start > 0 && words < CONTEXT_WORDS; words++) {
+      while (start > 0 && !isWordChar(text[start - 1])) start--;
+      while (start > 0 && isWordChar(text[start - 1])) start--;
+    }
+    let end = last;
+    for (let words = 0; end < text.length && words < CONTEXT_WORDS; words++) {
+      while (end < text.length && !isWordChar(text[end])) end++;
+      while (end < text.length && isWordChar(text[end])) end++;
+    }
+    const previous = regions.at(-1);
+    if (previous && start <= previous.end) previous.end = Math.max(previous.end, end);
+    else regions.push({ start, end });
+  };
+  for (const m of text.matchAll(DIGIT_LIKE)) {
+    const at = m.index;
+    if (last < 0 || !withinRunGap(text, last, at)) {
+      flush();
+      first = at;
+      digits = 0;
+    }
+    last = at + m[0].length;
+    digits += digitsAtMost(m[0]);
+  }
+  flush();
+  return regions;
+}
+
+/**
+ * True when what is between two digit tokens could join them into one run:
+ * only whitespace, the punctuation STT writes at a pause, and fillers, no
+ * more of them than `joinsGroups` ever allows. Any other word or character
+ * ends a run, so a stretch never spans prose ("10/22 about the heater in
+ * 2015").
+ */
+function withinRunGap(text: string, from: number, to: number): boolean {
+  let marks = 0;
+  let fillers = 0;
+  for (let i = from; i < to; ) {
+    const ch = text[i];
+    if (isSpace(text.charCodeAt(i))) {
+      i++;
+    } else if (MARK_CHARS.has(ch) || PAUSE_CHARS.has(ch)) {
+      if (++marks > MAX_JOINER_MARKS) return false;
+      i++;
+    } else {
+      let j = i;
+      while (j < to && isWordChar(text[j])) j++;
+      if (j === i || !FILLER_WORDS.has(text.slice(i, j).toLowerCase()) || ++fillers > MAX_JOINER_FILLERS) return false;
+      i = j;
+    }
+  }
+  return true;
+}
+
+function isSpace(code: number): boolean {
+  return code === 32 || (code >= 9 && code <= 13) || code === 0xa0 || code === 0x2028 || code === 0x2029;
+}
 
 /**
  * A run of written digits, a word (letters), a run of spaces or tabs, or one
@@ -698,11 +796,25 @@ function textCue(text: string, tokens: readonly Token[], placeholder: string): T
   };
   return {
     near(from, to) {
-      return locate().some(
-        ({ first, last }) =>
-          (last < from && words[from] - words[last + 1] <= MAX_CUE_DISTANCE_WORDS) ||
-          (first > to && words[first] - words[to + 1] <= MAX_CUE_DISTANCE_WORDS) ||
-          (first <= to && last >= from),
+      // Mentions are in text order and never overlap, so only two can be the
+      // nearest: the last one starting at or before the window's end (it
+      // overlaps the window, or is the closest before it) and the one after
+      // it. A binary search, not a walk over every mention: a text naming the
+      // card next to each of thousands of cards would be quadratic.
+      const found = locate();
+      let lo = 0;
+      let hi = found.length;
+      while (lo < hi) {
+        const mid = (lo + hi) >> 1;
+        if (found[mid].first <= to) lo = mid + 1;
+        else hi = mid;
+      }
+      const before = found[lo - 1];
+      const after = found[lo];
+      return (
+        (before !== undefined &&
+          (before.last >= from || words[from] - words[before.last + 1] <= MAX_CUE_DISTANCE_WORDS)) ||
+        (after !== undefined && words[after.first] - words[to + 1] <= MAX_CUE_DISTANCE_WORDS)
       );
     },
     wordsAfterLastMention() {
@@ -962,6 +1074,9 @@ function cutLength(digits: number, keepsWhatFollows: boolean, fromGroupStart: bo
  */
 const MAX_CUT_LEAD_DIGITS = 2;
 
+/** The most a caller says straight after a card: a four-digit code and an MMYY expiry. */
+const MAX_DIGITS_AFTER_A_CARD = 8;
+
 /** MMYY with a month 01–12. */
 const EXPIRY = /^(?:0[1-9]|1[0-2])\d\d$/;
 
@@ -1022,7 +1137,7 @@ function isLuhnValid(digits: string): boolean {
  * never in a phone's 3-3-4, so a window may not START on a phone; a card said
  * after the phone is still found.
  */
-function phoneGroupsAt(groups: string[], i: number): number {
+function phoneGroupsAt(groups: readonly string[], i: number): number {
   const len = (k: number): number => groups[i + k]?.length ?? 0;
   const g0 = groups[i];
   if (g0.length === 10 || (g0.length === 11 && g0.startsWith('1'))) return 1;
@@ -1043,7 +1158,7 @@ const PHONE_SHAPES_IN_PAIRS: ReadonlyArray<readonly number[]> = [
   [2, 2, 2, 2, 2],
 ];
 
-function spokenPhoneGroupsAt(groups: string[], i: number): number {
+function spokenPhoneGroupsAt(groups: readonly string[], i: number): number {
   const phone = phoneGroupsAt(groups, i);
   if (phone > 0) return phone;
   const shape = PHONE_SHAPES_IN_PAIRS.find((lengths) => lengths.every((n, k) => groups[i + k]?.length === n));
@@ -1094,8 +1209,8 @@ function groupHit(groups: readonly DigitGroup[], first: number, last: number): C
  * its first and last group.
  */
 function wholeGroupCards(
-  digits: string[],
-  phoneAt: (groups: string[], i: number) => number,
+  digits: readonly string[],
+  phoneAt: (groups: readonly string[], i: number) => number,
   accept: (first: number, last: number, run: string) => boolean = () => true,
 ): Array<[number, number]> {
   const cards: Array<[number, number]> = [];
@@ -1160,7 +1275,13 @@ function runCards(groups: DigitGroup[], cue: CardCue): CardHit[] {
     let b = a + 1;
     while (b < groups.length && !taken[b]) b++;
     const rest = groups.slice(a, b);
-    if (rest.reduce((n, g) => n + g.digits.length, 0) >= MIN_PAN_DIGITS) hits.push(...cardWindows(rest, cue));
+    // Written digits inside one turn were searched in full above (no window
+    // of them is cut, and every whole one was tried): only digit words, or
+    // turns, can add a card.
+    const searchedAbove = rest.every((g) => g.written && g.seg === rest[0].seg);
+    if (!searchedAbove && rest.reduce((n, g) => n + g.digits.length, 0) >= MIN_PAN_DIGITS) {
+      hits.push(...cardWindows(rest, cue));
+    }
     a = b;
   }
   return hits.sort((x, y) => x.from - y.from);
@@ -1186,19 +1307,21 @@ function cardWindows(groups: DigitGroup[], cue: CardCue): CardHit[] {
   const ctx: SearchContext = { phoneTurns, cue };
   const whole = (from: number, to: number): WindowPart[] =>
     groups.slice(from, to + 1).map((group) => ({ group, units: group.units }));
+  // Built once for the run: the cut search below runs once per card found and
+  // reads phone shapes across the whole run, so rebuilding it there made a
+  // long run of cards quadratic.
+  const digits = groups.map((g) => g.digits);
   const hits: CardHit[] = [];
   // First group of the stretch no whole-group card has covered yet.
   let stretch = 0;
-  for (const [first, last] of wholeGroupCards(
-    groups.map((g) => g.digits),
-    spokenPhoneGroupsAt,
-    (from, to, run) => cardShaped(whole(from, to), run, ctx),
+  for (const [first, last] of wholeGroupCards(digits, spokenPhoneGroupsAt, (from, to, run) =>
+    cardShaped(whole(from, to), run, ctx),
   )) {
-    hits.push(...cutCardWindows(groups, stretch, first, ctx));
+    hits.push(...cutCardWindows(groups, digits, stretch, first, ctx));
     hits.push(groupHit(groups, first, last));
     stretch = last + 1;
   }
-  hits.push(...cutCardWindows(groups, stretch, groups.length, ctx));
+  hits.push(...cutCardWindows(groups, digits, stretch, groups.length, ctx));
   return hits;
 }
 
@@ -1216,8 +1339,13 @@ function cardWindows(groups: DigitGroup[], cue: CardCue): CardHit[] {
  * digits are one token per group, so the written path never gets here with
  * anything to cut.
  */
-function cutCardWindows(groups: DigitGroup[], from: number, to: number, ctx: SearchContext): CardHit[] {
-  const digits = groups.map((g) => g.digits);
+function cutCardWindows(
+  groups: DigitGroup[],
+  digits: readonly string[],
+  from: number,
+  to: number,
+  ctx: SearchContext,
+): CardHit[] {
   const units: Array<DigitUnit & { group: number; lead: number; first: boolean; last: boolean }> = [];
   for (let g = from; g < to; g++) {
     let lead = 0;
@@ -1233,10 +1361,9 @@ function cutCardWindows(groups: DigitGroup[], from: number, to: number, ctx: Sea
     if (start.first) {
       const phone = spokenPhoneGroupsAt(digits, start.group);
       if (phone > 0) {
-        // Kept verbatim, as in the whole-group search.
-        const next = units.findIndex((u) => u.group >= start.group + phone);
-        if (next < 0) break;
-        p = next;
+        // Kept verbatim, as in the whole-group search; scanning resumes after
+        // it (forward from here: a run of phone numbers is one pass).
+        while (p < units.length && units[p].group < start.group + phone) p++;
         continue;
       }
     } else if (start.lead > MAX_CUT_LEAD_DIGITS) {
@@ -1256,9 +1383,13 @@ function cutCardWindows(groups: DigitGroup[], from: number, to: number, ctx: Sea
       // (already searched), neither is a stretch out of the middle of a run.
       if (start.first === end.last) return false;
       if (!cutLength(w.digits.length, !end.last, start.first)) return false;
+      // What the caller said after the card in the same group: its digits
+      // past this unit (at most a code and an expiry, so a long rest is none).
       if (!end.last) {
-        const rest = groups[end.group].units.slice(groups[end.group].units.findIndex((u) => u.token === end.token) + 1);
-        if (!followsACard(rest.map((u) => u.digits).join(''), w.digits)) return false;
+        const group = groups[end.group].digits;
+        const restFrom = end.lead + end.digits.length;
+        if (group.length - restFrom > MAX_DIGITS_AFTER_A_CARD) return false;
+        if (!followsACard(group.slice(restFrom), w.digits)) return false;
       }
       if (!isLuhnValid(w.digits)) return false;
       // A 17- or 18-digit order, serial or confirmation number read as words
@@ -1357,20 +1488,20 @@ export function redactCardNumbers(
 ): string {
   if (!text) return text;
   const tagged = text.replace(DEEPGRAM_CARD_TAG, placeholder);
-  if (!HOLDS_DIGITS.test(tagged)) return tagged;
-  const tokens = tokenize(tagged);
-  const hits = findCardHits(tokens, textCue(tagged, tokens, placeholder));
-  if (hits.length === 0) return tagged;
   let out = '';
   let pos = 0;
-  for (const hit of hits) {
-    const start = tokens[hit.from].start;
-    const end = tokens[hit.to].end;
-    onRedact?.(tagged.slice(start, end), start);
-    out += tagged.slice(pos, start) + placeholder;
-    pos = end;
+  for (const region of candidateRegions(tagged)) {
+    const stretch = tagged.slice(region.start, region.end);
+    const tokens = tokenize(stretch);
+    for (const hit of findCardHits(tokens, textCue(stretch, tokens, placeholder))) {
+      const start = region.start + tokens[hit.from].start;
+      const end = region.start + tokens[hit.to].end;
+      onRedact?.(tagged.slice(start, end), start);
+      out += tagged.slice(pos, start) + placeholder;
+      pos = end;
+    }
   }
-  return out + tagged.slice(pos);
+  return pos === 0 ? tagged : out + tagged.slice(pos);
 }
 
 /**
