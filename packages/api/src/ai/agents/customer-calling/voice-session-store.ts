@@ -1186,7 +1186,8 @@ export class VoiceSessionStore {
    * PRIV-3 — a caller who pauses mid-card leaves turns that each hold fewer
    * than 13 digits, which the per-turn scrub (`callerTranscriptText`) cannot
    * see. Every caller turn is therefore also read together with the caller
-   * turns just before it (`cardSplitWindow`: five turns, one minute); when a
+   * turns just before it (`cardSplitWindow`: five turns that could hold
+   * digits, a pause turn between them not counted, one minute); when a
    * Luhn-valid card spans them, each
    * contributing span becomes the marker: in the in-memory transcript at once
    * (so no later prompt, proposal or summary built from it carries the card),

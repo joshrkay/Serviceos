@@ -77,11 +77,11 @@
  * or a Diners Club's 14 or an Amex read as words with no pause at all, is
  * now missed too. So is a Diners Club's 14 from 300–305, 3095 or 38–39 read
  * as words with no pause at all and nothing run on, even with the card named
- * (this corpus reads Diners Clubs from 36 only): those ranges start area
- * codes, and a phone number from 301–305 or 380/385/386 read straight into
- * four more digits, with the card named a few words before it, was replaced
- * 1,040 and 1,008 times in 10,000. Read in its groups, with its CVV or expiry
- * run on, or over turns, it is caught; from 36 it is caught read either way.
+ * (18 of the 5,000 below): those ranges start area codes, and a phone number
+ * from 301–305 or 380/385/386 read straight into four more digits, with the
+ * card named a few words before it, was replaced 1,040 and 1,008 times in
+ * 10,000. Read in its groups, with its CVV or expiry run on, or over turns,
+ * it is caught; from 36 it is caught read either way.
  */
 import { describe, expect, it } from 'vitest';
 import {
@@ -227,7 +227,7 @@ describe('PRIV-3 — seeded corpus of cards read with the card mentioned near th
       else missed.push(text);
     }
     expect(missed).toEqual([]);
-    expect(unbrokenDinersOutside36).toBe(0);
+    expect(unbrokenDinersOutside36).toBe(18);
   });
 
   it('catches every card read over several turns in its groups, the card mentioned in its turns, the turn before or by the agent', () => {

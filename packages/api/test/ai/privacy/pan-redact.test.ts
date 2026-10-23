@@ -853,6 +853,23 @@ describe('redactCardNumbers — a card read as words that runs straight into oth
   const VISA_EN = 'four oh one two eight eight eight eight eight eight eight eight one eight eight one';
   const VISA_ES = 'cuatro cero uno dos ocho ocho ocho ocho ocho ocho ocho ocho uno ocho ocho uno';
 
+  // The whole-group search goes group by group; a window from a later group
+  // of the card (a Diners Club's 14 from "thirty-nine", or from "tres ocho")
+  // can pass the Luhn check by chance and used to be taken before the card
+  // cut out of the run from its first group, leaving those groups in clear.
+  it('takes the card cut from its first group over a chance window from a later group of it', () => {
+    // 4360 0096 3747 3976 433, then its CVV (888) and expiry (12/26).
+    expect(
+      redactCardNumbers(
+        'the card is forty-three sixty dash oh zero ninety six\nthirty-seven forty seven dash thirty-nine seventy six\nfour three three eight eight eight one two two six',
+      ),
+    ).toBe('the card is [card number] eight eight eight one two two six');
+    // Diners Club 3625 383146 1044, then its expiry (01/26).
+    expect(
+      redactCardNumbers('mi tarjeta es tres seis dos cinco y tres ocho tres uno cuatro seis, eh, uno cero cuatro cuatro cero uno dos seis'),
+    ).toBe('mi tarjeta es [card number] cero uno dos seis');
+  });
+
   it('keeps the CVV said straight after the card', () => {
     expect(redactCardNumbers(`my card is ${VISA_EN} one two three thanks`)).toBe(
       'my card is [card number] one two three thanks',
@@ -1167,6 +1184,88 @@ describe('redactCardNumbersAcrossTurns', () => {
     expect(redactCardNumbersAcrossTurns(['4111 1111', 'si, 1111 1111'])).toEqual([MARKER, `si, ${MARKER}`]);
   });
 
+  it('joins a continuation turn that opens with "sure" or "hmm", or with up to three such words', () => {
+    expect(redactCardNumbersAcrossTurns(['4111 1111', 'sure, 1111 1111'])).toEqual([MARKER, `sure, ${MARKER}`]);
+    expect(redactCardNumbersAcrossTurns(['4111 1111', 'hmm, 1111 1111'])).toEqual([MARKER, `hmm, ${MARKER}`]);
+    expect(redactCardNumbersAcrossTurns(['4111 1111', 'Okay, sorry, so 1111 1111'])).toEqual([
+      MARKER,
+      `Okay, sorry, so ${MARKER}`,
+    ]);
+    expect(redactCardNumbersAcrossTurns(['4111 1111', 'sí, vale, entonces 1111 1111'])).toEqual([
+      MARKER,
+      `sí, vale, entonces ${MARKER}`,
+    ]);
+    // Four is a sentence of its own, a filler for the fourth too, and any
+    // other word ends the run.
+    expect(redactCardNumbersAcrossTurns(['4111 1111', 'okay, sorry, so, yeah 1111 1111'])).toBeNull();
+    expect(redactCardNumbersAcrossTurns(['4111 1111', 'okay, sorry, so, um, 1111 1111'])).toBeNull();
+    expect(redactCardNumbersAcrossTurns(['4111 1111', 'okay, sorry, um, 1111 1111'])).toEqual([MARKER, `okay, sorry, um, ${MARKER}`]);
+    expect(redactCardNumbersAcrossTurns(['4111 1111', 'um um um um 1111 1111'])).toBeNull();
+    expect(redactCardNumbersAcrossTurns(['4111 1111', 'well 1111 1111'])).toBeNull();
+  });
+
+  // Where the card is mentioned near it: callers say "okay" between bare
+  // answers too, and two eight-digit answers with an "okay" between them
+  // passed the Luhn check as often as any (in a seeded run of 20,000 bare
+  // answers with acknowledgement turns, reading on past them without a
+  // mention doubled the "cards" found, 73 to 144).
+  it('reads on past a turn of nothing but an acknowledgement or a filler between the groups, where the card is mentioned', () => {
+    expect(redactCardNumbersAcrossTurns(['my card is 4111 1111', 'okay', '1111 1111'])).toEqual([
+      `my card is ${MARKER}`,
+      'okay',
+      MARKER,
+    ]);
+    expect(redactCardNumbersAcrossTurns(['4111 1111', 'um', '1111', 'mm-hmm', '1111'], MARKER, AGENT_MENTIONS_CARD)).toEqual([
+      MARKER,
+      'um',
+      MARKER,
+      'mm-hmm',
+      MARKER,
+    ]);
+    expect(redactCardNumbersAcrossTurns(['4111 1111', 'okay', '1111 1111'])).toBeNull();
+    // In the live window, as said.
+    expect(
+      redactCardNumbersInCallTurns([
+        { speaker: 'caller', text: 'my card is 4111 1111', at: 0 },
+        { speaker: 'agent', text: 'go on', at: 1000 },
+        { speaker: 'caller', text: 'okay', at: 2000 },
+        { speaker: 'caller', text: '1111 1111', at: 3000 },
+      ]),
+    ).toEqual([`my card is ${MARKER}`, 'go on', 'okay', MARKER]);
+    // A turn that says anything else still ends the run, and so do three
+    // such turns in a row (more fillers than a pause between groups holds).
+    expect(redactCardNumbersAcrossTurns(['4111 1111', 'okay what', '1111 1111'])).toBeNull();
+    expect(redactCardNumbersAcrossTurns(['4111 1111', 'okay', 'um', 'so', '1111 1111'])).toBeNull();
+  });
+
+  // A card read group by group with an "okay" after each group is seven
+  // caller turns: only the turns that give digits count toward the window's
+  // five (a turn of nothing but a pause holds none of the card).
+  it("counts only the caller turns that give digits toward the window: an 'okay' after every group still reads on", () => {
+    const groups = ['my card is 4111', '1111', '1111', '1111'];
+    const withOkays = groups.flatMap((g, k) => (k === 0 ? [g] : ['okay', g]));
+    const said = (texts: readonly string[]) => texts.map((text, k) => ({ speaker: 'caller' as const, text, at: k * 2000 }));
+    expect(redactCardNumbersInCallTurns(said(withOkays))).toEqual([
+      `my card is ${MARKER}`,
+      'okay',
+      MARKER,
+      'okay',
+      MARKER,
+      'okay',
+      MARKER,
+    ]);
+    // A 19-digit card read the same way, nine turns.
+    const nineteen = ['my card is 4000', '0000', '0000', '0000', '006'].flatMap((g, k) => (k === 0 ? [g] : ['okay', g]));
+    expect(redactCardNumbersInCallTurns(said(nineteen))).toEqual(nineteen.map((t) => (t === 'okay' ? t : t.replace(/\d+/, MARKER))));
+    // Gate codes answered the same way, with no card named, are no card.
+    const codes = ['the gate code is 4111', 'okay', '1111', 'okay', '1111', 'okay', '1111'];
+    expect(redactCardNumbersInCallTurns(said(codes))).toBeNull();
+    // Still five turns with digits at most: a card's leading digit six digit
+    // turns back has left the window.
+    const six = ['my card is 4', '1', '1', '1', '1111 1111', '1111'].flatMap((g, k) => (k === 0 ? [g] : ['okay', g]));
+    expect(redactCardNumbersInCallTurns(said(six))).toBeNull();
+  });
+
   it('joins a continuation turn that says which group comes next', () => {
     // "four" here counts the digits; it is not one of them.
     expect(redactCardNumbersAcrossTurns(['4111 1111 1111', 'the next four are 1111'])).toEqual([
@@ -1289,6 +1388,62 @@ describe('redactCardNumbersAcrossTurns', () => {
     ]);
   });
 
+  // A 13-digit Visa or a Diners Club read in fours over two turns ends its
+  // last turn on the card's last four plus the final one or two digits.
+  it('stitches a last turn that holds the last four and the final partial group (13-digit [8,5], Diners [8,6])', () => {
+    // Visa 4222 2222 2222 2 and Diners Club 3614 8900 6479 13.
+    expect(redactCardNumbersAcrossTurns(['my card is 4222 2222', '2222 2'])).toEqual([`my card is ${MARKER}`, MARKER]);
+    expect(redactCardNumbersAcrossTurns(['my card is 3614 8900', '6479 13'])).toEqual([`my card is ${MARKER}`, MARKER]);
+    // Only where the card is mentioned: an eight-digit answer and a zip read
+    // the same way, and so does a group of four per turn.
+    expect(redactCardNumbersAcrossTurns(['4222 2222', '2222 2'])).toBeNull();
+    expect(redactCardNumbersAcrossTurns(['4222', '2222', '2222 2'])).toBeNull();
+    expect(redactCardNumbersAcrossTurns(['4222', '2222', '2222 2'], MARKER, AGENT_MENTIONS_CARD)).toEqual(
+      Array(3).fill(MARKER),
+    );
+    // Subject to the issued lengths: 13 digits are a Visa or nothing, 14 a
+    // Diners Club or nothing (5100 0000 0000 3 and 4111 1111 1111 14 pass
+    // the Luhn check).
+    expect(redactCardNumbersAcrossTurns(['my card is 5100 0000', '0000 3'])).toBeNull();
+    expect(redactCardNumbersAcrossTurns(['my card is 4111 1111', '1111 14'])).toBeNull();
+  });
+
+  // Diners Club International is issued at 14 from 300–305, 3095 and 38–39
+  // as from 36 (the networks' 14-digit test numbers start 305 and 38).
+  it('stitches a Diners Club 14 from 300–305, 3095 or 38–39 in its 4-6-4, 10-4, 4-10 and [8,6] turns, as one from 36', () => {
+    for (const card of ['30569309025904', '38520000023237', '30951234567897', '39123456789010', '36227206271667']) {
+      const [a, b, c] = [card.slice(0, 4), card.slice(4, 10), card.slice(10)];
+      for (const turns of [
+        [`my card number is ${a}`, b, c],
+        [`my card number is ${a} ${b}`, c],
+        [`my card number is ${a}`, `${b} ${c}`],
+        [`my card is ${card.slice(0, 4)} ${card.slice(4, 8)}`, `${card.slice(8, 12)} ${card.slice(12)}`],
+      ]) {
+        expect(redactCardNumbersAcrossTurns(turns), turns.join(' | ')).toEqual(
+          turns.map((t) => t.replace(/[\d ]+$/, (digits) => (digits.startsWith(' ') ? ` ${MARKER}` : MARKER))),
+        );
+      }
+      // Read as words with the CVV run straight on in the last turn.
+      expect(redactCardNumbersAcrossTurns([`my card is ${spell(a)}`, spell(b), `${spell(c)} one two three`])).toEqual([
+        `my card is ${MARKER}`,
+        MARKER,
+        `${MARKER} one two three`,
+      ]);
+      // In the live window, the agent saying "go on" between the turns.
+      expect(
+        redactCardNumbersInCallTurns([
+          { speaker: 'caller', text: `my card number is ${a}`, at: 0 },
+          { speaker: 'agent', text: 'Go on.', at: 2000 },
+          { speaker: 'caller', text: b, at: 4000 },
+          { speaker: 'caller', text: c, at: 6000 },
+        ]),
+      ).toEqual([`my card number is ${MARKER}`, 'Go on.', MARKER, MARKER]);
+    }
+  });
+
+  // Already read: a Diners Club 4-6-4 and an Amex [8,7] (see "still stitches
+  // every way a card is read aloud in turns").
+
   // Years, gate codes, last-four answers and prices said one per turn are
   // groups of four, and joined they pass the Luhn check one time in ten: each
   // hit rewrote the caller's lines (the agent lost the years or codes) and
@@ -1408,17 +1563,18 @@ describe('redactCardNumbersAcrossTurns', () => {
   // agent's "go ahead with the card number" with one. That turn is a pause,
   // not another moment of the call: the mention is read past up to two such
   // turns, and the agent's lines before them count as well. Every shape
-  // below has a turn of four digits or fewer, so none is stitched with no
-  // mention; before, a pause turn after the mention hid it and none of them
-  // was caught.
+  // below has a turn of four digits or fewer (or ends on a 13-digit card's
+  // last four and one), so none is stitched with no mention; before, a pause
+  // turn after the mention hid it and none of them was caught.
   describe('the mention, past a pause turn said before the card', () => {
     const SHAPES: ReadonlyArray<readonly [string, readonly string[]]> = [
       ['Visa 4-4-4-4', ['4111', '1111', '1111', '1111']],
       ['Amex 4-6-5', ['3782', '822463', '10005']],
       ['Diners Club 4-6-4', ['3614', '890064', '7913']],
       ['Visa 4-12', ['4111', '1111 1111 1111']],
+      ['13-digit Visa [8,5]', ['4222 2222', '2222 2']],
     ];
-    const PAUSES = ['okay', 'um', 'mm-hmm', 'sí', 'Okay, um.'];
+    const PAUSES = ['okay', 'um', 'sure', 'mm-hmm', 'sí', 'Okay, um.'];
     const marked = (groups: readonly string[]) => groups.map(() => MARKER);
 
     it.each(SHAPES)('%s after the caller names the card, or the agent asks for it', (_name, groups) => {
@@ -1575,6 +1731,103 @@ describe('redactCardNumbersAcrossTurns', () => {
             ...marked(groups),
           ]);
         }
+      }
+    });
+
+    // Pauses no turn reads on from ("yep", "got it", "hold on", "one sec",
+    // "let me get it", "claro", "un momento"): said between naming the card
+    // and reading it, they hid the mention, so a card with a turn of four
+    // digits or fewer was missed. The mention is read past them as past
+    // "okay"; a turn of one of them still ends a run, as any other word does.
+    const MORE_PAUSES = [
+      'uh huh',
+      'Yep.',
+      'Got it.',
+      'All right.',
+      'Hold on.',
+      'One sec.',
+      'One moment.',
+      'Just a second.',
+      'Let me get it.',
+      'Hang on.',
+      'Mmm.',
+      'Okey.',
+      'Ajá.',
+      'Claro.',
+      'Ya.',
+      'Un momento.',
+      'Déjame buscarla.',
+      'A ver.',
+    ];
+
+    it.each(SHAPES)('%s after a pause no turn reads on from, the mention before it', (_name, groups) => {
+      for (const pause of MORE_PAUSES) {
+        expect(redactCardNumbersAcrossTurns(['my card number is', pause, ...groups]), pause).toEqual([
+          'my card number is',
+          pause,
+          ...marked(groups),
+        ]);
+        expect(
+          redactCardNumbersAcrossTurns([pause, ...groups], MARKER, { agentLines: [['Go ahead with the card number.']] }),
+          pause,
+        ).toEqual([pause, ...marked(groups)]);
+        // With an acknowledgement turn as well: two pause turns.
+        expect(redactCardNumbersAcrossTurns(['mi tarjeta es', 'vale', pause, ...groups]), pause).toEqual([
+          'mi tarjeta es',
+          'vale',
+          pause,
+          ...marked(groups),
+        ]);
+        // Nothing names the card, or the agent asks for another number.
+        expect(redactCardNumbersAcrossTurns([pause, ...groups]), pause).toBeNull();
+        expect(redactCardNumbersAcrossTurns(['the gate is on the left', pause, ...groups]), pause).toBeNull();
+        expect(
+          redactCardNumbersAcrossTurns(['my card number is', pause, ...groups], MARKER, { agentLines: [[], [], ["What's the house number?"]] }),
+          pause,
+        ).toBeNull();
+      }
+      // "Let me get my card" names the card itself: it is no pause to read past.
+      expect(redactCardNumbersAcrossTurns(['I can pay now', 'let me get my card', ...groups])).toEqual([
+        'I can pay now',
+        'let me get my card',
+        ...marked(groups),
+      ]);
+    });
+
+    // "One sec" and "one moment" hold a digit word. Said after digits, it read
+    // as one more digit of them: twelve digits and the "one" passed the Luhn
+    // check as a 13-digit Visa, and a card's sixteen and the "one" as a
+    // 17-digit Discover. As a pause, it gives a card no digit.
+    it("never takes the digit word of 'one sec' or 'one moment' into a card", () => {
+      expect(redactCardNumbersAcrossTurns(['my card number is 4111 1111 1110', 'One sec.'])).toBeNull();
+      expect(redactCardNumbersAcrossTurns(['my card number is 4111 1111 1110', 'Okay, one moment.'])).toBeNull();
+      expect(redactCardNumbersAcrossTurns(['my card is', '6011', '0000', '0000', '0038', 'One sec.'])).toEqual([
+        'my card is',
+        MARKER,
+        MARKER,
+        MARKER,
+        MARKER,
+        'One sec.',
+      ]);
+      // "un" is no digit word, and "un momento" gives none either way.
+      expect(redactCardNumbersAcrossTurns(['mi tarjeta es', '6011', '0000', '0000', '0038', 'Un momento.'])).toEqual([
+        'mi tarjeta es',
+        MARKER,
+        MARKER,
+        MARKER,
+        MARKER,
+        'Un momento.',
+      ]);
+    });
+
+    // Nor is it a turn that gives digits toward the window's five: a 19-digit
+    // card read in five turns after "my card number is", "one sec" still has
+    // the mention in reach.
+    it('counts no pause toward the five turns that give digits, so a 19-digit card after one keeps its mention', () => {
+      for (const pause of ['One sec.', 'one moment', 'Un momento.', 'Hold on.']) {
+        const said = ['my card number is', pause, '4000', '0000', '0000', '0000', '006'];
+        const lines = said.map((text, k) => ({ speaker: 'caller' as const, text, at: 1_000_000 + k * 3000 }));
+        expect(redactCardNumbersInCallTurns(lines), pause).toEqual(['my card number is', pause, ...Array(5).fill(MARKER)]);
       }
     });
 
@@ -2343,6 +2596,48 @@ describe('redactCardNumbersAcrossTurns — seeded simulation of four-digit answe
       }
     }
     expect(stitched).toEqual(Object.fromEntries(Object.keys(sequences).map((kind) => [kind, []])));
+  });
+});
+
+/**
+ * Eight-digit answers (account and order numbers, dates written 10222026),
+ * zips, years, phones and house numbers, with a caller's "okay", "um" or
+ * "sure" said as a turn of its own between some of them. Two eight-digit
+ * answers read as two halves of a card; a card read on past an
+ * acknowledgement turn, or a 13-digit one whose last turn holds its last
+ * four and one ([8,5]), is taken only where the card is mentioned. Of these
+ * 20,000 sequences, 73 were "cards" before (all two halves of eight); reading
+ * on past the acknowledgement turns with no mention made it 144.
+ */
+describe('redactCardNumbersAcrossTurns — seeded simulation of answers with acknowledgement turns', () => {
+  it('finds no more "cards" than two eight-digit halves already were', () => {
+    const random = seededRandom(3535);
+    const int = (lo: number, hi: number): number => lo + Math.floor(random() * (hi - lo + 1));
+    const pick = <T,>(xs: readonly T[]): T => xs[Math.floor(random() * xs.length)];
+    const digits = (n: number): string => String(int(1, 9)) + Array.from({ length: n - 1 }, () => String(int(0, 9))).join('');
+    const answers: ReadonlyArray<() => string> = [
+      () => digits(int(1, 5)),
+      () => String(int(1000, 99999)).padStart(5, '0'),
+      () => String(int(1950, 2025)),
+      () => digits(8),
+      () => `${digits(4)} ${digits(4)}`,
+      () => `${int(1, 12)}${String(int(1, 28)).padStart(2, '0')}${int(2024, 2027)}`,
+      () => `${int(201, 989)} ${int(200, 999)} ${digits(4)}`,
+      () => digits(int(6, 7)),
+      () => digits(9),
+    ];
+    const acks = ['okay', 'mm-hmm', 'um', 'yes', 'sure', 'hmm'];
+    let found = 0;
+    for (let n = 0; n < 20_000; n++) {
+      const turns: string[] = [];
+      const count = int(2, 4);
+      for (let k = 0; k < count; k++) {
+        turns.push(pick(answers)());
+        if (k < count - 1 && random() < 0.5) turns.push(pick(acks));
+      }
+      if (redactCardNumbersAcrossTurns(turns.slice(-5))) found++;
+    }
+    expect(found).toBeLessThanOrEqual(66);
   });
 });
 

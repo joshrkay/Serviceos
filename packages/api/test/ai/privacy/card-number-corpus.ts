@@ -555,7 +555,7 @@ export class CardNumberCorpus {
 
   /** A Luhn-valid card number as a network issues it, and its natural groups. */
   card(): { number: string; groups: number[] } {
-    const kind = this.pick(['visa', 'visa', 'mastercard', 'mastercard2', 'amex', 'discover', 'diners', 'jcb', 'visa19'] as const);
+    const kind = this.pick(['visa', 'visa', 'mastercard', 'mastercard2', 'amex', 'discover', 'diners', 'diners30', 'jcb', 'visa19'] as const);
     const make = (prefix: string, length: number): string =>
       withLuhnCheckDigit(prefix + this.digits(length - prefix.length - 1, true));
     switch (kind) {
@@ -571,6 +571,9 @@ export class CardNumberCorpus {
         return { number: make('6011', 16), groups: [4, 4, 4, 4] };
       case 'diners':
         return { number: make('36', 14), groups: [4, 6, 4] };
+      case 'diners30':
+        // Diners Club International's other ranges, issued at 14 too.
+        return { number: make(this.pick(['300', '301', '302', '303', '304', '305', '3095', '38', '39']), 14), groups: [4, 6, 4] };
       case 'jcb':
         return { number: make(String(this.int(3528, 3589)), 16), groups: [4, 4, 4, 4] };
       case 'visa19':
@@ -667,10 +670,12 @@ export class CardNumberCorpus {
       lines.push({ speaker, text, at });
       at += this.int(2, 5) * 1000;
     };
-    const where = this.pick(['first-turn', 'turn-before', 'agent-before'] as const);
+    const where = this.pick(['first-turn', 'turn-before', 'agent-before', 'turn-before-pause', 'agent-before-pause'] as const);
     say('agent', 'How would you like to pay?');
-    if (where === 'turn-before') say('caller', this.cardTalk(lang));
-    if (where === 'agent-before') say('agent', "Sorry, I can't take card numbers over the phone.");
+    if (where === 'turn-before' || where === 'turn-before-pause') say('caller', this.cardTalk(lang));
+    if (where === 'agent-before' || where === 'agent-before-pause') say('agent', "Sorry, I can't take card numbers over the phone.");
+    // A turn of nothing but a pause between the mention and the card ("okay").
+    if (where.endsWith('-pause')) say('caller', this.pick(lang === 'en' ? ['okay', 'um', 'sure', 'mm-hmm', 'okay, so'] : ['sí', 'vale', 'este', 'bueno']));
     turns.forEach((inner, k) => {
       const lead = k === 0 && where === 'first-turn' ? (lang === 'en' ? 'my card is ' : 'mi tarjeta es ') : k > 0 ? this.pick(['', '', 'okay, ', 'um, ']) : '';
       // A turn of ten digit words with no pause (eleven starting 1) is a

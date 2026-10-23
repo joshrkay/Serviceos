@@ -238,18 +238,21 @@ const MAX_JOINER_FILLERS = 2;
 
 /**
  * A short acknowledgement a caller may open the turn that reads on with,
- * answering the agent's "go on" ("okay, 1111 1111", "vale, …").
+ * answering the agent's "go on" ("okay, 1111 1111", "vale, …"), or say as a
+ * turn of its own between two groups ("okay", "mm-hmm").
  */
 const ACKNOWLEDGEMENTS = [
   'okay',
   'ok',
   'so',
+  'sure',
   'alright',
   'right',
   'yes',
   'yeah',
   'then',
   'sorry',
+  'hmm',
   'mm-hmm',
   'mhm',
   'uh-huh',
@@ -265,25 +268,23 @@ const ACKNOWLEDGEMENTS = [
 /** Spaces and the punctuation STT writes at a pause. */
 const BREAK = String.raw`[\s,.;:!?…–—-]`;
 
-/**
- * A turn of nothing but one to three acknowledgements or fillers ("okay",
- * "um", "sí", "okay, um."): a pause the caller says as a turn of its own,
- * read past for a mention of the card before it (`turnsCue`).
- */
-const PAUSE_TURN = new RegExp(
-  String.raw`^${BREAK}*(?:(?:${[...ACKNOWLEDGEMENTS, ...FILLER_WORDS].join('|')})(?:${BREAK}+|$)){1,3}$`,
-  'iu',
-);
+/** Most fillers or acknowledgements a continuation turn opens with. */
+const MAX_LEAD_IN_WORDS = 3;
 
 /**
  * How a caller may open the turn that reads on (`redactCardNumbersAcrossTurns`
- * only): up to two fillers or acknowledgements, then optionally which group
- * comes next ("the next four are", "and the last four digits are", "los
- * últimos cuatro son"; captured), whose count is not one of the card's
- * digits. Inside a turn these words end a run as they always did.
+ * only): up to three fillers or acknowledgements ("okay, sorry, so"; a filler
+ * after them is a fourth, and the run ends), then
+ * optionally which group comes next ("the next four are", "and the last four
+ * digits are", "los últimos cuatro son"; captured), whose count is not one of
+ * the card's digits. A turn that is nothing else ("okay", "mm-hmm") is one
+ * pause between the groups around it. Inside a turn these words end a run as
+ * they always did.
  */
 const CONTINUATION_LEAD_IN = new RegExp(
-  String.raw`^${BREAK}*(?:(?:${[...ACKNOWLEDGEMENTS, ...FILLER_WORDS].join('|')})${BREAK}+){0,2}` +
+  String.raw`^${BREAK}*(?:(?:${[...ACKNOWLEDGEMENTS, ...FILLER_WORDS].join('|')})(?:${BREAK}+|$)){0,${MAX_LEAD_IN_WORDS}}` +
+    // A filler after them would be one word more ("okay, sorry, so, um").
+    String.raw`(?!${BREAK}*(?:${[...FILLER_WORDS].join('|')})(?:${BREAK}|$))` +
     String.raw`(?:((?:the\s+)?(?:next|last|final|other|remaining)\s+(?:one|two|three|four|five|six|[1-6])` +
     String.raw`(?:\s+(?:digits?|numbers?))?(?:\s+(?:are|is))?` +
     String.raw`|(?:(?:los|las)\s+)?(?:siguientes|próximos|proximos|últimos|ultimos|otros)\s+(?:uno|dos|tres|cuatro|cinco|seis|[1-6])` +
@@ -373,7 +374,8 @@ const DIGIT_LIKE = new RegExp(
 
 /**
  * A digit or a number word anywhere in a text (`DIGIT_LIKE`, one match: no
- * `g` flag to carry a `lastIndex`): what a card marker in a stored row's
+ * `g` flag to carry a `lastIndex`): what a caller turn must hold to give a
+ * card digits (`cardSplitWindow`), and what a card marker in a stored row's
  * redacted text stands for (the recording hook's `fitsRedaction`).
  */
 export const HOLDS_DIGITS = new RegExp(DIGIT_LIKE.source, 'iu');
@@ -718,6 +720,14 @@ interface WindowPart {
  */
 interface CardCue {
   near(from: number, to: number): boolean;
+  /**
+   * Across turns: the turns that are only a pause, an acknowledgement or a
+   * filler said as a turn of its own ("okay", "mm-hmm"). A card read on past
+   * one must be mentioned near it: callers say "okay" between bare answers
+   * too, and two eight-digit answers with an "okay" between them would
+   * otherwise be a card.
+   */
+  pauseTurns?: ReadonlySet<number>;
 }
 
 /**
@@ -983,8 +993,11 @@ function groupedLikeACard(parts: readonly WindowPart[], chunks: readonly string[
  * group read on its own, or a gate or lockbox code, a last-four, a year or a
  * time answered alone, which nothing in the digits tells apart: a gate code,
  * a serial number read in two fours and a time passed the Luhn check joined
- * as 4-8-4), the card must also be mentioned near it. Two eight-digit halves
- * need no mention: whether a card read so with no card mentioned at all is
+ * as 4-8-4), where it reads on past a turn that is only "okay" or "um"
+ * (`CardCue.pauseTurns`), or where a 13- or 14-digit card's last turn holds
+ * its last four and the final digit or two (an eight-digit answer and a
+ * zip), the card must also be mentioned near it. Two eight-digit halves need
+ * no mention: whether a card read so with no card mentioned at all is
  * stitched is the owner's open decision.
  */
 function cardShaped(parts: readonly WindowPart[], run: string, ctx: SearchContext): boolean {
@@ -1035,13 +1048,17 @@ function cardShaped(parts: readonly WindowPart[], run: string, ctx: SearchContex
   // A turn of four digits or fewer: a card's group read on its own, or a gate
   // or lockbox code, a last-four, a year, a time or a PIN answered alone.
   const shortTurn = turnDigits.some((n) => n <= 4);
+  const throughPause = [...(ctx.cue.pauseTurns ?? [])].some((seg) => seg > segs[0] && seg < segs[segs.length - 1]);
+  // A 13- or 14-digit card whose last turn holds its last four and the final
+  // digit or two: an eight-digit answer and a zip read the same way.
+  const shortTail = run.length < 15 && turnDigits[turnDigits.length - 1] === 4 + partialGroup(run);
   return (
     // Never from the middle of a written number ("(236) 987-2420", then the
     // next turns).
     !parts[0].group.writtenJoin &&
     !segs.some((seg) => ctx.phoneTurns.has(seg)) &&
     readLikeACard(turnDigits, run) &&
-    (!shortTurn || mentioned())
+    ((!shortTurn && !throughPause && !shortTail) || mentioned())
   );
 }
 
@@ -1169,11 +1186,11 @@ function spokenPhoneGroupsAt(groups: readonly string[], i: number): number {
  * How a card read aloud over several turns falls into them, as the digits
  * each turn gives it: whole groups of four in every turn (4-4-4-4, two halves
  * of eight, 4-12), the last turn either whole fours or the final partial
- * group (1–3 digits: a 13-digit card's last digit, a 19-digit card's last
- * three, alone or after its fourth group, "1111 123"); or an Amex in its 4-6-5
+ * group (`partialGroup`: a 13-digit card's last digit, a Diners Club's last
+ * two read in fours, a 19-digit card's or an Amex's last three), alone or
+ * after the fours before it ("2222 2", "1111 123"); or an Amex in its 4-6-5
  * groups, or a Diners Club International in its 4-6-4 (only a card that
- * starts like one: 34 or 37, and 36). An Amex read in fours ends on a group of
- * three as a 19-digit card does (`endsOnThree`). Intake answers in a row are
+ * starts like one: 34 or 37, and `DINERS_CLUB`). Intake answers in a row are
  * not read like that: a zip is five digits, a phone ten, a price "$1,250", so
  * a zip in 20000–69999 or a house number starting 2–6 can no longer be
  * stitched into a "card" just because the joined digits pass the Luhn check.
@@ -1184,15 +1201,29 @@ const DINERS_TURN_SPLITS: ReadonlySet<string> = new Set(['4,6,4', '10,4', '4,10'
 function readLikeACard(turnDigits: readonly number[], run: string): boolean {
   const split = turnDigits.join(',');
   if (AMEX_TURN_SPLITS.has(split)) return /^3[47]/.test(run);
-  if (DINERS_TURN_SPLITS.has(split)) return run.startsWith('36');
+  if (DINERS_TURN_SPLITS.has(split)) return DINERS_CLUB.test(run);
   const last = turnDigits[turnDigits.length - 1];
   return (
     turnDigits.slice(0, -1).every((n) => n % 4 === 0) &&
-    (last % 4 === 0 || last <= 3 || (endsOnThree(run) && last % 4 === 3))
+    (last % 4 === 0 ||
+      last <= 3 ||
+      (endsOnThree(run) && last % 4 === 3) ||
+      (run.length < 16 && last === 4 + partialGroup(run)))
   );
 }
 
-/** Read in fours, a 19-digit card and an Amex end on a group of three. */
+/**
+ * The digits of a card's last group read in fours, when it is short: a
+ * 13-digit Visa ends on one, a Diners Club's 14 on two, a 19-digit card and
+ * an Amex on three (0 for a card that ends on a whole four). A card's last
+ * turn may hold its last four and that partial group together ("2222 2",
+ * "6479 13", "0000 006").
+ */
+function partialGroup(run: string): number {
+  return run.length % 4;
+}
+
+/** Read in fours, a 19-digit card and an Amex end on a group of three, which may follow several fours in the last turn. */
 function endsOnThree(run: string): boolean {
   return run.length === MAX_PAN_DIGITS || (run.length === 15 && /^3[47]/.test(run));
 }
@@ -1312,23 +1343,39 @@ function cardWindows(groups: DigitGroup[], cue: CardCue): CardHit[] {
   // long run of cards quadratic.
   const digits = groups.map((g) => g.digits);
   const hits: CardHit[] = [];
-  // First group of the stretch no whole-group card has covered yet.
+  // First group of the stretch no card found has covered yet.
   let stretch = 0;
   for (const [first, last] of wholeGroupCards(digits, spokenPhoneGroupsAt, (from, to, run) =>
     cardShaped(whole(from, to), run, ctx),
   )) {
-    hits.push(...cutCardWindows(groups, digits, stretch, first, ctx));
+    // Inside a card cut out of the groups before it (below): already taken.
+    if (first < stretch) continue;
+    // A card cut out of a spoken group that starts before this window may run
+    // on into it: the card read with its CVV and expiry run on, and this
+    // window a chance one from a later group of it ("…, thirty-nine seventy
+    // six, four three three eight eight eight one two two six" holds a Diners
+    // Club's 14 from "thirty-nine"). The one that starts first is the card;
+    // taking the later one left the card's first groups in clear.
+    const cuts = cutCardWindows(groups, digits, stretch, last + 1, ctx, first);
+    hits.push(...cuts);
+    const cut = cuts.at(-1);
+    if (cut && cut.toGroup >= first) {
+      stretch = cut.toGroup + 1;
+      continue;
+    }
     hits.push(groupHit(groups, first, last));
     stretch = last + 1;
   }
-  hits.push(...cutCardWindows(groups, digits, stretch, groups.length, ctx));
+  hits.push(...cutCardWindows(groups, digits, stretch, groups.length, ctx, groups.length));
   return hits;
 }
 
 /**
- * The cards in groups `from`..`to` (exclusive) that only a window cutting a
- * spoken group between two of its words finds: the whole-group search found
- * none there. One end of such a window is a group boundary and the other is
+ * The cards in groups `from`..`to` (exclusive), starting in a group before
+ * `startsBefore`, that only a window cutting a spoken group between two of
+ * its words finds: the whole-group search found none starting there (one it
+ * found later in the run may lie inside such a card, `cardWindows`). One end
+ * of such a window is a group boundary and the other is
  * inside a spoken group, so it takes the card and leaves the CVV or expiry
  * run on after it ("four oh one two … one eight eight one oh four two seven"),
  * or a stray digit word before it ("number one four oh one two …"). Such a
@@ -1345,7 +1392,8 @@ function cutCardWindows(
   from: number,
   to: number,
   ctx: SearchContext,
-): CardHit[] {
+  startsBefore: number,
+): Array<CardHit & { toGroup: number }> {
   const units: Array<DigitUnit & { group: number; lead: number; first: boolean; last: boolean }> = [];
   for (let g = from; g < to; g++) {
     let lead = 0;
@@ -1354,9 +1402,9 @@ function cutCardWindows(
       lead += u.digits.length;
     });
   }
-  const hits: CardHit[] = [];
+  const hits: Array<CardHit & { toGroup: number }> = [];
   let p = 0;
-  while (p < units.length) {
+  while (p < units.length && units[p].group < startsBefore) {
     const start = units[p];
     if (start.first) {
       const phone = spokenPhoneGroupsAt(digits, start.group);
@@ -1405,7 +1453,7 @@ function cutCardWindows(
       return cardShaped(parts, w.digits, ctx);
     });
     if (hit) {
-      hits.push({ from: start.token, to: units[hit.end].token });
+      hits.push({ from: start.token, to: units[hit.end].token, toGroup: units[hit.end].group });
       p = hit.end + 1;
     } else {
       p++;
@@ -1528,7 +1576,8 @@ export interface CardSplitContext {
 }
 
 /**
- * Most turns of nothing but a pause ("okay", "um", "sí"; `PAUSE_TURN`) a
+ * Most turns of nothing but a pause ("okay", "um", "sure", "sí";
+ * `CardCue.pauseTurns`, or one no turn reads on from, `ASIDE_PAUSE_TURN`) a
  * caller may say between naming the card and reading it: "my card number
  * is", "okay", then the groups; or the agent's "go ahead with the card
  * number" answered with "okay". More is another moment of the call.
@@ -1700,6 +1749,51 @@ function asksForAnotherNumber(line: string, placeholder: string): boolean {
   );
 }
 
+/** `BREAK` and the inverted marks Spanish opens with. */
+const PAUSE_BREAK = String.raw`[\s,.;:!?¡¿…–—-]`;
+
+/**
+ * Pauses a caller says as a turn of their own that are no lead-in a turn
+ * reads on from (`CONTINUATION_LEAD_IN`): "yep", "uh huh", "got it", "all
+ * right", "hold on", "hang on", "one sec", "just a moment", "let me get it",
+ * "mmm", "okey", "ajá", "claro", "ya", "a ver", "un momento", "espere",
+ * "permítame", "déjame buscarla", after an acknowledgement or two ("okay,
+ * hold on") and before a "please".
+ * Said between naming the card and reading it, they hid the mention as
+ * "okay" did, so the mention is read past them too (`turnsCue`), and only
+ * that: such a turn between two groups still ends the run, as any other word
+ * does, and the digit word in "one sec" or "one moment" gives a card no
+ * digit (`redactCardNumbersAcrossTurns`, `cardSplitWindow`). "Let me get my
+ * card" is no pause: it names the card.
+ */
+const ASIDE_PAUSES = [
+  'yep',
+  'yup',
+  String.raw`uh[\s-]huh`,
+  String.raw`got\s+it`,
+  String.raw`all\s+right`,
+  String.raw`hold\s+on`,
+  String.raw`hang\s+on`,
+  String.raw`one\s+(?:sec|second|moment|minute)`,
+  String.raw`just\s+a\s+(?:sec|second|moment|minute)`,
+  String.raw`let\s+me\s+(?:get|grab|find)\s+(?:it|that)`,
+  'm{3,}',
+  'okey',
+  'aj[aá]',
+  'claro',
+  'ya',
+  String.raw`a\s+ver`,
+  String.raw`un\s+(?:momento|momentito|segundo|segundito)`,
+  'esp[eé]r(?:e|eme)',
+  'perm[ií]t(?:a|e)me',
+  String.raw`d[eé]j(?:a|e)me\s+(?:ver|buscar(?:la|lo)?)`,
+];
+const ASIDE_PAUSE_TURN = new RegExp(
+  String.raw`^${PAUSE_BREAK}*(?:(?:${[...ACKNOWLEDGEMENTS, ...FILLER_WORDS].join('|')})${PAUSE_BREAK}+){0,2}` +
+    String.raw`(?:${ASIDE_PAUSES.join('|')})(?:${PAUSE_BREAK}+(?:please|por\s+favor))?${PAUSE_BREAK}*$`,
+  'iu',
+);
+
 /**
  * A mention of the card near a window read across turns (a..b): in one of the
  * turns it spans within `MAX_CUE_DISTANCE_WORDS` words of the digits that
@@ -1710,23 +1804,25 @@ function asksForAnotherNumber(line: string, placeholder: string): boolean {
  * before its digits), in the agent's lines just before and between them, or
  * a turn of it that reads on from the one before ("the next four are",
  * `READS_ON`). Up to `MAX_PAUSE_TURNS_BEFORE_CARD` pause turns just before
- * the window (`pauseTurns`) are read past (their words counted, and the
- * agent's lines before each read too): the caller's turn before is the one
- * before them. Not when the agent asks for another number
- * (`asksForAnotherNumber`: "What's the house number?", "Go ahead with the
- * gate code.", "What number should the tech call?") right before the window
- * or before any pause read past, even in a line that also talks of cards:
- * the turns answer it, and card talk before the pause names no card of
- * theirs (read past it, a caller's bare answers were stitched into a
- * "card"). A mention further back, or far from the digits in a long turn, is
- * another moment of the call: the caller asked about paying by card, then
- * gave gate codes or read out the times the technician gave them.
+ * the window (`readPast`: `pauseTurns` and `ASIDE_PAUSE_TURN`s) are read
+ * past (their words counted, and the agent's lines before each read too):
+ * the caller's turn before is the one before them. Not when the agent asks
+ * for another number (`asksForAnotherNumber`: "What's the house number?",
+ * "Go ahead with the gate code.", "What number should the tech call?") right
+ * before the window or before any pause read past, even in a line that also
+ * talks of cards: the turns answer it, and card talk before the pause names
+ * no card of theirs (read past it, a caller's bare answers were stitched
+ * into a "card"). A mention further back, or far from the digits in a long
+ * turn, is another moment of the call: the caller asked about paying by
+ * card, then gave gate codes or read out the times the technician gave
+ * them.
  */
 function turnsCue(
   tokens: readonly Token[],
   turns: readonly string[],
   readsOn: ReadonlySet<number>,
   pauseTurns: ReadonlySet<number>,
+  readPast: ReadonlySet<number>,
   placeholder: string,
   context: CardSplitContext,
 ): CardCue {
@@ -1753,6 +1849,7 @@ function turnsCue(
   const agentAsksAnother = (seg: number): boolean =>
     (context.agentLines?.[seg] ?? []).some((line) => asksForAnotherNumber(line, placeholder));
   return {
+    pauseTurns,
     near(from, to) {
       const a = tokens[from].seg;
       const b = tokens[to].seg;
@@ -1767,7 +1864,7 @@ function turnsCue(
       let before = a - 1;
       let pauseWords = 0;
       if (!agentAsksAnother(a)) {
-        for (let k = 0; k < MAX_PAUSE_TURNS_BEFORE_CARD && before >= 0 && pauseTurns.has(before); k++, before--) {
+        for (let k = 0; k < MAX_PAUSE_TURNS_BEFORE_CARD && before >= 0 && readPast.has(before); k++, before--) {
           // The pause answers the agent's ask before it ("What's the gate
           // code?" "Yep."), even in the line that talks of cards.
           if (agentAsksAnother(before)) return false;
@@ -1781,6 +1878,11 @@ function turnsCue(
       );
     },
   };
+}
+
+/** A digit word said as part of a pause ("one" in "one sec") read as the word it is there. */
+function asNoDigit(t: Token): Token {
+  return isDigitToken(t) ? { ...t, kind: 'other', digits: '', pair: false } : t;
 }
 
 /**
@@ -1819,31 +1921,38 @@ export function redactCardNumbersAcrossTurns(
   const tokens: Token[] = [];
   const readsOn = new Set<number>();
   const pauseTurns = new Set<number>();
+  const readPast = new Set<number>();
   for (const [seg, text] of tagged.entries()) {
-    // A turn of nothing but a pause ("okay", "um"), the first too, is read
-    // past for a mention of the card before it (`turnsCue`).
-    if (PAUSE_TURN.test(text)) pauseTurns.add(seg);
+    // What the turn opens with before reading on is one joiner token, and a
+    // turn that is nothing else ("okay", "um") is a pause: the first turn too,
+    // read past for a mention of the card before it (`turnsCue`). So is a
+    // pause no turn reads on from ("hold on", "one sec"), whose digit word
+    // is none.
+    const leadIn = CONTINUATION_LEAD_IN.exec(text);
+    const lead = leadIn?.[0] ?? '';
+    const aside = ASIDE_PAUSE_TURN.test(text);
+    const turnTokens = aside ? tokenize(text, seg).map(asNoDigit) : tokenize(text, seg);
+    const opens = /\p{L}/u.test(lead);
+    const rest = opens ? turnTokens.filter((t) => t.start >= lead.length) : turnTokens;
+    if (opens && rest.every(isJoinerToken)) pauseTurns.add(seg);
+    if (aside || pauseTurns.has(seg)) readPast.add(seg);
     if (seg === 0) {
-      tokens.push(...tokenize(text, seg));
+      tokens.push(...turnTokens);
       continue;
     }
     tokens.push({ kind: 'turn', seg, start: 0, end: 0, digits: '' });
-    // What the turn opens with before reading on is one joiner token.
-    const leadIn = CONTINUATION_LEAD_IN.exec(text);
-    const lead = leadIn?.[0] ?? '';
-    const turnTokens = tokenize(text, seg);
-    if (!/\p{L}/u.test(lead)) {
+    if (!opens) {
       tokens.push(...turnTokens);
       continue;
     }
     if (leadIn?.[1] !== undefined && READS_ON.test(leadIn[1])) readsOn.add(seg);
     tokens.push({ kind: 'lead', seg, start: 0, end: lead.length, digits: '' });
-    tokens.push(...turnTokens.filter((t) => t.start >= lead.length));
+    tokens.push(...rest);
   }
   // Per turn, the spans to replace: for each card, from the first to the last
   // of its digit tokens that sit in that turn.
   const spans: Array<Array<{ start: number; end: number }>> = tagged.map(() => []);
-  for (const hit of findCardHits(tokens, turnsCue(tokens, tagged, readsOn, pauseTurns, placeholder, context))) {
+  for (const hit of findCardHits(tokens, turnsCue(tokens, tagged, readsOn, pauseTurns, readPast, placeholder, context))) {
     const inHit = new Map<number, { start: number; end: number }>();
     for (let k = hit.from; k <= hit.to; k++) {
       const t = tokens[k];
@@ -1870,7 +1979,10 @@ export function redactCardNumbersAcrossTurns(
 /**
  * The window a card split across caller turns is read in: each caller turn
  * together with the caller turns just before it, up to
- * {@link CARD_SPLIT_WINDOW_TURNS} in all, said within
+ * {@link CARD_SPLIT_WINDOW_TURNS} in all that could hold digits (a turn of
+ * nothing but "okay", "um" or "one sec" holds none of the card, so a card
+ * read group by group with an "okay" after each still fits; at most
+ * {@link CARD_SPLIT_WINDOW_MAX_TURNS} turns in all), said within
  * {@link CARD_SPLIT_WINDOW_MS} of it. Agent turns never join.
  *
  * Why five turns and a minute: the longest card (19 digits) read in its
@@ -1883,6 +1995,13 @@ export function redactCardNumbersAcrossTurns(
  */
 const CARD_SPLIT_WINDOW_TURNS = 5;
 const CARD_SPLIT_WINDOW_MS = 60_000;
+/** Five turns that give digits and a turn between each two. */
+const CARD_SPLIT_WINDOW_MAX_TURNS = 2 * CARD_SPLIT_WINDOW_TURNS - 1;
+
+/** A caller turn that could give a card digits: it holds some, and is no pause ("one sec", `ASIDE_PAUSE_TURN`). */
+function givesDigits(text: string): boolean {
+  return HOLDS_DIGITS.test(text) && !ASIDE_PAUSE_TURN.test(text);
+}
 
 /**
  * The earlier caller turns (oldest first) a caller turn said at `at` is read
@@ -1890,13 +2009,20 @@ const CARD_SPLIT_WINDOW_MS = 60_000;
  * (read only for a mention of the card: {@link CardSplitContext}). Keep both
  * to slide the window on.
  */
-export function cardSplitWindow<T extends { at: number }>(
+export function cardSplitWindow<T extends { at: number; text: string }>(
   earlier: readonly T[],
   at: number,
 ): { window: T[]; before: T | undefined } {
   const recent = earlier.filter((t) => at - t.at <= CARD_SPLIT_WINDOW_MS);
-  const window = recent.slice(-(CARD_SPLIT_WINDOW_TURNS - 1));
-  return { window, before: recent[recent.length - window.length - 1] };
+  let start = recent.length;
+  let withDigits = 0;
+  while (start > 0 && recent.length - start < CARD_SPLIT_WINDOW_MAX_TURNS - 1) {
+    const holdsDigits = givesDigits(recent[start - 1].text);
+    if (holdsDigits && withDigits === CARD_SPLIT_WINDOW_TURNS - 1) break;
+    if (holdsDigits) withDigits++;
+    start--;
+  }
+  return { window: recent.slice(start), before: recent[start - 1] };
 }
 
 /** One line of a call leg, in the order it was said. */
@@ -1936,7 +2062,7 @@ export function agentLinesBefore(lines: readonly CallLine[], callerIndexes: read
  */
 export function redactCardNumbersInCallTurns(turns: ReadonlyArray<CallLine & { at: number }>): string[] | null {
   const texts = turns.map((t) => t.text);
-  let recent: Array<{ k: number; at: number }> = [];
+  let recent: Array<{ k: number; at: number; text: string }> = [];
   let changed = false;
   turns.forEach(({ speaker, text, at }, k) => {
     if (speaker !== 'caller') return;
@@ -1947,7 +2073,7 @@ export function redactCardNumbersInCallTurns(turns: ReadonlyArray<CallLine & { a
       recent = [...kept, ...earlier];
       return;
     }
-    const window = [...earlier, { k, at }];
+    const window = [...earlier, { k, at, text }];
     recent = [...kept, ...window];
     if (earlier.length === 0) return;
     const fragments = new Map<number, string[]>();

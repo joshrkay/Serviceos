@@ -864,6 +864,22 @@ describe('VoiceSessionStore', () => {
       expect(other.transcript).toEqual([`caller: ${MARKER}`, 'agent: go on, 1234', `caller: ${MARKER}`]);
     });
 
+    it("counts only the caller turns that give digits toward the window: an 'okay' after every group still reads on", () => {
+      const store = newStore();
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      const said = ['my card is 4111', 'okay', '1111', 'okay', '1111', 'okay', '1111'];
+      for (const text of said) store.appendTranscript(session.id, { speaker: 'caller', text });
+      expect(session.transcript).toEqual([
+        `caller: my card is ${MARKER}`,
+        'caller: okay',
+        `caller: ${MARKER}`,
+        'caller: okay',
+        `caller: ${MARKER}`,
+        'caller: okay',
+        `caller: ${MARKER}`,
+      ]);
+    });
+
     it('does not join a caller turn said more than a minute earlier', async () => {
       const { repo, redactCardNumberTurns } = splitRepo();
       const store = newStore({ callTranscriptTurnRepo: repo });
@@ -932,12 +948,13 @@ describe('VoiceSessionStore', () => {
     // "my card number is", then "okay" (or the agent's "go ahead with the
     // card number" answered with "okay"), then the groups: the pause turn
     // hid the mention, and every shape below has a turn of four digits or
-    // fewer, which needs it.
+    // fewer (or ends on a 13-digit card's last four and one), which needs it.
     it.each([
       ['Visa 4-4-4-4', ['4111', '1111', '1111', '1111']],
       ['Amex 4-6-5', ['3782', '822463', '10005']],
       ['Diners Club 4-6-4', ['3614', '890064', '7913']],
       ['Visa 4-12', ['4111', '1111 1111 1111']],
+      ['13-digit Visa [8,5]', ['4222 2222', '2222 2']],
     ] as const)('stitches %s read after a pause turn that follows the mention of the card', async (_name, groups) => {
       const leads: ReadonlyArray<ReadonlyArray<readonly ['caller' | 'agent', string]>> = [
         [['caller', 'my card number is'], ['caller', 'okay']],
@@ -971,6 +988,25 @@ describe('VoiceSessionStore', () => {
       expect(session.transcript).toEqual(['the gate is on the left', 'okay', ...groups].map((text) => `caller: ${text}`));
       await session.cardRedactionWrites;
       expect(redactCardNumberTurns).not.toHaveBeenCalled();
+    });
+
+    // A pause no turn reads on from ("hold on", "one sec", "un momento") hid
+    // the mention the same way. "One sec" holds a digit word, which counted
+    // it among the five turns that give digits: a 19-digit card read in five
+    // turns after it lost the mention from the window.
+    it.each([
+      ['Hold on.', ['4111', '1111', '1111', '1111']],
+      ['One sec.', ['3782', '822463', '10005']],
+      ['Un momento.', ['4111', '1111', '1111', '1111']],
+      ['One sec.', ['4000', '0000', '0000', '0000', '006']],
+    ] as const)('stitches a card read after "%s" that follows the mention of the card', (pause, groups) => {
+      const store = newStore();
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      let ts = 1_000_000;
+      for (const text of ['my card number is', pause, ...groups]) {
+        store.appendTranscript(session.id, { speaker: 'caller', text, ts: (ts += 2000) });
+      }
+      expect(session.transcript).toEqual(['caller: my card number is', `caller: ${pause}`, ...groups.map(() => `caller: ${MARKER}`)]);
     });
 
     // Every caller turn is read with the turns before it, which also finds a
