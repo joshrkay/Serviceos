@@ -33,6 +33,7 @@ import { SYSTEM_TENANT_ID } from '../../src/ai/gateway/gateway';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { runLeaderGatedTick } from '../../src/workers/leader-tick';
 import {
+  FIND_TENANTS_WITH_DUE_SQL,
   PgShadowComparisonRetentionRepository,
   runShadowComparisonRetentionSweep,
 } from '../../src/workers/shadow-comparison-retention-worker';
@@ -307,5 +308,56 @@ describe('shadow-comparison retention sweep (real Postgres, RLS_RUNTIME_ROLE=tru
     await runLeaderGatedTick(pool, lockKey, async () => { await sweep(); }, () => { ticks++; });
     expect(ticks).toBe(1);
     expect(await idsFor(t.tenantId)).toEqual([]);
+  });
+});
+
+describe('the tenant selection is index-served (migration 353)', () => {
+  it('idx_shadow_comparisons_created leads with created_at', async () => {
+    const { rows } = await pool.query(
+      `SELECT indexdef FROM pg_indexes
+        WHERE tablename = 'shadow_comparisons' AND indexname = 'idx_shadow_comparisons_created'`,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0].indexdef).toMatch(/ON public\.shadow_comparisons USING btree \(created_at, tenant_id\)/);
+  });
+
+  it('EXPLAIN of the selection is a range scan on that index, not a pass over the tenant-leading index or the table', async () => {
+    // Many rows inside the window and a few past it: the shape the sweep
+    // sees every hour. 352's tenant-leading index can only answer the
+    // created_at bound by reading all of itself (or the planner reads the
+    // heap); the created_at-leading index narrows to the due rows. Seq scans
+    // are off so the plan text is decided between index plans (the
+    // jobs-audit-tenant-indexes precedent), and ANALYZE makes the estimate
+    // for this shape accurate whatever other files left in the table.
+    const t = await seedTenant();
+    for (let i = 0; i < 300; i++) {
+      await pool.query(
+        `INSERT INTO shadow_comparisons (id, tenant_id, shadow_model, task_type, created_at)
+         VALUES ($1, $2, 'shadow-model', 'classify_intent', $3)`,
+        [crypto.randomUUID(), t.tenantId, at(i * DAY_MS + HOUR_MS)],
+      );
+    }
+    await save(t.tenantId, 'classify_intent', at(WINDOW_DAYS * DAY_MS + DAY_MS));
+    await pool.query('ANALYZE shadow_comparisons');
+
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query('SET LOCAL enable_seqscan = off');
+      const { rows } = await client.query(`EXPLAIN ${FIND_TENANTS_WITH_DUE_SQL}`, [NOW, WINDOW_DAYS, 100]);
+      const plan = rows.map((r: { 'QUERY PLAN': string }) => r['QUERY PLAN']).join('\n');
+      // Index-only once the visibility map is set (VACUUM); a bitmap scan
+      // before. Either way the range is the created_at bound on the leading key.
+      expect(plan).toMatch(
+        /(Index Only Scan using|Index Scan using|Bitmap Index Scan on) idx_shadow_comparisons_created\b/,
+      );
+      expect(plan).toMatch(/Index Cond: \(created_at < /);
+      expect(plan).not.toMatch(/idx_shadow_comparisons_tenant_created/);
+      // The legal-hold probe rides migration 321's partial index.
+      expect(plan).toMatch(/idx_voice_recordings_legal_hold/);
+    } finally {
+      await client.query('ROLLBACK');
+      client.release();
+    }
   });
 });

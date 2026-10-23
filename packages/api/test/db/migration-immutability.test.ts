@@ -680,6 +680,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['351_knowledge_chunks_tenant_dedupe', 'c70c47d970a3799b5193f8e2c128281a327b9adb70500680ffcd343959d74c51'],
   // P2-030 shadow_comparisons table (lost with the branch's 101) — new migration.
   ['352_create_shadow_comparisons', '54735dd7ffef5d55b5cc454f15973499e4eb8aa2147b9d247015577f176ae09a'],
+  // shadow_comparisons created_at-leading index for the retention sweep's selection — new migration.
+  ['353_shadow_comparisons_created_index', '79cb5803d5dc903ca5b262885f1ebf472e7ade5a574e3cff3a2c81ee8b63e93d'],
 ];
 
 function hashMigration(value: string): string {

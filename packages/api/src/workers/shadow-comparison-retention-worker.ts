@@ -43,9 +43,12 @@
  *     SHADOW_COMPARISON_RETENTION_SWEEP_TENANT_LIMIT per sweep. Driven from
  *     shadow_comparisons itself, so the all-zero placeholder bucket that
  *     platform ('system') calls are filed under is reached like any tenant.
- *     The GROUP BY reads only (tenant_id, created_at), so an index-only scan
- *     of migration 352's idx_shadow_comparisons_tenant_created serves it; the
- *     table is bounded by this sweep, so there is no dedicated index.
+ *     Migration 353's idx_shadow_comparisons_created (created_at, tenant_id)
+ *     serves it as an index-only range scan over the due rows alone (each
+ *     probed against the legal-hold index), so the hourly cost follows what
+ *     is due, not the table's size: in steady state, the rows that aged past
+ *     the window since the last sweep plus any held ones. A backlog costs
+ *     one pass over its rows per sweep until it drains.
  *   - Each tenant's DELETE is tenant-scoped (`withTenantTransaction`, RLS on
  *     app.current_tenant_id plus `tenant_id = $1`), at most `batchSize` rows,
  *     oldest first. A backlog drains across hourly sweeps.
@@ -113,6 +116,18 @@ export interface ShadowComparisonRetentionRepository {
   ): Promise<PurgedShadowComparison[]>;
 }
 
+/**
+ * The cross-tenant selection: $1 now, $2 retention days, $3 tenant limit.
+ * Exported so the integration test EXPLAINs the exact SQL that runs.
+ */
+export const FIND_TENANTS_WITH_DUE_SQL = `SELECT sc.tenant_id
+           FROM shadow_comparisons sc
+          WHERE sc.created_at < $1::timestamptz - make_interval(days => $2::int)
+            AND NOT EXISTS (${HELD_CALL_WINDOW_PROBE})
+          GROUP BY sc.tenant_id
+          ORDER BY MIN(sc.created_at) ASC
+          LIMIT $3`;
+
 export class PgShadowComparisonRetentionRepository
   extends PgBaseRepository
   implements ShadowComparisonRetentionRepository
@@ -123,16 +138,7 @@ export class PgShadowComparisonRetentionRepository
 
   async findTenantsWithDue(now: Date, retentionDays: number, limit: number): Promise<string[]> {
     return this.withCrossTenantSweep(async (client) => {
-      const { rows } = await client.query(
-        `SELECT sc.tenant_id
-           FROM shadow_comparisons sc
-          WHERE sc.created_at < $1::timestamptz - make_interval(days => $2::int)
-            AND NOT EXISTS (${HELD_CALL_WINDOW_PROBE})
-          GROUP BY sc.tenant_id
-          ORDER BY MIN(sc.created_at) ASC
-          LIMIT $3`,
-        [now, retentionDays, limit],
-      );
+      const { rows } = await client.query(FIND_TENANTS_WITH_DUE_SQL, [now, retentionDays, limit]);
       return rows.map((row) => String(row.tenant_id));
     });
   }
