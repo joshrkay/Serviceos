@@ -20,7 +20,12 @@ import {
 } from '../../src/proposals/proposal';
 import { applyChainMetadata } from '../../src/proposals/chain';
 import { jobReferenceCheck } from '../../src/proposals/approval-reference-checks';
-import type { ResolvedApprover } from '../../src/proposals/approver-identity';
+import {
+  resolveBackupSupervisorApprover,
+  type ResolvedApprover,
+} from '../../src/proposals/approver-identity';
+import { InMemorySettingsRepository, createSettings } from '../../src/settings/settings';
+import { InMemoryUserRepository, type User } from '../../src/users/user';
 import { InMemoryJobRepository, createJob } from '../../src/jobs/job';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import {
@@ -656,6 +661,11 @@ describe('B4 follow-up — one-tap on a linked step says what to do about the ea
     const { res, status } = await linkedStep('draft_invoice', 'approved');
     expect(res.status).toBe(409);
     expect(res.text).toContain('Issue the invoice first');
+    // The same next step the voice line speaks: where to issue it, and then what.
+    expect(res.text).toContain(
+      'The invoice this sends has to be issued first. Issue it in the app, then approve this one from your review queue.',
+    );
+    expect(res.text).not.toContain('Once it exists');
     expect(res.text).not.toContain('needs fixing');
     expect(status).toBe('ready_for_review');
   });
@@ -813,5 +823,143 @@ describe('B1 — a one-tap link approves as its recipient', () => {
 
     expect(res.status).toBe(200);
     expect((await proposalRepo.findById(TENANT, proposal.id))?.executedByRole).toBe('owner');
+  });
+});
+
+// B4-2 parity — the tap re-checked the backup by subject: the login id when
+// they have one, else their users row id. A backup who linked a login after
+// the text went out changed subject, so their own link was refused as if they
+// had been replaced. The voice owner line already compares users row ids
+// (#1810); the link now carries the row id and the tap compares it. A link
+// minted before the row id rode in the token compares subjects as before.
+describe('B4-2 parity — a backup link names the backup by users row id', () => {
+  const BACKUP_MOBILE = '+15125550111';
+
+  async function backupTenant() {
+    const settingsRepo = new InMemorySettingsRepository();
+    const users = new InMemoryUserRepository();
+    await createSettings({ tenantId: TENANT, businessName: 'Backup Co' }, settingsRepo);
+    const member = (overrides: Partial<User> = {}) =>
+      users.create!({
+        id: crypto.randomUUID(),
+        tenantId: TENANT,
+        email: `member-${Math.random().toString(36).slice(2)}@example.com`,
+        role: 'dispatcher',
+        canFieldServe: false,
+        mobileNumber: BACKUP_MOBILE,
+        ...overrides,
+      });
+    // A backup with no login yet: their subject is their users row id.
+    const backup = await member();
+    await settingsRepo.update(TENANT, { backupSupervisorUserId: backup.id });
+    const approverDeps = { settingsRepo, userRepo: users };
+
+    const proposalRepo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const estimate = (summary: string) =>
+      proposalRepo.create({
+        ...createProposal({
+          tenantId: TENANT,
+          proposalType: 'draft_estimate',
+          payload: {
+            customerId: '7a1b2c3d-1111-4111-8111-111111111111',
+            lineItems: [{ description: 'Labor', quantity: 1, unitPrice: 11500 }],
+          },
+          summary,
+          confidenceScore: 0.97,
+          createdBy: 'voice',
+        }),
+        status: 'ready_for_review',
+      });
+    const proposal = await estimate('Estimate for Mrs Lee');
+    const app = express();
+    app.use(
+      '/public/proposals',
+      createOneTapApproveRouter({
+        proposalRepo,
+        auditRepo,
+        secret: SECRET,
+        consumeNonce: createInMemoryNonceStore(),
+        // Production wiring (app.ts).
+        resolveBackupApprover: (tenantId) => resolveBackupSupervisorApprover(approverDeps, tenantId),
+      }),
+    );
+
+    // The link as the text went out: who the backup was then.
+    const atSend = (await resolveBackupSupervisorApprover(approverDeps, TENANT))!;
+    expect(atSend).toMatchObject({ userId: backup.id, userRowId: backup.id });
+    const link = createOneTapApproveToken({
+      proposalId: proposal.id,
+      tenantId: TENANT,
+      secret: SECRET,
+      approver: { userId: atSend.userId!, role: atSend.role, userRowId: atSend.userRowId! },
+    }).token;
+    const tap = (token = link) => request(app).get('/public/proposals/one-tap-approve').query({ token });
+    const status = async (id = proposal.id) => (await proposalRepo.findById(TENANT, id))?.status;
+    const auditTypes = async () =>
+      (await auditRepo.findByEntity(TENANT, 'proposal', proposal.id)).map((e) => e.eventType);
+    return { settingsRepo, users, backup, member, estimate, proposal, proposalRepo, tap, status, auditTypes };
+  }
+
+  it('a backup who links a login after the link went out still approves with it, as that login', async () => {
+    const t = await backupTenant();
+    // Linking a login gives the same users row a login subject.
+    await t.users.create!({ ...t.backup, clerkUserId: 'clerk-linked' });
+
+    const res = await t.tap();
+
+    expect(res.status).toBe(200);
+    const stored = (await t.proposalRepo.findById(TENANT, t.proposal.id))!;
+    expect(stored.status).toBe('approved');
+    expect(stored.executedBy).toBe('clerk-linked');
+    expect(stored.executedByRole).toBe('dispatcher');
+  });
+
+  it('a different teammate made backup on the same mobile is refused', async () => {
+    const t = await backupTenant();
+    const teammate = await t.member({ clerkUserId: 'clerk-teammate' });
+    await t.settingsRepo.update(TENANT, { backupSupervisorUserId: teammate.id });
+
+    const res = await t.tap();
+
+    expect(res.status).toBe(403);
+    expect(res.text).toContain('Ask the owner');
+    expect(await t.status()).toBe('ready_for_review');
+    expect(await t.auditTypes()).toContain('proposal.one_tap_blocked_recipient');
+    expect(await t.auditTypes()).not.toContain('proposal.approved');
+  });
+
+  it('a backup deactivated after the link went out is refused', async () => {
+    const t = await backupTenant();
+    await t.users.deactivateMember(TENANT, t.backup.id);
+
+    const res = await t.tap();
+
+    expect(res.status).toBe(403);
+    expect(await t.status()).toBe('ready_for_review');
+    expect(await t.auditTypes()).toContain('proposal.one_tap_blocked_recipient');
+  });
+
+  it('a link minted before the row id rode in the token still compares subjects', async () => {
+    const t = await backupTenant();
+    const subjectOnly = (proposalId: string) =>
+      createOneTapApproveToken({
+        proposalId,
+        tenantId: TENANT,
+        secret: SECRET,
+        approver: { userId: t.backup.id, role: 'dispatcher' },
+      }).token;
+
+    // Same subject → approves.
+    const same = await t.tap(subjectOnly(t.proposal.id));
+    expect(same.status).toBe(200);
+    expect(await t.status()).toBe('approved');
+
+    // Subject changed since → refused, as before (fail closed).
+    const next = await t.estimate('Estimate for Mr Park');
+    await t.users.create!({ ...t.backup, clerkUserId: 'clerk-linked' });
+    const changed = await t.tap(subjectOnly(next.id));
+    expect(changed.status).toBe(403);
+    expect(await t.status(next.id)).toBe('ready_for_review');
   });
 });
