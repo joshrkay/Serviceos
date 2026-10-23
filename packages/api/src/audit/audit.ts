@@ -61,8 +61,17 @@ export interface AuditRepository {
    */
   findRecentByTenant?(
     tenantId: string,
-    opts?: { limit?: number },
+    opts?: RecentAuditEventsOptions,
   ): Promise<AuditEvent[]>;
+}
+
+export interface RecentAuditEventsOptions {
+  limit?: number;
+  /**
+   * Event types left out before the limit applies, so `limit` counts only
+   * the rows returned (the activity feed hides internal housekeeping).
+   */
+  excludeEventTypes?: readonly string[];
 }
 
 export function createAuditEvent(input: AuditEventInput): AuditEvent {
@@ -139,11 +148,12 @@ export class InMemoryAuditRepository implements AuditRepository {
 
   async findRecentByTenant(
     tenantId: string,
-    opts: { limit?: number } = {},
+    opts: RecentAuditEventsOptions = {},
   ): Promise<AuditEvent[]> {
     const limit = opts.limit ?? 50;
+    const excluded = new Set(opts.excludeEventTypes ?? []);
     return this.events
-      .filter((e) => e.tenantId === tenantId)
+      .filter((e) => e.tenantId === tenantId && !excluded.has(e.eventType))
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
       .slice(0, limit)
       .map((e) => ({ ...e }));

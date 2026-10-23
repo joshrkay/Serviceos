@@ -57,6 +57,9 @@
  *   - One `shadow_comparison.purged` audit event per tenant batch, except for
  *     the placeholder bucket (audit_events.tenant_id references tenants and
  *     the placeholder has no row; its purges show in the completion log).
+ *     The owner's activity feed (GET /api/analytics/activity) leaves the
+ *     event out: hourly internal housekeeping, not something the owner did
+ *     or needs to act on.
  *
  * Not gated on SHADOW_LLM_ENABLED: rows written while the flag was on must
  * still age out after it is turned off. app.ts drives the hourly cadence
@@ -76,6 +79,12 @@ export const SHADOW_COMPARISON_RETENTION_SWEEP_TENANT_LIMIT = 100;
 export const SHADOW_COMPARISON_RETENTION_SWEEP_BATCH = 500;
 
 const RETENTION_ACTOR = 'shadow-comparison-retention-worker';
+
+/**
+ * The audit event type of one tenant batch. Internal housekeeping: the
+ * owner's activity feed leaves it out (analytics/activity-feed.ts).
+ */
+export const SHADOW_COMPARISON_PURGED_EVENT = 'shadow_comparison.purged';
 
 /**
  * The PRIV-1 legal-hold probe (recording-retention-worker.ts,
@@ -279,7 +288,7 @@ export async function runShadowComparisonRetentionSweep(
           tenantId,
           actorId: RETENTION_ACTOR,
           actorRole: 'system',
-          eventType: 'shadow_comparison.purged',
+          eventType: SHADOW_COMPARISON_PURGED_EVENT,
           entityType: 'tenant',
           entityId: tenantId,
           metadata: summarizePurgedShadowComparisons(rows, retentionDays),

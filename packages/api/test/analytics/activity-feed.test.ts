@@ -107,6 +107,27 @@ describe('RepoBackedActivityFeedReporter', () => {
     expect(feed.map((f) => f.id)).toEqual([newer.id, older.id]);
   });
 
+  it('leaves the shadow-comparison retention purge out, and fills the limit with rows the owner sees', async () => {
+    const repo = new InMemoryAuditRepository();
+    const visible = createAuditEvent({
+      tenantId: 't1', actorId: 'u1', actorRole: 'owner',
+      eventType: 'customer.created', entityType: 'customer', entityId: 'c1',
+    });
+    visible.createdAt = new Date('2026-06-01T10:00:00.000Z');
+    await repo.create(visible);
+    for (const hour of [10, 11, 12]) {
+      const purge = createAuditEvent({
+        tenantId: 't1', actorId: 'shadow-comparison-retention-worker', actorRole: 'system',
+        eventType: 'shadow_comparison.purged', entityType: 'tenant', entityId: 't1',
+      });
+      purge.createdAt = new Date(`2026-06-02T${hour}:00:00.000Z`);
+      await repo.create(purge);
+    }
+
+    const feed = await new RepoBackedActivityFeedReporter(repo).query('t1', { limit: 1 });
+    expect(feed.map((f) => f.id)).toEqual([visible.id]);
+  });
+
   it('throws when the repo cannot do tenant-wide reads', async () => {
     const repo = {
       create: async (e: AuditEvent) => e,

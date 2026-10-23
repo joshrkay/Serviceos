@@ -1,4 +1,5 @@
 import type { AuditEvent, AuditRepository } from '../audit/audit';
+import { SHADOW_COMPARISON_PURGED_EVENT } from '../workers/shadow-comparison-retention-worker';
 
 /**
  * Epic 12.7 — Activity feed.
@@ -68,6 +69,15 @@ export function toActivityFeed(events: AuditEvent[]): ActivityFeedItem[] {
   return events.map(toActivityFeedItem);
 }
 
+/**
+ * Audit events the feed never shows: internal housekeeping the owner did not
+ * do and cannot act on, whose label would name an internal mechanism. The
+ * shadow-comparison retention sweep writes one per tenant batch, about hourly
+ * for a tenant with sampled calls, which would also push real activity off
+ * the Home card. Left out in the read itself, so `limit` counts visible rows.
+ */
+export const ACTIVITY_FEED_HIDDEN_EVENT_TYPES: readonly string[] = [SHADOW_COMPARISON_PURGED_EVENT];
+
 export interface ActivityFeedReporter {
   query(tenantId: string, opts?: { limit?: number }): Promise<ActivityFeedItem[]>;
 }
@@ -79,7 +89,10 @@ export class RepoBackedActivityFeedReporter implements ActivityFeedReporter {
     if (!this.auditRepo.findRecentByTenant) {
       throw new Error('Audit repository does not support tenant-wide reads');
     }
-    const events = await this.auditRepo.findRecentByTenant(tenantId, { limit: opts.limit ?? 50 });
+    const events = await this.auditRepo.findRecentByTenant(tenantId, {
+      limit: opts.limit ?? 50,
+      excludeEventTypes: ACTIVITY_FEED_HIDDEN_EVENT_TYPES,
+    });
     return toActivityFeed(events);
   }
 }
