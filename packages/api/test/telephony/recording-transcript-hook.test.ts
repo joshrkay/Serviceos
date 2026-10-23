@@ -688,6 +688,44 @@ describe('createRecordingTranscriptHook (U8)', () => {
       );
     });
 
+    // The agent has the caller fetch the card while it pulls up the invoice
+    // itself ("While you grab that, I'll pull up your invoice."): the invoice
+    // is the agent's own, no number asked for, and the card read after
+    // "okay" and "Okay, go ahead." is still the card, live and at the
+    // recording. Read as an ask for another number, it was left in clear.
+    it('rewrites a card read after the agent has the caller fetch it while it pulls up the invoice', async () => {
+      const said = [
+        ['agent', 'How can I help?'],
+        ['caller', 'I want to pay my invoice by card'],
+        ['agent', "Sure. While you grab that, I'll pull up your invoice."],
+        ['caller', 'okay'],
+        ['agent', 'Okay, go ahead.'],
+        ['caller', '4111'],
+        ['caller', '1111'],
+        ['caller', '1111'],
+        ['caller', '1111'],
+      ] as const;
+      const liveRepo = new InMemoryCallTranscriptTurnRepository();
+      const store = new VoiceSessionStore({ startInterval: false, callTranscriptTurnRepo: liveRepo });
+      const session = store.create(TENANT, 'telephony', { callSid: CALL_SID });
+      for (const [speaker, text] of said) store.appendTranscript(session.id, { speaker, text });
+      await session.cardRedactionWrites;
+      expect(session.transcript.slice(-4), 'live transcript').toEqual(Array(4).fill(`caller: ${MARKER}`));
+      store.dispose();
+
+      const { hook, repo, send, markCardNumberDetected } = harness();
+      await seedLeg(repo, SESSION_1, said);
+      await hook(event());
+      const rows = await repo.listByRecording(TENANT, RECORDING_1);
+      expect(rows.filter((r) => r.speaker === 'caller').map((r) => r.text)).toEqual([
+        'I want to pay my invoice by card',
+        'okay',
+        ...Array(4).fill(MARKER),
+      ]);
+      expect(JSON.stringify(payloadTurns(send))).not.toMatch(/4111|\b1111\b/);
+      expect(markCardNumberDetected).toHaveBeenCalledWith(TENANT, RECORDING_1);
+    });
+
     // The agent's confirm readback renders what the classifier took from the
     // caller's turn: its stored row holds the card's first part as well.
     it("rewrites the agent's stored readback of a part of the card with the caller's rows", async () => {
@@ -731,6 +769,365 @@ describe('createRecordingTranscriptHook (U8)', () => {
       const rewrite = vi.spyOn(repo, 'redactCardNumberTurns');
       await hook(event());
       expect(rewrite).not.toHaveBeenCalled();
+    });
+  });
+
+  // PRIV-3 — card talk, a pause turn ("sure", "mm-hmm", "okay"), then the
+  // agent's intake questions answered with bare numbers. The mention of the
+  // card was read past the pause, so the answers were stitched into a "card"
+  // live (the transcript and the rows rewritten) and again from the stored
+  // rows at the recording, which was flagged for its audio to be purged. The
+  // agent's question right before them asks for another number: no card.
+  describe('PRIV-3: intake answers after card talk and a pause turn are no card, live or at the recording', () => {
+    type Said = ReadonlyArray<readonly ['agent' | 'caller', string]>;
+    const LEGS: ReadonlyArray<readonly [string, Said]> = [
+      [
+        'the agent on cards, "sure", then a customer number and two house numbers',
+        [
+          ['agent', 'How can I help?'],
+          ['caller', 'I need someone to look at my AC'],
+          ['agent', 'Do you want the card on file charged after the visit?'],
+          ['caller', 'sure'],
+          ['agent', 'Your customer number?'],
+          ['caller', '67500046'],
+          ['agent', "What's the house number?"],
+          ['caller', '7179'],
+          ['agent', "What's the house number?"],
+          ['caller', '2407'],
+        ],
+      ],
+      [
+        'the caller asks about paying by card, "mm-hmm", then lockbox codes, a PIN and a last four',
+        [
+          ['agent', 'How can I help?'],
+          ['caller', 'I need someone to look at my AC'],
+          ['caller', 'can I pay by card when they come'],
+          ['agent', 'Yes, we do.'],
+          ['caller', 'mm-hmm'],
+          ['agent', 'And the lockbox code?'],
+          ['caller', 'five three zero nine'],
+          ['agent', 'And the account PIN?'],
+          ['caller', 'nine five zero eight'],
+          ['caller', 'sure'],
+          ['agent', 'And the lockbox code?'],
+          ['caller', '0518'],
+          ['agent', 'Last four of your phone?'],
+          ['caller', '6429'],
+        ],
+      ],
+      [
+        // 3605550006 then 2247: fourteen digit words from 36 passing the Luhn check.
+        'card talk, "okay", then a callback number from 360 read straight on into four more digits',
+        [
+          ['agent', 'How can I help?'],
+          ['caller', 'I want to pay by card'],
+          ['caller', 'okay'],
+          ['agent', "What's a good callback number?"],
+          ['caller', 'three six zero five five five zero zero zero six two two four seven'],
+        ],
+      ],
+      // The agent's ask said before the caller's pause, between two pauses,
+      // or in the card talk's own line; a request with no question mark; a
+      // phone number asked for without naming one. Each pause is an old one
+      // ("yeah", "okay") or an aside ("Yep.", "One sec.", "Un momento.").
+      [
+        'card talk, the gate code asked, "Yep.", then the answers',
+        [
+          ['agent', 'How can I help?'],
+          ['caller', 'I need someone to look at my AC'],
+          ['caller', "I'll pay with my Visa at the visit"],
+          ['agent', "What's the gate code?"],
+          ['caller', 'Yep.'],
+          ['caller', "it's two three two eight"],
+          ['agent', 'And the lockbox code?'],
+          ['caller', 'one four zero four'],
+          ['agent', "What's the house number?"],
+          ['caller', 'eight five one one'],
+          ['agent', 'And the account PIN?'],
+          ['caller', 'four five one one'],
+        ],
+      ],
+      [
+        'the agent on cards and the PIN asked, "yeah", then the answers',
+        [
+          ['agent', 'How can I help?'],
+          ['caller', 'I need someone to look at my AC'],
+          ['agent', 'We take all major cards at the visit.'],
+          ['agent', 'And the account PIN?'],
+          ['caller', 'yeah'],
+          ['caller', '5104'],
+          ['agent', 'And the account PIN?'],
+          ['caller', 'zero nine zero five'],
+          ['agent', 'Unit number?'],
+          ['caller', 'four six six eight'],
+          ['agent', 'What year is the unit?'],
+          ['caller', 'sure'],
+          ['caller', '2001'],
+          ['agent', 'Unit number?'],
+          ['caller', 'five two six'],
+        ],
+      ],
+      [
+        'card talk, "okay", the lockbox code asked, "yeah", then the answers',
+        [
+          ['agent', 'How can I help?'],
+          ['caller', 'I need someone to look at my AC'],
+          ['caller', "I'll pay with my Visa at the visit"],
+          ['agent', 'Yes, we do.'],
+          ['caller', 'okay'],
+          ['agent', 'And the lockbox code?'],
+          ['caller', 'yeah'],
+          ['caller', '4039'],
+          ['agent', 'What year is the unit?'],
+          ['caller', '2024'],
+          ['agent', "What's the gate code?"],
+          ['caller', '1398'],
+          ['agent', 'And the account PIN?'],
+          ['caller', 'six nine three five'],
+        ],
+      ],
+      [
+        'the agent on cards, "Yep.", the house number asked, "Hold on.", then the answers',
+        [
+          ['agent', 'How can I help?'],
+          ['caller', 'I need someone to look at my AC'],
+          ['agent', 'We take all major cards at the visit.'],
+          ['caller', 'Yep.'],
+          ['agent', 'And the house number, please.'],
+          ['caller', 'Hold on.'],
+          ['caller', 'five five eight one'],
+          ['agent', 'Go ahead with your customer number.'],
+          ['caller', 'three eight three zero one four four zero'],
+          ['agent', "I'll need the lockbox code."],
+          ['caller', 'five four two three'],
+        ],
+      ],
+      [
+        'card talk and the PIN asked in one line, "sure", then the answers',
+        [
+          ['agent', 'How can I help?'],
+          ['caller', 'I need someone to look at my AC'],
+          ['agent', 'We take all major cards at the visit. And the account PIN?'],
+          ['caller', 'sure'],
+          ['caller', '5104'],
+          ['agent', 'Unit number?'],
+          ['caller', 'zero nine zero five'],
+          ['agent', 'Unit number?'],
+          ['caller', 'four six six eight'],
+          ['agent', 'What year is the unit?'],
+          ['caller', '2001'],
+        ],
+      ],
+      [
+        'en español: tarjetas y el PIN en una línea, "Un momento.", then the answers',
+        [
+          ['agent', '¿En qué le puedo ayudar?'],
+          ['caller', 'necesito una cita para el aire'],
+          ['agent', 'Aceptamos todas las tarjetas en la visita. ¿El PIN de la cuenta?'],
+          ['caller', 'Un momento.'],
+          ['caller', 'cinco uno cero cuatro'],
+          ['agent', '¿Número de unidad?'],
+          ['caller', 'cero nueve cero cinco'],
+          ['agent', '¿Número de unidad?'],
+          ['caller', 'cuatro seis seis ocho'],
+          ['agent', '¿De qué año es el equipo?'],
+          ['caller', '2001'],
+        ],
+      ],
+      [
+        'the agent on cards, "One sec.", then "Please give me the alarm code." and more requests',
+        [
+          ['agent', 'How can I help?'],
+          ['caller', 'I need someone to look at my AC'],
+          ['agent', 'I can send you a link to pay by card.'],
+          ['caller', 'One sec.'],
+          ['agent', 'Please give me the alarm code.'],
+          ['caller', '2246'],
+          ['agent', 'Go ahead with your customer number.'],
+          ['caller', 'eight eight nine six three two four five'],
+          ['agent', 'Tell me the year of the unit.'],
+          ['caller', '1999'],
+          ['agent', 'Read me the zip code.'],
+          ['caller', '94901'],
+        ],
+      ],
+      [
+        'the agent on cards, "okay", then "Go ahead with the gate code." and more requests',
+        [
+          ['agent', 'How can I help?'],
+          ['caller', 'I need someone to look at my AC'],
+          ['agent', 'I can send you a link to pay by card.'],
+          ['caller', 'okay'],
+          ['agent', 'Go ahead with the gate code.'],
+          ['caller', '2246'],
+          ['agent', 'Go ahead with your customer number.'],
+          ['caller', 'eight eight nine six three two four five'],
+          ['agent', 'Tell me the year of the unit.'],
+          ['caller', '1999'],
+        ],
+      ],
+      [
+        'en español: tarjeta, "A ver.", then "Dígame el código postal." and more requests',
+        [
+          ['agent', '¿En qué le puedo ayudar?'],
+          ['caller', 'necesito una cita para el aire'],
+          ['caller', '¿puedo pagar con tarjeta?'],
+          ['agent', 'Sí, claro.'],
+          ['caller', 'A ver.'],
+          ['agent', 'Dígame el código postal.'],
+          ['caller', 'dos dos cuatro seis'],
+          ['agent', 'Dígame su número de cliente.'],
+          ['caller', 'ocho ocho nueve seis tres dos cuatro cinco'],
+          ['agent', 'Dígame el año del equipo.'],
+          ['caller', '1999'],
+        ],
+      ],
+      [
+        'card talk, the callback number asked, "one sec", then 360 read straight on into four more digits',
+        [
+          ['agent', 'How can I help?'],
+          ['caller', 'I want to pay by card'],
+          ['agent', "What's a good callback number?"],
+          ['caller', 'one sec'],
+          ['caller', 'three six zero five five five zero zero zero six two two four seven'],
+        ],
+      ],
+      [
+        'card talk, "okay", "What number should the tech call?", then 360 and four more',
+        [
+          ['agent', 'How can I help?'],
+          ['caller', 'I want to pay by card'],
+          ['caller', 'okay'],
+          ['agent', 'What number should the tech call?'],
+          ['caller', 'three six zero five five five zero zero zero six two two four seven'],
+        ],
+      ],
+      [
+        'card talk, "What is the best number for you?", "One sec.", then 360 and four more',
+        [
+          ['agent', 'How can I help?'],
+          ['caller', 'I want to pay by card'],
+          ['agent', 'What is the best number for you?'],
+          ['caller', 'One sec.'],
+          ['caller', 'three six zero five five five zero zero zero six two two four seven'],
+        ],
+      ],
+      [
+        `card talk, "What's a good number to text you at?", "um", then 360 and four more`,
+        [
+          ['agent', 'How can I help?'],
+          ['caller', 'can I pay with my Visa'],
+          ['agent', "What's a good number to text you at?"],
+          ['caller', 'um'],
+          ['caller', 'three six zero five five five zero zero zero six two two four seven'],
+        ],
+      ],
+      [
+        'en español: tarjeta, "Un momento.", "¿A qué número le podemos llamar?", then 360 and four more',
+        [
+          ['agent', '¿En qué le puedo ayudar?'],
+          ['caller', 'quiero pagar con tarjeta'],
+          ['caller', 'Un momento.'],
+          ['agent', '¿A qué número le podemos llamar?'],
+          ['caller', 'tres seis cero cinco cinco cinco cero cero cero seis dos dos cuatro siete'],
+        ],
+      ],
+      // The ask with a period inside its sentence: an honorific, a clock time.
+      [
+        'card talk, "okay", "What\'s a good callback number, Dr. Patel?", then 360 and four more',
+        [
+          ['agent', 'How can I help?'],
+          ['caller', 'I want to pay by card'],
+          ['caller', 'okay'],
+          ['agent', "What's a good callback number, Dr. Patel?"],
+          ['caller', 'three six zero five five five zero zero zero six two two four seven'],
+        ],
+      ],
+      [
+        'the agent on cards, "okay", the gate code asked "for the 9 a.m. visit", then the answers',
+        [
+          ['agent', 'How can I help?'],
+          ['caller', 'I need someone to look at my AC'],
+          ['agent', 'We take all major cards at the visit.'],
+          ['caller', 'okay'],
+          ['agent', "What's the gate code for the 9 a.m. visit?"],
+          ['caller', '4111'],
+          ['agent', "What's the lockbox code, Mrs. Lopez?"],
+          ['caller', '1111'],
+          ['agent', 'And the alarm code... for the tech?'],
+          ['caller', '1111'],
+          ['agent', 'The house number at 12 Elm St. is?'],
+          ['caller', '1111'],
+        ],
+      ],
+      // A hold that asks the caller to fetch another number; card talk and
+      // the ask on either side of a Unicode ellipsis.
+      [
+        'the agent on cards, then "Please hold on while you grab your account number.", "okay", then the number in fours',
+        [
+          ['agent', 'How can I help?'],
+          ['caller', 'I need someone to look at my AC'],
+          ['agent', 'Sure, we take all major cards. Please hold on while you grab your account number.'],
+          ['caller', 'okay'],
+          ['caller', '4111'],
+          ['caller', '1111'],
+          ['caller', '1111'],
+          ['caller', '1111'],
+        ],
+      ],
+      [
+        'en español: tarjeta…¿el código del portón?, "sí", then the answers',
+        [
+          ['agent', '¿En qué le puedo ayudar?'],
+          ['caller', 'necesito que revisen mi aire acondicionado'],
+          ['agent', 'Claro, puede pagar con tarjeta en la visita…¿cuál es el código del portón?'],
+          ['caller', 'sí'],
+          ['caller', '4111'],
+          ['caller', '1111'],
+          ['caller', '1111'],
+          ['caller', '1111'],
+        ],
+      ],
+    ];
+
+    /** The leg said live through the real store, its rows stored as it went. */
+    async function liveCall(said: Said) {
+      const repo = new InMemoryCallTranscriptTurnRepository();
+      const store = new VoiceSessionStore({ startInterval: false, callTranscriptTurnRepo: repo });
+      const session = store.create(TENANT, 'telephony', { callSid: CALL_SID });
+      const live = vi.spyOn(repo, 'redactCardNumberTurns');
+      let ts = 1_000_000;
+      for (const [speaker, text] of said) store.appendTranscript(session.id, { speaker, text, ts: (ts += 3000) });
+      await session.cardRedactionWrites;
+      return { repo, store, session, live };
+    }
+
+    it.each(LEGS)('%s', async (_name, said) => {
+      const asSaid = said.map(([speaker, text]) => `${speaker}: ${text}`);
+      // With the session in memory at the recording, and from the stored rows
+      // alone (after a restart, or the callback on another replica).
+      for (const fromRowsOnly of [false, true]) {
+        const { repo, store, session, live } = await liveCall(said);
+        expect(session.transcript, 'live transcript').toEqual(asSaid);
+        if (fromRowsOnly) store.dispose();
+        const send = vi.fn(async () => 'msg-1');
+        const markCardNumberDetected = vi.fn(async () => undefined);
+        const hook = createRecordingTranscriptHook({
+          store: fromRowsOnly ? { findByCallSidIncludingEnded: () => undefined } : store,
+          callTranscriptTurnRepo: repo,
+          voiceRepo: { markCardNumberDetected },
+          auditRepo: new InMemoryAuditRepository(),
+          queue: { send },
+          logger,
+        });
+        await hook(event());
+        expect(live, 'rows rewritten').not.toHaveBeenCalled();
+        expect((await repo.listByCallSid(TENANT, CALL_SID)).map((r) => `${r.speaker}: ${r.text}`), 'stored rows').toEqual(asSaid);
+        const [, payload] = send.mock.calls[0] as unknown as [string, { turns: Array<{ speaker: string; text: string }> }];
+        expect(payload.turns.map((t) => `${t.speaker}: ${t.text}`), 'ingested').toEqual(asSaid);
+        expect(markCardNumberDetected, 'recording flagged for audio purge').not.toHaveBeenCalled();
+        if (!fromRowsOnly) store.dispose();
+      }
     });
   });
 });

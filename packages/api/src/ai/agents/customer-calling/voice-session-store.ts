@@ -39,7 +39,7 @@ import type {
 import { voiceReplyStampLostTotal } from '../../../monitoring/metrics';
 import type { ResolvedApprover } from '../../../proposals/approver-identity';
 import {
-  agentLinesAround,
+  agentLinesBefore,
   CARD_NUMBER_PLACEHOLDER,
   cardSplitWindow,
   redactCardFragments,
@@ -620,8 +620,9 @@ export interface VoiceSession {
   pendingReplyStamps: Map<string, ReplyAudioStampFields[]>;
   /**
    * PRIV-3 — the window a card number split across caller turns is looked
-   * for in: the last few non-empty caller turns (`cardSplitWindow`),
-   * oldest first. See `appendTranscript`.
+   * for in: the last few non-empty caller turns (`cardSplitWindow`), oldest
+   * first, with the one said just before them (read only for a mention of the
+   * card). See `appendTranscript`.
    */
   recentCallerTurns: RecentCallerTurn[];
   /**
@@ -1197,37 +1198,44 @@ export class VoiceSessionStore {
     entry: TranscriptEntry,
   ): { text: string; rewritten: RewrittenTurn[] } | null {
     const at = entry.ts ?? Date.now();
-    const earlier = cardSplitWindow(session.recentCallerTurns, at);
+    const { window: earlier, before } = cardSplitWindow(session.recentCallerTurns, at);
+    const kept = before ? [before] : [];
     // An empty utterance holds no digits and is never persisted.
     if (entry.text.trim().length === 0) {
-      session.recentCallerTurns = earlier;
+      session.recentCallerTurns = [...kept, ...earlier];
       this.forgetAgentTurnsBefore(session);
       return null;
     }
     const current: RecentCallerTurn = { turnIndex, text: entry.text, at };
-    session.recentCallerTurns = [...earlier, current];
+    const window = [...earlier, current];
+    session.recentCallerTurns = [...kept, ...window];
     this.forgetAgentTurnsBefore(session);
     if (earlier.length === 0) return null;
-    // The agent's lines around the window: a card read group by group, one
-    // per turn, must be mentioned in them or in the caller's turns.
-    const agentLines = agentLinesAround(
-      session.transcript.map((line) =>
-        line.startsWith(AGENT_LINE) ? { speaker: 'agent', text: line.slice(AGENT_LINE.length) } : { speaker: 'caller', text: '' },
-      ),
-      session.recentCallerTurns[0].turnIndex,
-      turnIndex,
+    // The agent's lines right before each turn of the window, and the
+    // caller's turn before it: a card read group by group, one per turn, must
+    // be mentioned in them or in its own turns. Only the transcript from the
+    // agent's lines before the window's first turn is read.
+    let from = window[0].turnIndex;
+    while (from > 0 && session.transcript[from - 1].startsWith(AGENT_LINE)) from--;
+    const agentLines = agentLinesBefore(
+      session.transcript
+        .slice(from)
+        .map((line) =>
+          line.startsWith(AGENT_LINE) ? { speaker: 'agent', text: line.slice(AGENT_LINE.length) } : { speaker: 'caller', text: '' },
+        ),
+      window.map((t) => t.turnIndex - from),
     );
     const fragments = new Map<number, string[]>();
     const texts = redactCardNumbersAcrossTurns(
-      session.recentCallerTurns.map((t) => t.text),
+      window.map((t) => t.text),
       CARD_NUMBER_PLACEHOLDER,
-      { agentLines },
+      { agentLines, ...(before ? { callerTurnBefore: before.text } : {}) },
       (k, matched) => fragments.set(k, [...(fragments.get(k) ?? []), matched]),
     );
     if (!texts) return null;
     const rewritten: RewrittenTurn[] = [];
     const captured: CapturedTextRewrite[] = [];
-    session.recentCallerTurns.forEach((turn, k) => {
+    window.forEach((turn, k) => {
       if (texts[k] === turn.text) return;
       if (turn !== current) {
         captured.push({ turnIndex: turn.turnIndex, from: turn.text, to: texts[k], fragments: fragments.get(k) ?? [] });

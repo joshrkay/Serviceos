@@ -926,6 +926,70 @@ describe('VoiceSessionStore', () => {
       expect(redactCardNumberTurns).toHaveBeenCalledTimes(1);
     });
 
+    // "my card number is", then "okay" (or the agent's "go ahead with the
+    // card number" answered with "okay"), then the groups: the pause turn
+    // hid the mention, and every shape below has a turn of four digits or
+    // fewer, which needs it.
+    it.each([
+      ['Visa 4-4-4-4', ['4111', '1111', '1111', '1111']],
+      ['Amex 4-6-5', ['3782', '822463', '10005']],
+      ['Diners Club 4-6-4', ['3614', '890064', '7913']],
+      ['Visa 4-12', ['4111', '1111 1111 1111']],
+    ] as const)('stitches %s read after a pause turn that follows the mention of the card', async (_name, groups) => {
+      const leads: ReadonlyArray<ReadonlyArray<readonly ['caller' | 'agent', string]>> = [
+        [['caller', 'my card number is'], ['caller', 'okay']],
+        [['caller', 'my card number is'], ['caller', 'um']],
+        [['caller', 'my card number is'], ['agent', 'Sure, go ahead.'], ['caller', 'mm-hmm']],
+        [['agent', 'Go ahead with the card number.'], ['caller', 'okay']],
+        [['agent', 'Go ahead with the card number.'], ['caller', 'okay'], ['agent', 'Go on.']],
+      ];
+      for (const [k, lead] of leads.entries()) {
+        const { repo, redactCardNumberTurns } = splitRepo();
+        const store = newStore({ callTranscriptTurnRepo: repo });
+        const session = store.create('tenant-a', 'telephony', { callSid: `CA0000000000000000000000000000${String(40 + k).padStart(4, '0')}` });
+        let ts = 1_000_000;
+        for (const [speaker, text] of lead) store.appendTranscript(session.id, { speaker, text, ts: (ts += 2000) });
+        groups.forEach((text, g) => {
+          if (g > 0) store.appendTranscript(session.id, { speaker: 'agent', text: 'Go on.', ts: (ts += 2000) });
+          store.appendTranscript(session.id, { speaker: 'caller', text, ts: (ts += 2000) });
+        });
+        const label = lead.map(([, text]) => text).join(' | ');
+        expect(session.transcript.filter((line) => line.startsWith('caller:') && /\d/.test(line)), label).toEqual([]);
+        expect(session.transcript.filter((line) => line === `caller: ${MARKER}`), label).toHaveLength(groups.length);
+        await session.cardRedactionWrites;
+        expect(redactCardNumberTurns, label).toHaveBeenCalledTimes(1);
+      }
+      // With nothing naming the card, the same turns are left alone.
+      const { repo, redactCardNumberTurns } = splitRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      let ts = 1_000_000;
+      for (const text of ['the gate is on the left', 'okay', ...groups]) store.appendTranscript(session.id, { speaker: 'caller', text, ts: (ts += 2000) });
+      expect(session.transcript).toEqual(['the gate is on the left', 'okay', ...groups].map((text) => `caller: ${text}`));
+      await session.cardRedactionWrites;
+      expect(redactCardNumberTurns).not.toHaveBeenCalled();
+    });
+
+    // Every caller turn is read with the turns before it, which also finds a
+    // "card" wholly inside the new turn: a mention of the card there counts
+    // only near the digits, as it does for the turn alone.
+    it('leaves a turn alone whose card mention is far from its digits, once earlier caller turns are in the window', async () => {
+      const { repo, redactCardNumberTurns } = splitRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      // 4118 1215 1230 1545 passes the Luhn check: four times read in pairs.
+      const far =
+        'I will pay by card when he comes. and the technician said the unit was old and the filter was dirty and the coil needed ' +
+        'cleaning and he would come back next week to check the pressure again after the part arrives. the times he gave me were ' +
+        'forty-one eighteen, twelve fifteen, twelve thirty, fifteen forty-five';
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'hi' });
+      store.appendTranscript(session.id, { speaker: 'agent', text: 'Go ahead.' });
+      expect(store.appendTranscript(session.id, { speaker: 'caller', text: far })).toEqual({ text: far, rewrittenTurnIndexes: [] });
+      expect(session.transcript).toEqual(['caller: hi', 'agent: Go ahead.', `caller: ${far}`]);
+      await session.cardRedactionWrites;
+      expect(redactCardNumberTurns).not.toHaveBeenCalled();
+    });
+
     it("never touches another session's turns", () => {
       const { repo } = splitRepo();
       const store = newStore({ callTranscriptTurnRepo: repo });

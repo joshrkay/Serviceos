@@ -7,19 +7,25 @@
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import {
-  agentLinesAround,
+  agentLinesBefore,
   CARD_NUMBER_PLACEHOLDER,
+  type CardSplitContext,
   containsCardNumber,
   redactCardNumbers,
   redactCardNumbersAcrossTurns,
   redactCardFragments,
   redactCardNumbersInCallTurns,
 } from '../../../src/ai/privacy/pan-redact';
+import { digitOnlyScrubber, seededRandom, withLuhnCheckDigit } from './card-number-corpus';
 
 const MARKER = CARD_NUMBER_PLACEHOLDER;
 
-/** The agent mentions the card around the caller's turns. */
-const AGENT_MENTIONS_CARD = { agentLines: ["I'm sorry, I can't take card numbers over the phone."] };
+/** A test number read out digit by digit ("3056" → "three zero five six"). */
+const DIGIT_NAMES = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'];
+const spell = (digits: string): string => [...digits].map((d) => DIGIT_NAMES[Number(d)]).join(' ');
+
+/** The agent mentions the card right before the caller's turns. */
+const AGENT_MENTIONS_CARD = { agentLines: [["I'm sorry, I can't take card numbers over the phone."]] };
 
 describe('redactCardNumbers', () => {
   it('replaces a space-grouped 16-digit Visa test number (the audit trigger)', () => {
@@ -143,94 +149,6 @@ describe('redactCardNumbers', () => {
     expect(redactCardNumbers('4111 1111 1111 1111', '[CARD_NUMBER]')).toBe('[CARD_NUMBER]');
   });
 });
-
-/**
- * The digit-only scrubber as it shipped before digit words were read
- * (packages/api/src/ai/privacy/pan-redact.ts at da456f812), kept verbatim in
- * behaviour as the oracle for written digits: reading words must not change
- * a single redaction of text that holds none.
- */
-function digitOnlyScrubber(text: string, onRedact: (matched: string, offset: number) => void): string {
-  const sep = String.raw`(?:[ \t]*[,.\-][ \t]*|[ \t]+)`;
-  const run = new RegExp(String.raw`(?<![0-9A-Za-z])\d+(?:${sep}\d+)*(?![0-9A-Za-z])`, 'g');
-  const split = new RegExp(`(${sep})`);
-  const luhn = (d: string): boolean => {
-    let sum = 0;
-    for (let i = d.length - 1, dbl = false; i >= 0; i--, dbl = !dbl) {
-      let n = d.charCodeAt(i) - 48;
-      if (dbl) n = n * 2 > 9 ? n * 2 - 9 : n * 2;
-      sum += n;
-    }
-    return d.length > 0 && sum % 10 === 0;
-  };
-  const phoneAt = (g: string[], i: number): number => {
-    const len = (k: number): number => g[i + k]?.length ?? 0;
-    if (g[i].length === 10 || (g[i].length === 11 && g[i].startsWith('1'))) return 1;
-    if (len(0) === 3 && len(1) === 3 && len(2) === 4) return 3;
-    if (g[i] === '1' && len(1) === 3 && len(2) === 3 && len(3) === 4) return 4;
-    return 0;
-  };
-  return text.replace(/\[CREDIT_CARD(?:_\d+)?\]/g, '[card number]').replace(run, (match: string, offset: number) => {
-    if (match.replace(/\D/g, '').length < 13) return match;
-    const parts = match.split(split);
-    const groups = parts.filter((_, k) => k % 2 === 0);
-    const seps = parts.filter((_, k) => k % 2 === 1);
-    const starts: number[] = [];
-    parts.reduce((pos, p, k) => (k % 2 === 0 && starts.push(pos), pos + p.length), 0);
-    const out: string[] = [];
-    let i = 0;
-    while (i < groups.length) {
-      const phone = phoneAt(groups, i);
-      if (phone > 0) {
-        for (let g = i; g < i + phone; g++) out.push(groups[g], ...(g + 1 < groups.length ? [seps[g]] : []));
-        i += phone;
-        continue;
-      }
-      let digits = '';
-      let end = -1;
-      for (let j = i; j < groups.length && (digits += groups[j]).length <= 19; j++) {
-        if (digits.length >= 13 && luhn(digits)) end = j;
-      }
-      const last = end >= 0 ? end : i;
-      if (end >= 0) {
-        onRedact(match.slice(starts[i], starts[last] + groups[last].length), offset + starts[i]);
-        out.push('[card number]');
-      } else {
-        out.push(groups[i]);
-      }
-      if (last + 1 < groups.length) out.push(seps[last]);
-      i = last + 1;
-    }
-    return out.join('');
-  });
-}
-
-/** Deterministic PRNG (mulberry32) so the parity run is the same every time. */
-function seededRandom(seed: number): () => number {
-  let a = seed >>> 0;
-  return () => {
-    a = (a + 0x6d2b79f5) >>> 0;
-    let t = a;
-    t = Math.imul(t ^ (t >>> 15), t | 1);
-    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
-    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
-  };
-}
-
-/** `body` plus the digit that makes it pass the Luhn check. */
-function withLuhnCheckDigit(body: string): string {
-  for (let d = 0; d <= 9; d++) {
-    const candidate = body + d;
-    let sum = 0;
-    for (let i = candidate.length - 1, dbl = false; i >= 0; i--, dbl = !dbl) {
-      let n = candidate.charCodeAt(i) - 48;
-      if (dbl) n = n * 2 > 9 ? n * 2 - 9 : n * 2;
-      sum += n;
-    }
-    if (sum % 10 === 0) return candidate;
-  }
-  throw new Error('unreachable');
-}
 
 describe('redactCardNumbers — written digits behave exactly as the digit-only scrubber did', () => {
   it('matches it on seeded random digit text with ASCII and non-ASCII neighbours', () => {
@@ -467,10 +385,78 @@ describe('redactCardNumbers — a card number read out as words', () => {
     ]) {
       expect(redactCardNumbers(text)).toBe(text);
     }
-    // An Amex read as one run of words is still a card.
+    // An Amex read as one run of words is still a card where it is named…
     expect(redactCardNumbers('amex three seven eight two eight two two four six three one oh oh oh five')).toBe(
       'amex [card number]',
     );
+    // …but a phone number and a zip said with no pause are 15 digit words
+    // too, and 346 and 347 are area codes: 370 699 2688 71523 and 341 955
+    // 5636 94226 pass the Luhn check and start like an Amex.
+    for (const text of [
+      'call me at three seven oh six nine nine two six eight eight seven one five two three',
+      'three four one nine five five five six three six nine four two two six',
+    ]) {
+      expect(redactCardNumbers(text)).toBe(text);
+    }
+  });
+
+  // Diners Club International is issued at 14 to 19 digits from every one of
+  // its ranges (300–305, 3095, 36, 38–39), not only 36; the networks' 14-digit
+  // test numbers start 305 and 38. Read with its pauses (4-6-4), a Diners 14
+  // is a card whatever range it is from; read as one run of words, 14 digit
+  // words are a phone number and a house number as often (see above), so
+  // there the card must be named near it, as for a cut, and only one from 36
+  // is taken (see below).
+  it('reads a Diners Club 14 from 300–305, 3095 or 38–39 as a card, as one from 36', () => {
+    for (const card of ['30569309025904', '38520000023237', '30000000000004', '30951234567897', '39123456789010', '36227206271667']) {
+      const groups = [card.slice(0, 4), card.slice(4, 10), card.slice(10)];
+      const spoken = groups.map(spell).join(', ');
+      expect(redactCardNumbers(`my diners card is ${spoken}`)).toBe(`my diners card is ${MARKER}`);
+      expect(redactCardNumbers(spoken)).toBe(MARKER);
+      // The CVV said straight after the last group.
+      expect(redactCardNumbers(`my card is ${spoken} one two three`)).toBe(`my card is ${MARKER} one two three`);
+      // Read as one run of words with the CVV run on (a cut): only with the card named near it.
+      expect(redactCardNumbers(`my card is ${spell(card)} one two three`)).toBe(`my card is ${MARKER} one two three`);
+      expect(redactCardNumbers(`${spell(card)} one two three`)).toBe(`${spell(card)} one two three`);
+      // Read as one run of words and nothing else: only from 36, and only
+      // with the card named near it.
+      expect(redactCardNumbers(`my card is ${spell(card)}`)).toBe(card.startsWith('36') ? `my card is ${MARKER}` : `my card is ${spell(card)}`);
+      expect(redactCardNumbers(spell(card))).toBe(spell(card));
+      // Written, the digit path always took it.
+      expect(redactCardNumbers(`card ${groups.join(' ')}`)).toBe(`card ${MARKER}`);
+    }
+    // In groups no card is read in, 14 digit words are a serial or reference
+    // number (3894 9325 6957 51 passes the Luhn check): only with the card named.
+    const serial = 'serial number four six two, and three eight nine, four nine three, and two five six nine five seven, and five one';
+    expect(redactCardNumbers(serial)).toBe(serial);
+    expect(redactCardNumbers('confirmation number three six nine seven nine nine four six one eight one two five five')).toBe(
+      'confirmation number three six nine seven nine nine four six one eight one two five five',
+    );
+    expect(redactCardNumbers('my card is three eight nine, four nine three, two five six nine five seven, five one')).toBe(
+      `my card is ${MARKER}`,
+    );
+    // 15 digits from those ranges are no card (an Amex's length alone):
+    // 3056 930902 59049 passes the Luhn check.
+    const fifteen = 'my card is three oh five six, nine three oh nine oh two, five nine oh four nine';
+    expect(redactCardNumbers(fifteen)).toBe(fifteen);
+  });
+
+  // 300–305 and 38–39 start area codes (301–305, 380–399): a phone number
+  // read as one run of words with four more digits straight after it (a gate
+  // code, an extension) is 14 digit words starting like a Diners Club, and
+  // one in ten passes the Luhn check. With the card named a few words before
+  // it ("I'll pay by card at the visit, my number is …"), 1,040 and 1,008 of
+  // 10,000 such phone numbers from 301–305 and 380/385/386 were replaced and
+  // their recording's audio purged. A Diners Club's 14 read with no pause at
+  // all is taken only from 36, its main range; from the others it is read in
+  // its groups, cut with its CVV or expiry run on, or over turns.
+  it('reads a phone number from 301–305 or 380–399 and four more digits said as one run of words as no card, even with the card named', () => {
+    // Each passes the Luhn check as 14 digits.
+    for (const digits of ['30154794486521', '30445770482504', '38570107934422', '38647214776811', '38025157356521', '39267043492602']) {
+      const text = `I'll pay by card at the visit, my number is ${spell(digits)}`;
+      expect(redactCardNumbers(text), digits).toBe(text);
+      expect(redactCardNumbersAcrossTurns(["I'll pay by card at the visit", `my number is ${spell(digits)}`]), digits).toBeNull();
+    }
   });
 
   it('leaves a phone number read as digit words with its last four in pairs untouched, with a zip after it', () => {
@@ -539,8 +525,8 @@ describe('redactCardNumbers — fillers, line breaks and a card read in pairs', 
       `Mastercard ${MARKER}`,
     );
     // Digit words and pairs mixed in one group.
-    expect(redactCardNumbers('pay with four one eleven, one one one one, eleven eleven, one one eleven')).toBe(
-      `pay with ${MARKER}`,
+    expect(redactCardNumbers('pay with my card, four one eleven, one one one one, eleven eleven, one one eleven')).toBe(
+      `pay with my card, ${MARKER}`,
     );
   });
 
@@ -631,6 +617,229 @@ describe('redactCardNumbers — fillers, line breaks and a card read in pairs', 
     // Twelve digits: too short for a card.
     const short = 'forty-one eleven, eleven eleven, eleven eleven';
     expect(redactCardNumbers(short)).toBe(short);
+  });
+});
+
+/**
+ * What counts as the card being mentioned, and where. A hit rewrites the
+ * caller's words and purges the recording's audio early, which cannot be
+ * undone, so the rules that need a mention (a card read in pairs, two
+ * year-shaped groups, a group of four per turn) take only words that name a
+ * card, said near the digits: talk of paying ("can I pay now", "store
+ * credit", "debit or cash", "I want to discover what is wrong") goes with
+ * gate codes and years as often as with a card.
+ */
+describe('the card mention: card words only, near the digits', () => {
+  const PAIRS = 'forty-one eleven, eleven eleven, eleven eleven, eleven eleven';
+
+  it('takes only words that name a card, a card network or its security code', () => {
+    for (const cue of ['my card is', 'credit card', 'debit card', 'card number', 'Visa', 'Mastercard', 'master card', 'Amex', 'American Express', 'the Discover card', 'mi tarjeta es', 'número de tarjeta', 'tarjeta de crédito', 'the cvv is after']) {
+      expect(redactCardNumbers(`${cue} ${PAIRS}`)).toBe(`${cue} ${MARKER}`);
+    }
+    for (const talk of ['can I pay now', "I'm paying today", 'about the payment', 'I have store credit', 'debit or cash', 'I want to discover', 'quiero pagar', 'el pago', 'tengo crédito', 'débito']) {
+      const text = `${talk} ${PAIRS}`;
+      expect(redactCardNumbers(text)).toBe(text);
+    }
+  });
+
+  it('takes a mention only within a few words of the digits, never anywhere in a whole recording', () => {
+    expect(redactCardNumbers(`my card number is uh let me grab it okay it is ${PAIRS}`)).toBe(
+      `my card number is uh let me grab it okay it is ${MARKER}`,
+    );
+    const tooFar = `my card number is uh hold on one second let me go and grab my wallet from the car okay ${PAIRS}`;
+    expect(redactCardNumbers(tooFar)).toBe(tooFar);
+    expect(redactCardNumbers(`${PAIRS}, and that is the card`)).toBe(`${MARKER}, and that is the card`);
+    // The transcription worker scrubs a whole call as one text: a card
+    // mentioned at the start says nothing of numbers read minutes later.
+    const recording = [
+      'my card was declined last week so I would rather pay cash when you come out',
+      'the water heater is in the garage and it has been leaking since Sunday',
+      'the house is on the corner and there is a side gate you can use',
+      `the units are ${PAIRS}`,
+    ].join('. ');
+    expect(redactCardNumbers(recording)).toBe(recording);
+  });
+
+  it('allows a second year-shaped group only where the card is mentioned near it', () => {
+    // Visa 4111 1999 2005 0000: two of its groups read as years.
+    const years = 'four one one one, one nine nine nine, two oh oh five, oh oh oh oh';
+    expect(redactCardNumbers(`my card is ${years}`)).toBe(`my card is ${MARKER}`);
+    expect(redactCardNumbers(`can I pay now, ${years}`)).toBe(`can I pay now, ${years}`);
+  });
+});
+
+describe('redactCardNumbersAcrossTurns — the card mentioned near the turns', () => {
+  const GROUPS = ['4111', '1111', '1111', '1111'];
+
+  it('takes no talk of paying as a mention, from the caller or the agent', () => {
+    for (const talk of ['can I pay now', 'I have a store credit', 'do you take debit', 'I want to discover the problem', 'quiero pagar']) {
+      expect(redactCardNumbersAcrossTurns([talk, ...GROUPS])).toBeNull();
+    }
+    expect(redactCardNumbersAcrossTurns(GROUPS, MARKER, { agentLines: [['Do you want to pay by credit or debit?']] })).toBeNull();
+  });
+
+  it("takes a mention in the card's own turns, the caller's turn just before them, or the agent's lines right before and between them", () => {
+    expect(redactCardNumbersAcrossTurns(['my card is 4111', '1111', '1111', '1111'])).toEqual([
+      `my card is ${MARKER}`,
+      MARKER,
+      MARKER,
+      MARKER,
+    ]);
+    expect(redactCardNumbersAcrossTurns(['4111', '1111', '1111', '1111 is my Visa'])).toEqual([MARKER, MARKER, MARKER, `${MARKER} is my Visa`]);
+    expect(redactCardNumbersAcrossTurns(['it goes on my Visa', ...GROUPS])).toEqual(['it goes on my Visa', ...Array(4).fill(MARKER)]);
+    expect(
+      redactCardNumbersAcrossTurns(GROUPS, MARKER, { agentLines: [["Sorry, I can't take card numbers."]] }),
+    ).toEqual(Array(4).fill(MARKER));
+    expect(
+      redactCardNumbersAcrossTurns(GROUPS, MARKER, { agentLines: [[], [], ["Please don't read me your card."], []] }),
+    ).toEqual(Array(4).fill(MARKER));
+    // The turn before a window of five: a 19-digit card read group by group.
+    expect(
+      redactCardNumbersAcrossTurns(['4000', '0000', '0000', '0000', '006'], MARKER, { callerTurnBefore: 'my card number is' }),
+    ).toEqual(Array(5).fill(MARKER));
+  });
+
+  // The agent's own approval-card copy (tts-copy: voice_approval_refusal,
+  // inapp_incomplete_draft) names the proposal card on screen, not a payment
+  // card; on an owner-line call it is said right before amounts and codes.
+  it("takes the agent's approval-card copy as no mention of a payment card", () => {
+    for (const line of [
+      "Tap the card to approve — I don't take approvals by voice here yet.",
+      'Toque la tarjeta para aprobar — aquí todavía no acepto aprobaciones por voz.',
+      "I've drafted that, but it still needs a few details before it can be approved — open the card to fill them in. Is there anything else I can help you with?",
+      'Lo dejé como borrador, pero le faltan algunos datos antes de poder aprobarlo — abra la tarjeta para completarlos. ¿Hay algo más en lo que pueda ayudarle?',
+    ]) {
+      expect(redactCardNumbersAcrossTurns(GROUPS, MARKER, { agentLines: [[line]] }), line).toBeNull();
+      const pairs = 'forty-one eleven, eleven eleven, eleven eleven, eleven eleven';
+      expect(redactCardNumbers(`${line} ${pairs}`)).toBe(`${line} ${pairs}`);
+    }
+    // A payment card named in the same line still counts.
+    expect(
+      redactCardNumbersAcrossTurns(GROUPS, MARKER, { agentLines: [["Tap the card to approve. And please don't read me your credit card."]] }),
+    ).toEqual(Array(4).fill(MARKER));
+  });
+
+  it('takes no mention two turns or more before the card, or from an agent line further back', () => {
+    expect(redactCardNumbersAcrossTurns(['can I use my card at the visit', 'the gate is on the left', '3287', '9106', '3649', '7'].slice(0, 5))).toBeNull();
+    expect(redactCardNumbersAcrossTurns(['I paid by card last time', 'it is the blue house', ...GROUPS].slice(-5))).toBeNull();
+    expect(
+      redactCardNumbersAcrossTurns(['the blue house', ...GROUPS], MARKER, { agentLines: [['We take all major credit cards.'], [], [], [], []] }),
+    ).toBeNull();
+    expect(
+      redactCardNumbersAcrossTurns(GROUPS, MARKER, { callerTurnBefore: 'I paid by card last time', agentLines: [['What is the gate code?']] }),
+    ).toEqual(Array(4).fill(MARKER));
+  });
+
+  // The cross-turn search also finds what lies wholly inside one turn, and
+  // reads every turn the live path appends: a mention inside a turn counts
+  // only near the digits, as it does in one text (`redactCardNumbers`), so a
+  // card named in passing at the start of a long turn makes no "card" of the
+  // times read out at its end. The same holds for the turn's own digits in a
+  // window over several turns, and for the caller's turn just before them.
+  describe('a mention in a long turn', () => {
+    // 4118 1215 1230 1545 passes the Luhn check: four times read in pairs.
+    const TIMES = 'forty-one eighteen, twelve fifteen, twelve thirty, fifteen forty-five';
+    const AFTER_THE_MENTION =
+      'and the technician said the unit was old and the filter was dirty and the coil needed cleaning and he would come back next week to check the pressure again after the part arrives.';
+    const FAR = `I will pay by card when he comes. ${AFTER_THE_MENTION}`;
+    const turn = `${FAR} the times he gave me were ${TIMES}`;
+
+    it('counts only within a few words of a window inside that turn, as in one text', () => {
+      expect(redactCardNumbers(turn)).toBe(turn);
+      expect(redactCardNumbersAcrossTurns(['okay', turn])).toBeNull();
+      expect(redactCardNumbersAcrossTurns([turn])).toBeNull();
+      expect(
+        redactCardNumbersInCallTurns([
+          { speaker: 'caller', text: 'hi', at: 1_000_000 },
+          { speaker: 'agent', text: 'Go ahead.', at: 1_003_000 },
+          { speaker: 'caller', text: turn, at: 1_006_000 },
+        ]),
+      ).toBeNull();
+      // Near the digits it still counts, before them or after.
+      const near = `${FAR} my card number is ${TIMES}`;
+      expect(redactCardNumbersAcrossTurns(['okay', near])).toEqual(['okay', `${FAR} my card number is ${MARKER}`]);
+      expect(redactCardNumbersAcrossTurns(['okay', `${TIMES}, that is my card`])).toEqual(['okay', `${MARKER}, that is my card`]);
+    });
+
+    it("counts in a turn of a window over several turns only near the digits that turn gives", () => {
+      expect(redactCardNumbersAcrossTurns([`${FAR} the gate code is 4111`, '1111', '1111', '1111'])).toBeNull();
+      expect(redactCardNumbersAcrossTurns(['4111', '1111', '1111', `1111. ${AFTER_THE_MENTION} I will pay by card`])).toBeNull();
+      expect(redactCardNumbersAcrossTurns([`${FAR} my card is 4111`, '1111', '1111', '1111'])).toEqual([
+        `${FAR} my card is ${MARKER}`,
+        MARKER,
+        MARKER,
+        MARKER,
+      ]);
+      expect(redactCardNumbersAcrossTurns(['4111', '1111', '1111', `1111, that is the card. ${AFTER_THE_MENTION}`])).toEqual([
+        MARKER,
+        MARKER,
+        MARKER,
+        `${MARKER}, that is the card. ${AFTER_THE_MENTION}`,
+      ]);
+    });
+
+    it("counts in the caller's turn just before only near its end", () => {
+      expect(redactCardNumbersAcrossTurns([FAR, TIMES])).toBeNull();
+      expect(redactCardNumbersAcrossTurns([FAR, '4111', '1111', '1111', '1111'])).toBeNull();
+      expect(redactCardNumbersAcrossTurns(['4111', '1111', '1111', '1111'], MARKER, { callerTurnBefore: FAR })).toBeNull();
+      expect(redactCardNumbersAcrossTurns([`${AFTER_THE_MENTION} so I want to pay with my card`, TIMES])).toEqual([
+        `${AFTER_THE_MENTION} so I want to pay with my card`,
+        MARKER,
+      ]);
+      expect(
+        redactCardNumbersAcrossTurns(['4111', '1111', '1111', '1111'], MARKER, { callerTurnBefore: 'okay, my card number is' }),
+      ).toEqual(Array(4).fill(MARKER));
+    });
+  });
+
+  // A stitched or cut window takes only the lengths a card is issued at for
+  // its first digits: an Amex is 15, a Mastercard 16, a Visa 13, 16 or 19, a
+  // Diners Club 14 to 19, Discover, JCB and UnionPay 16 to 19, and a card
+  // starting 2 is a Mastercard (2221–2720) or none.
+  it('stitches only lengths a card is issued at for its first digits', () => {
+    const cue = { agentLines: [["Sorry, I can't take card numbers."]] };
+    // 2018 0000 0000 0006 passes the Luhn check, but no card starts 2018.
+    expect(redactCardNumbersAcrossTurns(['2018', '0000', '0000', '0006'], MARKER, cue)).toBeNull();
+    // A 2-series Mastercard does: 2221 0000 0000 0009.
+    expect(redactCardNumbersAcrossTurns(['2221', '0000', '0000', '0009'], MARKER, cue)).toEqual(Array(4).fill(MARKER));
+    // A Mastercard is never 19 digits (5100 0000 0000 0000 003 passes Luhn).
+    expect(redactCardNumbersAcrossTurns(['5100', '0000', '0000', '0000', '003'], MARKER, cue)).toBeNull();
+    // A 15-digit window is an Amex or nothing (4111 1111 1111 116 passes Luhn).
+    expect(redactCardNumbersAcrossTurns(['4111 1111', '1111 116'], MARKER, cue)).toBeNull();
+  });
+
+  it('cuts only lengths a card is issued at for its first digits', () => {
+    // 15 digit words with no pause before a CVV: an Amex cut is kept…
+    expect(
+      redactCardNumbers('amex three seven eight two eight two two four six three one oh oh oh five one two three four'),
+    ).toBe(`amex ${MARKER} one two three four`);
+    // …but 15 digits that are no Amex are no card (4111 1111 1111 116 + 123).
+    const notAmex = 'card four one one one one one one one one one one one one one six one two three';
+    expect(redactCardNumbers(notAmex)).toBe(notAmex);
+  });
+
+  // A 17- or 18-digit order, serial or confirmation number read as words and
+  // starting 36 has its first fourteen digits pass the Luhn check one time in
+  // ten, and its last three or four read as a CVV or an expiry: a Diners
+  // Club's 14 is cut out of a run of words only with the card named near it.
+  // 3612 412341 3045 passes the Luhn check; written, the whole number is no card.
+  it('cuts a Diners Club 14 out of a run of words only with the card named near it', () => {
+    const run = 'three six one two four one two three four one three zero four five';
+    for (const text of [
+      `order number ${run} one two three`,
+      `serial number ${run} oh four two seven`,
+      `the confirmation number is ${run} one two three`,
+      'tres seis uno dos cuatro uno dos tres cuatro uno tres cero cuatro cinco uno dos tres',
+      `my water heater is leaking. the order number is ${run} one two three. thanks`,
+      'the order number is 36124123413045123',
+    ]) {
+      expect(redactCardNumbers(text)).toBe(text);
+    }
+    expect(redactCardNumbers(`my card is ${run} one two three`)).toBe(`my card is ${MARKER} one two three`);
+    expect(redactCardNumbers(`diners card ${run} oh four two seven`)).toBe(`diners card ${MARKER} oh four two seven`);
+    expect(redactCardNumbers(`mi tarjeta es tres seis uno dos cuatro uno dos tres cuatro uno tres cero cuatro cinco uno dos tres`)).toBe(
+      `mi tarjeta es ${MARKER} uno dos tres`,
+    );
   });
 });
 
@@ -840,25 +1049,27 @@ describe('redactCardNumbers — seeded simulation of numbers read as words', () 
     // Diners-like one (36x) and a house number as a Diners Club; two phones
     // whose first sixteen digits pass the Luhn check, followed by a month and
     // year, read as a card and its expiry; and a reference of 16 or more digits
-    // starting 2–6 that passes the Luhn check reads as a card, as it always
-    // did written.
+    // starting like a card, at a length one is issued at for that start, that
+    // passes the Luhn check reads as a card, as it always did written (144
+    // before the issued lengths, `issuedAtLength`, were asked of it).
     expect(found['a phone and zip']).toBeLessThanOrEqual(2);
     expect(found['a zip and phone']).toBeLessThanOrEqual(9);
     expect(found['a phone and house number']).toBeLessThanOrEqual(3);
-    expect(found['two phones']).toBeLessThanOrEqual(16);
-    expect(found['a 15 to 19 digit reference']).toBeLessThanOrEqual(144);
+    expect(found['two phones']).toBeLessThanOrEqual(14);
+    expect(found['a 15 to 19 digit reference']).toBeLessThanOrEqual(88);
   });
 
   it('still catches cards read in pairs where the card is mentioned, and cards with their CVV or expiry run on', () => {
     const missed: string[] = [];
     let total = 0;
     for (let n = 0; n < 1500; n++) {
-      const prefix = pick(['4', '51', '55', '6011', '35', '2221']);
+      // Issued prefixes (a JCB is 3528–3589).
+      const prefix = pick(['4', '51', '55', '6011', '3566', '2221']);
       const card = withLuhnCheckDigit(prefix + Array.from({ length: 15 - prefix.length }, () => String(int(0, 9))).join(''));
       const fours = card.match(/.{4}/g)!;
       const es = random() < 0.4;
       const pairs = fours.map((g) => [Number(g.slice(0, 2)), Number(g.slice(2))].map(es ? pairEs : pairEn).join(' '));
-      const lead = es ? pick(['mi tarjeta es ', 'la tarjeta, ', 'pago con ']) : pick(['my card is ', 'the Visa is ', 'card number ']);
+      const lead = es ? pick(['mi tarjeta es ', 'la tarjeta, ', 'pago con la tarjeta ']) : pick(['my card is ', 'the Visa is ', 'card number ']);
       const read = pairs.join(pick(es ? [', ', ' y ', ', eh, '] : [', ', ' ', ', uh, ', ' and ']));
       const text = `${lead}${read}${pick(['', ', thanks', '.'])}`;
       total++;
@@ -910,13 +1121,16 @@ describe('redactCardNumbersAcrossTurns', () => {
   });
 
   it('cuts the card out of the last turn when the caller runs straight on into the expiry', () => {
+    // A turn of four digits or fewer needs the card mentioned (see "stitches a
+    // window with any turn of four digits or fewer only where the card is
+    // mentioned").
     expect(
       redactCardNumbersAcrossTurns([
-        'four oh one two, eight eight eight eight',
+        'my card is four oh one two, eight eight eight eight',
         'eight eight eight eight',
         'one eight eight one oh four two seven',
       ]),
-    ).toEqual(['[card number]', '[card number]', '[card number] oh four two seven']);
+    ).toEqual(['my card is [card number]', '[card number]', '[card number] oh four two seven']);
   });
 
   // A caller reading on after a pause often opens the next turn with a filler
@@ -924,8 +1138,8 @@ describe('redactCardNumbersAcrossTurns', () => {
   it('joins a continuation turn that opens with a filler', () => {
     expect(redactCardNumbersAcrossTurns(['4111 1111', 'um, 1111 1111'])).toEqual([MARKER, `um, ${MARKER}`]);
     expect(redactCardNumbersAcrossTurns(['4111 1111', 'and 1111 1111'])).toEqual([MARKER, `and ${MARKER}`]);
-    expect(redactCardNumbersAcrossTurns(['4111 1111', 'uh... 1111', 'y 1111'])).toEqual([
-      MARKER,
+    expect(redactCardNumbersAcrossTurns(['my card is 4111 1111', 'uh... 1111', 'y 1111'])).toEqual([
+      `my card is ${MARKER}`,
       `uh... ${MARKER}`,
       `y ${MARKER}`,
     ]);
@@ -935,15 +1149,15 @@ describe('redactCardNumbersAcrossTurns', () => {
 
   it('joins a continuation turn that opens with a short acknowledgement, in English and Spanish', () => {
     expect(redactCardNumbersAcrossTurns(['4111 1111', 'Okay, 1111 1111'])).toEqual([MARKER, `Okay, ${MARKER}`]);
-    expect(redactCardNumbersAcrossTurns(['4111 1111', 'ok 1111', 'so 1111'])).toEqual([
-      MARKER,
+    expect(redactCardNumbersAcrossTurns(['my card is 4111 1111', 'ok 1111', 'so 1111'])).toEqual([
+      `my card is ${MARKER}`,
       `ok ${MARKER}`,
       `so ${MARKER}`,
     ]);
     expect(redactCardNumbersAcrossTurns(['4111 1111', 'vale, 1111 1111'])).toEqual([MARKER, `vale, ${MARKER}`]);
     expect(
-      redactCardNumbersAcrossTurns(['cuatro uno uno uno, uno uno uno uno', 'bueno, uno uno uno uno', 'uno uno uno uno']),
-    ).toEqual([MARKER, `bueno, ${MARKER}`, MARKER]);
+      redactCardNumbersAcrossTurns(['mi tarjeta es cuatro uno uno uno, uno uno uno uno', 'bueno, uno uno uno uno', 'uno uno uno uno']),
+    ).toEqual([`mi tarjeta es ${MARKER}`, `bueno, ${MARKER}`, MARKER]);
   });
 
   it('joins a continuation turn that opens with an apology or a back-channel', () => {
@@ -959,14 +1173,18 @@ describe('redactCardNumbersAcrossTurns', () => {
       MARKER,
       `the next four are ${MARKER}`,
     ]);
-    expect(redactCardNumbersAcrossTurns(['4111 1111 1111', 'and the last four digits are 1111.'])).toEqual([
-      MARKER,
+    // "The last four" says no card is being read (a caller answers for an
+    // account or a phone the same way), so a last turn of four needs the card
+    // mentioned; "the next four" reads on, which is a mention.
+    expect(redactCardNumbersAcrossTurns(['my card is 4111 1111 1111', 'and the last four digits are 1111.'])).toEqual([
+      `my card is ${MARKER}`,
       `and the last four digits are ${MARKER}.`,
     ]);
-    expect(redactCardNumbersAcrossTurns(['4111 1111 1111', 'los últimos cuatro son 1111'])).toEqual([
-      MARKER,
+    expect(redactCardNumbersAcrossTurns(['mi tarjeta es 4111 1111 1111', 'los últimos cuatro son 1111'])).toEqual([
+      `mi tarjeta es ${MARKER}`,
       `los últimos cuatro son ${MARKER}`,
     ]);
+    expect(redactCardNumbersAcrossTurns(['4111 1111 1111', 'and the last four digits are 1111.'])).toBeNull();
   });
 
   it('keeps fillers and acknowledgements inside a turn as they were', () => {
@@ -1045,19 +1263,22 @@ describe('redactCardNumbersAcrossTurns', () => {
       Array(4).fill(MARKER),
     );
     expect(redactCardNumbersAcrossTurns(['41111111', '11111111'])).toEqual([MARKER, MARKER]);
-    expect(redactCardNumbersAcrossTurns(['4111', '1111 1111 1111'])).toEqual([MARKER, MARKER]);
+    // Any turn of four digits or fewer needs the card mentioned (see "stitches
+    // a window with any turn of four digits or fewer only where the card is
+    // mentioned"); here the caller or the agent did.
+    expect(redactCardNumbersAcrossTurns(['card 4111', '1111 1111 1111'])).toEqual([`card ${MARKER}`, MARKER]);
     // A 19-digit Visa read 4-4-4-4-3, the last two groups together or apart.
     expect(redactCardNumbersAcrossTurns(['4000', '0000', '0000', '0000', '006'], MARKER, AGENT_MENTIONS_CARD)).toEqual(
       Array(5).fill(MARKER),
     );
-    expect(redactCardNumbersAcrossTurns(['4000 0000', '0000', '0000 006'])).toEqual(Array(3).fill(MARKER));
+    expect(redactCardNumbersAcrossTurns(['4000 0000', '0000', '0000 006'], MARKER, AGENT_MENTIONS_CARD)).toEqual(Array(3).fill(MARKER));
     // Amex 3782 822463 10005 in its 4-6-5 groups.
-    expect(redactCardNumbersAcrossTurns(['3782', '822463', '10005'])).toEqual(Array(3).fill(MARKER));
+    expect(redactCardNumbersAcrossTurns(['3782', '822463', '10005'], MARKER, AGENT_MENTIONS_CARD)).toEqual(Array(3).fill(MARKER));
     expect(redactCardNumbersAcrossTurns(['3782 822463', '10005'])).toEqual([MARKER, MARKER]);
     // A Diners Club International 3614 890064 7913 in its 4-6-4 groups, and an
     // Amex read in fours (3782 8224 6310 005).
     expect(redactCardNumbersAcrossTurns(['card 3614', '890064', '7913'])).toEqual([`card ${MARKER}`, MARKER, MARKER]);
-    expect(redactCardNumbersAcrossTurns(['3614 890064', '7913'])).toEqual([MARKER, MARKER]);
+    expect(redactCardNumbersAcrossTurns(['my card is 3614 890064', '7913'])).toEqual([`my card is ${MARKER}`, MARKER]);
     expect(redactCardNumbersAcrossTurns(['3782 8224', '6310 005'])).toEqual([MARKER, MARKER]);
     // A 13-digit Visa: three fours, then the last digit.
     expect(redactCardNumbersAcrossTurns(['my card is 4222', '2222', '2222', '2'])).toEqual([
@@ -1122,15 +1343,821 @@ describe('redactCardNumbersAcrossTurns', () => {
       Array(4).fill(MARKER),
     );
     expect(
-      redactCardNumbersAcrossTurns(['4111', '1111', '1111', '1111'], MARKER, { agentLines: ['What is the gate code?'] }),
+      redactCardNumbersAcrossTurns(['4111', '1111', '1111', '1111'], MARKER, { agentLines: [['What is the gate code?']] }),
     ).toBeNull();
     // The agent talking about paying is no mention of a card: it says so while
     // it takes gate codes and years.
     expect(
       redactCardNumbersAcrossTurns(['3287', '9106', '3649', '7'], MARKER, {
-        agentLines: ["I'll text you a payment link. What is the gate code?"],
+        agentLines: [["I'll text you a payment link. What is the gate code?"]],
       }),
     ).toBeNull();
+  });
+
+  // Bare intake answers in a row are not all four digits or fewer: a gate
+  // code, a serial number read as two fours and a time (4420, 0198 7388,
+  // 1100) pass the Luhn check joined, and so do the other shapes below. Any
+  // turn of four digits or fewer in a window (a gate or lockbox code, a
+  // last-four, a year, a time, a PIN) is a bare answer as often as a card's
+  // group, so such a window needs the card mentioned near it, whatever the
+  // other turns give.
+  it('stitches a window with any turn of four digits or fewer only where the card is mentioned', () => {
+    let at = 1_000_000;
+    const line = (speaker: 'caller' | 'agent', text: string) => ({ speaker, text, at: (at += 5000) });
+    const leg = [
+      line('agent', 'How can I help?'),
+      line('caller', 'I need someone to look at my AC'),
+      line('agent', "What's the gate code?"),
+      line('caller', '4420.'),
+      line('agent', 'And the serial number?'),
+      line('caller', '0198, 7388'),
+      line('agent', 'What time works?'),
+      line('caller', 'um, 1100.'),
+      line('agent', 'And the lockbox code?'),
+      line('caller', '9775'),
+    ];
+    expect(redactCardNumbersInCallTurns(leg)).toBeNull();
+    expect(redactCardNumbersAcrossTurns(['4420.', '0198, 7388', 'um, 1100.'])).toBeNull();
+    // The same digits in every grouping with a turn of four or fewer: 4-8-4,
+    // 8-4-4, 4-4-8, 4-12 and 12-4.
+    const shapes = [
+      ['4420', '0198 7388', '1100'],
+      ['4420 0198', '7388', '1100'],
+      ['4420', '0198', '7388 1100'],
+      ['4420', '0198 7388 1100'],
+      ['4420 0198 7388', '1100'],
+    ];
+    for (const turns of shapes) {
+      expect(redactCardNumbersAcrossTurns(turns), turns.join(' | ')).toBeNull();
+      // Named near them, they are a card.
+      const named = [`my card is ${turns[0]}`, ...turns.slice(1)];
+      expect(redactCardNumbersAcrossTurns(named), named.join(' | ')).toEqual([`my card is ${MARKER}`, ...turns.slice(1).map(() => MARKER)]);
+      expect(redactCardNumbersAcrossTurns(turns, MARKER, AGENT_MENTIONS_CARD)).toEqual(turns.map(() => MARKER));
+    }
+    // An Amex or a Diners Club read with a turn of four or fewer, too.
+    expect(redactCardNumbersAcrossTurns(['3782', '822463', '10005'])).toBeNull();
+    expect(redactCardNumbersAcrossTurns(['3614 890064', '7913'])).toBeNull();
+    expect(redactCardNumbersAcrossTurns(['card 3782', '822463', '10005'])).toEqual([`card ${MARKER}`, MARKER, MARKER]);
+    // Two halves of eight, or an Amex 8-7, have no such turn: stitched as before.
+    expect(redactCardNumbersAcrossTurns(['4420 0198', '7388 1100'])).toEqual([MARKER, MARKER]);
+    expect(redactCardNumbersAcrossTurns(['3782 8224', '6310 005'])).toEqual([MARKER, MARKER]);
+  });
+
+  // A caller often says "okay", "um" or "mm-hmm" between naming the card and
+  // reading it ("my card number is", "okay", "3782", …), or answers the
+  // agent's "go ahead with the card number" with one. That turn is a pause,
+  // not another moment of the call: the mention is read past up to two such
+  // turns, and the agent's lines before them count as well. Every shape
+  // below has a turn of four digits or fewer, so none is stitched with no
+  // mention; before, a pause turn after the mention hid it and none of them
+  // was caught.
+  describe('the mention, past a pause turn said before the card', () => {
+    const SHAPES: ReadonlyArray<readonly [string, readonly string[]]> = [
+      ['Visa 4-4-4-4', ['4111', '1111', '1111', '1111']],
+      ['Amex 4-6-5', ['3782', '822463', '10005']],
+      ['Diners Club 4-6-4', ['3614', '890064', '7913']],
+      ['Visa 4-12', ['4111', '1111 1111 1111']],
+    ];
+    const PAUSES = ['okay', 'um', 'mm-hmm', 'sí', 'Okay, um.'];
+    const marked = (groups: readonly string[]) => groups.map(() => MARKER);
+
+    it.each(SHAPES)('%s after the caller names the card, or the agent asks for it', (_name, groups) => {
+      for (const pause of PAUSES) {
+        expect(redactCardNumbersAcrossTurns(['my card number is', pause, ...groups]), pause).toEqual([
+          'my card number is',
+          pause,
+          ...marked(groups),
+        ]);
+        // The mention in the caller's turn before the window.
+        expect(redactCardNumbersAcrossTurns([pause, ...groups], MARKER, { callerTurnBefore: 'my card number is' }), pause).toEqual([
+          pause,
+          ...marked(groups),
+        ]);
+        // The agent asked for it, the caller said "okay".
+        expect(
+          redactCardNumbersAcrossTurns([pause, ...groups], MARKER, { agentLines: [['Go ahead with the card number.']] }),
+          pause,
+        ).toEqual([pause, ...marked(groups)]);
+        expect(
+          redactCardNumbersAcrossTurns(['it is the blue house', pause, ...groups], MARKER, {
+            agentLines: [[], ['Go ahead with the card number.']],
+          }),
+          pause,
+        ).toEqual(['it is the blue house', pause, ...marked(groups)]);
+      }
+      // Two such turns.
+      expect(redactCardNumbersAcrossTurns(['mi tarjeta es', 'sí', 'este', ...groups])).toEqual(['mi tarjeta es', 'sí', 'este', ...marked(groups)]);
+    });
+
+    it.each(SHAPES)('%s after a pause with no card named before it is still no card', (_name, groups) => {
+      for (const pause of PAUSES) {
+        expect(redactCardNumbersAcrossTurns([pause, ...groups]), pause).toBeNull();
+        expect(redactCardNumbersAcrossTurns(['the gate is on the left', pause, ...groups]), pause).toBeNull();
+        // Talk of paying is no mention, past a pause or not.
+        expect(redactCardNumbersAcrossTurns(['can I pay now', pause, ...groups]), pause).toBeNull();
+        expect(redactCardNumbersAcrossTurns([pause, ...groups], MARKER, { agentLines: [['What is the gate code?']] }), pause).toBeNull();
+      }
+      // Three pause turns are more than a breath between naming the card
+      // and reading it, and the mention still counts only near the turn's end.
+      expect(redactCardNumbersAcrossTurns(['my card number is', 'okay', 'um', 'so', ...groups])).toBeNull();
+      expect(
+        redactCardNumbersAcrossTurns([
+          'I will pay by card when he comes, and the gate is on the left past the blue house with the dog',
+          'okay',
+          ...groups,
+        ]),
+      ).toBeNull();
+    });
+
+    it.each(SHAPES)('%s in a stored call leg, with the agent between the turns', (_name, groups) => {
+      type Said = readonly ['caller' | 'agent', string];
+      const leg = (lead: readonly Said[]) =>
+        [['agent', 'How can I help?'] as Said, ...lead, ...groups.flatMap((g, k): Said[] => (k === 0 ? [['caller', g]] : [['agent', 'Go on.'], ['caller', g]]))].map(
+          ([speaker, text], k) => ({ speaker, text, at: 1_000_000 + k * 3000 }),
+        );
+      for (const lead of [
+        [['caller', 'my card number is'], ['caller', 'okay']],
+        [['caller', 'my card number is'], ['agent', 'Sure, go ahead.'], ['caller', 'um']],
+        [['agent', 'Go ahead with the card number.'], ['caller', 'okay']],
+        [['agent', 'Go ahead with the card number.'], ['caller', 'mm-hmm'], ['agent', 'Go on.']],
+      ] as const) {
+        const lines = leg(lead);
+        expect(redactCardNumbersInCallTurns(lines), lead.map(([, text]) => text).join(' | ')).toEqual(
+          lines.map((l) => (l.speaker === 'caller' && /\d/.test(l.text) ? MARKER : l.text)),
+        );
+      }
+      // The same leg with nothing naming the card is left alone.
+      expect(redactCardNumbersInCallTurns(leg([['caller', 'the gate is on the left'], ['caller', 'okay']]))).toBeNull();
+      expect(redactCardNumbersInCallTurns(leg([['agent', 'What is the gate code?'], ['caller', 'okay']]))).toBeNull();
+    });
+
+    // Card talk, a pause turn, then the agent asks for another number ("What's
+    // the house number?", "And the lockbox code?"): the turns answer that
+    // question, and the talk before the pause names no card of theirs. Read
+    // past the pause, bare intake answers (codes, house numbers, a PIN, a
+    // customer number, a callback number read straight on into more digits)
+    // were stitched into a "card": the caller's words rewritten and the
+    // recording's audio purged.
+    it.each(SHAPES)("%s answering the agent's question for another number, after card talk and a pause, is no card", (_name, groups) => {
+      for (const pause of PAUSES) {
+        for (const question of ["What's the house number?", 'And the lockbox code?', '¿Cuál es el código del portón?', '¿Y la caja de llaves?']) {
+          expect(
+            redactCardNumbersAcrossTurns(['my card number is', pause, ...groups], MARKER, { agentLines: [[], [], [question]] }),
+            `${pause} | ${question}`,
+          ).toBeNull();
+          expect(
+            redactCardNumbersAcrossTurns([pause, ...groups], MARKER, { agentLines: [['We take all major cards at the visit.'], [question]] }),
+            `${pause} | ${question}`,
+          ).toBeNull();
+        }
+      }
+    });
+
+    // The agent's ask for another number is as often said before the caller's
+    // pause as after it ("What's the gate code?" "Yep." "4821"), between two
+    // pauses, or in the same line as the card talk ("We take all major cards
+    // at the visit. And the account PIN?"); as a request with no question
+    // mark ("Go ahead with the gate code.", "Dígame el código postal."); or
+    // for a phone number without naming one ("What number should the tech
+    // call?"). Only the line right before the digits was read, and only for a
+    // question: the card talk before the pause was read past it, and the
+    // answers stitched into a "card" (the recording's audio purged).
+    const ASKS_FOR_ANOTHER_NUMBER = [
+      "What's the gate code?",
+      'Go ahead with the gate code.',
+      'Please give me the alarm code.',
+      'Dígame el código postal.',
+      'What number should the tech call?',
+      'What is the best number for you?',
+      "What's a good number to text you at?",
+      '¿A qué número le podemos llamar?',
+    ];
+    // Pauses the mention is read past, and asides no turn reads on from.
+    const PAUSES_AROUND_THE_ASK = [...PAUSES, 'yeah', 'Yep.', 'One sec.', 'Hold on.', 'Let me find it.', 'Un momento.', 'A ver.'];
+    it.each(SHAPES)("%s answering the agent's ask for another number, wherever it sits around the pause, is no card", (_name, groups) => {
+      for (const pause of PAUSES_AROUND_THE_ASK) {
+        for (const ask of ASKS_FOR_ANOTHER_NUMBER) {
+          const legs: ReadonlyArray<readonly [string, readonly string[], CardSplitContext]> = [
+            // Card talk, a pause, the ask, the answers.
+            ['card | pause | ask', ['my card number is', pause, ...groups], { agentLines: [[], [], [ask]] }],
+            // Card talk, the ask, a pause, the answers.
+            ['card | ask | pause', ["I'll pay with my Visa at the visit", pause, ...groups], { agentLines: [[], [ask]] }],
+            ['agent card | ask | pause', [pause, ...groups], { agentLines: [['We take all major cards at the visit.', ask]] }],
+            // Card talk, a pause, the ask, a pause, the answers.
+            ['card | pause | ask | pause', ['can I pay by card when they come', pause, pause, ...groups], { agentLines: [[], ['Yes, we do.'], [ask]] }],
+            // Card talk and the ask in one agent line, a pause, the answers.
+            ['agent card + ask | pause', [pause, ...groups], { agentLines: [[`We take all major cards at the visit. ${ask}`]] }],
+            ['card | agent ok + ask | pause', ['do you take credit cards', pause, ...groups], { agentLines: [[], [`Yes, we do. ${ask}`]] }],
+          ];
+          for (const [shape, turns, context] of legs) {
+            expect(redactCardNumbersAcrossTurns(turns, MARKER, context), `${shape}: ${pause} | ${ask}`).toBeNull();
+          }
+        }
+      }
+    });
+
+    // What counts as that ask is a sentence of the agent's that asks or
+    // requests ("?", "please", "go ahead with", "dígame") a number the card
+    // is not, and names no card. Card talk that only states something ("We'll
+    // call you when the tech is on the way"), or asks for the card and
+    // another number in one breath, leaves the mention before the pause.
+    it.each(SHAPES)('%s after card talk and a pause still counts where no sentence asks for another number', (_name, groups) => {
+      for (const pause of ['okay', 'um', 'sí']) {
+        for (const [lead, ask] of [
+          ['Sure, you can pay by card. We will call you when the tech is on the way.', 'Go ahead.'],
+          ['Sure, you can pay by card. I can text you a receipt after.', 'Go ahead.'],
+          ['Sure, you can pay by card.', 'Can I get the card number and the zip code?'],
+          ['Sure, you can pay by card.', 'Please read me the card number and the expiration date.'],
+          ['Claro, puede pagar con tarjeta.', 'Dígame el número de la tarjeta, por favor.'],
+        ] as const) {
+          expect(redactCardNumbersAcrossTurns([pause, ...groups], MARKER, { agentLines: [[lead, ask]] }), `${lead} ${ask}`).toEqual([
+            pause,
+            ...marked(groups),
+          ]);
+        }
+      }
+    });
+
+    // The call legs that were stitched: each turn below was replaced, and the
+    // recording flagged for audio purge.
+    const at = (k: number) => 1_000_000 + k * 3000;
+    const callLeg = (said: ReadonlyArray<readonly ['caller' | 'agent', string]>) =>
+      said.map(([speaker, text], k) => ({ speaker, text, at: at(k) }));
+    it.each([
+      [
+        'the agent on cards, "sure", then a customer number and two house numbers',
+        [
+          ['agent', 'How can I help?'],
+          ['caller', 'I need someone to look at my AC'],
+          ['agent', 'Do you want the card on file charged after the visit?'],
+          ['caller', 'sure'],
+          ['agent', 'Your customer number?'],
+          ['caller', '67500046'],
+          ['agent', "What's the house number?"],
+          ['caller', '7179'],
+          ['agent', "What's the house number?"],
+          ['caller', '2407'],
+        ],
+      ],
+      [
+        'the caller asks about paying by card, "mm-hmm", then lockbox codes, a PIN and a last four',
+        [
+          ['agent', 'How can I help?'],
+          ['caller', 'I need someone to look at my AC'],
+          ['caller', 'can I pay by card when they come'],
+          ['agent', 'Yes, we do.'],
+          ['caller', 'mm-hmm'],
+          ['agent', 'And the lockbox code?'],
+          ['caller', 'five three zero nine'],
+          ['agent', 'And the account PIN?'],
+          ['caller', 'nine five zero eight'],
+          ['caller', 'sure'],
+          ['agent', 'And the lockbox code?'],
+          ['caller', '0518'],
+          ['agent', 'Last four of your phone?'],
+          ['caller', '6429'],
+        ],
+      ],
+      [
+        'en español: tarjeta, "sí", then a house number, a last four, a year and a gate code',
+        [
+          ['agent', '¿En qué le puedo ayudar?'],
+          ['caller', 'necesito una cita para el aire'],
+          ['caller', 'pago con tarjeta en la visita'],
+          ['agent', 'Sí, claro.'],
+          ['caller', 'sí'],
+          ['agent', '¿Número de la casa?'],
+          ['caller', 'cuatro dos cero dos'],
+          ['agent', '¿Los últimos cuatro de su teléfono?'],
+          ['caller', '2897'],
+          ['agent', '¿De qué año es el equipo?'],
+          ['caller', '2014'],
+          ['agent', '¿Cuál es el código del portón?'],
+          ['caller', 'seis seis cinco cero'],
+        ],
+      ],
+      [
+        // 3605550006 and 2247: fourteen digit words starting 36 that pass the
+        // Luhn check, a Diners Club's 14 read with no pause.
+        'card talk, "okay", then a callback number from 360 read straight on into four more digits',
+        [
+          ['agent', 'How can I help?'],
+          ['caller', 'I want to pay by card'],
+          ['caller', 'okay'],
+          ['agent', "What's a good callback number?"],
+          ['caller', spell('36055500062247')],
+        ],
+      ],
+      [
+        // 3475550000 and 85006: fifteen, an Amex's length from 34 or 37.
+        'card talk, "okay", then a callback number from 347 read straight on into a zip',
+        [
+          ['agent', 'How can I help?'],
+          ['caller', 'I want to pay by card'],
+          ['caller', 'okay'],
+          ['agent', 'Can I get a phone number for the technician?'],
+          ['caller', spell('347555000085006')],
+        ],
+      ],
+    ] as const)('leaves alone %s', (_name, said) => {
+      expect(redactCardNumbersInCallTurns(callLeg(said))).toBeNull();
+    });
+
+    // The agent asking for the card itself again ("Go ahead, what's the
+    // number?") is no question for another number: the mention before the
+    // pause still counts.
+    it.each(SHAPES)('%s read after the agent asks again for the number, past a pause turn', (_name, groups) => {
+      for (const [lead, reprompt] of [
+        [[['agent', "What's the card number?"], ['caller', 'okay']], "Go ahead, what's the number?"],
+        [[['caller', 'my card number is'], ['caller', 'um']], "Sorry, what's the number?"],
+        [[['agent', '¿Cuál es el número de la tarjeta?'], ['caller', 'vale']], 'Adelante, ¿cuál es el número?'],
+      ] as const) {
+        const lines = callLeg([...lead, ['agent', reprompt], ...groups.map((g) => ['caller', g] as const)]);
+        expect(redactCardNumbersInCallTurns(lines), reprompt).toEqual(
+          lines.map((l) => (l.speaker === 'caller' && /\d/.test(l.text) ? MARKER : l.text)),
+        );
+      }
+    });
+
+    // Re-asks for the card that never say "card" but name its data (the
+    // expiration date, the security code, the billing zip), say "take your
+    // time", "four digits at a time" or "one more time", or open with an
+    // aside naming an account, an address, a phone or an invoice before the
+    // question. Read as a whole line, each named "another number", and the
+    // card read straight after it was missed.
+    it.each(SHAPES)('%s read after a re-ask that names card data, an idiom or an aside, past a pause turn', (_name, groups) => {
+      const reasks = [
+        'Sure, take your time. What is the number?',
+        "What's the number? Take your time.",
+        'Can you read it to me four digits at a time?',
+        'Could you give me the number one group at a time?',
+        'Could you read me the number and the expiration date?',
+        "What's the number, and the security code on the back?",
+        'Can I get the number and the billing zip code?',
+        "One moment while I pull up your account. Okay, what's the number?",
+        "Thanks, I have your address on file. What's the number?",
+        "Got it, I'll text a receipt to your phone. Go ahead, what's the number?",
+        "Sure, I can take payment on that invoice now. What's the number?",
+        'Sorry, could you read me the number one more time?',
+        "What's the three digit code on the back, and the number?",
+        'Please read me the number on the front, then the code on the back.',
+        'Please give me the number, and the date it expires.',
+        "What's the number and the exp date?",
+        'Read me the number, then the exp. date, please.',
+        // Its data in the plural, as the singular.
+        'Can I get the number and the expiration dates?',
+        'Can I get the number and the security codes?',
+      ];
+      const reasksEs = [
+        '¿Me puede dar el número y la fecha de vencimiento?',
+        '¿Cuál es el número y el código de seguridad?',
+        '¿Me da el número y los códigos de seguridad?',
+        '¿Y el número y las fechas de vencimiento?',
+        'Claro, tómese su tiempo. ¿Cuál es el número?',
+        'Un momento, busco su cuenta. Listo, ¿cuál es el número?',
+        'Gracias, ya tengo su dirección. ¿Cuál es el número?',
+        '¿Me da el número y el código de atrás?',
+        '¿Y el número y la fecha de caducidad?',
+        '¿Me da el número y el código de tres dígitos?',
+        '¿Me da el número y el código postal de facturación?',
+      ];
+      const leads = (es: boolean) =>
+        es
+          ? ([
+              [['caller', 'el número de mi tarjeta es'], ['caller', 'sí']],
+              [['agent', 'Claro, puede pagar con tarjeta.'], ['caller', 'este']],
+            ] as const)
+          : ([
+              [['caller', 'my card number is'], ['caller', 'okay']],
+              [['agent', 'Sure, you can pay by card.'], ['caller', 'um']],
+            ] as const);
+      for (const [es, list] of [[false, reasks], [true, reasksEs]] as const) {
+        for (const reask of list) {
+          for (const lead of leads(es)) {
+            const lines = callLeg([...lead, ['agent', reask], ...groups.map((g) => ['caller', g] as const)]);
+            expect(redactCardNumbersInCallTurns(lines), `${lead[0][1]} | ${reask}`).toEqual(
+              lines.map((l) => (l.speaker === 'caller' && /\d/.test(l.text) ? MARKER : l.text)),
+            );
+          }
+        }
+      }
+      // A documented miss: "the account number on it" names an account
+      // number, which an intake flow asks for as often as the card.
+      const lines = callLeg([
+        ['caller', 'my card number is'],
+        ['caller', 'okay'],
+        ['agent', "What's the account number on it?"],
+        ...groups.map((g) => ['caller', g] as const),
+      ]);
+      expect(redactCardNumbersInCallTurns(lines)).toBeNull();
+    });
+
+    // "Times" counting how often ("it cut out a few times", "read it two
+    // times") and "series" ("the series of numbers on the front") name no
+    // time and no serial number: read with the plural that "date" and "code"
+    // take, they were "another number", and the card read straight after
+    // them was missed. A time asked for in the plural ("What times work for
+    // you?") is still one.
+    it.each(SHAPES)('%s read after a re-ask that says "times" or "series", past a pause turn', (_name, groups) => {
+      for (const reask of [
+        'Sorry, it cut out a few times, could you read me the number again?',
+        'Sorry, the line broke up a couple of times, can you repeat the number?',
+        "It's been cutting out at times, could you repeat the digits?",
+        'Could you read me the series of numbers on the front?',
+        'Go ahead and read me the series of numbers.',
+        'Please read the number a couple more times.',
+        'Can you read the digits two times so I get them right?',
+        "Please read me the number, I'll repeat it back a few times.",
+        "Go ahead with the number; I'll read it back two times to confirm.",
+      ]) {
+        for (const lead of [
+          [['caller', 'my card number is'], ['caller', 'okay']],
+          [['agent', 'Sure, you can pay by card.'], ['caller', 'um']],
+        ] as const) {
+          const lines = callLeg([...lead, ['agent', reask], ...groups.map((g) => ['caller', g] as const)]);
+          expect(redactCardNumbersInCallTurns(lines), `${lead[0][1]} | ${reask}`).toEqual(
+            lines.map((l) => (l.speaker === 'caller' && /\d/.test(l.text) ? MARKER : l.text)),
+          );
+        }
+      }
+    });
+
+    // The card data and idioms name no other number, and nothing more:
+    // "the alarm's security code" still names the alarm, and a date or a
+    // time asked for on its own is still another number.
+    it.each(SHAPES)('%s answering an ask for an alarm security code, a date or a time, after card talk and a pause, is no card', (_name, groups) => {
+      for (const ask of [
+        'What is the alarm security code?',
+        'What are the alarm security codes?',
+        "What's the code on the back of the lockbox?",
+        'What date works for you?',
+        'What time is best for you?',
+        '¿A qué hora le queda bien?',
+      ]) {
+        for (const pause of ['okay', 'um', 'sí']) {
+          expect(
+            redactCardNumbersAcrossTurns(['my card number is', pause, ...groups], MARKER, { agentLines: [[], [], [ask]] }),
+            `${pause} | ${ask}`,
+          ).toBeNull();
+        }
+      }
+    });
+
+    /** Card talk, the agent's `ask` before or after a pause or in the card talk's own line, then the answers: no card. */
+    const expectNoCardAnswering = (ask: string, groups: readonly string[]) => {
+      for (const pause of ['okay', 'um', 'sí']) {
+        const legs: ReadonlyArray<readonly [string, readonly string[], CardSplitContext]> = [
+          ['card | pause | ask', ['my card number is', pause, ...groups], { agentLines: [[], [], [ask]] }],
+          ['card | ask | pause', ["I'll pay with my Visa at the visit", pause, ...groups], { agentLines: [[], [ask]] }],
+          ['agent card | ask | pause', [pause, ...groups], { agentLines: [['We take all major cards at the visit.', ask]] }],
+          ['card | pause | ask | pause', ['can I pay by card when they come', pause, pause, ...groups], { agentLines: [[], ['Yes, we do.'], [ask]] }],
+          ['agent card + ask | pause', [pause, ...groups], { agentLines: [[`We take all major cards at the visit. ${ask}`]] }],
+        ];
+        for (const [shape, turns, context] of legs) {
+          expect(redactCardNumbersAcrossTurns(turns, MARKER, context), `${shape}: ${pause} | ${ask}`).toBeNull();
+        }
+      }
+    };
+
+    // An ask with a period inside its sentence: an honorific ("Mr. Smith",
+    // "Sra. García"), a clock time ("the 2 p.m. visit"), an abbreviated
+    // street, unit or direction ("Elm St.", "the apt. number", "400 N.
+    // Main"), "e.g." or an ellipsis ("the gate code... for the tech?"). Split
+    // at every period, its number and its question mark fell in two
+    // "sentences", neither of them an ask for another number, and the
+    // answers after card talk and a pause were stitched into a "card".
+    it.each(SHAPES)('%s answering an ask with an abbreviation, a clock time or an ellipsis in it, after card talk and a pause, is no card', (_name, groups) => {
+      for (const ask of [
+        "What's the gate code, Mr. Smith?",
+        "What's the best callback number, Dr. Patel?",
+        'Is the lockbox code still the same, Ms. Rivera?',
+        "What's the best number to reach you before the 2 p.m. visit?",
+        "What's the gate code for the 9 a.m. appointment?",
+        "What's the gate code for the 9 A.M. visit?",
+        'Is there a gate code at 12 Elm St. for the tech?',
+        "What's the zip code for St. Petersburg?",
+        "What's the apt. number?",
+        "What's your unit number at 400 N. Main?",
+        'What zip code, e.g. 85004?',
+        'And the gate code... for the tech?',
+        'Y su código postal, Sra. García?',
+      ]) {
+        expectNoCardAnswering(ask, groups);
+      }
+    });
+
+    // Card talk whose sentence ends on an abbreviation ("We take Visa,
+    // Mastercard, Amex, etc.", "We'll charge the card at 2 p.m.", "our office
+    // on Main St.") and the ask in the next sentence of the same line. Read
+    // with no sentence ending there, the two were one sentence that named
+    // the card and asked for no other number.
+    it.each(SHAPES)('%s answering an ask said after card talk that ends on an abbreviation, past a pause, is no card', (_name, groups) => {
+      for (const talk of [
+        'We take Visa, Mastercard, Amex, etc.',
+        "We'll charge the card at 2 p.m.",
+        'We take cards at our office on Main St.',
+        "We don't take Amex, no.",
+        'Aceptamos tarjetas, Visa, Amex, etc.',
+      ]) {
+        for (const ask of ["What's the gate code?", 'Go ahead with the gate code.', '¿Cuál es el código postal?']) {
+          for (const pause of ['okay', 'um', 'sí']) {
+            expect(redactCardNumbersAcrossTurns([pause, ...groups], MARKER, { agentLines: [[`${talk} ${ask}`]] }), `${talk} ${ask} | ${pause}`).toBeNull();
+          }
+        }
+      }
+    });
+
+    // Card talk and the ask in one line with an ellipsis between them ("…",
+    // as a speech-to-text engine or the model writes it, or "..."), with or
+    // without a space after it. "... " ended a sentence, and "…" and "..."
+    // with no space never did, so the card talk and the ask were one
+    // sentence that named the card. Read as "... " is (an end, and once no
+    // end), an ask with an ellipsis inside it ("And the gate code… for the
+    // tech?") is still an ask. So is a request with "..." run straight on
+    // into its number, in a line whose card talk ends on an ellipsis or an
+    // abbreviation ("Sure, you can pay by card... Go ahead with...the gate
+    // code.", "We take Visa, Mastercard, Amex, etc. Go ahead with...the
+    // gate code."): split at that "..." too, it was "Go ahead with" and "the
+    // gate code.", and read with no end at all, one sentence with the card
+    // talk, so the line asked for nothing.
+    it.each(SHAPES)('%s answering an ask said after card talk and an ellipsis, past a pause, is no card', (_name, groups) => {
+      for (const line of [
+        "Sure, we take all major cards at the visit… what's the gate code?",
+        "Sure, we take all major cards at the visit…what's the gate code?",
+        "Sure, we take all major cards at the visit...what's the gate code?",
+        'Claro, puede pagar con tarjeta en la visita...¿cuál es el código del portón?',
+        "Sure, you can pay by card at the visit… and what's the zip code?",
+        'Sure, you can pay by card at the visit… ¿y el código postal?',
+        'Claro, puede pagar con tarjeta en la visita… ¿cuál es el código del portón?',
+        'Claro, puede pagar con tarjeta en la visita…¿cuál es el código del portón?',
+        'We take all major cards at the visit... Go ahead with...the gate code.',
+        'Sure, you can pay by card... Go ahead with...the gate code.',
+        'Sure, you can pay by card… Can I get...your gate code.',
+        'Claro, puede pagar con tarjeta…Dígame...el código del portón.',
+        'We take Visa, Mastercard, Amex, etc. Go ahead with...the gate code.',
+        "We'll charge the card at 2 p.m. Please read me...the account number.",
+      ]) {
+        for (const pause of ['okay', 'um', 'sí']) {
+          expect(redactCardNumbersAcrossTurns([pause, ...groups], MARKER, { agentLines: [[line]] }), `${line} | ${pause}`).toBeNull();
+          expect(
+            redactCardNumbersAcrossTurns(['can I pay by card when they come', pause, ...groups], MARKER, { agentLines: [[], [line]] }),
+            `${line} | ${pause}`,
+          ).toBeNull();
+        }
+      }
+      for (const ask of ['And the gate code… for the tech?', 'And the gate code…for the tech?', 'And the gate code...for the tech?', '¿Y el código del portón… para el técnico?']) {
+        expectNoCardAnswering(ask, groups);
+      }
+    });
+
+    // The number asked for in the plural ("What times work for you?",
+    // "¿Cuáles son los códigos de acceso?") is another number as the singular
+    // is, and so are a claim, tracking, permit, license, member or ID number
+    // (a "member no." too), a VIN, the last four of a social, a birthday,
+    // the number the caller is calling from or which number the tech should
+    // use.
+    it.each(SHAPES)('%s answering an ask for numbers in the plural, or for another kind of number, after card talk and a pause, is no card', (_name, groups) => {
+      for (const ask of [
+        'What times work for you?',
+        'Which times work best for you?',
+        'Which of the two addresses?',
+        '¿Cuáles son los códigos de acceso?',
+        '¿Qué fechas le quedan bien?',
+        'What number are you calling from?',
+        'Which number should the tech use?',
+        "What's your birthday?",
+        'What is the claim number?',
+        "What's the tracking number?",
+        "What's the permit number?",
+        "What's your license number?",
+        'What are the last four of your social?',
+        'Can you read me the VIN?',
+        'What is your member ID?',
+        "What's your member number?",
+        "What's your member no.?",
+        "What's your ID number?",
+        '¿Cuál es el número de reclamo?',
+        '¿Cuál es el número de serie?',
+      ]) {
+        expectNoCardAnswering(ask, groups);
+      }
+    });
+
+    // "Please hold", "one moment, please" or "un momento, por favor" is a
+    // pause the agent takes, no request: the account, the invoice or the
+    // time of payment named with it ("Please hold while I pull up your
+    // account.", "Please note there's a fee at the time of payment.") is no
+    // number asked for. Nor is "call out the number" a number to call. Read
+    // as asks for another number, the card read after them was missed.
+    type Said = readonly ['caller' | 'agent', string];
+    /** Card talk, a pause, each re-ask (`true` for Spanish; its own caller turn is the pause), then the groups: still the card. */
+    const expectCardReadAfter = (reasks: ReadonlyArray<readonly [boolean, ReadonlyArray<Said>]>, groups: readonly string[]) => {
+      const leads = (es: boolean): ReadonlyArray<ReadonlyArray<Said>> =>
+        es
+          ? [
+              [['caller', 'el número de mi tarjeta es'], ['caller', 'sí']],
+              [['agent', 'Claro, puede pagar con tarjeta.'], ['caller', 'este']],
+            ]
+          : [
+              [['caller', 'my card number is'], ['caller', 'okay']],
+              [['agent', 'Sure, you can pay by card.'], ['caller', 'um']],
+            ];
+      for (const [es, reask] of reasks) {
+        // A re-ask the caller answers ("okay") is the pause: the card is named right before it.
+        const answered = reask.some(([speaker]) => speaker === 'caller');
+        for (const lead of leads(es).map((said) => (answered ? said.slice(0, 1) : said))) {
+          const lines = callLeg([...lead, ...reask, ...groups.map((g) => ['caller', g] as const)]);
+          expect(redactCardNumbersInCallTurns(lines), [...lead, ...reask].map(([, text]) => text).join(' | ')).toEqual(
+            lines.map((l) => (l.speaker === 'caller' && /\d/.test(l.text) ? MARKER : l.text)),
+          );
+        }
+      }
+    };
+    it.each(SHAPES)('%s read after the agent puts the caller on hold, or asks to have the number called out, past a pause turn', (_name, groups) => {
+      const reasks: ReadonlyArray<readonly [boolean, ReadonlyArray<Said>]> = [
+        [false, [['agent', "One moment please while I pull up your account. Okay, what's the number?"]]],
+        [false, [['agent', "Please bear with me, I'm pulling up your account. What's the number?"]]],
+        [false, [['agent', "Thanks, please wait while I open the invoice. Ready, what's the number?"]]],
+        [false, [['agent', 'Just a moment, please, while I find your account. Go ahead.']]],
+        [false, [['agent', 'Please hold while I pull up your account.'], ['caller', 'okay'], ['agent', 'Go ahead with the number.']]],
+        [false, [['agent', 'One moment please while I pull up your account.'], ['caller', 'okay'], ['agent', "What's the number?"]]],
+        [false, [['agent', 'Thanks, please hold, I am pulling up the invoice.'], ['caller', 'okay'], ['agent', 'Ready, go ahead.']]],
+        [false, [['agent', "Please note there's a three percent fee at the time of payment."], ['caller', 'okay'], ['agent', 'Go ahead with the number.']]],
+        [false, [['agent', 'Can you call out the number for me?']]],
+        [false, [['agent', 'Could you call out the digits one more time?']]],
+        [true, [['agent', 'Un momento, por favor, mientras abro su cuenta. ¿Cuál es el número?']]],
+        [true, [['agent', 'Un momento, por favor, abro su cuenta.'], ['caller', 'sí'], ['agent', 'Listo, dígame el número.']]],
+        [true, [['agent', 'Espere, por favor, abro su factura.'], ['caller', 'sí'], ['agent', 'Listo, dígame el número.']]],
+        // "Hang on", "be patient", "give me" or "allow me" a moment or a
+        // second, "deme un momento": holds as well.
+        [false, [['agent', 'Please hang on while I pull up your account.'], ['caller', 'okay'], ['agent', 'Go ahead with the number.']]],
+        [false, [['agent', 'Please give me a moment while I pull up your account.'], ['caller', 'okay'], ['agent', 'Go ahead with the number.']]],
+        [false, [['agent', 'Please allow me a moment to pull up your account.'], ['caller', 'okay'], ['agent', 'Go ahead with the number.']]],
+        [false, [['agent', 'Please be patient while I pull up your account.'], ['caller', 'okay'], ['agent', 'Go ahead with the number.']]],
+        [false, [['agent', 'Please give me a second to open your account.'], ['caller', 'okay'], ['agent', 'Okay, go ahead.']]],
+        [false, [['agent', "Give me a moment while I pull up your account. Okay, what's the number?"]]],
+        [true, [['agent', 'Por favor, deme un momento mientras abro su cuenta.'], ['caller', 'sí'], ['agent', 'Listo, dígame el número.']]],
+        [true, [['agent', 'Deme un segundo, busco su cuenta. Listo, ¿cuál es el número?']]],
+      ];
+      expectCardReadAfter(reasks, groups);
+      // A hold, then an ask for another number, still asks for it.
+      for (const ask of ["Please hold. What's the gate code?", 'One moment please, and the gate code?', 'Un momento, por favor. ¿Cuál es el código postal?']) {
+        expectNoCardAnswering(ask, groups);
+      }
+    });
+
+    // A hold that asks the caller to fetch another number, or have it ready
+    // ("Please hold on while you grab your account number.", "Please hold
+    // and have your account number ready.", "Please note we'll need your
+    // gate code.", "Espere, por favor, y tenga a mano el código del
+    // portón."): with the hold's "please" set aside, the sentence held no
+    // request, and the number the caller then read out after card talk and
+    // a pause was stitched into a "card" (the caller's words rewritten, the
+    // recording's audio purged). The fetch is the request, and it wins over
+    // a hold said with it ("Please give me a moment while you find your gate
+    // code."); so does a second number asked for ("Please give me a second
+    // phone number.", "Give me a second gate code.", "Give me a second,
+    // alternate phone number.", "Please give me a second way to reach
+    // you.", "Deme un segundo código."), which read as a hold and asked for
+    // nothing.
+    it.each(SHAPES)('%s answering a hold that asks the caller to fetch another number, after card talk and a pause, is no card', (_name, groups) => {
+      for (const ask of [
+        'Please hold on while you grab your account number.',
+        'Please hold and have your account number ready.',
+        'One moment, please, while you find the account number.',
+        'Please wait while you look up the gate code.',
+        'Please stay on the line and have your gate code handy.',
+        "Please note we'll need your gate code.",
+        'Un momento, por favor, mientras busca el número de cuenta.',
+        'Espere, por favor, y tenga a mano el código del portón.',
+        'Please give me a moment while you find your gate code.',
+        'Por favor, deme un momento mientras busca el código del portón.',
+        'Please give me a second phone number.',
+        'Deme un segundo número de teléfono.',
+        'Give me a second gate code.',
+        'Give me a second, alternate phone number.',
+        'Please give me a second way to reach you.',
+        'Deme un segundo código.',
+      ]) {
+        expectNoCardAnswering(ask, groups);
+      }
+    });
+
+    // A re-ask that has the caller fetch the card while the agent pulls up
+    // the account, the invoice or the order itself ("While you grab that,
+    // I'll pull up your invoice.", "okay", "Okay, go ahead."; "Have your
+    // number ready while I pull up the invoice."; "Mientras busca, abro su
+    // factura."). Read as a request for every number its sentence named,
+    // the fetch made the agent's own invoice or account "another number",
+    // and the card read straight after it was missed. A fetch asks only for
+    // what it fetches, in its own clause (to a comma, a dash or a bracket,
+    // or to where the agent says what it does itself, "I'll pull up"; what
+    // is needed, to the "to" of what it is for); a fetch of another number
+    // still asks for it, whatever the agent pulls up.
+    it.each(SHAPES)('%s read after a re-ask that has the caller fetch the card while the agent pulls up an account, invoice or order, past a pause turn', (_name, groups) => {
+      expectCardReadAfter(
+        [
+          [false, [['agent', "I'll pull up your account while you grab the number."]]],
+          [false, [['agent', 'While you grab the number, I will pull up the invoice.']]],
+          [false, [['agent', "While you grab that, I'll pull up your invoice."], ['caller', 'okay'], ['agent', 'Okay, go ahead.']]],
+          [false, [['agent', 'While you get it, let me open your account.'], ['caller', 'okay'], ['agent', "Go ahead whenever you're ready."]]],
+          [false, [['agent', "I'll pull up the invoice while you get that."], ['caller', 'okay'], ['agent', 'Go ahead.']]],
+          [false, [['agent', "While you're finding it, I'll bring up your order."], ['caller', 'okay'], ['agent', 'Go ahead.']]],
+          [false, [['agent', "We'll need that to pay off the invoice."], ['caller', 'okay'], ['agent', 'Go ahead.']]],
+          [false, [['agent', 'I will need the number to close out the invoice.']]],
+          [false, [['agent', 'We will need the long number to settle the invoice.']]],
+          [true, [['agent', 'Mientras busca, abro su factura.'], ['caller', 'sí'], ['agent', 'Dígame.']]],
+          [true, [['agent', 'Tenga a mano el número, abro su cuenta.'], ['caller', 'sí'], ['agent', 'Dígame.']]],
+          [false, [['agent', 'Have your number ready while I pull up the invoice.'], ['caller', 'okay'], ['agent', 'Go ahead.']]],
+          [false, [['agent', 'Let me pull up your account while you get the number ready.']]],
+          [false, [['agent', "We'll need the number on the front, and I'll pull up your account."]]],
+          // With no comma before what the agent does itself.
+          [false, [['agent', "While you grab the number I'll pull up the invoice."], ['caller', 'okay'], ['agent', 'Go ahead.']]],
+          [false, [['agent', 'While you grab the number and I pull up your account, go ahead.']]],
+          [false, [['agent', 'While you get that I will open your account.'], ['caller', 'okay'], ['agent', 'Go ahead.']]],
+          [false, [['agent', "We'll need the number to pay the invoice and the account."], ['caller', 'okay'], ['agent', 'Go ahead.']]],
+          // With a dash or a bracket before it, as the model writes them.
+          [false, [['agent', "While you grab that—I'll pull up your invoice."], ['caller', 'okay'], ['agent', 'Go ahead.']]],
+          [false, [['agent', "While you grab that–I'll pull up your invoice."], ['caller', 'okay'], ['agent', 'Go ahead.']]],
+          [false, [['agent', "While you grab the number (I'll pull up the invoice)."], ['caller', 'okay'], ['agent', 'Go ahead.']]],
+          [false, [['agent', "We'll need that—then the invoice is paid."], ['caller', 'okay'], ['agent', 'Go ahead.']]],
+          [true, [['agent', 'Mientras busca el número—abro su factura.'], ['caller', 'sí'], ['agent', 'Dígame.']]],
+        ],
+        groups,
+      );
+      for (const ask of [
+        "While you grab your gate code, I'll pull up your account.",
+        "I'll pull up the invoice while you find the account number.",
+        "While you grab the gate code I'll wait.",
+        'Have your gate code ready while I pull up the invoice.',
+        "We'll need your gate code to let the tech in.",
+        "We'll need your number to call you back.",
+        'We will need to get your gate code.',
+        "We'll need you to grab the gate code.",
+        'Mientras busca el código del portón, abro su factura.',
+        'While you grab your gate code—I will pull up your account.',
+        'Mientras busca el código del portón—abro su factura.',
+      ]) {
+        expectNoCardAnswering(ask, groups);
+      }
+    });
+
+    // A fetch is read to where it ends a character at a time, and every
+    // sentence of an agent line is read: a long run of spaces after "we
+    // will need" or "while you", or of ellipses, costs in proportion to its
+    // length, never its square (a lookahead over the whole run at every
+    // space took 50 ms for 2,000 spaces and seconds for 20,000).
+    it('reads a long agent line for an ask in time proportional to its length', () => {
+      const best = (run: () => unknown): number => {
+        let fastest = Infinity;
+        for (let k = 0; k < 3; k++) {
+          const started = performance.now();
+          run();
+          fastest = Math.min(fastest, performance.now() - started);
+        }
+        return fastest;
+      };
+      const legAfter = (line: string) =>
+        callLeg([['caller', 'my card number is'], ['agent', line], ['caller', 'okay'], ...['4111', '1111', '1111', '1111'].map((g) => ['caller', g] as const)]);
+      for (const make of [
+        (n: number) => `we will need you${' '.repeat(n)}`,
+        (n: number) => `while you${' '.repeat(n)}`,
+        (n: number) => '...a'.repeat(n / 4),
+      ]) {
+        const small = legAfter(make(2_000));
+        const large = legAfter(make(16_000));
+        const smallMs = best(() => redactCardNumbersInCallTurns(small));
+        const largeMs = best(() => redactCardNumbersInCallTurns(large));
+        expect(largeMs, make(8).trim()).toBeLessThan(2.5 * 8 * smallMs + 20);
+      }
+    });
+
+    // "id" and "vin" name another number only as words of their own, and
+    // "member" only as a member number or ID: "Did you find it?", "Are you
+    // driving?", "Do you remember it?", "Members get ten percent off" and "a
+    // family member's name" ask for none, and the card read after them is
+    // still the card. Nor is "which number" another number unless it asks
+    // which one to use ("Which number should the tech use?"): "Sorry, which
+    // number was that?" asks for the card again.
+    it.each(SHAPES)('%s read after a re-ask that holds "id", "vin" or "member" inside a word, or asks which number was said, past a pause turn', (_name, groups) => {
+      for (const reask of [
+        'Did you find it? Go ahead with the number.',
+        "Are you driving? Go ahead when you're ready.",
+        "Do you remember it? What's the number?",
+        'Members get ten percent off, so please read me the number.',
+        "Is that in a family member's name? Go ahead with the number.",
+        'Sorry, which number was that?',
+        'Which number is on the front?',
+      ]) {
+        const lines = callLeg([
+          ['caller', 'my card number is'],
+          ['caller', 'okay'],
+          ['agent', reask],
+          ...groups.map((g) => ['caller', g] as const),
+        ]);
+        expect(redactCardNumbersInCallTurns(lines), reask).toEqual(lines.map((l) => (l.speaker === 'caller' && /\d/.test(l.text) ? MARKER : l.text)));
+      }
+    });
   });
 
   it('does not join digits that do not touch the turn boundary', () => {
@@ -1230,7 +2257,7 @@ describe('redactCardNumbersAcrossTurns — seeded intake simulation', () => {
       { length: 16, prefix: '4', turns: [4, 4, 4, 4] },
       { length: 16, prefix: '5', turns: [8, 8] }, // two halves of eight
       { length: 16, prefix: '6011', turns: [4, 4, 8] },
-      { length: 16, prefix: '2', turns: [12, 4] },
+      { length: 16, prefix: String(2221 + Math.floor(random() * 500)), turns: [12, 4] }, // a 2-series Mastercard
       { length: 19, prefix: '4', turns: [4, 4, 4, 4, 3] },
       { length: 19, prefix: '6', turns: [8, 4, 7] },
       { length: 15, prefix: '37', turns: [4, 6, 5] }, // Amex
@@ -1254,15 +2281,19 @@ describe('redactCardNumbersAcrossTurns — seeded intake simulation', () => {
           const trail = k === parts.length - 1 ? pick(['', ' thanks', '.']) : pick(['', ',', '...']);
           return `${lead}${written}${trail}`;
         });
-        const mentioned = turns.some((size) => size > 4) || spoken[0].startsWith('my card is');
+        // A window with a turn of four digits or fewer needs the card
+        // mentioned near it; the agent does where the caller does not.
+        const mentioned = turns.every((size) => size > 4) || spoken[0].startsWith('my card is');
         const agentLines = mentioned
           ? []
           : [
-              pick([
-                "Sorry, I can't take card numbers over the phone.",
-                "For your security, please don't read your card number to me.",
-                'Is that a credit card?',
-              ]),
+              [
+                pick([
+                  "Sorry, I can't take card numbers over the phone.",
+                  "For your security, please don't read your card number to me.",
+                  'Is that a credit card?',
+                ]),
+              ],
             ];
         total++;
         const rewritten = redactCardNumbersAcrossTurns(spoken, MARKER, { agentLines });
@@ -1458,8 +2489,8 @@ describe('redactCardFragments', () => {
   });
 });
 
-describe('agentLinesAround', () => {
-  it("takes the agent's last line before the window's first turn and every agent line after it", () => {
+describe('agentLinesBefore', () => {
+  it("takes, for each caller turn of a window, the agent's lines since the caller's previous line", () => {
     const lines = [
       { speaker: 'agent' as const, text: 'hi' },
       { speaker: 'caller' as const, text: 'I need a plumber' },
@@ -1467,13 +2498,15 @@ describe('agentLinesAround', () => {
       { speaker: 'caller' as const, text: '12 Main' },
       { speaker: 'caller' as const, text: '4111' },
       { speaker: 'agent' as const, text: 'go on' },
+      { speaker: 'agent' as const, text: 'and the rest?' },
       { speaker: 'caller' as const, text: '1111' },
-      { speaker: 'agent' as const, text: 'said after the current turn' },
+      { speaker: 'agent' as const, text: 'said after the last turn' },
     ];
-    // Window: the caller turns at 3, 4 and 6; the current turn is 6.
-    expect(agentLinesAround(lines, 3, 6)).toEqual(['what is the address?', 'go on']);
-    // No agent line before the first turn.
-    expect(agentLinesAround(lines.slice(1), 0, 3)).toEqual(['what is the address?']);
+    // Window: the caller turns at 3, 4 and 7.
+    expect(agentLinesBefore(lines, [3, 4, 7])).toEqual([['what is the address?'], [], ['go on', 'and the rest?']]);
+    // A turn not stored yet comes after every line.
+    expect(agentLinesBefore(lines, [7, 9])).toEqual([['go on', 'and the rest?'], ['said after the last turn']]);
+    expect(agentLinesBefore(lines.slice(1), [0])).toEqual([[]]);
   });
 });
 
