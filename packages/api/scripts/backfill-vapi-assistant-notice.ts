@@ -29,7 +29,7 @@ import type { Pool } from 'pg';
 import { createPool } from '../src/db/pool';
 import { tenantQuery } from '../src/workers/tenant-query';
 import { getVapiClient, type VapiClient } from '../src/integrations/vapi/client';
-import { buildAssistantConfig, vapiNoticeLanguage } from '../src/integrations/vapi/assistant-config';
+import { vapiFirstMessageForSettings } from '../src/integrations/vapi/assistant-config';
 
 /** One tenant's Vapi assistant and the settings its first message is built from. */
 export interface VapiNoticeRow {
@@ -136,12 +136,7 @@ export async function listVapiAssistantsForBackfill(
 
 /** The first message provisioning would build for this tenant today. */
 export function firstMessageFor(row: VapiNoticeRow): string {
-  return buildAssistantConfig({
-    businessName: row.businessName ?? 'ServiceOS',
-    greeting: row.greeting,
-    services: row.services,
-    language: vapiNoticeLanguage(row.defaultLanguage),
-  }).firstMessage;
+  return vapiFirstMessageForSettings(row);
 }
 
 export async function runVapiNoticeBackfill(opts: {

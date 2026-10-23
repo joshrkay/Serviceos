@@ -7,6 +7,7 @@ import {
   autoGenerateGreeting,
   vapiFirstMessage,
   vapiNoticeLanguage,
+  vapiFirstMessageForSettings,
 } from '../integrations/vapi/assistant-config';
 
 /**
@@ -101,4 +102,46 @@ export async function saveVoiceConfig(
   );
 
   return { voiceId: preset.id, greeting, assistantUpdated };
+}
+
+export type VapiFirstMessageRefresh = 'updated' | 'no_assistant' | 'failed';
+
+/**
+ * PRIV-4 — re-push an existing assistant's first message after a settings
+ * change that alters it without a voice-config save (the tenant's
+ * `default_language`, which picks the virtual-assistant notice's language).
+ * Only `firstMessage` is written. Best-effort like {@link saveVoiceConfig}:
+ * the setting is already persisted, so a Vapi failure is reported to the
+ * caller as `'failed'` rather than thrown.
+ */
+export async function refreshVapiFirstMessage(
+  deps: { pool: Pick<Pool, 'query'>; vapiClient: Pick<VapiClient, 'updateAssistant'> },
+  tenantId: string,
+): Promise<VapiFirstMessageRefresh> {
+  const { rows } = await deps.pool.query<{
+    vapi_assistant_id: string | null;
+    business_name: string | null;
+    voice_greeting: string | null;
+    services_offered: string[] | null;
+    default_language: string | null;
+  }>(
+    `SELECT vapi_assistant_id, business_name, voice_greeting, services_offered, default_language
+       FROM tenant_settings WHERE tenant_id = $1`,
+    [tenantId],
+  );
+  const s = rows[0];
+  if (!s?.vapi_assistant_id) return 'no_assistant';
+  try {
+    await deps.vapiClient.updateAssistant(s.vapi_assistant_id, {
+      firstMessage: vapiFirstMessageForSettings({
+        businessName: s.business_name,
+        greeting: s.voice_greeting,
+        services: s.services_offered,
+        defaultLanguage: s.default_language,
+      }),
+    });
+    return 'updated';
+  } catch {
+    return 'failed';
+  }
 }

@@ -3,17 +3,20 @@
  * cross-tenant `tenant_integrations` read under `app.system_lookup`, then
  * `vapi_assistant_id`, `business_name`, `voice_greeting`, `services_offered`
  * and `default_language` from `tenant_settings` under each tenant's own RLS
- * context (a mocked Pool is never the only proof a query works).
+ * context (a mocked Pool is never the only proof a query works). The same
+ * columns back `refreshVapiFirstMessage`, the language-change re-push.
  *
  * Run (Docker-gated):
  *   cd packages/api && RLS_RUNTIME_ROLE=true npx vitest run \
  *     --config vitest.integration.config.mts \
  *     test/integration/backfill-vapi-assistant-notice.test.ts
  */
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, vi } from 'vitest';
 import type { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant } from './shared';
 import { listVapiAssistantsForBackfill } from '../../scripts/backfill-vapi-assistant-notice';
+import { refreshVapiFirstMessage } from '../../src/voice/voice-config';
+import { tenantQuery } from '../../src/workers/tenant-query';
 
 describe('PRIV-4 — listVapiAssistantsForBackfill at real Postgres', () => {
   let pool: Pool;
@@ -69,5 +72,27 @@ describe('PRIV-4 — listVapiAssistantsForBackfill at real Postgres', () => {
   it('narrows to one tenant with --tenant-id', async () => {
     const rows = await listVapiAssistantsForBackfill(pool, vapiTenant);
     expect(rows.map((r) => r.tenantId)).toEqual([vapiTenant]);
+  });
+
+  it('refreshVapiFirstMessage reads the same columns under the tenant context and pushes the Spanish notice', async () => {
+    const updateAssistant = vi.fn(async () => undefined);
+    const scoped = (tenantId: string) => ({
+      query: (sql: string, params: unknown[]) => tenantQuery(pool, tenantId, sql, params),
+    });
+    const outcome = await refreshVapiFirstMessage(
+      { pool: scoped(vapiTenant) as never, vapiClient: { updateAssistant } },
+      vapiTenant,
+    );
+    expect(outcome).toBe('updated');
+    expect(updateAssistant).toHaveBeenCalledWith('asst_priv4', {
+      firstMessage: 'Gracias por llamar. Para que lo sepa, soy un asistente virtual, no una persona real.',
+    });
+
+    const none = await refreshVapiFirstMessage(
+      { pool: scoped(plainTenant) as never, vapiClient: { updateAssistant } },
+      plainTenant,
+    );
+    expect(none).toBe('no_assistant');
+    expect(updateAssistant).toHaveBeenCalledTimes(1);
   });
 });

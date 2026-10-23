@@ -1,5 +1,5 @@
 import { describe, it, expect, vi } from 'vitest';
-import { saveVoiceConfig } from '../../src/voice/voice-config';
+import { saveVoiceConfig, refreshVapiFirstMessage } from '../../src/voice/voice-config';
 import { resolveVoicePreset } from '../../src/integrations/vapi/assistant-config';
 
 function makePool(settings: { business_name?: string | null; services_offered?: string[] | null; vapi_assistant_id?: string | null; default_language?: string | null }) {
@@ -81,5 +81,43 @@ describe('saveVoiceConfig', () => {
     const res = await saveVoiceConfig({ pool, auditRepo }, { tenantId: 't1', actorId: 'u1', voiceId: 'nope' });
     expect(res.voiceId).toBe('rachel');
     expect(updates[0].params[0]).toBe('rachel');
+  });
+});
+
+describe('refreshVapiFirstMessage (PRIV-4 language change)', () => {
+  function settingsPool(row: Record<string, unknown> | undefined) {
+    return { query: vi.fn(async () => ({ rows: row ? [row] : [] })) } as never;
+  }
+  const spanish = {
+    vapi_assistant_id: 'asst_1',
+    business_name: 'Acme HVAC',
+    voice_greeting: null,
+    services_offered: ['heating'],
+    default_language: 'es',
+  };
+
+  it('pushes only the first message, rebuilt in the new language', async () => {
+    const updateAssistant = vi.fn(async () => undefined);
+    const outcome = await refreshVapiFirstMessage({ pool: settingsPool(spanish), vapiClient: { updateAssistant } }, 't1');
+    expect(outcome).toBe('updated');
+    expect(updateAssistant).toHaveBeenCalledWith('asst_1', {
+      firstMessage:
+        'Thanks for calling Acme HVAC. We handle heating. How can I help you today? Para que lo sepa, soy un asistente virtual, no una persona real.',
+    });
+  });
+
+  it('does nothing for a tenant without an assistant', async () => {
+    const updateAssistant = vi.fn(async () => undefined);
+    const noAssistant = { ...spanish, vapi_assistant_id: null };
+    expect(await refreshVapiFirstMessage({ pool: settingsPool(noAssistant), vapiClient: { updateAssistant } }, 't1')).toBe('no_assistant');
+    expect(await refreshVapiFirstMessage({ pool: settingsPool(undefined), vapiClient: { updateAssistant } }, 't1')).toBe('no_assistant');
+    expect(updateAssistant).not.toHaveBeenCalled();
+  });
+
+  it('reports a Vapi failure instead of throwing', async () => {
+    const updateAssistant = vi.fn(async () => {
+      throw new Error('vapi 503');
+    });
+    expect(await refreshVapiFirstMessage({ pool: settingsPool(spanish), vapiClient: { updateAssistant } }, 't1')).toBe('failed');
   });
 });

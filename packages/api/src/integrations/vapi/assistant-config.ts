@@ -69,6 +69,26 @@ export function vapiFirstMessage(
   return `${greeting.trim()} ${buildAiDisclosureText({ businessName, language })}`.trim();
 }
 
+/**
+ * The first message an existing assistant should carry for these
+ * `tenant_settings` values, built exactly as provisioning builds it (stored
+ * greeting, else the auto greeting; `default_language` picks the notice's
+ * language). Shared by every re-push so they cannot drift apart.
+ */
+export function vapiFirstMessageForSettings(s: {
+  businessName: string | null;
+  greeting: string | null;
+  services: string[] | null;
+  defaultLanguage: string | null;
+}): string {
+  return buildAssistantConfig({
+    businessName: s.businessName ?? 'ServiceOS',
+    greeting: s.greeting,
+    services: s.services ?? [],
+    language: vapiNoticeLanguage(s.defaultLanguage),
+  }).firstMessage;
+}
+
 /** Narrow a `tenant_settings.default_language` value to a supported language. */
 export function vapiNoticeLanguage(defaultLanguage: string | null | undefined): Language {
   return defaultLanguage === 'es' ? 'es' : 'en';
