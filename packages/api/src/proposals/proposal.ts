@@ -988,13 +988,21 @@ export interface ProposalRepository {
   createMany(proposals: Proposal[]): Promise<Proposal[]>;
   findById(tenantId: string, id: string): Promise<Proposal | null>;
   /**
-   * The locking read of a proposal SET (onboarding/draft/locked-set.ts): this
-   * tenant's rows among `ids`, ordered by id, each `SELECT ... FOR UPDATE` until
-   * the request transaction ends. A missing or foreign id is simply absent from
-   * the result. The fixed order means two callers locking the same set cannot
-   * deadlock. Only meaningful inside the /api request transaction: the Pg
-   * implementation refuses to run outside one (a lock taken on a throwaway
-   * connection is released at once). In memory it is a plain ordered read.
+   * The locking read of a proposal SET (onboarding/draft/locked-set.ts) or of
+   * one row (resolve-entity.ts, resolve-line.ts): this tenant's rows among
+   * `ids`, ordered by id, each `SELECT ... FOR UPDATE` until the transaction
+   * ends. A missing or foreign id is simply absent from the result. The fixed
+   * order means two callers locking the same set cannot deadlock. Only
+   * meaningful inside a tenant transaction: the Pg implementation refuses to
+   * run outside one (a lock taken on a throwaway connection is released at
+   * once).
+   *
+   * The in-memory implementation locks NOTHING. A caller that writes from the
+   * result must not rely on the lock: write through `updateIfUnchanged`
+   * against the row it read (or a write conditional on what it decided from,
+   * such as `updateStatusIf` for a status move), or hold `scope.lock` on the
+   * row's id for the whole read-decide-write. Under the Pg lock the compare
+   * always passes, so the outcome there is the same.
    */
   findByIdsForUpdate(tenantId: string, ids: string[]): Promise<Proposal[]>;
   findByTenant(tenantId: string): Promise<Proposal[]>;
@@ -1506,7 +1514,18 @@ export class InMemoryProposalRepository implements ProposalRepository {
     return structuredClone(proposal);
   }
 
-  /** Plain ordered read (deep copies, like findById): in-memory callers are single-threaded, so there is nothing to lock. */
+  /**
+   * A plain ordered read of deep copies (like findById). It locks NOTHING:
+   * there is no row lock here, and InMemoryTransactionRunner holds a lock only
+   * when asked through `scope.lock`. Requests interleave at every await, so
+   * another pick, an edit or a decision can land between this read and the
+   * caller's write. Every caller that writes from the result must therefore
+   * write through `updateIfUnchanged` against the row it read (or a write
+   * conditional on what it decided from, such as `updateStatusIf`), or hold a
+   * `scope.lock` on the row for the whole read-decide-write; a plain `update`
+   * built from this read erases whatever landed in between (Codex on #1811,
+   * resolve-entity.ts and resolve-line.ts).
+   */
   async findByIdsForUpdate(tenantId: string, ids: string[]): Promise<Proposal[]> {
     return [...new Set(ids)]
       .sort()
