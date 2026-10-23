@@ -28,6 +28,7 @@ import { loadOnboardingFacts } from '../../src/onboarding/load-facts';
 import { deriveOnboardingStatus } from '../../src/onboarding/derive-status';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 import { withTenantTransaction } from '../../src/middleware/tenant-context';
+import { PgTenantTransactionRunner } from '../../src/db/tenant-transaction';
 
 const BASE = '/api/onboarding/draft';
 const CREATE = {
@@ -69,7 +70,7 @@ describe('POST /draft/undo (real DB)', () => {
     app.use('/api', withTenantTransaction(pool));
     app.use(BASE, createOnboardingDraftRouter({ draftRepo, tierRepo: new PgRegionalPriceTierRepository(pool), proposalRepo, auditRepo }));
     // The inbox, for the split-pair case (one member undone from it).
-    app.use('/api/proposals', createProposalsRouter(proposalRepo, undefined, auditRepo));
+    app.use('/api/proposals', createProposalsRouter(proposalRepo, new PgTenantTransactionRunner(pool), undefined, auditRepo));
   });
 
   beforeEach(async () => {

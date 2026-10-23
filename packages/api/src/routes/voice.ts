@@ -170,6 +170,10 @@ export function createVoiceRouter(
    * browser dictation client. The long-lived DEEPGRAM_API_KEY never leaves the
    * server; the browser opens the streaming WebSocket with this short-lived
    * token. Authenticated + tenant-scoped like every other voice route.
+   *
+   * Runs outside the request transaction (LLM_LONG_CALL_ROUTES): the grant
+   * fetch is an external call with no deadline of its own. The audit row is
+   * the only DB touch and names the tenant explicitly.
    */
   router.post(
     '/stream-token',
@@ -331,6 +335,11 @@ export function createVoiceRouter(
    *
    * S3-2 — the per-user cap is charged after the cache lookup, one unit per
    * clip synthesized, from the budget the batch route shares.
+   *
+   * Runs outside the request transaction (LLM_LONG_CALL_ROUTES in
+   * middleware/tenant-context.ts): the provider call can take up to 30s, and
+   * it must not pin a pooled connection meanwhile. Every DB touch here (the
+   * voice setting, the audit row) is a repo call with an explicit tenantId.
    */
   router.post(
     '/tts',
@@ -471,6 +480,10 @@ export function createVoiceRouter(
    * whole turn (the client degrades the turn); clips already made stay
    * cached, and the units already taken are not refunded, since the
    * provider may have billed the failed call.
+   *
+   * Outside the request transaction, like POST /tts: up to four clips in
+   * sequence can outlast the 60s idle-in-transaction timeout, which killed
+   * the backend and answered 500 for a turn whose clips were already billed.
    */
   router.post(
     '/tts/batch',
@@ -584,6 +597,11 @@ export function createVoiceRouter(
   /**
    * POST /transcribe — Synchronous transcription.
    * Accepts multipart form with 'audio' field, returns { transcript, metadata } immediately.
+   *
+   * Runs outside the request transaction (LLM_LONG_CALL_ROUTES): reading the
+   * upload and the Whisper call (60s timeout) must not pin a pooled
+   * connection. Its one DB touch, the completed/failed audit row, names the
+   * tenant explicitly and commits on its own.
    */
   router.post(
     '/transcribe',

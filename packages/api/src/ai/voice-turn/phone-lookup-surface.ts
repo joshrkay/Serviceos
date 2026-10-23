@@ -15,7 +15,9 @@
  *   1. Identity. The caller IS the customer for customer-scoped lookups
  *      (`session.customerId` from caller-ID identification), and the
  *      ACTOR is `session.actorUserId`, resolved once at session
- *      establishment (`telephony/phone-actor.ts`). The shared module's
+ *      establishment (`telephony/phone-actor.ts`) — and, on an owner line,
+ *      dropped for any turn on which the line no longer resolves (B3-1,
+ *      the turn processor's `refreshOwnerLine`). The shared module's
  *      RBAC gate does the authorising — there is no ownerSession /
  *      extendedIntents check at dispatch any more. The tenant flag still
  *      decides whether the classifier OFFERS the owner-extended intents;

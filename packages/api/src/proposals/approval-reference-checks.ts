@@ -16,7 +16,7 @@
  * kind; wire them where the repositories live (app.ts), never inside the
  * action layer.
  */
-import type { Proposal, ProposalType } from './proposal';
+import { missingFieldsFor, type Proposal, type ProposalType } from './proposal';
 import type { InvoiceRepository } from '../invoices/invoice';
 import type { JobRepository } from '../jobs/job';
 import type { CustomerRepository } from '../customers/customer';
@@ -411,6 +411,24 @@ export function describeDanglingReferences(fields: readonly string[]): string {
   if (fields.includes(INVOICE_NOT_SENDABLE)) parts.push(INVOICE_NOT_SENDABLE_SENTENCE);
   for (const [gap, sentence] of SMS_BLOCKED_SENTENCES) if (fields.includes(gap)) parts.push(sentence);
   return `Cannot approve proposal: ${parts.join('; ')}`;
+}
+
+/**
+ * B4 follow-up / B3-5 — did approveProposal refuse a card the reference
+ * checks hold, rather than one with an unfilled field? Both refusals carry
+ * `details.missingFields`; only a card with no unfilled field of its own was
+ * held by a check (its job belongs to another customer, an id names nothing).
+ * The linked-step gate sets `missingFields: ['linkedStep']` too, and always
+ * `linkedStepReason` beside it, so it is not one (B3-4). The SMS Y reply and
+ * the voice approval both say "something on it needs fixing first" for these,
+ * and "missing required info" for the rest.
+ */
+export function isReferenceCheckHold(details: Record<string, unknown> | undefined, proposal: Proposal): boolean {
+  return (
+    Array.isArray(details?.missingFields) &&
+    details?.linkedStepReason === undefined &&
+    missingFieldsFor(proposal).length === 0
+  );
 }
 
 /**

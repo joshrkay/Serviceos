@@ -25,6 +25,7 @@ import {
   describeDanglingReferences,
   askForExecutabilityGaps,
   holdForExecutability,
+  isReferenceCheckHold,
 } from '../../src/proposals/approval-reference-checks';
 import { InMemoryJobRepository, type Job } from '../../src/jobs/job';
 import { InMemoryLocationRepository, createLocation } from '../../src/locations/location';
@@ -317,5 +318,44 @@ describe('jobReferenceCheck — a drafted jobId must name this tenant\'s job, of
     expect(describeDanglingReferences(held.gaps)).toMatch(/different customer/);
     expect(askForExecutabilityGaps(held.gaps)).toMatch(/different customer/);
     expect(askForExecutabilityGaps(held.gaps)).not.toMatch(/does not name an existing record/);
+  });
+});
+
+// B3-5 — the one reading the SMS Y reply and the voice approval share of an
+// approveProposal ValidationError: a hold by the reference checks, or not.
+describe('isReferenceCheckHold', () => {
+  const complete = createProposal({
+    tenantId,
+    proposalType: 'create_appointment',
+    payload: { customerName: 'Mrs Lee', scheduledStart: '2026-06-16T19:00:00Z', scheduledEnd: '2026-06-16T20:00:00Z' },
+    summary: 'Book Mrs Lee',
+    createdBy: actorId,
+  });
+  const unfilled = createProposal({
+    tenantId,
+    proposalType: 'create_appointment',
+    payload: { customerName: 'Mrs Lee' },
+    summary: 'Book Mrs Lee',
+    createdBy: actorId,
+    sourceContext: { missingFields: ['scheduledStart'] },
+  });
+
+  it('a field-naming refusal on a card with no unfilled field is a reference-check hold', () => {
+    expect(isReferenceCheckHold({ missingFields: ['jobId'] }, complete)).toBe(true);
+  });
+
+  it('a card with an unfilled field is not, whatever the refusal names', () => {
+    expect(isReferenceCheckHold({ missingFields: ['scheduledStart'] }, unfilled)).toBe(false);
+  });
+
+  it('the linked-step gate is not, though it names a field too', () => {
+    expect(
+      isReferenceCheckHold({ missingFields: ['linkedStep'], linkedStepReason: 'approve_parent_first' }, complete),
+    ).toBe(false);
+  });
+
+  it('a refusal that names no fields (an expired window) is not', () => {
+    expect(isReferenceCheckHold({ proposalId: complete.id, expiresAt: new Date() }, complete)).toBe(false);
+    expect(isReferenceCheckHold(undefined, complete)).toBe(false);
   });
 });

@@ -313,6 +313,7 @@ export default defineConfig<DevAuthFixtures>({
               'review-response-approval-mobile.spec.ts',
               'job-scheduling-mobile.spec.ts',
               'settings-mobile.spec.ts',
+              'supervisor-backup-mobile.spec.ts',
               'technician-day-mobile.spec.ts',
               'customer-archive-mobile.spec.ts',
               'shell-mobile.spec.ts',

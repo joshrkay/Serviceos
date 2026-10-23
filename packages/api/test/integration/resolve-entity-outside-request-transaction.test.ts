@@ -250,16 +250,13 @@ describe('A1 — resolve-entity holds no connection across its LLM call and comm
       '/api/proposals',
       createProposalsRouter(
         proposalRepo,
+        new PgTenantTransactionRunner(pool),
         undefined,
         auditRepo,
         undefined,
         undefined,
         undefined,
         createRedraftHandlerFactory({ gateway }),
-        undefined,
-        undefined,
-        undefined,
-        new PgTenantTransactionRunner(pool),
       ),
     );
 
@@ -513,6 +510,124 @@ describe('A1 — resolve-entity holds no connection across its LLM call and comm
     expect(lock).toBeGreaterThan(after.indexOf('BEGIN'));
     expect(after[lock + 1]).toBe('ROLLBACK');
     expect(after.some((s) => s.startsWith('UPDATE proposals'))).toBe(false);
+  });
+
+  // ── A3-1 — an edit that commits in the gap is never overwritten ─────────
+
+  const EDITED_TRANSCRIPT = 'invoice Bob for the water heater and the filter';
+
+  /**
+   * Runs the pick with a real owner edit (PUT /api/proposals/:id) committed
+   * between the pick's read and its transaction - for the re-draft, before
+   * its LLM call - and returns the pick's response and the SQL it sent after
+   * the gate opened.
+   */
+  async function pickRacingAnEdit(proposalId: string) {
+    log.length = 0;
+    // A4-5 — probes from earlier tests in the file must not count for this pick.
+    llmProbes.length = 0;
+    llmEntered = deferred();
+    releaseLlm = deferred();
+    releaseLlm.resolve();
+    readGate.reached = deferred();
+    readGate.release = deferred();
+    readGate.armedFor = proposalId;
+    const pick = post(`/api/proposals/${proposalId}/resolve-entity`, tenantA, { candidateId: CUST_B });
+    await readGate.reached.promise;
+
+    const edited = await fetch(`${baseUrl}/api/proposals/${proposalId}`, {
+      method: 'PUT',
+      headers: {
+        'content-type': 'application/json',
+        'x-test-tenant': tenantA.tenantId,
+        'x-test-user': tenantA.userId,
+      },
+      body: JSON.stringify({ edits: { transcript: EDITED_TRANSCRIPT } }),
+    });
+    expect(edited.status).toBe(200);
+    expect((await proposalRow(proposalId)).payload.transcript).toBe(EDITED_TRANSCRIPT);
+
+    const releasedAt = log.length;
+    readGate.release.resolve();
+    const response = await pick;
+    return { response, after: log.slice(releasedAt).map((s) => s.sql) };
+  }
+
+  it('A3-1 annotate-only: an edit that commits after the pick read the row is kept, and the pick lands on top of it', async () => {
+    const seeded = await seedRepo.create(annotateOnlyClarificationFor(tenantA.tenantId, tenantA.userId));
+
+    const { response, after } = await pickRacingAnEdit(seeded.id);
+
+    expect(response.status).toBe(200);
+    const row = await proposalRow(seeded.id);
+    expect(row.payload.transcript).toBe(EDITED_TRANSCRIPT);
+    expect(row.payload.customerId).toBe(CUST_B);
+    expect(row.payload.entityCandidates).toBeUndefined();
+    expect(row.status).toBe('ready_for_review');
+    expect(await resolvedAudits(seeded.id)).toBe(1);
+    // Built under the lock: the lock, then the patch, in one committed transaction.
+    const lock = after.findIndex((s) => LOCK_ROW.test(s));
+    const patch = after.findIndex((s) => s.startsWith('UPDATE proposals SET updated_at = NOW(), payload'));
+    expect(lock).toBeGreaterThan(after.indexOf('BEGIN'));
+    expect(patch).toBeGreaterThan(lock);
+    expect(after.indexOf('COMMIT', patch)).toBeGreaterThan(patch);
+  });
+
+  it('A3-1 next ambiguity: an edit that commits after the pick read the row is kept, and the row advances on top of it', async () => {
+    const seeded = await seedRepo.create(
+      annotateOnlyClarificationFor(tenantA.tenantId, tenantA.userId, {
+        pendingEntityAmbiguities: [
+          {
+            entityKind: 'job',
+            reference: 'Rodriguez job',
+            candidates: [
+              { id: JOB_A, kind: 'job', label: 'Rodriguez - kitchen', score: 0.8 },
+              { id: JOB_B, kind: 'job', label: 'Rodriguez - bath', score: 0.79 },
+            ],
+          },
+        ],
+      }),
+    );
+
+    const { response } = await pickRacingAnEdit(seeded.id);
+
+    expect(response.status).toBe(200);
+    const row = await proposalRow(seeded.id);
+    expect(row.payload.transcript).toBe(EDITED_TRANSCRIPT);
+    expect(row.payload.entityReference).toBe('Rodriguez job');
+    expect((row.payload.entityCandidates as Array<{ id: string }>).map((c) => c.id)).toEqual([JOB_A, JOB_B]);
+    expect(row.source_context.resolvedEntities).toEqual([
+      { id: CUST_B, field: 'customerId', kind: 'customer', label: 'Bob Jones', offeredIds: [CUST_A, CUST_B] },
+    ]);
+    expect(row.status).toBe('draft');
+    expect(await resolvedAudits(seeded.id)).toBe(1);
+  });
+
+  it('A3-1 re-draft: an edit that commits during the pick refuses the stale draft (409); the edited row is left as it is', async () => {
+    const seeded = await seedRepo.create(clarificationFor(tenantA.tenantId, tenantA.userId));
+
+    const { response, after } = await pickRacingAnEdit(seeded.id);
+
+    expect(response.status).toBe(409);
+    // The question is still open, so the owner is told to try again.
+    expect(((await response.json()) as { message: string }).message).toBe(
+      'This changed while you were choosing. Please try again.',
+    );
+    const row = await proposalRow(seeded.id);
+    expect(row.proposal_type).toBe('voice_clarification');
+    expect(row.status).toBe('draft');
+    expect(row.payload.transcript).toBe(EDITED_TRANSCRIPT);
+    expect(row.payload.customerId).toBeUndefined();
+    expect(row.payload.entityCandidates).toHaveLength(2);
+    expect(await resolvedAudits(seeded.id)).toBe(0);
+    // The draft was built (the LLM ran once, for this pick), then refused
+    // under the lock: no write.
+    expect(llmProbes).toHaveLength(1);
+    const lock = after.findIndex((s) => LOCK_ROW.test(s));
+    expect(lock).toBeGreaterThan(after.indexOf('BEGIN'));
+    expect(after[lock + 1]).toBe('ROLLBACK');
+    expect(after.some((s) => s.startsWith('UPDATE proposals'))).toBe(false);
+    expect(after.some((s) => s.startsWith('INSERT INTO audit_events'))).toBe(false);
   });
 
   it('annotate-only, no race: the row lock comes first, then the patch and the audit, in one transaction', async () => {

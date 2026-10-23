@@ -334,10 +334,11 @@ export function createSettingsRouter(
   capabilityDeps?: SettingsCapabilityDependencies,
   dunningDeps?: SettingsDunningDependencies,
   /**
-   * #1463 — when wired (app.ts always does), `backupSupervisorUserId` must
-   * name an active member of the caller's tenant. Readers already scope the
-   * lookup to the tenant, but the write must not persist another tenant's
-   * user id (or 500 on the FK for an id naming nobody).
+   * #1463 — when wired (app.ts always does), a NEW `backupSupervisorUserId`
+   * must name an active member of the caller's tenant. Readers already scope
+   * the lookup to the tenant, but the write must not persist another
+   * tenant's user id (or 500 on the FK for an id naming nobody). The value
+   * already on file, sent back unchanged, is accepted (B3-3).
    */
   memberDeps?: { userRepo: Pick<UserRepository, 'findById'> },
   /**
@@ -537,28 +538,39 @@ export function createSettingsRouter(
           }
         }
 
-        if (parsed.backupSupervisorUserId && memberDeps) {
-          const backup = await requireActiveTenantMember(
-            memberDeps.userRepo,
-            req.auth!.tenantId,
-            parsed.backupSupervisorUserId,
-            'backupSupervisorUserId',
-          );
-          // B1 — the backup's mobile is an approval phone (SMS replies, the
-          // voice owner line, one-tap links), and it approves with the
-          // backup's own role. A role without proposals:approve would be an
-          // approval phone that can approve nothing.
-          // B1 follow-up — the rule is about who is being MADE the backup. A
-          // backup named before B1 (e.g. a technician) and sent back
-          // unchanged with another field is accepted: it already carries no
-          // approval authority, and refusing it blocked every save.
+        if (parsed.backupSupervisorUserId !== undefined && memberDeps) {
+          // B1 follow-up / B3-3 — both checks are about who is being MADE the
+          // backup. A value sent back unchanged with another field is
+          // accepted even when that member was deactivated (#1463) or holds
+          // a role that cannot approve (B1): approval SMS, the owner line and
+          // one-tap links already treat such a backup as nobody, and refusing
+          // it blocked every save of the section.
           const stored = await getSettings(req.auth!.tenantId, settingsRepo);
-          const unchanged = stored?.backupSupervisorUserId === parsed.backupSupervisorUserId;
-          if (!unchanged && (!isValidRole(backup.role) || !hasPermission(backup.role, 'proposals:approve'))) {
-            throw new ValidationError(
-              "That team member can't approve work, so they can't be your backup.",
-              { field: 'backupSupervisorUserId' },
+          const sent = parsed.backupSupervisorUserId?.toLowerCase() ?? null;
+          if ((stored?.backupSupervisorUserId?.toLowerCase() ?? null) === sent) {
+            // Codex P2 on #1810 — and it is left out of the write. This read
+            // and the write are separate statements: a save that changed the
+            // backup in between would otherwise be reverted to this unchecked
+            // value, or cleared by an unchanged "no backup". Leaving it out
+            // also keeps it out of the audit's changedKeys.
+            delete parsed.backupSupervisorUserId;
+          } else if (parsed.backupSupervisorUserId) {
+            const backup = await requireActiveTenantMember(
+              memberDeps.userRepo,
+              req.auth!.tenantId,
+              parsed.backupSupervisorUserId,
+              'backupSupervisorUserId',
             );
+            // B1 — the backup's mobile is an approval phone (SMS replies, the
+            // voice owner line, one-tap links), and it approves with the
+            // backup's own role. A role without proposals:approve would be an
+            // approval phone that can approve nothing.
+            if (!isValidRole(backup.role) || !hasPermission(backup.role, 'proposals:approve')) {
+              throw new ValidationError(
+                "That team member can't approve work, so they can't be your backup.",
+                { field: 'backupSupervisorUserId' },
+              );
+            }
           }
         }
 
