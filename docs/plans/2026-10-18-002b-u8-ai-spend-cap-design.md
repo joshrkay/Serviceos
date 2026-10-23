@@ -53,12 +53,13 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
       null ceiling, the reserve step skips only the comparison. It still takes the spend lock and
       reads the ceiling under it (see "A ceiling change and a reservation take the same lock"
       below).
-    - **Caps start in the first full calendar month after the ledger ships, so no pre-ledger
-      spend has to be estimated.** Every attempt to reconcile old-version spend inside a month
+    - **Caps start in the first full calendar month after a recorded legacy shutdown, so no
+      pre-ledger spend has to be estimated.** Every attempt to reconcile old-version spend inside a month
       left a race. A seed missed late writes. A reconcile on an interval went stale. Even a
       recompute inside the reserve transaction can't serialize with an old-version write it never
       sees under `READ COMMITTED`, because old code takes no lock. Old-version processes can't be
-      proven gone either, because they predate any heartbeat. So:
+      proven gone either, because they predate any heartbeat, so a month rollover is never taken
+      as proof that they are. So:
       - Every ledger-era `ai_runs` row carries a ledger tag from the moment it is inserted, from
         the day the ledger ships. The `ai_runs` repository's insert writes `ledger_era = true`, in
         a column whose default is `false` and that old code never names.
@@ -70,15 +71,33 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           `ai_spend_reservations.ai_run_id`.
         - A cache hit still writes an `ai_runs` audit row (`ai/gateway/cache.ts:191-224`), through
           the same insert, so it carries the tag too. It costs nothing and has no reservation.
-      - A cap can be enabled from the first full calendar month after the ledger ships. Every run
-        in that month, and in every month after it, was written by ledger-era code, so `spent` is
-        the month's real spend. During the ship month, the settings write that enables a cap is
-        refused, with a plain "available from <date>".
-      - **A tripwire stays in place.** A capped tenant's reserve transaction checks a partial index
+      - **A cap can be enabled only after a recorded legacy-shutdown confirmation, and only in a
+        month that began after it.** One platform-wide `ai_spend_cutover` row holds the confirming
+        operator, `confirmed_at` and a note on how the shutdown was verified (the orchestrator's
+        instance listing shows no pre-ledger release running). Only an operator-only path writes
+        it, with an audit event, as a deploy step after the old release's last instance has
+        stopped. No timer, month change or app code writes it. The cap-enable path reads it under
+        the spend lock, as it reads the ceiling. Like `ai_spend_bound_breaches`, it is global,
+        holds no subject content, and is classified `keep` in the U7 manifest.
+        - The calendar can't stand in for it. If the ledger deploy crosses a month boundary, an old
+          instance can still accept and dispatch an unreserved request on the first day of the new
+          month, after a cap became available. The tripwire below sees that untagged row only
+          after the provider has charged, so it can't enforce the cap. The confirmation is the
+          fence the old writers can't bypass.
+        - Every run in a month that began after `confirmed_at`, and in every month after it, was
+          written by ledger-era code, so `spent` is the month's real spend. The month in progress
+          at the confirmation is excluded, since an old writer may have
+          written untagged rows in it.
+        - Without a confirmation, or in the month it was recorded, the settings write that enables
+          a cap is refused, and says which: "not available: legacy shutdown not confirmed" or
+          "available from <date>".
+      - **A tripwire stays in place, as detection and not enforcement.** A capped tenant's reserve transaction checks a partial index
         for the current month:
         `ai_runs (tenant_id, created_at) WHERE NOT ledger_era`.
-        - An untagged row means an old-version writer is still alive, weeks after the ship. The
-          capped reservation is then refused, and `alertOperator` fires.
+        - An untagged row means an old-version writer is still alive, so the confirmation was
+          wrong. The capped reservation is then refused, and `alertOperator` fires. The old
+          writer's own charge has already happened, which is why the confirmation gates the
+          cap and the tripwire does not.
         - A ledger-era run is tagged before its first reserve, so neither its own pending row, nor
           a cache hit, nor a run whose process died before dispatch ever trips it.
         - Tests: a capped tenant's cache hit writes a tagged row, and the next capped request is
@@ -289,7 +308,7 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           UTC calendar month. A tenant's timezone setting can change, and a month that moved would
           leave open reservations in the wrong month. The settings page renders the reset time in
           the tenant's timezone, like every other time.
-        - The reserve, the settings check, the tripwire and the ship-month rule each evaluate it in
+        - The reserve, the settings check, the tripwire and the cutover rule each evaluate it in
           a statement that runs after the lock is granted. A reservation records the month that
           `spend_month` returned in its reserve.
         - **An unpriced attempt is admitted only when the ceiling read under the lock is null.** The
@@ -304,7 +323,7 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         - every reservation without a price snapshot that can still change this month's spend: a
           `reserved` row with none, in any month, which is an unpriced attempt in flight, and every
           `settled_unpriced` row of the month `spend_month` returns
-        - the tripwire, the ship-month rule, and the rule that every configured model and every
+        - the tripwire, the cutover rule, and the rule that every configured model and every
           reserved surface has a price (see "That check covers every reserved surface" below)
       - **Only two orders exist.** Either an attempt's reservation commits first, and the settings
         write counts it, or the settings write commits first, and the reservation compares against
@@ -566,8 +585,8 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
             and refuses it otherwise. No row inserted means the typed refusal.
           - The ledger's `spent` and `reserved` stay as they were until repricing, or the ceiling
             write that prices an in-flight attempt, supplies an amount.
-        Caps start only in a month with no untagged runs (see above), so `spent` is the month's
-        full spend.
+        Caps start only in a month that began after the confirmed legacy shutdown (see above), so
+        `spent` is the month's full spend.
       - **Every later step is a guarded transition on that one row**, in the same transaction as
         the ledger adjustment, after the spend lock.
         - Under the lock, the step reads the row (its state, snapshot, `reserved_micro_cents` and
@@ -829,8 +848,8 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         `spend_exempt` with that reason, and the settings page says the cap covers model tokens
         only.
       - The one-ceiling-writer structural test also fails on SQL that names
-        `ai_spend_reservations`, `ai_spend_ledger` or `ai_spend_bound_breaches` outside the spend
-        module.
+        `ai_spend_reservations`, `ai_spend_ledger`, `ai_spend_bound_breaches` or
+        `ai_spend_cutover` outside the spend module.
       - Test: with the shadow wrapper on, a capped tenant's sampled call reserves twice, and an
         embedding call reserves once. A capped tenant's voicemail transcription reserves by
         duration. A fixture `new WebSocket('wss://api.deepgram.com/...')` with no reservation and no
@@ -933,7 +952,7 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
       row is unchanged.
     - A first-ever tenant with no ceiling has its first request reserved, and its ledger row
       appears.
-    - A first-ever tenant with a cap, in a month after the ship month, has a request under the cap
+    - A first-ever tenant with a cap, in a month that began after the confirmed shutdown, has a request under the cap
       admitted. A request whose worst case alone exceeds the cap is refused with the typed error,
       and no reservation row exists for it.
     - Two first requests of a new month start together. Afterwards one ledger row exists for that
@@ -951,12 +970,17 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
       changes nothing.
     - An unpriced attempt that fails before dispatch ends `released`, with no amount, and the
       ledger is unchanged.
-  - **Integration (mid-month cap):** in a month after the ship month, a tenant has $90 of tagged
+  - **Integration (mid-month cap):** in a month that began after the confirmed shutdown, a tenant has $90 of tagged
     `ai_runs` cost. It enables a $100 cap, and a $15 worst-case call is refused.
-  - **Integration (ship month):**
-    - Enabling a cap during the ship month is refused, with the date it becomes available.
-    - An untagged run in a later month trips the wire: the capped reservation is refused, and an
-      alert fires.
+  - **Integration (legacy-shutdown confirmation):**
+    - A month rollover with no confirmed shutdown leaves caps unenforceable: enabling a cap in the
+      new month is refused, and the refusal says the shutdown is unconfirmed.
+    - Recording the confirmation mid-month doesn't enable caps that month. The refusal gives the
+      first of the next month as the date it becomes available, and a cap can be enabled from then.
+    - The confirmation can't be written by a tenant route, a proposal handler or a timer, and each
+      write leaves one audit row.
+    - An untagged run after the confirmation trips the wire: the capped reservation is refused, and
+      an alert fires.
   - **Integration (unpriced):**
     - A current-month `settled_unpriced` reservation blocks enabling a cap. A null `ai_runs` cost
       alone doesn't, since the check reads only reservations.
@@ -1014,6 +1038,6 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
     The run's `ai_runs` cost is written once phase 1 commits. A test-only path that takes a stripe
     under the spend lock raises, and so does one that enters the spend module holding a stripe.
   - **Structural (one ceiling writer):** SQL that names the ceiling column outside its module fails
-    the build, and so does SQL that names `ai_spend_reservations`, `ai_spend_ledger` or
-    `ai_spend_bound_breaches` outside the spend module. A `PUT /api/settings` body that carries a
+    the build, and so does SQL that names `ai_spend_reservations`, `ai_spend_ledger`,
+    `ai_spend_bound_breaches` or `ai_spend_cutover` outside the spend module. A `PUT /api/settings` body that carries a
     ceiling key leaves the ceiling unchanged.

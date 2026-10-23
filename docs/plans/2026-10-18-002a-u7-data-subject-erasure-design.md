@@ -829,7 +829,7 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         - **A job-age alarm, with its own outbox slot.** If it shared `alert_due_generation`, an
           age alert stamped at generation 7 would leave a later `erase_incomplete` close at 7
           unsent. And an age measured from phase 1 would fire at once on every re-open after the
-          limit, such as the daily retry or a late object from the 30-day listing. So:
+          limit, such as the daily retry or a late object from the backstop listing. So:
           - The age runs from when the job last opened. Phase 1 sets `opened_at`, and
             `opened_generation` to 1 (above). A re-open that moves a terminal job back to `pending`
             stamps both again, and one that finds the job already open stamps neither. So a job
@@ -2156,11 +2156,24 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           That re-opens the job under the job row's lock (see "A late target re-opens the job"
           above). The S3 step deletes the object, confirms with a HEAD and nulls the key again,
           however long after the URL's expiry the PUT finished.
-        - **A listing backs up a lost notification.** A notification can be delayed, or lost while
-          the queue consumer is down. So the leader-gated sweep also lists each cleanup row's
-          prefix (`ListObjectsV2` with that prefix) on a fixed schedule for a fixed period after
-          the row closes, for example daily for 30 days, and treats any object it finds the same
-          way.
+        - **A listing backs up a lost notification, and it has no end date.** A notification can be
+          delayed, or lost while the queue consumer is down. And the provider checks a presigned
+          URL's expiry only when the request starts, so it doesn't bound how long an accepted PUT
+          runs. No provider bound is cited here, so no date exists after which a scan could stop
+          without risking a PUT that finishes after the last listing and leaves an untracked
+          object. So the leader-gated sweep lists each cleanup row's prefix (`ListObjectsV2` with
+          that prefix) in two phases, and treats any object it finds the same way as a
+          notification:
+          - **A frequent phase** on a fixed schedule for a fixed period after the row closes, for
+            example daily for 30 days.
+          - **Then a low-frequency backstop that doesn't end**, for example weekly, for as long as
+            the row exists. The row keeps its prefix, which names no file. It retires the backstop
+            only if the deploy's storage endpoint is shown to enforce an upper bound on a PUT's
+            duration, and then only after that bound plus a margin.
+          - **What bounds the cost:** one listing request per prefix per period, which returns no
+            keys in the normal case. Each row records its next scan time, so the sweep resumes after
+            a restart, and each pass takes a fixed budget of due rows. The cost grows with the
+            number of erased upload keys, never with the size of the bucket.
         - Every S3 target the step takes from a write-ahead claim, rather than from a deleted
           `files` row, gets a cleanup row too, with `not_before` from that claim. So this check
           covers it as well.
@@ -2204,6 +2217,11 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           filename.
         - The same late PUT with its notification dropped is found by the next backstop listing
           and deleted.
+        - A PUT completes after the last frequent listing, with its notification dropped. The
+          low-frequency backstop still lists the row's prefix, finds the object, re-opens the job
+          and deletes it, and the job closes again. With the clock set years past the frequent
+          phase, the row is still scheduled, and no cleanup row retires its backstop without a
+          configured provider bound.
         - A notification for another file of the same tenant matches no cleanup row and changes
           nothing.
         - A late object whose filename contains spaces and a literal `+` is matched, deleted and
