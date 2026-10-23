@@ -418,11 +418,13 @@ function warnOnUnpricedModels(
 }
 
 /**
- * AI_FALLBACK_RESERVE_MS — cap on the slice of a request's deadline held back
- * for the fallback provider (GATEWAY-03; see `fallbackReserveFor`). A
- * non-negative integer; 0 gives the primary the whole budget (the fallback then
- * only runs after a FAST primary failure). Invalid values keep the default and
- * warn on stderr. Exported for unit tests.
+ * AI_FALLBACK_RESERVE_MS — the most of a request's deadline held back for the
+ * fallback provider (GATEWAY-03; see `fallbackReserveFor`). A non-negative
+ * integer. Not a strict cap: a reserve that is carved is never under 1000ms
+ * (a viable attempt plus timer slack), so 700–999 is raised to 1000; below
+ * 700, or 0, gives the primary the whole budget (the fallback then only runs
+ * after a FAST primary failure). Invalid values keep the default and warn on
+ * stderr. Exported for unit tests.
  */
 export function resolveFallbackReserveMsFromEnv(env: NodeJS.ProcessEnv = process.env): number {
   const raw = env.AI_FALLBACK_RESERVE_MS?.trim();

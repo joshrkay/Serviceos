@@ -24,7 +24,7 @@ import {
 } from '../proposals/actions';
 import type { ApprovalReferenceCheck } from '../proposals/approval-reference-checks';
 import { resolveProposalLine } from '../proposals/resolve-line';
-import { resolveProposalEntity } from '../proposals/resolve-entity';
+import { ownerFacingPickError, resolveProposalEntity } from '../proposals/resolve-entity';
 import type { RedraftHandlerFactory } from '../proposals/redraft-handler-factory';
 import type { EntityAliasCandidateCapture } from '../learning/entity-aliases/candidate-service';
 import {
@@ -86,6 +86,11 @@ const resolveEntityBodySchema = z.object({
 
 export function createProposalsRouter(
   proposalRepo: ProposalRepository,
+  // A1 / A3-3 — POST /:id/resolve-entity holds no request transaction (it
+  // awaits the re-draft's LLM call), so its row lock and writes run in this
+  // runner. Required: it must match `proposalRepo` (PgTenantTransactionRunner
+  // with the Pg repos — their row lock refuses to run outside one).
+  transactionRunner: TenantTransactionRunner,
   appointmentRepo?: AppointmentRepository,
   auditRepo?: AuditRepository,
   feasibilityDeps?: FeasibilityDependencies,
@@ -109,9 +114,6 @@ export function createProposalsRouter(
   // #1405 — the card's "which accepted estimate?" pick re-drafts the invoice
   // from the picked estimate. Absent → the pick fills the id only.
   estimateRepo?: Pick<EstimateRepository, 'findById'>,
-  // A1 — POST /:id/resolve-entity holds no request transaction (it awaits the
-  // re-draft's LLM call), so its writes commit together through this runner.
-  transactionRunner?: TenantTransactionRunner,
 ): Router {
   const router = Router();
 
@@ -422,9 +424,12 @@ export function createProposalsRouter(
           ...(auditRepo ? { auditRepo } : {}),
           ...(redraftHandlerFactory ? { redraftHandlerFactory } : {}),
           ...(entityAliasCandidateCapture ? { entityAliasCandidateCapture } : {}),
-          ...(transactionRunner ? { transactionRunner } : {}),
+          transactionRunner,
         },
-      );
+      ).catch((err: unknown) => {
+        // A3-4 — the owner sees this message verbatim.
+        throw ownerFacingPickError(err);
+      });
       res.json(result);
     })
   );

@@ -258,7 +258,37 @@ describe('withTenantClient', () => {
 });
 
 describe('InMemoryTransactionRunner', () => {
-  it('runs the unit of work directly with a no-op lock', async () => {
+  const otherTenantId = '550e8400-e29b-41d4-a716-446655440001';
+
+  /** A promise plus the function that resolves it. */
+  function gate(): { promise: Promise<void>; open: () => void } {
+    let open!: () => void;
+    const promise = new Promise<void>((resolve) => {
+      open = resolve;
+    });
+    return { promise, open };
+  }
+
+  /** Let every queued callback and timer run, so a waiter that could proceed has. */
+  const settle = () =>
+    new Promise<void>((resolve) => {
+      setTimeout(resolve, 10);
+    });
+
+  /** Fails fast with `what` instead of hanging until the test timeout. */
+  async function within<T>(promise: Promise<T>, what: string): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${what} did not finish`)), 1000);
+    });
+    try {
+      return await Promise.race([promise, timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  it('runs the unit of work directly and an uncontended lock resolves at once', async () => {
     const runner = new InMemoryTransactionRunner();
     let locked = false;
     const result = await runner.run(tenantId, async ({ lock }) => {
@@ -268,6 +298,172 @@ describe('InMemoryTransactionRunner', () => {
     });
     expect(result).toBe(42);
     expect(locked).toBe(true);
+  });
+
+  it('serializes two runs that lock the same key: the second starts only after the first settles', async () => {
+    const runner = new InMemoryTransactionRunner();
+    const order: string[] = [];
+    const firstHasLock = gate();
+    const finishFirst = gate();
+
+    const first = runner.run(tenantId, async ({ lock }) => {
+      await lock('about');
+      order.push('first:locked');
+      firstHasLock.open();
+      await finishFirst.promise;
+      order.push('first:done');
+      return 'first';
+    });
+    await firstHasLock.promise;
+
+    const second = runner.run(tenantId, async ({ lock }) => {
+      order.push('second:waiting');
+      await lock('about');
+      order.push('second:locked');
+      return 'second';
+    });
+    await settle();
+    expect(order).toEqual(['first:locked', 'second:waiting']);
+
+    finishFirst.open();
+    expect(await within(Promise.all([first, second]), 'the two runs')).toEqual(['first', 'second']);
+    expect(order).toEqual(['first:locked', 'second:waiting', 'first:done', 'second:locked']);
+  });
+
+  it('shares the lock across runner instances, as advisory locks are database-wide', async () => {
+    // public-booking and public-portal each get their own runner and lock the
+    // same 'self-service-booking' key against each other.
+    const order: string[] = [];
+    const firstHasLock = gate();
+    const finishFirst = gate();
+
+    const first = new InMemoryTransactionRunner().run(tenantId, async ({ lock }) => {
+      await lock('self-service-booking');
+      firstHasLock.open();
+      await finishFirst.promise;
+      order.push('first:done');
+    });
+    await firstHasLock.promise;
+    const second = new InMemoryTransactionRunner().run(tenantId, async ({ lock }) => {
+      await lock('self-service-booking');
+      order.push('second:locked');
+    });
+    await settle();
+    expect(order).toEqual([]);
+
+    finishFirst.open();
+    await within(Promise.all([first, second]), 'the two runs');
+    expect(order).toEqual(['first:done', 'second:locked']);
+  });
+
+  it('does not block a run that locks a different key, or the same key for another tenant', async () => {
+    const runner = new InMemoryTransactionRunner();
+    const firstHasLock = gate();
+    const finishFirst = gate();
+
+    const first = runner.run(tenantId, async ({ lock }) => {
+      await lock('about');
+      firstHasLock.open();
+      await finishFirst.promise;
+    });
+    await firstHasLock.promise;
+
+    const otherKey = runner.run(tenantId, async ({ lock }) => {
+      await lock('booking');
+      return 'other key';
+    });
+    const otherTenant = runner.run(otherTenantId, async ({ lock }) => {
+      await lock('about');
+      return 'other tenant';
+    });
+    // Both finish while the first run still holds tenantId's 'about' lock.
+    expect(await within(Promise.all([otherKey, otherTenant]), 'the unrelated runs')).toEqual([
+      'other key',
+      'other tenant',
+    ]);
+
+    finishFirst.open();
+    await first;
+  });
+
+  it('releases the lock when the run throws, so the next run waiting on it proceeds', async () => {
+    const runner = new InMemoryTransactionRunner();
+    const firstHasLock = gate();
+    const failFirst = gate();
+
+    const first = runner.run(tenantId, async ({ lock }) => {
+      await lock('about');
+      firstHasLock.open();
+      await failFirst.promise;
+      throw new Error('insert failed');
+    });
+    await firstHasLock.promise;
+    const second = runner.run(tenantId, async ({ lock }) => {
+      await lock('about');
+      return 'second';
+    });
+
+    failFirst.open();
+    await expect(first).rejects.toThrow('insert failed');
+    expect(await within(second, 'the run after the failed one')).toBe('second');
+    // And the key is free again for a later run.
+    expect(await within(runner.run(tenantId, async ({ lock }) => lock('about').then(() => 'third')), 'a later run')).toBe(
+      'third',
+    );
+  });
+
+  it('lets a run lock a key it already holds again, as Postgres does within one transaction', async () => {
+    const runner = new InMemoryTransactionRunner();
+    const result = runner.run(tenantId, async ({ lock }) => {
+      await lock('about');
+      await lock('about');
+      return 'relocked';
+    });
+    expect(await within(result, 'the relocking run')).toBe('relocked');
+  });
+
+  it('a second lock() of the same key in one run waits for the first to be granted', async () => {
+    const runner = new InMemoryTransactionRunner();
+    const order: string[] = [];
+    const firstHasLock = gate();
+    const finishFirst = gate();
+
+    const holder = runner.run(tenantId, async ({ lock }) => {
+      await lock('about');
+      firstHasLock.open();
+      await finishFirst.promise;
+      order.push('holder:done');
+    });
+    await firstHasLock.promise;
+
+    const waiter = runner.run(tenantId, async ({ lock }) => {
+      await Promise.all([
+        lock('about').then(() => order.push('waiter:first-lock')),
+        lock('about').then(() => order.push('waiter:second-lock')),
+      ]);
+    });
+    await settle();
+    expect(order).toEqual([]);
+
+    finishFirst.open();
+    await within(Promise.all([holder, waiter]), 'the two runs');
+    expect(order[0]).toBe('holder:done');
+    expect(order.slice(1).sort()).toEqual(['waiter:first-lock', 'waiter:second-lock']);
+  });
+
+  it('refuses a lock() through a scope whose run has already settled, so it cannot be held forever', async () => {
+    const runner = new InMemoryTransactionRunner();
+    let escaped: ((key: string) => Promise<void>) | undefined;
+    await runner.run(tenantId, async ({ lock }) => {
+      escaped = lock;
+    });
+
+    await expect(escaped!('about')).rejects.toThrow(/settled/);
+    const next = runner.run(tenantId, async ({ lock }) => {
+      await lock('about');
+      return 'next';
+    });
+    expect(await within(next, 'a later run of the same key')).toBe('next');
   });
 
   it('runs savepoint work directly and propagates its errors', async () => {

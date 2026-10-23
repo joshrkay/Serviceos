@@ -329,6 +329,11 @@ export async function runWithRetry<T>(
       return await op(attempt);
     } catch (err) {
       lastErr = err;
+      // A3-6 — an aborted (or spent) deadline is final. remainingMs() ignores
+      // the aborted flag, so a caller's abort, which classifies as a
+      // retryable timeout, used to sleep one backoff before the loop noticed
+      // it - holding the breaker's half-open probe slot for nothing.
+      if (opts.deadline?.isExpired()) throw err;
       const errClass = classifyError(err);
       const remaining = opts.deadline?.remainingMs() ?? Number.POSITIVE_INFINITY;
       const next = attempt + 1;
