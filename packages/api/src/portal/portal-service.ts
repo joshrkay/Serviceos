@@ -202,7 +202,7 @@ export async function resolvePortalToken(
 
   // Best-effort touch — never fail the resolve over a transient write.
   try {
-    await repo.touchLastAccessed(session.id, now);
+    await repo.touchLastAccessed(session.tenantId, session.id, now);
   } catch {
     // intentional: read path stays available even when the touch fails.
   }
