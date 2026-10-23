@@ -43,6 +43,7 @@ import { isCustomerDuplicateLoader } from '../customers/dedup';
 import type { EstimateRepository } from '../estimates/estimate';
 import type { LLMGateway } from '../ai/gateway/gateway';
 import { discloseRecording } from '../ai/skills/disclose-recording';
+import { buildAiDisclosureText, discloseAiIdentity } from '../ai/skills/disclose-ai-identity';
 import { t, type Language } from '../ai/i18n/i18n';
 import { identifyCaller } from '../ai/skills/identify-caller';
 import { findOrCreateLeadByPhone } from '../ai/skills/find-or-create-lead';
@@ -510,21 +511,26 @@ export interface TwilioAdapterDeps {
 /**
  * Build the full telephony greeting.
  *
- * `disclosureText` (recording notice) is always appended after the
- * greeting when present — it is a compliance requirement that cannot
- * be opted out.
+ * Two notices ride in every branch, in this order, and neither can be opted
+ * out:
+ *   - `assistantNotice` (PRIV-4) — the caller is talking to a virtual
+ *     assistant, not a person. Placed straight after the opener / the
+ *     tenant's own greeting, so a persona name ("This is Sarah.") is never
+ *     left standing as a human introduction. Defaults to the built-in copy
+ *     (`buildAiDisclosureText`) when the caller passes none; a caller passes
+ *     the per-tenant wording through `discloseAiIdentity`.
+ *   - `disclosureText` — the recording notice, after the assistant notice.
  *
  * Branch priority:
  *   1. Custom greeting (`persona.greeting` set):
- *        Returns `${persona.greeting} ${disclosureText}` (trimmed).
- *        The tenant owns the entire opening line — NO CTA is appended.
- *        The result is returned as-is so the tenant's chosen wording
- *        is preserved verbatim.
+ *        `${persona.greeting} ${assistantNotice} ${disclosureText}` (trimmed).
+ *        The tenant's own words stay verbatim and first — NO CTA is
+ *        appended, and this branch is not localized.
  *   2. Agent name only (`persona.agentName` set, no custom greeting):
- *        `Thank you for calling ${name}. This is ${agentName}. ${disclosure} How can I help you today?`
+ *        `Thank you for calling ${name}. This is ${agentName}. ${assistantNotice} ${disclosure} How can I help you today?`
  *        A CTA is appended if the assembled string does not already end with `?`.
  *   3. Neither:
- *        `Thank you for calling ${name}. ${disclosure} How can I help you today?`
+ *        `Thank you for calling ${name}. ${assistantNotice} ${disclosure} How can I help you today?`
  *        A CTA is appended if the assembled string does not already end with `?`.
  *
  * `${name}` in branches 2/3 (#1156) is `persona.businessName` — the
@@ -540,26 +546,34 @@ export function buildTelephonyGreeting(
   businessName: string,
   disclosureText: string,
   persona?: VoicePersona | null,
-  language: Language = 'en'
+  language: Language = 'en',
+  assistantNotice?: string,
 ): string {
-  const disclosure = disclosureText.trim();
+  const resolvedBusinessName = persona?.businessName || businessName;
+  const notices = [
+    (assistantNotice ?? '').trim() ||
+      buildAiDisclosureText({ businessName: resolvedBusinessName, language }),
+    disclosureText.trim(),
+  ]
+    .filter(Boolean)
+    .join(' ');
 
-  // Branch 1 — tenant owns the entire opening line. Return without CTA
-  // append. The custom greeting is used verbatim (the tenant authored it
-  // in their own language), so we do NOT localize this branch.
-  if (persona?.greeting) {
-    const greeting = persona.greeting.trim();
-    return disclosure ? `${greeting} ${disclosure}`.trim() : greeting;
+  // Branch 1 — the tenant's own opening line, verbatim, then the notices. No
+  // CTA append; not localized (the tenant authored it in their own language).
+  // A whitespace-only greeting falls through to the default opener, so the
+  // caller still hears the business name before the notices.
+  const customGreeting = persona?.greeting?.trim();
+  if (customGreeting) {
+    return `${customGreeting} ${notices}`;
   }
 
   // Branch 2 / 3 — assemble a localized default greeting, then ensure it
   // ends with a CTA (the ES CTA already ends with '?'). #1156: the
   // tenant's own resolved business name wins over the env-wide fallback.
-  const resolvedBusinessName = persona?.businessName || businessName;
   const opener = persona?.agentName
     ? t('greeting.opener_named', language, { business: resolvedBusinessName, agent: persona.agentName })
     : t('greeting.opener_default', language, { business: resolvedBusinessName });
-  const assembled = disclosure ? `${opener} ${disclosure}`.trim() : opener;
+  const assembled = `${opener} ${notices}`.trim();
   return assembled.endsWith('?') ? assembled : `${assembled} ${t('greeting.cta', language)}`;
 }
 
@@ -836,6 +850,15 @@ export class TwilioGatherAdapter {
   private readonly pendingConsentCommit = new Map<string, () => Promise<void>>();
 
   /**
+   * PRIV-4 — the virtual-assistant notice's half of the parked greeting
+   * commit, on its own so a cached-greeting replay can ledger the notice it
+   * spoke without also claiming recording consent (a replay arms no
+   * `<Start><Record>`). Same lifetime and sweep as {@link pendingConsentCommit};
+   * the `assistantNoticeHeard` latch keeps the two from writing twice.
+   */
+  private readonly pendingAssistantNoticeCommit = new Map<string, () => Promise<void>>();
+
+  /**
    * Drop parked consent thunks for sessions the store has already reaped.
    * Runs on each park, so the map stays bounded by concurrent live sessions —
    * the same lifetime the store itself enforces — without needing a hook on
@@ -846,6 +869,11 @@ export class TwilioGatherAdapter {
     for (const sessionId of this.pendingConsentCommit.keys()) {
       if (!this.deps.store.get(sessionId)) {
         this.pendingConsentCommit.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.pendingAssistantNoticeCommit.keys()) {
+      if (!this.deps.store.get(sessionId)) {
+        this.pendingAssistantNoticeCommit.delete(sessionId);
       }
     }
   }
@@ -1309,16 +1337,6 @@ export class TwilioGatherAdapter {
       ...(from ? { callerPhone: from } : {}),
       voiceSessionId: session.id,
     });
-    // C5 — the ledger write is DEFERRED, not skipped. Generating the copy is
-    // not evidence the caller heard it, so the thunk is parked here and each
-    // transport commits at its own point of evidence (see
-    // {@link commitRecordingConsent}). Overwrites any prior entry for this
-    // session — a re-bootstrap supersedes an uncommitted thunk. Swept first so
-    // the never-committed paths (transfer short-circuit, fail-closed hang-ups)
-    // cannot accumulate closures across calls.
-    this.sweepPendingConsentCommits();
-    this.pendingConsentCommit.set(session.id, disclosure.commitConsentLedger);
-
     // 2. Identify caller by phone number.
     // WS16c (divergence #3, CONVERGED) — identify-guard parity: BOTH transports
     // now require `pool && from`. Previously Gather ran identifyCaller even on a
@@ -1373,12 +1391,49 @@ export class TwilioGatherAdapter {
         persona = undefined;
       }
     }
+    // PRIV-4 — the virtual-assistant notice, spoken on EVERY call in the same
+    // greeting turn as the recording notice (never gated on caller state).
+    const assistantNotice = discloseAiIdentity({
+      tenantId: opts.tenantId,
+      businessName: persona?.businessName || this.deps.businessName,
+      language,
+      ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
+      voiceSessionId: session.id,
+      actorId: this.deps.systemActorId ?? 'system:inbound-call',
+      channel: session.channel,
+    });
     const baseGreeting = buildTelephonyGreeting(
       this.deps.businessName,
       disclosure.disclosureText,
       persona,
       language,
+      assistantNotice.disclosureText,
     );
+    // C5 — the ledger writes are DEFERRED, not skipped. Generating the copy is
+    // not evidence the caller heard it, so ONE thunk covering both notices
+    // (they ride in the same greeting turn) is parked here and each transport
+    // commits it at its own point of evidence (see
+    // {@link commitRecordingConsent}). Overwrites any prior entry for this
+    // session — a re-bootstrap supersedes an uncommitted thunk. Swept first so
+    // the never-committed paths (transfer short-circuit, fail-closed hang-ups)
+    // cannot accumulate closures across calls. Both inner thunks are
+    // idempotent and never reject.
+    this.sweepPendingConsentCommits();
+    this.pendingConsentCommit.set(session.id, async () => {
+      // The point of evidence for the greeting is the point the caller heard
+      // the assistant notice; a later degrade reads this latch. A replay or a
+      // fallback that already spoke (and ledgered) the notice set it first,
+      // so the notice is not ledgered twice.
+      const noticeAlreadyLedgered = session.assistantNoticeHeard === true;
+      session.assistantNoticeHeard = true;
+      await disclosure.commitConsentLedger();
+      if (!noticeAlreadyLedgered) await assistantNotice.commitDisclosureLedger();
+    });
+    this.pendingAssistantNoticeCommit.set(session.id, async () => {
+      if (session.assistantNoticeHeard) return;
+      session.assistantNoticeHeard = true;
+      await assistantNotice.commitDisclosureLedger();
+    });
     // #1223 — an approver caller-ID that was not A-attested runs as a caller;
     // say so, so a genuine owner on a partially-attested route knows why owner
     // actions are unavailable and where to take them.
@@ -1390,6 +1445,7 @@ export class TwilioGatherAdapter {
     // resumes capture on this leg (the realtime→Gather degrade) reads this
     // instead of assuming establishment ran.
     session.recordingDisclosed = true;
+    session.greetingText = greetingText;
     const expanded = sideEffects.map((fx) =>
       fx.type === 'tts_play' && fx.payload.text === 'greeting'
         ? { ...fx, payload: { ...fx.payload, text: greetingText } }
@@ -1517,6 +1573,7 @@ export class TwilioGatherAdapter {
     const commit = this.pendingConsentCommit.get(session.id);
     if (!commit) return;
     this.pendingConsentCommit.delete(session.id);
+    this.pendingAssistantNoticeCommit.delete(session.id);
     await commit();
 
     // Row 2.2 — the GRANT of implicit recording consent is a mutation
@@ -2217,15 +2274,73 @@ export class TwilioGatherAdapter {
         sessionId: session.id,
       });
       const replayHints = await this.resolveGatherHints(opts.tenantId);
-      return buildTwiML(
-        [{ type: 'tts_play', payload: { text: t('greeting.one_moment', session.language ?? 'en') } }],
+      // PRIV-4 — Twilio discarded the first response, so this document is the
+      // only greeting the caller hears: replay the established greeting (it
+      // carries the virtual-assistant and recording notices). A retry that
+      // lands while the first attempt is still establishing says both notices
+      // ahead of the hold line.
+      if (session.greetingText) {
+        const replayTwiml = buildTwiML(
+          [{ type: 'tts_play', payload: { text: session.greetingText } }],
+          {
+            gatherActionUrl: this.gatherUrl(session.id),
+            ...(session.language ? { language: session.language } : {}),
+            ...(session.ttsVoice ? { voiceOverride: session.ttsVoice } : {}),
+            ...(replayHints ? { hints: replayHints } : {}),
+          },
+        );
+        // The caller hears the virtual-assistant notice from this document,
+        // so ledger it here if the first attempt has not (it may be the
+        // stalled request Twilio gave up on). Recording consent stays with
+        // the first attempt: this replay arms no `<Start><Record>`, so it is
+        // no evidence of consent to a recording.
+        const noticeCommit = this.pendingAssistantNoticeCommit.get(session.id);
+        if (noticeCommit) {
+          this.pendingAssistantNoticeCommit.delete(session.id);
+          void noticeCommit();
+        }
+        return replayTwiml;
+      }
+      // Establishment has not pinned the language yet: resolve the tenant's
+      // own (never assume English), without pinning it on the session —
+      // bootstrap still owns that.
+      const pinned =
+        session.language === 'en' || session.language === 'es' ? session.language : undefined;
+      const { language: replayLanguage, ttsVoice: replayVoice } = await this.resolveTenantLanguage(
+        opts.tenantId,
+        pinned,
+      );
+      // This document is the evidence the caller heard the notice, so it is
+      // ledgered here; the latch stops the first attempt's deferred commit
+      // from writing a second row.
+      const replayNotice = discloseAiIdentity({
+        tenantId: opts.tenantId,
+        businessName: this.deps.businessName,
+        language: replayLanguage,
+        ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
+        voiceSessionId: session.id,
+        actorId: this.deps.systemActorId ?? 'system:inbound-call',
+        channel: session.channel,
+      });
+      const replayText = [
+        replayNotice.disclosureText,
+        t('disclose.two_party', replayLanguage),
+        t('greeting.one_moment', replayLanguage),
+      ].join(' ');
+      const twiml = buildTwiML(
+        [{ type: 'tts_play', payload: { text: replayText } }],
         {
           gatherActionUrl: this.gatherUrl(session.id),
-          ...(session.language ? { language: session.language } : {}),
-          ...(session.ttsVoice ? { voiceOverride: session.ttsVoice } : {}),
+          language: replayLanguage,
+          ...(replayVoice ? { voiceOverride: replayVoice } : {}),
           ...(replayHints ? { hints: replayHints } : {}),
         },
       );
+      if (!session.assistantNoticeHeard) {
+        session.assistantNoticeHeard = true;
+        void replayNotice.commitDisclosureLedger();
+      }
+      return twiml;
     }
 
     // WS16b — Phase B (shared): language pin + disclosure + identify + FSM
@@ -2274,6 +2389,7 @@ export class TwilioGatherAdapter {
       // implicit consent here would assert a notice that was never rendered.
       // Discard the parked thunk rather than leaving it for the sweep.
       this.pendingConsentCommit.delete(session.id);
+      this.pendingAssistantNoticeCommit.delete(session.id);
     } else {
       void this.commitRecordingConsent({ callSid: opts.callSid }).catch(() => {
         /* swallow — the thunk already swallows; this guards the lookup */

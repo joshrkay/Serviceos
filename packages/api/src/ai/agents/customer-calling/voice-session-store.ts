@@ -438,6 +438,22 @@ export interface VoiceSession {
    */
   recordingDisclosed?: boolean;
   /**
+   * PRIV-4 — true once this call has evidence the caller HEARD the
+   * virtual-assistant notice (the greeting reached its point of evidence:
+   * Gather's TwiML was built, or the stream's greeting turn played to
+   * completion), or a fallback document spoke it. Unlike `recordingDisclosed`
+   * (latched when the greeting is merely queued), a realtime→Gather degrade
+   * mid-greeting leaves this false, so the fallback speaks the notice itself.
+   */
+  assistantNoticeHeard?: boolean;
+  /**
+   * PRIV-4 — the full greeting (virtual-assistant notice and recording notice
+   * included) `bootstrapCallEstablishment` rendered for this call. A /voice
+   * webhook retry replays it: Twilio discarded the first response, so the
+   * retry's document is the only greeting the caller hears.
+   */
+  greetingText?: string;
+  /**
    * Set when the caller objected to being recorded. The Twilio recording is
    * paused via the REST API, but that only covers `<Start><Record>` — the
    * realtime transport's capture is the STT socket, which no REST call

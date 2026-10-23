@@ -139,6 +139,7 @@ import {
 } from './ai/supervisor-presence';
 import { createConversationRouter } from './routes/conversations';
 import { createSettingsRouter } from './routes/settings';
+import { getVapiClient } from './integrations/vapi/client';
 import { createBrandVoiceRouter } from './tenants/brand/brand-voice-router';
 import { listAllTenantIds } from './tenants/list-tenant-ids';
 import { createDncRouter } from './routes/dnc';
@@ -6606,6 +6607,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // S5a-5 (U8) — a PUT that switches to "Collect on the spot" enqueues
       // the pay-link cleanup in the request's own transaction.
       { queue },
+      // PRIV-4 — a language change re-pushes the Vapi first message.
+      pool ? { pool, vapiClient: getVapiClient() } : undefined,
     ),
   );
   // N-011 — Brand-Voice Configurator (behind the brand_voice_configurator flag,
