@@ -38,6 +38,7 @@
  */
 
 import { randomUUID } from 'crypto';
+import { CARD_NUMBER_PLACEHOLDER } from '../ai/privacy/pan-redact';
 
 export type CallTurnSpeaker = 'agent' | 'caller';
 
@@ -221,7 +222,9 @@ export interface CallTranscriptTurnRepository {
    * them in ONE transaction together with one
    * {@link CARD_NUMBER_SPLIT_REDACTED_EVENT} audit row, so the stored call
    * never keeps part of the card. Only this session's rows of the speaker
-   * each turn names are touched. Returns the number of rows rewritten.
+   * each turn names are touched, and a row that already reads as asked is no
+   * rewrite (a retry is idempotent: nothing changed, no audit row). Returns
+   * the number of rows rewritten.
    */
   redactCardNumberTurns(input: RedactCardNumberTurnsInput): Promise<number>;
 }
@@ -266,6 +269,18 @@ export function validateMarkReplyAudioInput(input: MarkReplyAudioInput): void {
       `call_transcript_turns: unknown replyUnackedReason ${String(input.replyUnackedReason)}`,
     );
   }
+}
+
+/**
+ * PRIV-3 — how many card markers `text` holds. A stored turn never trades its
+ * text for one holding fewer (`recordTurn`'s upsert, `redactCardNumberTurns`):
+ * a card's rewrite only ever turns digits into the marker, so text with fewer
+ * is a snapshot read before a rewrite landed (an end-of-call ingestion
+ * payload) or an earlier rewrite of the same row landing after a later one
+ * (two queued retries), and writing it would put part of the card back.
+ */
+export function cardMarkerCount(text: string): number {
+  return text.split(CARD_NUMBER_PLACEHOLDER).length - 1;
 }
 
 export function validateRedactCardNumberTurnsInput(input: RedactCardNumberTurnsInput): void {
@@ -375,7 +390,8 @@ export class InMemoryCallTranscriptTurnRepository implements CallTranscriptTurnR
       sessionId: existing?.sessionId ?? input.sessionId,
       turnIndex: input.turnIndex,
       speaker: input.speaker,
-      text: input.text,
+      // PRIV-3 — as the Pg upsert: never fewer card markers than stored.
+      text: existing && cardMarkerCount(existing.text) > cardMarkerCount(input.text) ? existing.text : input.text,
       startedAt,
       completedAt: input.completedAt,
       createdAt: existing ? existing.createdAt : this.nextCreatedAt(),
@@ -463,7 +479,7 @@ export class InMemoryCallTranscriptTurnRepository implements CallTranscriptTurnR
             ? r.id === turn.id
             : r.turnIndex === turn.turnIndex && r.voiceRecordingId === undefined),
       );
-      if (!row) continue;
+      if (!row || row.text === turn.text || cardMarkerCount(row.text) > cardMarkerCount(turn.text)) continue;
       row.text = turn.text;
       rewritten++;
     }

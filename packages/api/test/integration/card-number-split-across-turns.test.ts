@@ -190,8 +190,9 @@ describe('PRIV-3 follow-up — a card number split across caller turns (real Pos
       tenant_id: tenant.tenantId,
       actor_role: 'system',
       entity_type: 'voice_session',
-      // The caller rows that held the card, and the agent's repeat of a group.
-      metadata: { callSid, turnIndexes: [1, 3, 4, 5], rows: 4 },
+      // The completing row was inserted already rewritten: the rewrite
+      // changes (and audits) the two earlier caller rows and the agent's.
+      metadata: { callSid, turnIndexes: [1, 3, 4], rows: 3 },
     });
     expect(JSON.stringify(audits[0].metadata)).not.toContain('1111');
   });
@@ -219,7 +220,7 @@ describe('PRIV-3 follow-up — a card number split across caller turns (real Pos
       `SELECT metadata FROM audit_events WHERE event_type = $1 AND entity_id = $2`,
       [CARD_NUMBER_SPLIT_REDACTED_EVENT, session.id],
     );
-    expect(audits.map((a) => a.metadata)).toEqual([{ callSid, turnIndexes: [0, 1, 2], rows: 3 }]);
+    expect(audits.map((a) => a.metadata)).toEqual([{ callSid, turnIndexes: [0, 1], rows: 2 }]);
   });
 
   // A group of four per caller turn is also how gate codes and years are

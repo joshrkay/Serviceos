@@ -72,6 +72,39 @@ describe('P0-009 — Async job processing with SQS', () => {
     expect(handled).toEqual(['value']);
   });
 
+  it("processMessage logs a handler's own description of the payload in place of its snapshot", async () => {
+    const lines: Array<[string, unknown]> = [];
+    const log = {
+      info: (m: string, meta?: unknown) => lines.push([m, meta]),
+      warn: (m: string, meta?: unknown) => lines.push([m, meta]),
+      error: (m: string, meta?: unknown) => lines.push([m, meta]),
+      debug: () => undefined,
+      child: () => log,
+    } as unknown as Parameters<typeof processMessage>[2];
+    const msg: QueueMessage<{ id: string; text: string }> = {
+      id: '1',
+      type: 'test.job',
+      payload: { id: 'row-1', text: 'the caller said this' },
+      attempts: 3,
+      maxAttempts: 3,
+      idempotencyKey: 'idem-1',
+      createdAt: new Date().toISOString(),
+    };
+    const failing = async (): Promise<void> => {
+      throw new Error('boom');
+    };
+    await processMessage(msg, { type: 'test.job', handle: failing, describePayload: (p) => ({ id: p.id }) }, log);
+    expect(lines.filter(([m]) => m === 'Processing message' || m === 'Message processing failed').map(([, meta]) => (meta as { payload: unknown }).payload)).toEqual([
+      { id: 'row-1' },
+      { id: 'row-1' },
+    ]);
+    expect(JSON.stringify(lines)).not.toContain('the caller said');
+    // Without one, the redacted snapshot (an excerpt of each text field) as before.
+    lines.length = 0;
+    await processMessage(msg, { type: 'test.job', handle: failing }, log);
+    expect(JSON.stringify(lines)).toContain('the caller said');
+  });
+
   it('validation — processMessage returns {success: false, error} for type mismatch', async () => {
     const handler: WorkerHandler = {
       type: 'other.type',
@@ -362,5 +395,24 @@ describe('S5a-3 — InMemoryQueue.sendOn is a plain send (no transaction to join
     const batch = await queue.receiveBatch<{ tenantId: string }>(10);
     expect(batch.map((m) => [m.idempotencyKey, m.payload])).toEqual([['k-1', { tenantId: 't1' }]]);
     expect(await queue.depth()).toEqual({ pending: 1, deadLetter: 0 });
+  });
+});
+
+// PRIV-3 — the recording hook reads the card-number rewrites still queued for
+// a call (delayed or not yet run) to write them before the call is ingested.
+describe('InMemoryQueue.findPending — the messages of a type still queued whose payload holds the match', () => {
+  it('returns them oldest first, delayed ones included, and none once received', async () => {
+    const queue = new InMemoryQueue();
+    await queue.send('job', { tenantId: 't1', callSid: 'CA1', n: 1 }, 'k-1', { delaySeconds: 60 });
+    await queue.send('job', { tenantId: 't1', callSid: 'CA2', n: 2 }, 'k-2');
+    await queue.send('other', { tenantId: 't1', callSid: 'CA1', n: 3 }, 'k-3');
+    await queue.send('job', { tenantId: 't2', callSid: 'CA1', n: 4 }, 'k-4');
+    await queue.send('job', { tenantId: 't1', callSid: 'CA1', n: 5 }, 'k-5');
+    const found = await queue.findPending<{ n: number }>('job', { tenantId: 't1', callSid: 'CA1' });
+    expect(found.map((m) => m.payload.n)).toEqual([1, 5]);
+    await queue.receiveBatch(10);
+    expect(await queue.findPending('job', { tenantId: 't1', callSid: 'CA1' })).toEqual([
+      expect.objectContaining({ idempotencyKey: 'k-1' }),
+    ]);
   });
 });

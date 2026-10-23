@@ -1,6 +1,7 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
 import { createAuditEvent } from '../audit/audit';
+import { CARD_NUMBER_PLACEHOLDER } from '../ai/privacy/pan-redact';
 import {
   CARD_NUMBER_SPLIT_REDACTED_EVENT,
   CallTranscriptTurn,
@@ -91,6 +92,11 @@ export class PgCallTranscriptTurnRepository
       //     because EXCLUDED carries the COALESCE'd value (always non-null)
       //     and would otherwise overwrite the original timestamp on every
       //     retry.
+      // PRIV-3 — text never trades for text holding fewer card markers ($14,
+      // `cardMarkerCount`): the end-of-call ingestion upsert carries a
+      // snapshot the recording hook read, and a card's rewrite of the row may
+      // have landed since (the retry worker's). Every marker has the same
+      // length, so the characters it takes up compare as the count does.
       const result = await client.query<CallTranscriptTurnRow>(
         `INSERT INTO call_transcript_turns (
            tenant_id, voice_recording_id, call_sid, session_id, turn_index, speaker, text,
@@ -98,7 +104,12 @@ export class PgCallTranscriptTurnRepository
            last_word_at, stt_final_at, endpoint_delay_ms, transport
          ) VALUES ($1, $2, $3, $4, $5, $6, $7, COALESCE($8, NOW()), $9, $10, $11, $12, $13)
          ON CONFLICT ${conflictTarget} DO UPDATE SET
-           text         = EXCLUDED.text,
+           text         = CASE
+                            WHEN length(call_transcript_turns.text) - length(replace(call_transcript_turns.text, $14, ''))
+                               > length(EXCLUDED.text) - length(replace(EXCLUDED.text, $14, ''))
+                            THEN call_transcript_turns.text
+                            ELSE EXCLUDED.text
+                          END,
            speaker      = EXCLUDED.speaker,
            started_at   = COALESCE($8, call_transcript_turns.started_at),
            completed_at = EXCLUDED.completed_at,
@@ -121,6 +132,7 @@ export class PgCallTranscriptTurnRepository
           input.sttFinalAt ?? null,
           input.endpointDelayMs ?? null,
           input.transport ?? null,
+          CARD_NUMBER_PLACEHOLDER,
         ],
       );
       const row = result.rows[0];
@@ -260,9 +272,13 @@ export class PgCallTranscriptTurnRepository
 
   /**
    * PRIV-3 — one transaction: every contributing caller row rewritten, then
-   * the audit row, so either the whole card leaves the stored call or none of
-   * the rewrite lands (the in-memory transcript is already rewritten either
-   * way, and the recording hook later flags the recording from it). Each row
+   * the audit row (only when a row changed: a retried or repeated rewrite of
+   * rows that already read so writes and audits nothing, nor does an earlier
+   * rewrite landing after a later one: a row never trades its text for text
+   * holding fewer card markers, `cardMarkerCount`), so either the whole
+   * card leaves the stored call or none of the rewrite lands (the in-memory
+   * transcript is already rewritten either way, and the recording hook later
+   * flags the recording from it). Each row
    * is matched on this session's call key and its speaker (caller unless the
    * turn names the agent) as well as its id, so a stale id can never rewrite
    * another session's row or another speaker's; without an id, only a row no
@@ -274,20 +290,25 @@ export class PgCallTranscriptTurnRepository
     return this.withTenantTransaction(tenantId, async (client) => {
       const rewritten: number[] = [];
       for (const turn of input.turns) {
+        // A row that already reads so (the completing turn, stored
+        // rewritten; a rewrite that landed before its retry) is no rewrite.
         const speaker = turn.speaker ?? 'caller';
         const result =
           turn.id !== undefined
             ? await client.query(
                 `UPDATE call_transcript_turns SET text = $5
                   WHERE tenant_id = $1 AND call_sid = $2 AND session_id = $3
-                    AND speaker = $6 AND id = $4`,
-                [tenantId, callSid, sessionId, turn.id, turn.text, speaker],
+                    AND speaker = $6 AND id = $4 AND text IS DISTINCT FROM $5
+                    AND length(text) - length(replace(text, $7, '')) <= length($5) - length(replace($5, $7, ''))`,
+                [tenantId, callSid, sessionId, turn.id, turn.text, speaker, CARD_NUMBER_PLACEHOLDER],
               )
             : await client.query(
                 `UPDATE call_transcript_turns SET text = $5
                   WHERE tenant_id = $1 AND call_sid = $2 AND session_id = $3
-                    AND speaker = $6 AND turn_index = $4 AND voice_recording_id IS NULL`,
-                [tenantId, callSid, sessionId, turn.turnIndex, turn.text, speaker],
+                    AND speaker = $6 AND turn_index = $4 AND voice_recording_id IS NULL
+                    AND text IS DISTINCT FROM $5
+                    AND length(text) - length(replace(text, $7, '')) <= length($5) - length(replace($5, $7, ''))`,
+                [tenantId, callSid, sessionId, turn.turnIndex, turn.text, speaker, CARD_NUMBER_PLACEHOLDER],
               );
         if ((result.rowCount ?? 0) > 0) rewritten.push(turn.turnIndex);
       }

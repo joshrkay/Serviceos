@@ -678,6 +678,11 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     why: 'Ack: DELETE FROM _queue_messages WHERE id = $1 on the global queue table (no tenant_id, no RLS); the id comes from receiveBatch.',
   },
   {
+    file: 'src/queues/pg-queue.ts', fn: 'PgQueue.findPending', access: 'withClient', count: 1,
+    category: 'global_table', tables: ['_queue_messages', '_queue_dlq'], handsOffTo: ['this.ensureTable'],
+    why: "PRIV-3 read-only lookup: SELECT of a job type's still-queued messages whose server-built payload contains the match (JSONB @>) on the global, non-RLS _queue_messages; claims nothing. Its one caller (pendingCardNumberRewrites, voice/card-number-rewrite-retry.ts) matches on the call's own tenantId and callSid, so the recording hook reads only that tenant's queued card-number rewrites.",
+  },
+  {
     file: 'src/queues/pg-queue.ts', fn: 'PgQueue.recordFailure', access: 'withClient', count: 1,
     category: 'global_table', tables: ['_queue_messages', '_queue_dlq'], handsOffTo: ['this.ensureTable'],
     why: 'T4-F10 diagnostic: UPDATE _queue_messages SET last_error by message id on the global, non-RLS queue table.',

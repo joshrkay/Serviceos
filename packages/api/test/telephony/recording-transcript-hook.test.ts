@@ -23,6 +23,7 @@ import {
   type VoiceSession,
 } from '../../src/ai/agents/customer-calling/voice-session-store';
 import type { RecordingPersistedEvent } from '../../src/telephony/recording-webhook';
+import type { CardNumberRewriteRetryJob } from '../../src/voice/card-number-rewrite-retry';
 import { createLogger } from '../../src/logging/logger';
 
 const TENANT = '11111111-1111-1111-1111-111111111111';
@@ -66,7 +67,13 @@ function event(overrides: Partial<RecordingPersistedEvent> = {}): RecordingPersi
   };
 }
 
-function harness(opts: { session?: VoiceSession; queue?: boolean } = {}) {
+function harness(
+  opts: {
+    session?: VoiceSession;
+    queue?: boolean;
+    pendingCardNumberRewrites?: (tenantId: string, callSid: string) => Promise<CardNumberRewriteRetryJob[]>;
+  } = {},
+) {
   const store = {
     findByCallSidIncludingEnded: vi.fn((callSid: string) =>
       opts.session && opts.session.callSid === callSid ? opts.session : undefined,
@@ -83,6 +90,7 @@ function harness(opts: { session?: VoiceSession; queue?: boolean } = {}) {
     voiceRepo: { markCardNumberDetected },
     auditRepo,
     ...(opts.queue === false ? {} : { queue: { send } }),
+    ...(opts.pendingCardNumberRewrites ? { pendingCardNumberRewrites: opts.pendingCardNumberRewrites } : {}),
     logger,
   });
   return { hook, store, repo, auditRepo, send, markCardNumberDetected };
@@ -557,9 +565,11 @@ describe('createRecordingTranscriptHook (U8)', () => {
             callSid: CALL_SID,
             voiceRecordingId: RECORDING_1,
             turnIndexes: [1, 3, 5],
-            error: 'db still down',
+            // By class: a database error can quote the row it failed on.
+            error: 'Error',
           }),
         );
+        expect(JSON.stringify(errorLog.mock.calls)).not.toContain('db still down');
         expect(JSON.stringify(errorLog.mock.calls)).not.toMatch(/4111|\b1111\b|my card/);
         expect(JSON.stringify(payloadTurns(send))).not.toMatch(/4111|\b1111\b/);
         expect(payloadTurns(send).filter((t) => t.speaker === 'caller').map((t) => t.text)).toEqual([
@@ -757,6 +767,313 @@ describe('createRecordingTranscriptHook (U8)', () => {
         }),
       );
       expect(JSON.stringify(payloadTurns(send))).not.toMatch(/4111|\b1111\b/);
+    });
+
+    // A restart between the failed live rewrite and the recording callback
+    // (or the callback landing on another replica): no session in memory, and
+    // the completing row is the marker, so a re-read finds no card. The
+    // rewrite is still queued for the retry worker; the hook writes it first.
+    it('writes the rewrites still queued for the call when no session is in memory, before the call is ingested', async () => {
+      const queued: CardNumberRewriteRetryJob[] = [];
+      const pending = vi.fn(async () => queued);
+      const { hook, repo, send } = harness({ pendingCardNumberRewrites: pending });
+      await seedLeg(repo, SESSION_1, [
+        ['agent', 'how can I help'],
+        ['caller', 'my card is 4111 1111'],
+        ['agent', 'go on, 4111 1111?'],
+        ['caller', `${MARKER} thanks`],
+      ]);
+      const rows = await repo.listByCallSid(TENANT, CALL_SID);
+      queued.push({
+        tenantId: TENANT,
+        callSid: CALL_SID,
+        sessionId: SESSION_1,
+        turns: [
+          { id: rows[1].id, turnIndex: 1, text: `my card is ${MARKER}` },
+          { id: rows[2].id, turnIndex: 2, speaker: 'agent', text: `go on, ${MARKER}?` },
+          { id: rows[3].id, turnIndex: 3, text: `${MARKER} thanks` },
+        ],
+      });
+      const rewrite = vi.spyOn(repo, 'redactCardNumberTurns');
+
+      await hook(event());
+
+      expect(pending).toHaveBeenCalledWith(TENANT, CALL_SID);
+      expect(rewrite).toHaveBeenCalledWith({ ...queued[0], actorId: 'recording_webhook' });
+      expect((await repo.listByRecording(TENANT, RECORDING_1)).map((r) => r.text)).toEqual([
+        'how can I help',
+        `my card is ${MARKER}`,
+        `go on, ${MARKER}?`,
+        `${MARKER} thanks`,
+      ]);
+      expect(JSON.stringify(payloadTurns(send))).not.toMatch(/4111|\b1111\b/);
+    });
+
+    it('ingests the queued redacted text even when writing it fails, and logs by class only', async () => {
+      const { hook, repo, send } = harness({
+        pendingCardNumberRewrites: async () => [
+          {
+            tenantId: TENANT,
+            callSid: CALL_SID,
+            sessionId: SESSION_1,
+            turns: [{ id: rows[0].id, turnIndex: 0, text: `my card is ${MARKER}` }],
+          },
+        ],
+      });
+      await seedLeg(repo, SESSION_1, [
+        ['caller', 'my card is 4111 1111'],
+        ['caller', `${MARKER} thanks`],
+      ]);
+      const rows = await repo.listByCallSid(TENANT, CALL_SID);
+      vi.spyOn(repo, 'redactCardNumberTurns').mockRejectedValueOnce(new Error('db down: my card is 4111 1111'));
+      const errorLog = vi.spyOn(logger, 'error');
+      try {
+        await hook(event());
+        expect(payloadTurns(send).map((t) => t.text)).toEqual([`my card is ${MARKER}`, `${MARKER} thanks`]);
+        expect(errorLog).toHaveBeenCalledWith(
+          'recording-transcript-hook: card-number rewrite of stored turns failed',
+          expect.objectContaining({ callSid: CALL_SID, sessionId: SESSION_1, turnIndexes: [0], error: 'Error' }),
+        );
+        expect(JSON.stringify(errorLog.mock.calls)).not.toMatch(/4111|my card/);
+      } finally {
+        errorLog.mockRestore();
+      }
+    });
+
+    // Every rewrite is queued before the completing row's insert, when no
+    // row's id is known yet: such a job names its rows by their mid-call key
+    // (session, speaker, turn index), which the recording's claim renumbers.
+    // When writing it fails, its text is still what is ingested: the rows it
+    // names are looked up by that key before the claim.
+    describe('a queued rewrite that names its rows by turn index only', () => {
+      const MID_CALL_ROWS: ReadonlyArray<readonly [number, 'agent' | 'caller', string]> = [
+        // Index 1 was an empty utterance, never stored: the claim renumbers 2 → 1 and 3 → 2.
+        [0, 'caller', 'my card is 4111 1111'],
+        [2, 'agent', 'go on, 4111 1111?'],
+        [3, 'caller', `${MARKER} thanks`],
+      ];
+      const BY_TURN_INDEX: CardNumberRewriteRetryJob = {
+        tenantId: TENANT,
+        callSid: CALL_SID,
+        sessionId: SESSION_1,
+        turns: [
+          { turnIndex: 0, text: `my card is ${MARKER}` },
+          { turnIndex: 2, speaker: 'agent', text: `go on, ${MARKER}?` },
+          { turnIndex: 3, text: `${MARKER} thanks` },
+        ],
+      };
+
+      async function seedMidCall(repo: InMemoryCallTranscriptTurnRepository) {
+        for (const [turnIndex, speaker, text] of MID_CALL_ROWS) {
+          await repo.recordTurn({ tenantId: TENANT, callSid: CALL_SID, sessionId: SESSION_1, turnIndex, speaker, text });
+        }
+        // Another leg's row that reads the same, which no rewrite of this leg names.
+        await repo.recordTurn({ tenantId: TENANT, callSid: CALL_SID, sessionId: SESSION_2, turnIndex: 0, speaker: 'caller', text: 'my card is 4111 1111' });
+      }
+
+      it('writes it before the claim (by that key) when it can', async () => {
+        const { hook, repo, send } = harness({ pendingCardNumberRewrites: async () => [BY_TURN_INDEX] });
+        await seedMidCall(repo);
+        await hook(event());
+        expect(payloadTurns(send).slice(0, 3).map((t) => t.text)).toEqual([`my card is ${MARKER}`, `go on, ${MARKER}?`, `${MARKER} thanks`]);
+      });
+
+      it('still ingests its redacted text when writing it fails', async () => {
+        const { hook, repo, send, markCardNumberDetected } = harness({ pendingCardNumberRewrites: async () => [BY_TURN_INDEX] });
+        await seedMidCall(repo);
+        vi.spyOn(repo, 'redactCardNumberTurns').mockRejectedValueOnce(new Error('db down'));
+        const errorLog = vi.spyOn(logger, 'error');
+        try {
+          await hook(event());
+          expect(payloadTurns(send).map((t) => t.text)).toEqual([
+            `my card is ${MARKER}`,
+            `go on, ${MARKER}?`,
+            `${MARKER} thanks`,
+            // The other leg's row: no rewrite named it, and no card is in it alone.
+            'my card is 4111 1111',
+          ]);
+          expect(markCardNumberDetected).toHaveBeenCalledWith(TENANT, RECORDING_1);
+          expect(JSON.stringify(errorLog.mock.calls)).not.toMatch(/4111|my card/);
+        } finally {
+          errorLog.mockRestore();
+        }
+      });
+
+      // Writing it and looking its rows up both failed, and the claim then
+      // renumbered them: the rows it fits (its text with each marker standing
+      // for what the caller said) get its text in what is ingested.
+      it('still ingests its redacted text when the rows cannot be looked up before the claim either', async () => {
+        const { hook, repo, send } = harness({ pendingCardNumberRewrites: async () => [BY_TURN_INDEX] });
+        await seedMidCall(repo);
+        vi.spyOn(repo, 'redactCardNumberTurns').mockRejectedValueOnce(new Error('db down'));
+        vi.spyOn(repo, 'listByCallSid').mockRejectedValueOnce(new Error('db down'));
+        const errorLog = vi.spyOn(logger, 'error');
+        try {
+          await hook(event());
+          expect(payloadTurns(send).map((t) => t.text)).toEqual([
+            `my card is ${MARKER}`,
+            `go on, ${MARKER}?`,
+            `${MARKER} thanks`,
+            'my card is 4111 1111',
+          ]);
+          expect(errorLog).toHaveBeenCalledWith(
+            'recording-transcript-hook: rows of a card-number rewrite could not be looked up',
+            expect.objectContaining({ callSid: CALL_SID, voiceRecordingId: RECORDING_1, error: 'Error' }),
+          );
+          expect(JSON.stringify(errorLog.mock.calls)).not.toMatch(/4111|my card/);
+        } finally {
+          errorLog.mockRestore();
+        }
+      });
+
+      // A split card's middle groups are turns of nothing but digits, so the
+      // job names them as the bare marker, whose text fits any row of the
+      // leg. A marker stands for what the caller said there: a stretch the
+      // scrubber replaced, which begins and ends with a digit or a number
+      // word. A row with no such stretch there is another turn, even when it
+      // holds a number word ("the one upstairs", "sí, a las tres").
+      describe('a job naming a turn of nothing but the card', () => {
+        type Row = readonly [number, 'agent' | 'caller', string];
+        const LEG: ReadonlyArray<Row> = [
+          [0, 'agent', 'How can I help?'],
+          [1, 'caller', 'my water heater is leaking in the garage'],
+          [2, 'agent', 'Sorry to hear that. What is your name?'],
+          [3, 'caller', 'Dana Smith'],
+          [4, 'caller', 'the one upstairs, not the basement'],
+          [5, 'caller', 'el martes o el miércoles'],
+          [6, 'agent', 'What card would you like to use?'],
+          [7, 'caller', 'my card is four one one one, uh, one one one one'],
+          [8, 'caller', '1111'],
+          // The completing turn, inserted already rewritten.
+          [9, 'caller', MARKER],
+          [10, 'caller', 'thanks, the gate code is 4821, see you tomorrow'],
+          [11, 'caller', 'sí, a las tres'],
+          // A bare answer: nothing but a number, as a split card's middle group is.
+          [12, 'caller', '4821'],
+        ];
+        const JOB: CardNumberRewriteRetryJob = {
+          tenantId: TENANT,
+          callSid: CALL_SID,
+          sessionId: SESSION_1,
+          turns: [
+            { turnIndex: 7, text: `my card is ${MARKER}` },
+            { turnIndex: 8, text: MARKER },
+            { turnIndex: 9, text: MARKER },
+          ],
+        };
+
+        async function ingested(leg: ReadonlyArray<Row>, job: CardNumberRewriteRetryJob, lookupFails: boolean) {
+          const { hook, repo, send } = harness({ pendingCardNumberRewrites: async () => [job] });
+          for (const [turnIndex, speaker, text] of leg) {
+            await repo.recordTurn({ tenantId: TENANT, callSid: CALL_SID, sessionId: SESSION_1, turnIndex, speaker, text });
+          }
+          vi.spyOn(repo, 'redactCardNumberTurns').mockRejectedValueOnce(new Error('db down'));
+          if (lookupFails) vi.spyOn(repo, 'listByCallSid').mockRejectedValueOnce(new Error('db down'));
+          const errorLog = vi.spyOn(logger, 'error').mockImplementation(() => undefined);
+          try {
+            await hook(event());
+          } finally {
+            errorLog.mockRestore();
+          }
+          return payloadTurns(send).map((t) => t.text);
+        }
+
+        // When its write fails, its rows are found by their mid-call key and
+        // only they are redacted. When the lookup fails too, the rows are
+        // fitted by text: a caller row that is nothing but a number fits the
+        // bare marker and is ingested as it, in this double failure erring on
+        // the side of the marker; one whose words around a number word or a
+        // code are its own (the gate code below) is left as it is.
+        it('fits the bare marker only to caller rows that begin and end with a digit or a number word', async () => {
+          const said = LEG.map(([, , text]) => text);
+          const named = said.map((text, k) => (k === 7 ? `my card is ${MARKER}` : k === 8 ? MARKER : text));
+          expect(await ingested(LEG, JOB, false), 'its write failed').toEqual(named);
+          expect(await ingested(LEG, JOB, true), 'its write and the lookup by key failed').toEqual(
+            named.map((text, k) => (k === 12 ? MARKER : text)),
+          );
+        });
+
+        // A job with a marker after words of the row's own, or two markers
+        // around a filler: each marker fits only a stretch that begins and
+        // ends with a digit or a number word.
+        it('fits markers after words, or around a filler, only where such a stretch stands', async () => {
+          const leg: ReadonlyArray<Row> = [
+            [0, 'agent', 'How can I help?'],
+            [1, 'caller', 'okay, uh, sure'],
+            [2, 'caller', 'four one one one, uh, one one one one'],
+            [3, 'caller', 'yes, uh, no'],
+            [4, 'caller', 'my card is Visa'],
+            [5, 'caller', 'my card is the blue one'],
+            [6, 'caller', 'my card is 5555'],
+            [7, 'caller', 'one, uh, two'],
+          ];
+          const job: CardNumberRewriteRetryJob = {
+            tenantId: TENANT,
+            callSid: CALL_SID,
+            sessionId: SESSION_1,
+            turns: [
+              { turnIndex: 2, text: `${MARKER}, uh, ${MARKER}` },
+              { turnIndex: 6, text: `my card is ${MARKER}` },
+            ],
+          };
+          const said = leg.map(([, , text]) => text);
+          const named = said.map((text, k) => (k === 2 ? `${MARKER}, uh, ${MARKER}` : k === 6 ? `my card is ${MARKER}` : text));
+          expect(await ingested(leg, job, false), 'its write failed').toEqual(named);
+          // "one, uh, two" is two number words around a filler, as the card's
+          // own row was: it fits, erring on the side of the marker.
+          expect(await ingested(leg, job, true), 'its write and the lookup by key failed').toEqual(
+            named.map((text, k) => (k === 7 ? `${MARKER}, uh, ${MARKER}` : text)),
+          );
+        });
+
+        // A row that holds a card marked already (one read whole in that
+        // turn, or Deepgram's tag in a row stored before the scrubber) next
+        // to the first groups of the split one: the job's marker there
+        // stands for that card, and the row still fits. It did not, and its
+        // groups were ingested in clear.
+        it('fits a marker that stands where the row holds a card marked already', async () => {
+          for (const old of [MARKER, '[CREDIT_CARD_1]']) {
+            const leg: ReadonlyArray<Row> = [
+              [0, 'agent', 'What card would you like to use?'],
+              [1, 'caller', `the old one was ${old}, the new one is 4111 1111`],
+              // The completing turn, inserted already rewritten.
+              [2, 'caller', MARKER],
+            ];
+            const job: CardNumberRewriteRetryJob = {
+              tenantId: TENANT,
+              callSid: CALL_SID,
+              sessionId: SESSION_1,
+              turns: [
+                { turnIndex: 1, text: `the old one was ${MARKER}, the new one is ${MARKER}` },
+                { turnIndex: 2, text: MARKER },
+              ],
+            };
+            const named = ['What card would you like to use?', `the old one was ${MARKER}, the new one is ${MARKER}`, MARKER];
+            expect(await ingested(leg, job, false), `${old}: its write failed`).toEqual(named);
+            expect(await ingested(leg, job, true), `${old}: its write and the lookup by key failed`).toEqual(named);
+          }
+        });
+      });
+    });
+
+    it('ingests the rows as read when the queued rewrites cannot be read, and logs by class only', async () => {
+      const { hook, repo, send } = harness({
+        pendingCardNumberRewrites: async () => {
+          throw new Error('queue down');
+        },
+      });
+      await seedLeg(repo, SESSION_1, [['caller', 'my zip is 85006']]);
+      const errorLog = vi.spyOn(logger, 'error');
+      try {
+        await expect(hook(event())).resolves.toBeUndefined();
+        expect(payloadTurns(send).map((t) => t.text)).toEqual(['my zip is 85006']);
+        expect(errorLog).toHaveBeenCalledWith(
+          'recording-transcript-hook: queued card-number rewrites could not be read',
+          expect.objectContaining({ callSid: CALL_SID, voiceRecordingId: RECORDING_1, error: 'Error' }),
+        );
+      } finally {
+        errorLog.mockRestore();
+      }
     });
 
     it('leaves a call whose rows were already rewritten live as it is', async () => {

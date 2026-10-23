@@ -353,10 +353,12 @@ function blankNonMentions(text: string, placeholder: string): string {
 const MAX_CUE_DISTANCE_WORDS = 12;
 
 /**
- * Cheap pre-check: text with neither a digit nor a digit word cannot hold a
- * card number, so most prose skips the tokenizer.
+ * A digit or a number word anywhere in a text. Cheap pre-check: text with
+ * neither cannot hold a card number, so most prose skips the tokenizer. It
+ * is also what a card marker in a stored row's redacted text stands for
+ * (the recording hook's `fitsRedaction`).
  */
-const MAY_HOLD_DIGITS = new RegExp(
+export const HOLDS_DIGITS = new RegExp(
   String.raw`\d|(?:^|[^\p{L}])(?:${[
     ...DIGIT_WORDS.keys(),
     ...ENGLISH_PAIR_WORDS.keys(),
@@ -1355,7 +1357,7 @@ export function redactCardNumbers(
 ): string {
   if (!text) return text;
   const tagged = text.replace(DEEPGRAM_CARD_TAG, placeholder);
-  if (!MAY_HOLD_DIGITS.test(tagged)) return tagged;
+  if (!HOLDS_DIGITS.test(tagged)) return tagged;
   const tokens = tokenize(tagged);
   const hits = findCardHits(tokens, textCue(tagged, tokens, placeholder));
   if (hits.length === 0) return tagged;

@@ -36,7 +36,9 @@ import type {
   RedactCardNumberTurnsInput,
   ReplyUnackedReason,
 } from '../../../voice/call-transcript-turn';
-import { voiceReplyStampLostTotal } from '../../../monitoring/metrics';
+import { cardNumberRewriteFailedTotal, voiceReplyStampLostTotal } from '../../../monitoring/metrics';
+import type { Queue } from '../../../queues/queue';
+import { enqueueCardNumberRewriteRetry, errorClass, type CardNumberRewriteRetryJob } from '../../../voice/card-number-rewrite-retry';
 import type { ResolvedApprover } from '../../../proposals/approver-identity';
 import {
   agentLinesBefore,
@@ -818,6 +820,44 @@ export interface VoiceSessionStoreOptions {
    * Omitted ⇒ in-memory only (tests, in-app-only deployments).
    */
   callTranscriptTurnRepo?: CallTranscriptTurnRepoPort;
+  /**
+   * PRIV-3 — the durable queue every cross-turn card-number rewrite of the
+   * stored rows goes to before the completing row is inserted and before its
+   * live write (`queueCardRedactionByTurnIndex`), for the retry worker and
+   * the recording hook (voice/card-number-rewrite-retry.ts).
+   * Omitted ⇒ a rewrite whose live write fails is held only in the session's
+   * memory, for the recording hook.
+   */
+  cardRewriteRetryQueue?: Pick<Queue, 'send'>;
+}
+
+/**
+ * PRIV-3 — a cross-turn rewrite of a call's stored rows as the retry worker
+ * takes it (`CardNumberRewriteRetryJob`): each row by `ids[k]` where its
+ * insert resolved one, else by its mid-call key (turn index), with its
+ * redacted text; and what may be logged of it (ids and indexes, never text).
+ */
+function cardRedactionJob(
+  session: VoiceSession,
+  callSid: string,
+  rewritten: readonly RewrittenTurn[],
+  ids: ReadonlyArray<string | undefined> = [],
+): { job: CardNumberRewriteRetryJob; logged: Record<string, unknown> } {
+  return {
+    job: {
+      tenantId: session.tenantId,
+      callSid,
+      sessionId: session.id,
+      turns: rewritten.map((t, k) => ({
+        ...(ids[k] ? { id: ids[k] } : {}),
+        turnIndex: t.turnIndex,
+        // Absent for a caller row (the repository's default).
+        ...(t.speaker === 'agent' ? { speaker: t.speaker } : {}),
+        text: t.text.trim(),
+      })),
+    },
+    logged: { tenantId: session.tenantId, sessionId: session.id, callSid, turnIndexes: rewritten.map((t) => t.turnIndex) },
+  };
 }
 
 /** The slice of the repository the store writes through. */
@@ -860,10 +900,12 @@ export class VoiceSessionStore {
   private readonly replicaId: string;
   private readonly sweepHandle: ReturnType<typeof setInterval> | null;
   private readonly callTranscriptTurnRepo?: CallTranscriptTurnRepoPort;
+  private readonly cardRewriteRetryQueue?: Pick<Queue, 'send'>;
 
   constructor(options: VoiceSessionStoreOptions = {}) {
     this.idleTtlMs = options.idleTtlMs ?? DEFAULT_IDLE_TTL_MS;
     this.callTranscriptTurnRepo = options.callTranscriptTurnRepo;
+    this.cardRewriteRetryQueue = options.cardRewriteRetryQueue;
     this.replicaId = options.replicaId ?? REPLICA_ID;
     const sweepIntervalMs = options.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
     const startInterval = options.startInterval ?? true;
@@ -1167,7 +1209,10 @@ export class VoiceSessionStore {
     const line = split ? { ...entry, text: split.text } : entry;
     session.transcript.push(`${line.speaker}: ${line.text}`);
     session.lastActivityAt = new Date();
-    const row = this.persistTurn(session, turnIndex, line);
+    // PRIV-3 — the new row is stored as the marker, so the rewrite of the
+    // earlier rows is queued durably before it is inserted (`persistCardRedaction`).
+    const queued = split ? this.queueCardRedactionByTurnIndex(session, split.rewritten) : undefined;
+    const row = this.persistTurn(session, turnIndex, line, queued);
     const tracked = session.recentCallerTurns[session.recentCallerTurns.length - 1];
     if (line.speaker === 'caller') {
       if (tracked?.turnIndex === turnIndex) tracked.row = row;
@@ -1272,55 +1317,98 @@ export class VoiceSessionStore {
   }
 
   /**
-   * PRIV-3 — the stored half of a cross-turn rewrite: one repository
+   * PRIV-3 — the first, durable half of a cross-turn rewrite, handed to the
+   * retry queue (`cardRewriteRetryQueue`) before anything is written: the
+   * completing row is stored as the marker, so once it is, the earlier rows'
+   * fragments no longer read as a card and only the rewrite says what they
+   * must become. A process that dies while the inserts or the live write are
+   * in flight, a recording callback that lands on another process (the hook
+   * reads the queued rewrites, `pendingCardNumberRewrites`) or a call with no
+   * recording must still find it, so the completing row's insert waits on
+   * the returned promise (`appendTranscript`): sent side by side, the insert
+   * could commit first and a process dying between the two left the
+   * fragments with no job. Queued that early it names the rows by their
+   * mid-call key (their ids are not known yet), which holds until a
+   * recording claims them (`attachRecording` renumbers them), and the hook
+   * writes it before that. The job is delayed, so a live write that lands
+   * leaves it nothing to do (every write is idempotent). Never rejects: a
+   * failed send is logged and the insert goes ahead.
+   */
+  private queueCardRedactionByTurnIndex(session: VoiceSession, rewritten: readonly RewrittenTurn[]): Promise<void> | undefined {
+    const { callSid } = session;
+    if (!this.callTranscriptTurnRepo || !callSid) return undefined; // in-app: the running transcript is rewritten from memory
+    const { job, logged } = cardRedactionJob(session, callSid, rewritten);
+    return this.queueCardRedaction(job, logged);
+  }
+
+  /**
+   * PRIV-3 — the live half of a cross-turn rewrite of the stored rows (its
+   * durable half is `queueCardRedactionByTurnIndex`): one repository
    * transaction for every contributing row, chained behind those rows'
    * inserts (and behind any earlier rewrite of this session). Fire-and-forget
-   * like `persistTurn`: a failure is logged, kept on the session for the
-   * recording hook to write (`unwrittenCardRedactions`), and never reaches the
-   * call path.
+   * like `persistTurn`, and never reaches the call path. A failed live write
+   * is logged (by error class: a database error can quote the row), kept on
+   * the session for the recording hook (`unwrittenCardRedactions`), and
+   * queued again by the rows' ids, which a recording's claim does not change
+   * (a hook that could not read the queue claims the rows before the worker
+   * runs; and the first enqueue may have failed too).
    */
   private persistCardRedaction(session: VoiceSession, rewritten: RewrittenTurn[]): void {
     const repo = this.callTranscriptTurnRepo;
     const { callSid } = session;
     if (!repo || !callSid) return; // in-app: the running transcript is rewritten from memory
-    const turns = rewritten.map((t) => ({ ...t, text: t.text.trim() }));
+    const rows = rewritten.map((t) => t.row ?? Promise.resolve(undefined));
     session.cardRedactionWrites = session.cardRedactionWrites
-      .then(() => Promise.all(turns.map((t) => t.row ?? Promise.resolve(undefined))))
+      .then(() => Promise.all(rows))
       .then(async (ids) => {
-        const rows = turns.map((t, k) => ({
-          ...(ids[k] ? { id: ids[k] } : {}),
-          turnIndex: t.turnIndex,
-          // Absent for a caller row (the repository's default).
-          ...(t.speaker === 'agent' ? { speaker: t.speaker } : {}),
-          text: t.text,
-        }));
+        const { job: byId, logged } = cardRedactionJob(session, callSid, rewritten, ids);
         try {
-          await repo.redactCardNumberTurns({
-            tenantId: session.tenantId,
-            callSid,
-            sessionId: session.id,
-            actorId: 'voice-session-store',
-            turns: rows,
-          });
+          await repo.redactCardNumberTurns({ ...byId, actorId: 'voice-session-store' });
         } catch (err) {
-          session.unwrittenCardRedactions.push(rows);
+          session.unwrittenCardRedactions.push(byId.turns);
+          cardNumberRewriteFailedTotal.inc({ stage: 'live' });
           // eslint-disable-next-line no-console
           console.error('voice-session-store: card-number rewrite of stored turns failed', {
-            tenantId: session.tenantId,
-            sessionId: session.id,
-            callSid,
-            turnIndexes: turns.map((t) => t.turnIndex),
-            error: err instanceof Error ? err.message : String(err),
+            ...logged,
+            error: errorClass(err),
           });
+          await this.queueCardRedaction(byId, logged);
         }
       });
   }
 
-  /** Returns the row's insert (resolving to its id, undefined on failure), or undefined when nothing is persisted. */
+  /**
+   * PRIV-3 — enqueue a card rewrite for the retry worker. A failure is
+   * counted and logged by error class (never the job's text), and never
+   * thrown.
+   */
+  private async queueCardRedaction(
+    job: CardNumberRewriteRetryJob,
+    logged: Record<string, unknown>,
+  ): Promise<void> {
+    if (!this.cardRewriteRetryQueue) return;
+    try {
+      await enqueueCardNumberRewriteRetry(this.cardRewriteRetryQueue, job);
+    } catch (err) {
+      cardNumberRewriteFailedTotal.inc({ stage: 'enqueue' });
+      // eslint-disable-next-line no-console
+      console.error('voice-session-store: card-number rewrite could not be queued for retry', {
+        ...logged,
+        error: errorClass(err),
+      });
+    }
+  }
+
+  /**
+   * Returns the row's insert (resolving to its id, undefined on failure), or
+   * undefined when nothing is persisted. The insert starts once `after` (if
+   * given; it never rejects) has settled.
+   */
   private persistTurn(
     session: VoiceSession,
     turnIndex: number,
     entry: TranscriptEntry,
+    after: Promise<void> = Promise.resolve(),
   ): Promise<string | undefined> | undefined {
     const timing = entry.speaker === 'caller' ? entry.timing : undefined;
     const repo = this.callTranscriptTurnRepo;
@@ -1332,8 +1420,8 @@ export class VoiceSessionStore {
       timing?.lastWordAt !== undefined
         ? Math.max(0, timing.sttFinalAt.getTime() - timing.lastWordAt.getTime())
         : undefined;
-    // Promise.resolve().then(...) also contains a synchronous throw from the repo.
-    const persisted = Promise.resolve()
+    // after.then(...) also contains a synchronous throw from the repo.
+    const persisted = after
       .then(() =>
         repo.recordTurn({
           tenantId: session.tenantId,
@@ -1360,7 +1448,9 @@ export class VoiceSessionStore {
             sessionId: session.id,
             callSid,
             turnIndex,
-            error: err instanceof Error ? err.message : String(err),
+            // By class only: a database error can quote the row, which holds
+            // the caller's words (part of a card among them, PRIV-3).
+            error: errorClass(err),
           });
           return undefined;
         },

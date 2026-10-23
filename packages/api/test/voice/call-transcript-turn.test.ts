@@ -31,6 +31,54 @@ async function seedLeg(
 }
 
 describe('InMemoryCallTranscriptTurnRepository', () => {
+  // PRIV-3 — the retry worker and the recording hook may both write a
+  // cross-turn card rewrite the live store already wrote: a row that already
+  // reads so is no rewrite (Pg: no row counted, no audit row).
+  it('redactCardNumberTurns counts only the rows it changed', async () => {
+    const repo = new InMemoryCallTranscriptTurnRepository();
+    const base = { tenantId: 't1', callSid: 'CA1', sessionId: 's1' };
+    const first = await repo.recordTurn({ ...base, turnIndex: 0, speaker: 'caller', text: '4111 1111' });
+    const second = await repo.recordTurn({ ...base, turnIndex: 1, speaker: 'caller', text: '[card number]' });
+    const turns = [
+      { id: first.id, turnIndex: 0, text: '[card number]' },
+      { id: second.id, turnIndex: 1, text: '[card number]' },
+    ];
+    expect(await repo.redactCardNumberTurns({ ...base, actorId: 'test', turns })).toBe(1);
+    expect(await repo.redactCardNumberTurns({ ...base, actorId: 'test', turns })).toBe(0);
+    expect((await repo.listByCallSid('t1', 'CA1')).map((r) => r.text)).toEqual(['[card number]', '[card number]']);
+  });
+
+  // PRIV-3 — two rewrites of the same rows (a later card in the window) may
+  // land in either order through the retry queue, and an end-of-call upsert
+  // may carry a snapshot read before a rewrite landed: the card's marker is
+  // never taken back out of a stored row.
+  it('never replaces stored text with text that holds fewer card markers', async () => {
+    const repo = new InMemoryCallTranscriptTurnRepository();
+    const base = { tenantId: 't1', callSid: 'CA1', sessionId: 's1' };
+    const row = await repo.recordTurn({ ...base, turnIndex: 0, speaker: 'caller', text: '4111 1111 and 5555 5555' });
+    const once = { ...base, actorId: 'test', turns: [{ id: row.id, turnIndex: 0, text: '[card number] and 5555 5555' }] };
+    const twice = { ...base, actorId: 'test', turns: [{ id: row.id, turnIndex: 0, text: '[card number] and [card number]' }] };
+    expect(await repo.redactCardNumberTurns(twice)).toBe(1);
+    // The earlier rewrite, landing late, would put "5555 5555" back.
+    expect(await repo.redactCardNumberTurns(once)).toBe(0);
+    expect((await repo.listByCallSid('t1', 'CA1')).map((r) => r.text)).toEqual(['[card number] and [card number]']);
+
+    // The ingestion upsert of a snapshot taken before the rewrite.
+    await repo.attachRecording('t1', 'CA1', 'rec-1');
+    const upserted = await repo.recordTurn({
+      tenantId: 't1',
+      voiceRecordingId: 'rec-1',
+      turnIndex: 0,
+      speaker: 'caller',
+      text: '4111 1111 and 5555 5555',
+    });
+    expect(upserted.text).toBe('[card number] and [card number]');
+    // As redacted or more, it is written as given.
+    expect(
+      (await repo.recordTurn({ tenantId: 't1', voiceRecordingId: 'rec-1', turnIndex: 0, speaker: 'caller', text: '[card number] [card number] ok' })).text,
+    ).toBe('[card number] [card number] ok');
+  });
+
   describe('recordTurn validation', () => {
     it('rejects empty tenantId', async () => {
       const repo = new InMemoryCallTranscriptTurnRepository();

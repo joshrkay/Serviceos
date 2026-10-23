@@ -1,5 +1,8 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { VoiceSessionStore } from '../../../../src/ai/agents/customer-calling/voice-session-store';
+import { InMemoryQueue } from '../../../../src/queues/queue';
+import { InMemoryCallTranscriptTurnRepository } from '../../../../src/voice/call-transcript-turn';
+import { createCardNumberRewriteRetryWorker } from '../../../../src/voice/card-number-rewrite-retry';
 
 describe('VoiceSessionStore', () => {
   const stores: VoiceSessionStore[] = [];
@@ -1013,6 +1016,277 @@ describe('VoiceSessionStore', () => {
       expect(redactCardNumberTurns).not.toHaveBeenCalled();
     });
 
+    // A restart or deploy between a failed live rewrite and the recording
+    // callback, or a call with no recording, would leave the fragments in
+    // call_transcript_turns: the rewrite that did not land is also handed to
+    // the durable queue (P0-009), already redacted, for the retry worker.
+    it('hands a failed rewrite to the durable retry queue: the rows by turn index and the redacted text, no digits', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const { repo, redactCardNumberTurns } = splitRepo();
+        redactCardNumberTurns.mockRejectedValueOnce(new Error('connection terminated'));
+        const send = vi.fn(async () => 'msg-1');
+        const store = newStore({ callTranscriptTurnRepo: repo, cardRewriteRetryQueue: { send } });
+        const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+        store.appendTranscript(session.id, { speaker: 'caller', text: 'my card is 4111 1111' });
+        store.appendTranscript(session.id, { speaker: 'agent', text: 'go on' });
+        store.appendTranscript(session.id, { speaker: 'caller', text: '1111 1111 thanks' });
+        await session.cardRedactionWrites;
+        expect(send).toHaveBeenCalledTimes(2);
+        const [type, job, key] = send.mock.calls[0] as unknown as [string, unknown, string];
+        expect(type).toBe('voice.card_number_rewrite_retry');
+        // Queued before the rows' inserts had landed: by the mid-call key.
+        expect(job).toEqual({
+          tenantId: 'tenant-a',
+          callSid: CALL_SID,
+          sessionId: session.id,
+          turns: [
+            { turnIndex: 0, text: `my card is ${MARKER}` },
+            { turnIndex: 2, text: `${MARKER} thanks` },
+          ],
+        });
+        // Once the live write failed, again by the rows' ids, which a
+        // recording claiming the rows (and renumbering them) leaves as they are.
+        expect((send.mock.calls[1] as unknown as [string, { turns: unknown }])[1].turns).toEqual([
+          { id: 'row-0', turnIndex: 0, text: `my card is ${MARKER}` },
+          { id: 'row-2', turnIndex: 2, text: `${MARKER} thanks` },
+        ]);
+        expect(JSON.stringify(send.mock.calls.map((call) => (call as unknown as [string, { turns: unknown }])[1].turns))).not.toMatch(/\d{4}/);
+        // Keyed on the session and the rewrite, never on text the key would
+        // carry into an index.
+        expect(key).toMatch(/^card-number-rewrite:tenant-a:/);
+        expect(key).not.toContain('card number');
+        // Kept in memory too: the recording hook, if it runs first in this
+        // process, writes it before ingestion.
+        expect(session.unwrittenCardRedactions).toHaveLength(1);
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    // Durable first: a process that dies after the completing row's insert,
+    // before or during the live write, or a recording callback that lands on
+    // another process, still finds the rewrite in the queue. A live write
+    // that lands leaves the delayed job nothing to do.
+    it('queues the rewrite before writing it live, even when the live write lands', async () => {
+      const order: string[] = [];
+      const { repo, redactCardNumberTurns } = splitRepo();
+      redactCardNumberTurns.mockImplementation(async (input: { turns: ReadonlyArray<unknown> }) => {
+        order.push('live');
+        return input.turns.length;
+      });
+      const send = vi.fn(async () => {
+        order.push('queued');
+        return 'msg-1';
+      });
+      const store = newStore({ callTranscriptTurnRepo: repo, cardRewriteRetryQueue: { send } });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'my card is 4111 1111' });
+      store.appendTranscript(session.id, { speaker: 'caller', text: '1111 1111' });
+      await session.cardRedactionWrites;
+      expect(order).toEqual(['queued', 'live']);
+      expect(send).toHaveBeenCalledWith(
+        'voice.card_number_rewrite_retry',
+        {
+          tenantId: 'tenant-a',
+          callSid: CALL_SID,
+          sessionId: session.id,
+          turns: [
+            { turnIndex: 0, text: `my card is ${MARKER}` },
+            { turnIndex: 1, text: MARKER },
+          ],
+        },
+        expect.stringMatching(/^card-number-rewrite:tenant-a:/),
+        { delaySeconds: 60 },
+      );
+      // The live write names the rows by id, once their inserts have landed.
+      expect(redactCardNumberTurns.mock.calls[0][0]).toMatchObject({
+        turns: [
+          { id: 'row-0', turnIndex: 0, text: `my card is ${MARKER}` },
+          { id: 'row-1', turnIndex: 1, text: MARKER },
+        ],
+      });
+      expect(session.unwrittenCardRedactions).toEqual([]);
+    });
+
+    // The completing row is inserted as the marker at once, so from then on
+    // only the rewrite says what the earlier rows must become: it is queued
+    // in the same tick, not after the earlier rows' inserts (a process that
+    // died while they were in flight left nothing durable).
+    it('queues the rewrite the moment the completing turn is appended, before the inserts it waits on land', async () => {
+      const { repo, recordTurn, redactCardNumberTurns } = splitRepo();
+      let landFirstInsert!: () => void;
+      recordTurn.mockImplementationOnce(
+        (input: { turnIndex: number }) =>
+          new Promise((resolve) => {
+            landFirstInsert = () => resolve({ id: `row-${input.turnIndex}` } as never);
+          }),
+      );
+      const send = vi.fn(async () => 'msg-1');
+      const store = newStore({ callTranscriptTurnRepo: repo, cardRewriteRetryQueue: { send } });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'my card is 4111 1111' });
+      store.appendTranscript(session.id, { speaker: 'caller', text: '1111 1111' });
+      // Synchronously, with the first row's insert still in flight.
+      expect(send).toHaveBeenCalledTimes(1);
+      expect((send.mock.calls[0] as unknown as [string, { turns: unknown }])[1].turns).toEqual([
+        { turnIndex: 0, text: `my card is ${MARKER}` },
+        { turnIndex: 1, text: MARKER },
+      ]);
+      // The live write waits on that insert.
+      await settle();
+      expect(redactCardNumberTurns).not.toHaveBeenCalled();
+      landFirstInsert();
+      await session.cardRedactionWrites;
+      expect(redactCardNumberTurns).toHaveBeenCalledTimes(1);
+    });
+
+    // The completing row is stored as the marker: once it is, the earlier
+    // rows' fragments no longer read as a card and only the rewrite says what
+    // they must become. Its insert therefore waits for the queue's send to
+    // land; sent side by side, a process that died after the insert committed
+    // and before the send did left the fragments with no job.
+    it('inserts the completing row only once the rewrite is durably queued; a process that dies between the two leaves the job, which cleans the rows', async () => {
+      const rows = new InMemoryCallTranscriptTurnRepository();
+      const order: string[] = [];
+      const recordTurn = vi.fn(async (input: Parameters<InMemoryCallTranscriptTurnRepository['recordTurn']>[0]) => {
+        order.push(`insert ${input.turnIndex}`);
+        // The process dies at the completing row's insert: nothing after it runs.
+        if (input.turnIndex === 2) return new Promise<never>(() => undefined);
+        return rows.recordTurn(input);
+      });
+      const repo = {
+        recordTurn,
+        markReplyAudio: vi.fn(async () => 1),
+        redactCardNumberTurns: vi.fn(() => new Promise<number>(() => undefined)),
+      };
+      const queue = new InMemoryQueue();
+      let landSend!: () => void;
+      const send = vi.fn(
+        (...args: Parameters<InMemoryQueue['send']>) =>
+          new Promise<string>((resolve, reject) => {
+            landSend = () => {
+              order.push('queued');
+              queue.send(...args).then(resolve, reject);
+            };
+          }),
+      );
+      const store = newStore({ callTranscriptTurnRepo: repo, cardRewriteRetryQueue: { send } });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'my card is 4111 1111' });
+      store.appendTranscript(session.id, { speaker: 'agent', text: 'go on' });
+      await settle();
+      store.appendTranscript(session.id, { speaker: 'caller', text: '1111 1111' });
+      await settle();
+      expect(send).toHaveBeenCalledTimes(1);
+      // Not inserted while the send is in flight.
+      expect(order).toEqual(['insert 0', 'insert 1']);
+      landSend();
+      await settle();
+      expect(order).toEqual(['insert 0', 'insert 1', 'queued', 'insert 2']);
+      // The job alone (delayed, still pending) cleans what was stored.
+      const jobs = await queue.findPending('voice.card_number_rewrite_retry', { tenantId: 'tenant-a', callSid: CALL_SID });
+      expect(jobs).toHaveLength(1);
+      const worker = createCardNumberRewriteRetryWorker({ callTranscriptTurnRepo: rows });
+      await worker.handle(jobs[0] as never, { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never);
+      expect((await rows.listByCallSid('tenant-a', CALL_SID)).map((r) => r.text)).toEqual([`my card is ${MARKER}`, 'go on']);
+    });
+
+    it('still inserts the completing row when the send fails, or with no retry queue', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        for (const cardRewriteRetryQueue of [{ send: vi.fn(async (): Promise<string> => Promise.reject(new Error('queue down'))) }, undefined]) {
+          const { repo, recordTurn } = splitRepo();
+          const store = newStore({ callTranscriptTurnRepo: repo, ...(cardRewriteRetryQueue ? { cardRewriteRetryQueue } : {}) });
+          const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+          store.appendTranscript(session.id, { speaker: 'caller', text: 'my card is 4111 1111' });
+          store.appendTranscript(session.id, { speaker: 'caller', text: '1111 1111' });
+          await session.cardRedactionWrites;
+          expect(recordTurn.mock.calls.map(([input]) => input)).toEqual([
+            expect.objectContaining({ turnIndex: 0, text: 'my card is 4111 1111' }),
+            expect.objectContaining({ turnIndex: 1, text: MARKER }),
+          ]);
+        }
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('queues it again, by the row ids, when the queue was down and the live write fails too', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const { repo, redactCardNumberTurns } = splitRepo();
+        redactCardNumberTurns.mockRejectedValueOnce(new Error('connection terminated'));
+        const send = vi
+          .fn(async (): Promise<string> => 'msg-2')
+          .mockRejectedValueOnce(new Error('queue insert failed'));
+        const store = newStore({ callTranscriptTurnRepo: repo, cardRewriteRetryQueue: { send } });
+        const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+        store.appendTranscript(session.id, { speaker: 'caller', text: 'my card is 4111 1111' });
+        store.appendTranscript(session.id, { speaker: 'caller', text: '1111 1111' });
+        await session.cardRedactionWrites;
+        expect(send).toHaveBeenCalledTimes(2);
+        expect((send.mock.calls[1] as unknown as [string, { turns: unknown }])[1].turns).toEqual([
+          { id: 'row-0', turnIndex: 0, text: `my card is ${MARKER}` },
+          { id: 'row-1', turnIndex: 1, text: MARKER },
+        ]);
+        expect(session.unwrittenCardRedactions).toHaveLength(1);
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('logs (without text) and keeps the rewrite in memory when the retry queue is down too', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const { repo, redactCardNumberTurns } = splitRepo();
+        redactCardNumberTurns.mockRejectedValueOnce(new Error('connection terminated'));
+        const send = vi.fn(async () => {
+          throw new Error('queue insert failed: my card is [card number]');
+        });
+        const store = newStore({ callTranscriptTurnRepo: repo, cardRewriteRetryQueue: { send } });
+        const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+        store.appendTranscript(session.id, { speaker: 'caller', text: 'my card is 4111 1111' });
+        store.appendTranscript(session.id, { speaker: 'caller', text: '1111 1111' });
+        await expect(session.cardRedactionWrites).resolves.toBeUndefined();
+        expect(errorSpy).toHaveBeenCalledWith(
+          'voice-session-store: card-number rewrite could not be queued for retry',
+          expect.objectContaining({ sessionId: session.id, turnIndexes: [0, 1], error: 'Error' }),
+        );
+        // Tried at once, and again once the live write had failed.
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(JSON.stringify(errorSpy.mock.calls)).not.toMatch(/my card|\[card number\]|4111/);
+        expect(session.unwrittenCardRedactions).toHaveLength(1);
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    // A turn's row holds the caller's words, part of a card among them before
+    // a later turn shows it was one; a database error can quote the row.
+    it('logs a failed insert of a turn by error class, never by message', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const { repo, recordTurn } = splitRepo();
+        recordTurn.mockRejectedValueOnce(
+          Object.assign(new Error('value too long; Failing row contains (my card is 4111 1111)'), { code: '22001' }),
+        );
+        const store = newStore({ callTranscriptTurnRepo: repo });
+        const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+        store.appendTranscript(session.id, { speaker: 'caller', text: 'my card is 4111 1111' });
+        await session.pendingTurnPersist.get(0);
+        expect(errorSpy).toHaveBeenCalledWith('voice-session-store: mid-call transcript persist failed', {
+          sessionId: session.id,
+          callSid: CALL_SID,
+          turnIndex: 0,
+          error: 'Error:22001',
+        });
+        expect(JSON.stringify(errorSpy.mock.calls)).not.toMatch(/my card|4111/);
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
     it('a failing rewrite never throws into the call path and is logged', async () => {
       const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
       try {
@@ -1023,10 +1297,13 @@ describe('VoiceSessionStore', () => {
         store.appendTranscript(session.id, { speaker: 'caller', text: '4111 1111' });
         expect(() => store.appendTranscript(session.id, { speaker: 'caller', text: '1111 1111' })).not.toThrow();
         await session.cardRedactionWrites;
+        // Logged by class, never by message: a database error can quote the
+        // row it failed on, and the row holds part of a card.
         expect(errorSpy).toHaveBeenCalledWith(
           'voice-session-store: card-number rewrite of stored turns failed',
-          expect.objectContaining({ turnIndexes: [0, 1], error: 'db down' }),
+          expect.objectContaining({ turnIndexes: [0, 1], error: 'Error' }),
         );
+        expect(JSON.stringify(errorSpy.mock.calls)).not.toContain('db down');
         // The memory side stands regardless.
         expect(session.transcript).toEqual([`caller: ${MARKER}`, `caller: ${MARKER}`]);
         // The rewrite that did not land is kept for the recording hook to
