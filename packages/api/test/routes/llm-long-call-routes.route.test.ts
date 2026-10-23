@@ -35,6 +35,11 @@ import { permissiveTenantOwnership } from '../../src/shared/tenant-ownership';
 import { createOnboardingConversationRouter } from '../../src/routes/onboarding-conversation';
 import { OnboardingConversationOrchestrator } from '../../src/ai/orchestration/onboarding-conversation';
 import { InMemoryOnboardingSessionRepository } from '../../src/db/onboarding-session-repository';
+import { createTenantSiteRouter } from '../../src/routes/tenant-site';
+import { InMemoryTenantSiteRepository } from '../../src/tenant-site/tenant-site';
+import { InMemoryVerticalPackRegistry } from '../../src/shared/vertical-pack-registry';
+import { TenantSiteAboutTask } from '../../src/ai/tasks/tenant-site-about-task';
+import { InMemoryTransactionRunner } from '../../src/db/tenant-transaction';
 
 const TENANT = '11111111-1111-1111-1111-111111111111';
 const USER = 'user-ti02';
@@ -192,6 +197,34 @@ describe('TI-02 — in-request LLM routes bypass the request transaction', () =>
       .send({ userMessage: 'We run Acme HVAC in Mesa, Arizona' });
 
     expect(res.status).toBe(200);
+    h.expectNoRequestTransaction();
+  });
+
+  it('POST /tenant-site/about/draft', async () => {
+    const h = harness(() => 'Acme Plumbing keeps Mesa running. Call us for a quote.');
+    const settingsRepo = new InMemorySettingsRepository();
+    await settingsRepo.upsertIdentityFields(TENANT, { businessName: 'Acme Plumbing' });
+    const proposalRepo = new InMemoryProposalRepository();
+    h.app.use(
+      '/api/tenant-site',
+      createTenantSiteRouter({
+        baseDomain: 'sites.example-pages.test',
+        siteRepo: new InMemoryTenantSiteRepository(),
+        settingsRepo,
+        viewDeps: { settingsRepo, packRegistry: new InMemoryVerticalPackRegistry(), webOrigin: 'https://app.example.test' },
+        auditRepo: new InMemoryAuditRepository(),
+        aboutTask: new TenantSiteAboutTask(h.gateway),
+        proposalRepo,
+        transactionRunner: new InMemoryTransactionRunner(),
+      }),
+    );
+
+    const res = await request(h.app).post('/api/tenant-site/about/draft').send({});
+
+    expect(res.status).toBe(201);
+    expect((await proposalRepo.findById(TENANT, res.body.data.proposalId))?.proposalType).toBe(
+      'update_tenant_site_about',
+    );
     h.expectNoRequestTransaction();
   });
 });

@@ -12,6 +12,7 @@ import { InMemorySettingsRepository } from '../../src/settings/settings';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryVerticalPackRegistry } from '../../src/shared/vertical-pack-registry';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
+import { InMemoryTransactionRunner } from '../../src/db/tenant-transaction';
 import { toErrorResponse } from '../../src/shared/errors';
 import { TenantSiteAboutTask } from '../../src/ai/tasks/tenant-site-about-task';
 import { createMockLLMGateway } from '../../src/ai/gateway/factory';
@@ -74,6 +75,7 @@ describe('/api/tenant-site/domain', () => {
         auditRepo,
         aboutTask: new TenantSiteAboutTask(createMockLLMGateway('about').gateway),
         proposalRepo: new InMemoryProposalRepository(),
+        transactionRunner: new InMemoryTransactionRunner(),
         ...(opts.withDomain === false
           ? {}
           : { domain: { provider, dns, reservedHosts: ['app.example.test', 'api.example.test'] } }),

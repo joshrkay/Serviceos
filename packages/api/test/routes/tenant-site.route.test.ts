@@ -11,7 +11,7 @@ import { InMemoryTenantSiteRepository } from '../../src/tenant-site/tenant-site'
 import { InMemorySettingsRepository } from '../../src/settings/settings';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryVerticalPackRegistry } from '../../src/shared/vertical-pack-registry';
-import { toErrorResponse } from '../../src/shared/errors';
+import { AppError, toErrorResponse } from '../../src/shared/errors';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { approveProposal, editProposal, rejectProposal } from '../../src/proposals/actions';
 import { UpdateTenantSiteAboutExecutionHandler } from '../../src/proposals/execution/tenant-site-about-handler';
@@ -20,6 +20,11 @@ import { createMockLLMGateway } from '../../src/ai/gateway/factory';
 import { loadTenantSiteView } from '../../src/tenant-site/view';
 import { renderTenantSitePage } from '../../src/tenant-site/render';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
+import {
+  InMemoryTransactionRunner,
+  type TenantTransactionRunner,
+  type TransactionScope,
+} from '../../src/db/tenant-transaction';
 
 const TENANT = 'tenant-site-1';
 const OTHER = 'tenant-site-2';
@@ -44,7 +49,12 @@ describe('/api/tenant-site', () => {
 
   function app(
     role: NonNullable<AuthenticatedRequest['auth']>['role'] = 'owner',
-    opts: { baseDomain?: string | undefined; tenantId?: string } = {},
+    opts: {
+      baseDomain?: string | undefined;
+      tenantId?: string;
+      transactionRunner?: TenantTransactionRunner;
+      aboutTask?: { draft: TenantSiteAboutTask['draft'] };
+    } = {},
   ) {
     const a = express();
     a.use(express.json());
@@ -69,8 +79,9 @@ describe('/api/tenant-site', () => {
           webOrigin: 'https://app.example.test',
         },
         auditRepo,
-        aboutTask: new TenantSiteAboutTask(gateway.gateway),
+        aboutTask: opts.aboutTask ?? new TenantSiteAboutTask(gateway.gateway),
         proposalRepo,
+        transactionRunner: opts.transactionRunner ?? new InMemoryTransactionRunner(),
       }),
     );
     a.use((err: unknown, _req: Request, res: Response, _next: NextFunction) => {
@@ -305,6 +316,131 @@ describe('/api/tenant-site', () => {
       expect(second.proposalId).not.toBe(first.proposalId);
       expect((await proposalRepo.findById(TENANT, first.proposalId))?.status).toBe('rejected');
       expect((await request(app()).get('/api/tenant-site/about')).body.data.pending.proposalId).toBe(second.proposalId);
+    });
+
+    /**
+     * Stands in for PgTenantTransactionRunner. It records each unit of work,
+     * the locks taken in it and how it ended: 'committed' when `fn` resolved,
+     * 'rolled_back' when it threw. `open` is true while a unit runs, so a
+     * wrapped repository call can say whether it ran inside the transaction.
+     */
+    class RecordingRunner implements TenantTransactionRunner {
+      readonly runs: Array<{ tenantId: string; locks: string[]; outcome?: 'committed' | 'rolled_back' }> = [];
+      open = false;
+      constructor(private readonly seen: string[] = []) {}
+      async run<T>(tenantId: string, fn: (scope: TransactionScope) => Promise<T>): Promise<T> {
+        const entry: (typeof this.runs)[number] = { tenantId, locks: [] };
+        this.runs.push(entry);
+        this.open = true;
+        try {
+          const result = await fn({
+            lock: async (key) => {
+              entry.locks.push(key);
+              this.seen.push(`lock:${key}`);
+            },
+            savepoint: (work) => work(),
+          });
+          entry.outcome = 'committed';
+          return result;
+        } catch (err) {
+          entry.outcome = 'rolled_back';
+          throw err;
+        } finally {
+          this.open = false;
+        }
+      }
+    }
+
+    it('writes after the LLM call, all in one tenant transaction: supersede the old draft, create the new one, audit', async () => {
+      const first = (await request(app()).post('/api/tenant-site/about/draft')).body.data;
+
+      const seen: string[] = [];
+      const runner = new RecordingRunner(seen);
+      const realFindByStatus = proposalRepo.findByStatus.bind(proposalRepo);
+      proposalRepo.findByStatus = async (...args: Parameters<typeof realFindByStatus>) => {
+        seen.push(`proposal.findByStatus:${args[1]}:${runner.open}`);
+        return realFindByStatus(...args);
+      };
+      const realUpdateStatusIf = proposalRepo.updateStatusIf.bind(proposalRepo);
+      proposalRepo.updateStatusIf = async (...args: Parameters<typeof realUpdateStatusIf>) => {
+        seen.push(`proposal.updateStatusIf:${args[3]}:${runner.open}`);
+        return realUpdateStatusIf(...args);
+      };
+      const realCreate = proposalRepo.create.bind(proposalRepo);
+      proposalRepo.create = async (proposal) => {
+        seen.push(`proposal.create:${runner.open}`);
+        return realCreate(proposal);
+      };
+      const realAudit = auditRepo.create.bind(auditRepo);
+      auditRepo.create = async (event) => {
+        seen.push(`audit:${event.eventType}:${runner.open}`);
+        return realAudit(event);
+      };
+      const task = new TenantSiteAboutTask(gateway.gateway);
+      const aboutTask = {
+        draft: async (input: Parameters<TenantSiteAboutTask['draft']>[0]) => {
+          seen.push(`llm:${runner.open}`);
+          return task.draft(input);
+        },
+      };
+
+      const res = await request(app('owner', { transactionRunner: runner, aboutTask })).post(
+        '/api/tenant-site/about/draft',
+      );
+
+      expect(res.status).toBe(201);
+      // The LLM call runs with no transaction open; the pending drafts are
+      // read under the lock, inside the one transaction that writes.
+      expect(seen).toEqual([
+        'llm:false',
+        'lock:tenant_site.about_draft',
+        'proposal.findByStatus:draft:true',
+        'proposal.findByStatus:ready_for_review:true',
+        'proposal.updateStatusIf:rejected:true',
+        'audit:proposal.rejected:true',
+        'proposal.create:true',
+        'audit:tenant_site.about_drafted:true',
+      ]);
+      expect(runner.runs).toEqual([{ tenantId: TENANT, locks: ['tenant_site.about_draft'], outcome: 'committed' }]);
+      expect((await proposalRepo.findById(TENANT, first.proposalId))).toMatchObject({
+        status: 'rejected',
+        rejectionReason: 'superseded',
+      });
+      expect((await proposalRepo.findById(TENANT, res.body.data.proposalId))?.status).toBe('draft');
+    });
+
+    it('a failure after the LLM call leaves the transaction as an error (so it rolls back) and answers 500', async () => {
+      await request(app()).post('/api/tenant-site/about/draft');
+      const runner = new RecordingRunner();
+      proposalRepo.create = async () => {
+        throw new Error('insert failed');
+      };
+
+      const res = await request(app('owner', { transactionRunner: runner })).post('/api/tenant-site/about/draft');
+
+      expect(res.status).toBe(500);
+      expect(runner.runs).toEqual([{ tenantId: TENANT, locks: ['tenant_site.about_draft'], outcome: 'rolled_back' }]);
+      expect(await events()).toEqual(['tenant_site.about_drafted']);
+    });
+
+    it('a failed LLM call opens no transaction and leaves the draft awaiting approval alone', async () => {
+      const first = (await request(app()).post('/api/tenant-site/about/draft')).body.data;
+      const runner = new RecordingRunner();
+      const aboutTask = {
+        draft: async () => {
+          throw new AppError('LLM_PROVIDER_ERROR', 'Provider down', 502);
+        },
+      };
+
+      const res = await request(app('owner', { transactionRunner: runner, aboutTask })).post(
+        '/api/tenant-site/about/draft',
+      );
+
+      expect(res.status).toBe(502);
+      expect(runner.runs).toEqual([]);
+      expect((await proposalRepo.findById(TENANT, first.proposalId))?.status).toBe('draft');
+      expect((await request(app()).get('/api/tenant-site/about')).body.data.pending.proposalId).toBe(first.proposalId);
+      expect(await events()).toEqual(['tenant_site.about_drafted']);
     });
 
     it('needs a business name to draft from', async () => {

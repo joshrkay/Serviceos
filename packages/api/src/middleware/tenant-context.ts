@@ -260,6 +260,11 @@ const LLM_LONG_CALL_ROUTES: readonly { method: string; re: RegExp }[] = [
   // invoice/estimate LLM call) before it writes. Its post-LLM writes commit
   // together in one short tenant transaction of its own (resolve-entity.ts).
   { method: 'POST', re: /^(?:\/api)?\/proposals\/[^/]+\/resolve-entity\/?$/i },
+  // The website "About us" draft awaits the tenant_site_about LLM call (up to
+  // the 60s gateway deadline, the same as the idle-in-transaction timeout).
+  // Its post-LLM writes (supersede the pending draft, create the new one,
+  // audit) commit together in one short tenant transaction (tenant-site.ts).
+  { method: 'POST', re: /^(?:\/api)?\/tenant-site\/about\/draft\/?$/i },
 ];
 
 function isLlmLongCallRoute(req: { method: string; path: string }): boolean {

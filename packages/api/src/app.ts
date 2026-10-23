@@ -6109,6 +6109,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // arrives as an owner-approved proposal.
       aboutTask: new TenantSiteAboutTask(llmGateway),
       proposalRepo,
+      // The draft runs outside the request transaction (it awaits the LLM
+      // call); its writes after the call commit together in one short
+      // transaction. Matches the repos: Pg with a pool.
+      transactionRunner: pool ? new PgTenantTransactionRunner(pool) : new InMemoryTransactionRunner(),
       ...(customDomainProvider
         ? { domain: { provider: customDomainProvider, dns: customDomainDns, reservedHosts: appHostnames } }
         : {}),

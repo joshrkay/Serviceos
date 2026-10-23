@@ -589,6 +589,8 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       ['post', '/api/onboarding/conversation/turn'],
       // A1 — the "which Bob?" pick re-drafts through the task handler's LLM call.
       ['post', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity'],
+      // The website "About us" draft awaits the tenant_site_about LLM call.
+      ['post', '/api/tenant-site/about/draft'],
     ] as const)('%s %s holds no request transaction', async (method, path) => {
       const seen = await probe(method, path);
       expect(seen).toEqual({ connects: 0, began: false, storeAtHandler: undefined });
@@ -614,10 +616,16 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       ['post', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-line'],
       ['get', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity'],
       ['post', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity/extra'],
+      // The rest of the website routes keep the request transaction.
+      ['get', '/api/tenant-site/about'],
+      ['get', '/api/tenant-site/about/draft'],
+      ['post', '/api/tenant-site/publish'],
+      ['post', '/api/tenant-site/about/draft/extra'],
       // A nested router sharing the suffix does not inherit the bypass.
       ['post', '/api/admin/voice/sessions'],
       ['post', '/api/leads/estimates/suggest'],
       ['post', '/api/admin/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity'],
+      ['post', '/api/admin/tenant-site/about/draft'],
     ] as const)('%s %s still opens the transaction', async (method, path) => {
       const seen = await probe(method, path);
       expect(seen.connects).toBe(1);
@@ -642,6 +650,8 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       ['post', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity/'],
       ['post', '/api/Proposals/3f1c9a52-0000-4000-8000-000000000004/Resolve-Entity'],
       ['post', '/api/ASSISTANT/CHAT/'],
+      ['post', '/api/tenant-site/about/draft/'],
+      ['post', '/api/Tenant-Site/About/Draft'],
     ] as const)('%s %s (trailing slash / letter case) holds no request transaction', async (method, path) => {
       const seen = await probe(method, path);
       expect(seen).toEqual({ connects: 0, began: false, storeAtHandler: undefined });
@@ -668,6 +678,9 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       ['post', '/api/admin/voice/quality/grade/'],
       ['post', '/api/admin/voice/sessions/'],
       ['post', '/api/admin/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity/'],
+      ['post', '/api/tenant-site/about/draft//'],
+      ['post', '/api/tenant-site/about/draft/extra/'],
+      ['post', '/api/admin/tenant-site/about/draft/'],
     ] as const)('%s %s still opens the transaction', async (method, path) => {
       const seen = await probe(method, path);
       expect(seen.connects).toBe(1);
