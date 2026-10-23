@@ -40,6 +40,10 @@ import { InMemoryTenantSiteRepository } from '../../src/tenant-site/tenant-site'
 import { InMemoryVerticalPackRegistry } from '../../src/shared/vertical-pack-registry';
 import { TenantSiteAboutTask } from '../../src/ai/tasks/tenant-site-about-task';
 import { InMemoryTransactionRunner } from '../../src/db/tenant-transaction';
+import { createVoiceRouter } from '../../src/routes/voice';
+import { InMemoryVoiceRepository } from '../../src/voice/voice-service';
+import type { Queue } from '../../src/queues/queue';
+import type { TtsProvider } from '../../src/ai/tts/tts-provider';
 
 const TENANT = '11111111-1111-1111-1111-111111111111';
 const USER = 'user-ti02';
@@ -82,7 +86,7 @@ function harness(contentFor: (taskType: string) => string) {
     }
     expect(connect).not.toHaveBeenCalled();
   };
-  return { app, gateway, probes, expectNoRequestTransaction };
+  return { app, gateway, probes, connect, expectNoRequestTransaction };
 }
 
 describe('TI-02 — in-request LLM routes bypass the request transaction', () => {
@@ -226,5 +230,63 @@ describe('TI-02 — in-request LLM routes bypass the request transaction', () =>
       'update_tenant_site_about',
     );
     h.expectNoRequestTransaction();
+  });
+
+  // Not LLM calls, but the same shape: the speech provider is awaited for
+  // seconds (tens of seconds in the worst case), so the routes take the same
+  // bypass and write their audit rows with an explicit tenantId.
+  function voiceApp(
+    h: ReturnType<typeof harness>,
+    opts: { tts?: TtsProvider; transcribeAudio?: Parameters<typeof createVoiceRouter>[2] } = {},
+  ) {
+    const auditRepo = new InMemoryAuditRepository();
+    const auditStores: unknown[] = [];
+    const realCreate = auditRepo.create.bind(auditRepo);
+    auditRepo.create = async (event) => {
+      auditStores.push(currentTenantContext());
+      return realCreate(event);
+    };
+    h.app.use(
+      '/api/voice',
+      createVoiceRouter(
+        new InMemoryVoiceRepository(),
+        { send: vi.fn(async () => 'queued-1') } as unknown as Queue,
+        opts.transcribeAudio,
+        auditRepo,
+        undefined,
+        { ...(opts.tts ? { tts: opts.tts } : {}), settingsRepo: new InMemorySettingsRepository() },
+      ),
+    );
+    const audited = async (eventType: string) =>
+      (await auditRepo.findRecentByTenant(TENANT)).filter((e) => e.eventType === eventType);
+    return { auditStores, audited };
+  }
+
+  it('POST /voice/tts and POST /voice/tts/batch', async () => {
+    const h = harness(() => '');
+    const tts: TtsProvider = {
+      synthesize: vi.fn(async (input) => {
+        h.probes.push({ store: currentTenantContext(), connects: h.connect.mock.calls.length });
+        return { audio: Buffer.from(`clip:${input.text}`), contentType: 'audio/mpeg', provider: 'fake' };
+      }),
+    };
+    const v = voiceApp(h, { tts });
+
+    const one = await request(h.app).post('/api/voice/tts').send({ text: 'You have two jobs today.' });
+    expect(one.status).toBe(200);
+    expect(one.body).toMatchObject({ contentType: 'audio/mpeg', cached: false });
+
+    const batch = await request(h.app)
+      .post('/api/voice/tts/batch')
+      .send({ items: ['What do you do?', 'Plumbing', 'Heating'] });
+    expect(batch.status).toBe(200);
+    expect(batch.body.clips).toHaveLength(3);
+
+    expect(h.probes).toHaveLength(4);
+    h.expectNoRequestTransaction();
+    // Every billed clip is audited, each write standalone with no request transaction.
+    await vi.waitFor(async () => expect(await v.audited('voice.tts.synthesized')).toHaveLength(4));
+    expect(v.auditStores).toHaveLength(4);
+    expect(v.auditStores.every((s) => s === undefined)).toBe(true);
   });
 });

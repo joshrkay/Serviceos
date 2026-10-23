@@ -111,6 +111,12 @@ PgBouncer config: `pool_mode = transaction`, `max_client_conn` high (e.g. 1000),
   > a per-tenant advisory lock, so concurrent drafts keep one pending. Pinned
   > by `test/integration/tenant-site-about-draft-outside-request-transaction.test.ts`.
   >
+  > ✅ **Fixed — speech-provider routes.** Not LLM gateway calls, the same
+  > shape: `POST /voice/tts` and `POST /voice/tts/batch` await the TTS
+  > provider (30s timeout per clip, up to four clips in sequence per batch).
+  > Their only DB touches are the voice-setting read and one audit row per
+  > billed clip, each a repo call with an explicit tenantId.
+  >
   > Each entry is anchored at both ends and matches the way Express routes:
   > one optional trailing slash and any letter case (A-R4). Without that,
   > `POST /proposals/:id/resolve-entity/` reached the same handler inside the

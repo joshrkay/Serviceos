@@ -591,6 +591,9 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       ['post', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity'],
       // The website "About us" draft awaits the tenant_site_about LLM call.
       ['post', '/api/tenant-site/about/draft'],
+      // Speech synthesis: each clip awaits the TTS provider (30s timeout each).
+      ['post', '/api/voice/tts'],
+      ['post', '/api/voice/tts/batch'],
     ] as const)('%s %s holds no request transaction', async (method, path) => {
       const seen = await probe(method, path);
       expect(seen).toEqual({ connects: 0, began: false, storeAtHandler: undefined });
@@ -626,6 +629,12 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       ['post', '/api/leads/estimates/suggest'],
       ['post', '/api/admin/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity'],
       ['post', '/api/admin/tenant-site/about/draft'],
+      // The cached-clip read and the other voice routes keep it.
+      ['get', '/api/voice/tts/clip/0123abcd'],
+      ['get', '/api/voice/tts'],
+      ['post', '/api/voice/tts/batch/extra'],
+      ['post', '/api/voice/recordings'],
+      ['post', '/api/admin/voice/tts'],
     ] as const)('%s %s still opens the transaction', async (method, path) => {
       const seen = await probe(method, path);
       expect(seen.connects).toBe(1);
@@ -652,6 +661,8 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       ['post', '/api/ASSISTANT/CHAT/'],
       ['post', '/api/tenant-site/about/draft/'],
       ['post', '/api/Tenant-Site/About/Draft'],
+      ['post', '/api/voice/tts/'],
+      ['post', '/api/Voice/TTS/Batch/'],
     ] as const)('%s %s (trailing slash / letter case) holds no request transaction', async (method, path) => {
       const seen = await probe(method, path);
       expect(seen).toEqual({ connects: 0, began: false, storeAtHandler: undefined });
@@ -681,6 +692,8 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       ['post', '/api/tenant-site/about/draft//'],
       ['post', '/api/tenant-site/about/draft/extra/'],
       ['post', '/api/admin/tenant-site/about/draft/'],
+      ['post', '/api/voice/tts//'],
+      ['post', '/api/voice/tts/batch/extra/'],
     ] as const)('%s %s still opens the transaction', async (method, path) => {
       const seen = await probe(method, path);
       expect(seen.connects).toBe(1);

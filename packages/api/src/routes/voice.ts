@@ -331,6 +331,11 @@ export function createVoiceRouter(
    *
    * S3-2 — the per-user cap is charged after the cache lookup, one unit per
    * clip synthesized, from the budget the batch route shares.
+   *
+   * Runs outside the request transaction (LLM_LONG_CALL_ROUTES in
+   * middleware/tenant-context.ts): the provider call can take up to 30s, and
+   * it must not pin a pooled connection meanwhile. Every DB touch here (the
+   * voice setting, the audit row) is a repo call with an explicit tenantId.
    */
   router.post(
     '/tts',
@@ -471,6 +476,10 @@ export function createVoiceRouter(
    * whole turn (the client degrades the turn); clips already made stay
    * cached, and the units already taken are not refunded, since the
    * provider may have billed the failed call.
+   *
+   * Outside the request transaction, like POST /tts: up to four clips in
+   * sequence can outlast the 60s idle-in-transaction timeout, which killed
+   * the backend and answered 500 for a turn whose clips were already billed.
    */
   router.post(
     '/tts/batch',

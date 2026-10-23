@@ -265,6 +265,15 @@ const LLM_LONG_CALL_ROUTES: readonly { method: string; re: RegExp }[] = [
   // Its post-LLM writes (supersede the pending draft, create the new one,
   // audit) commit together in one short tenant transaction (tenant-site.ts).
   { method: 'POST', re: /^(?:\/api)?\/tenant-site\/about\/draft\/?$/i },
+  // Speech synthesis for the device (not the LLM gateway, the same shape):
+  // each clip awaits the TTS provider for up to TTS_SYNTH_TIMEOUT_MS (30s),
+  // and a batch turn synthesizes up to four in sequence, past the 60s
+  // idle-in-transaction timeout. The only DB touches are the voice-setting
+  // read and one audit row per billed clip, each a repo call with an explicit
+  // tenantId; none needs another's atomicity. GET /tts/clip/:hash reads the
+  // cache only and keeps the request transaction.
+  { method: 'POST', re: /^(?:\/api)?\/voice\/tts\/?$/i },
+  { method: 'POST', re: /^(?:\/api)?\/voice\/tts\/batch\/?$/i },
 ];
 
 function isLlmLongCallRoute(req: { method: string; path: string }): boolean {
