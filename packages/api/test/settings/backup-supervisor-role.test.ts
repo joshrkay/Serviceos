@@ -117,4 +117,56 @@ describe('PUT /api/settings — backupSupervisorUserId must be able to approve (
       expect(res.body.backupSupervisorUserId).toBe(dispatcher);
     });
   });
+
+  // B3-3 — the #1463 active-member check still ran on an UNCHANGED value, so
+  // an API client re-sending a backup who has since been deactivated (a web
+  // tab opened before the section stopped re-sending it, or any other client)
+  // got a 400 on every save of an unrelated field. B1's follow-up already
+  // texts that backup nothing and lets them approve nothing; keeping the
+  // value on file is not making them the backup.
+  describe('a deactivated backup already on file', () => {
+    let deactivated: string;
+    beforeEach(async () => {
+      deactivated = await member('dispatcher');
+      await settingsRepo.update(TENANT, { backupSupervisorUserId: deactivated });
+      await users.deactivateMember(TENANT, deactivated);
+    });
+
+    it('re-sending the unchanged backup with a routing change saves', async () => {
+      const res = await request(app)
+        .put('/api/settings')
+        .send({ backupSupervisorUserId: deactivated, unsupervisedProposalRouting: 'queue_only' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.backupSupervisorUserId).toBe(deactivated);
+      expect((await getSettings(TENANT, settingsRepo))?.unsupervisedProposalRouting).toBe('queue_only');
+    });
+
+    it('changing to another deactivated member is still refused', async () => {
+      const other = await member('dispatcher');
+      await users.deactivateMember(TENANT, other);
+
+      const res = await request(app).put('/api/settings').send({ backupSupervisorUserId: other });
+
+      expect(res.status).toBe(400);
+      expect(res.body.details.field).toBe('backupSupervisorUserId');
+      expect((await getSettings(TENANT, settingsRepo))?.backupSupervisorUserId).toBe(deactivated);
+    });
+
+    it("changing to another tenant's member is still refused", async () => {
+      const foreign = await users.create!({
+        id: crypto.randomUUID(),
+        tenantId: 'tenant-elsewhere',
+        email: `foreign-${Math.random().toString(36).slice(2)}@example.com`,
+        role: 'dispatcher',
+        canFieldServe: false,
+      });
+
+      const res = await request(app).put('/api/settings').send({ backupSupervisorUserId: foreign.id });
+
+      expect(res.status).toBe(400);
+      expect(res.body.details.field).toBe('backupSupervisorUserId');
+      expect((await getSettings(TENANT, settingsRepo))?.backupSupervisorUserId).toBe(deactivated);
+    });
+  });
 });

@@ -248,7 +248,7 @@ describe(provesExecution('send_estimate') + 'Integration — D-019 owner-approva
           sendSms: async (_to, body) => { smsBodies.push(body); },
           secret: 'close-int-secret',
           buildApproveUrl: (t) => `https://x/approve?token=${t}`,
-          ownerPhoneResolver: async () => '+15125550999',
+          resolveSmsRecipient: async () => ({ phone: '+15125550999', via: 'owner_phone' as const }),
         },
       },
       {
@@ -355,7 +355,7 @@ describe(provesExecution('send_estimate') + 'Integration — D-019 owner-approva
           sendSms: async (_to, body) => { smsBodies.push(body); },
           secret: 'close-int-secret',
           buildApproveUrl: (t) => `https://x/approve?token=${t}`,
-          ownerPhoneResolver: async () => '+15125550999',
+          resolveSmsRecipient: async () => ({ phone: '+15125550999', via: 'owner_phone' as const }),
         },
       },
       {

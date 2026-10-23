@@ -4,7 +4,7 @@ import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
 import { PgUserRepository } from '../../src/users/pg-user';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
-import { resolveApprovalSmsPhone, resolveApproverRole } from '../../src/proposals/approver-identity';
+import { resolveApprovalSmsRecipient, resolveApproverRole } from '../../src/proposals/approver-identity';
 import { routeUnsupervisedProposal } from '../../src/proposals/auto-approve';
 
 /**
@@ -19,6 +19,9 @@ import { routeUnsupervisedProposal } from '../../src/proposals/auto-approve';
  *
  * Pins the real columns: tenant_settings.owner_phone /
  * backup_supervisor_user_id, users.mobile_number / status / deleted_at.
+ *
+ * B3-2 — the recipient also says whose phone it is, from that same read, so
+ * the owner phone's link needs no second (failable) approver lookup.
  */
 describe('Postgres integration — B1 follow-up: an approval SMS reaches only an active backup', () => {
   const BACKUP_PHONE = '+15125550122';
@@ -73,7 +76,8 @@ describe('Postgres integration — B1 follow-up: an approval SMS reaches only an
   async function routeOneCard() {
     const sent: { to: string; body: string }[] = [];
     const proposalId = crypto.randomUUID();
-    const ownerPhone = await resolveApprovalSmsPhone({ settingsRepo, userRepo }, tenant.tenantId);
+    const recipient = await resolveApprovalSmsRecipient({ settingsRepo, userRepo }, tenant.tenantId);
+    const lookups: string[] = [];
     const result = await routeUnsupervisedProposal(
       {
         auditRepo,
@@ -81,24 +85,45 @@ describe('Postgres integration — B1 follow-up: an approval SMS reaches only an
         sendSms: async (to, body) => {
           sent.push({ to, body });
         },
-        resolveLinkApprover: (tenantId, phone) => resolveApproverRole({ settingsRepo, userRepo }, tenantId, phone),
+        resolveLinkApprover: (tenantId, phone) => {
+          lookups.push(phone);
+          return resolveApproverRole({ settingsRepo, userRepo }, tenantId, phone);
+        },
       },
       {
         tenantId: tenant.tenantId,
         proposalId,
         channel: 'other',
-        ...(ownerPhone ? { ownerPhone } : {}),
+        ...(recipient ? { ownerPhone: recipient.phone, recipientVia: recipient.via } : {}),
         summaryText: 'Book Mrs Lee Tuesday 2pm',
       },
     );
-    return { sent, result, ownerPhone };
+    return { sent, result, ownerPhone: recipient?.phone ?? null, recipient, lookups };
   }
 
   it('an active backup is the recipient and gets the text', async () => {
-    const { sent, result, ownerPhone } = await routeOneCard();
+    const { sent, result, ownerPhone, recipient, lookups } = await routeOneCard();
     expect(ownerPhone).toBe(BACKUP_PHONE);
+    expect(recipient?.via).toBe('backup_supervisor');
     expect(result.smsSent).toBe(true);
     expect(sent.map((s) => s.to)).toEqual([BACKUP_PHONE]);
+    // The backup's link is looked up (it approves as their role).
+    expect(lookups).toEqual([BACKUP_PHONE]);
+    expect(sent[0]!.body).toContain('token=');
+  });
+
+  it('an owner phone on file is the recipient, marked as the owner phone, and is not looked up again', async () => {
+    const OWNER_PHONE = '+15125550123';
+    await settingsRepo.update(tenant.tenantId, { ownerPhone: OWNER_PHONE });
+    try {
+      const { sent, recipient, lookups } = await routeOneCard();
+      expect(recipient).toEqual({ phone: OWNER_PHONE, via: 'owner_phone' });
+      expect(sent.map((s) => s.to)).toEqual([OWNER_PHONE]);
+      expect(sent[0]!.body).toContain('token=');
+      expect(lookups).toEqual([]);
+    } finally {
+      await pool.query(`UPDATE tenant_settings SET owner_phone = NULL WHERE tenant_id = $1`, [tenant.tenantId]);
+    }
   });
 
   it('a deactivated (suspended) backup is texted nothing', async () => {
