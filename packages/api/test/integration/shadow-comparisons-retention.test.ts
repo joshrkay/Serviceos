@@ -13,7 +13,9 @@
  *
  * Rows are written by the product writer (PgShadowComparisonStore.save, whose
  * `sampledAt` is the row's created_at), so the fixture clock is the only thing
- * the test controls. The window is pinned on both sides of the boundary (an
+ * the test controls. Every file shares one database, so assertions are scoped
+ * to this file's tenants (and, in the shared placeholder bucket, to its own
+ * task type): never the sweep's global counts. The window is pinned on both sides of the boundary (an
  * hour inside it is kept, an hour past it is deleted), the batch bound across
  * three consecutive sweeps, the per-tenant audit trail, and the leader gate
  * app.ts registers the sweep behind.
@@ -57,9 +59,19 @@ const silentLogger: Logger = {
   child: () => silentLogger,
 };
 
+/** The real repository, recording how many rows each purgeDue call deleted per tenant. */
+class RecordingRepo extends PgShadowComparisonRetentionRepository {
+  batches = new Map<string, number[]>();
+  override async purgeDue(...args: Parameters<PgShadowComparisonRetentionRepository['purgeDue']>) {
+    const batch = await super.purgeDue(...args);
+    this.batches.set(args[0], [...(this.batches.get(args[0]) ?? []), batch.rows.length]);
+    return batch;
+  }
+}
+
 let pool: Pool;
 let store: PgShadowComparisonStore;
-let repo: PgShadowComparisonRetentionRepository;
+let repo: RecordingRepo;
 let auditRepo: PgAuditRepository;
 const createdTenantIds: string[] = [];
 const NOW = new Date();
@@ -144,7 +156,7 @@ beforeAll(async () => {
   process.env.RLS_RUNTIME_ROLE = 'true';
   pool = await getSharedTestDb();
   store = new PgShadowComparisonStore(pool);
-  repo = new PgShadowComparisonRetentionRepository(pool);
+  repo = new RecordingRepo(pool);
   auditRepo = new PgAuditRepository(pool);
 });
 
@@ -190,19 +202,24 @@ describe('shadow-comparison retention sweep (real Postgres, RLS_RUNTIME_ROLE=tru
     expect(await idsFor(PLACEHOLDER_TENANT_ID, PLATFORM_TASK)).toEqual([pOld1, pOld2, pFresh]);
 
     // Sweep 1, batch 2: each tenant loses at most its two OLDEST due rows.
-    const first = await sweep(2);
-    expect(first).toEqual({ tenantsDue: 3, purged: 6, tenantsFailed: 0 });
+    expect((await sweep(2)).tenantsFailed).toBe(0);
+    expect(repo.batches.get(a.tenantId)).toEqual([2]);
+    expect(repo.batches.get(b.tenantId)).toEqual([2]);
     expect(await idsFor(a.tenantId)).toEqual([aOld3, aInside, aFresh]);
     expect(await idsFor(b.tenantId)).toEqual([bInside]);
     expect(await idsFor(PLACEHOLDER_TENANT_ID, PLATFORM_TASK)).toEqual([pFresh]);
 
-    // Sweep 2 takes the remainder of A's backlog; nothing else is due.
-    const second = await sweep(2);
-    expect(second).toEqual({ tenantsDue: 1, purged: 1, tenantsFailed: 0 });
+    // Sweep 2 takes the remainder of A's backlog; B has nothing due and is
+    // not selected.
+    await sweep(2);
+    expect(repo.batches.get(a.tenantId)).toEqual([2, 1]);
+    expect(repo.batches.get(b.tenantId)).toEqual([2]);
     expect(await idsFor(a.tenantId)).toEqual([aInside, aFresh]);
 
-    // Sweep 3 finds nothing: the rows an hour inside the window are kept.
-    expect(await sweep(2)).toEqual({ tenantsDue: 0, purged: 0, tenantsFailed: 0 });
+    // Sweep 3 selects neither: the rows an hour inside the window are kept.
+    await sweep(2);
+    expect(repo.batches.get(a.tenantId)).toEqual([2, 1]);
+    expect(repo.batches.get(b.tenantId)).toEqual([2]);
     expect(await idsFor(a.tenantId)).toEqual([aInside, aFresh]);
     expect(await idsFor(b.tenantId)).toEqual([bInside]);
     expect(await idsFor(PLACEHOLDER_TENANT_ID, PLATFORM_TASK)).toEqual([pFresh]);
@@ -355,6 +372,38 @@ describe('shadow-comparison retention sweep (real Postgres, RLS_RUNTIME_ROLE=tru
       expect(rowCount).toBe(0);
     } finally {
       await pool.query('DELETE FROM shadow_comparisons WHERE tenant_id = $1', [orphan]);
+    }
+  });
+
+  it('selects at most `limit` tenants, oldest due row first (LIMIT and ORDER BY are both load-bearing)', async () => {
+    // Fixed ids, so neither tenant_id order (ascending or descending) nor
+    // any other row order matches the expected one; rows decades older than
+    // anything another test writes, so these five lead the selection.
+    const id = (n: number) => `5ade0000-0000-4000-8000-00000000000${n}`;
+    const seeded: Array<[string, string[]]> = [
+      [id(3), ['1971-01-01', '1999-06-01']],
+      [id(1), ['1972-01-01']],
+      [id(4), ['1973-01-01', '1973-02-01']],
+      [id(2), ['1974-01-01']],
+      [id(5), ['1975-01-01']],
+    ];
+    const cleanup = () =>
+      pool.query('DELETE FROM shadow_comparisons WHERE tenant_id = ANY($1::uuid[])', [seeded.map(([t]) => t)]);
+    await cleanup();
+    try {
+      for (const [tenantId, dates] of seeded) {
+        for (const date of dates) {
+          await pool.query(
+            `INSERT INTO shadow_comparisons (id, tenant_id, shadow_model, task_type, created_at)
+             VALUES ($1, $2, 'shadow-model', 'classify_intent', $3)`,
+            [crypto.randomUUID(), tenantId, new Date(`${date}T00:00:00Z`)],
+          );
+        }
+      }
+      expect(await repo.findTenantsWithDue(NOW, WINDOW_DAYS, 3)).toEqual([id(3), id(1), id(4)]);
+      expect(await repo.findTenantsWithDue(NOW, WINDOW_DAYS, 1)).toEqual([id(3)]);
+    } finally {
+      await cleanup();
     }
   });
 
