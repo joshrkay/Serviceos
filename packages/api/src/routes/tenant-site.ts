@@ -30,6 +30,7 @@ import { createProposal, ProposalRepository } from '../proposals/proposal';
 import { rejectProposal } from '../proposals/actions';
 import type { TenantSiteAboutTask } from '../ai/tasks/tenant-site-about-task';
 import type { Role } from '../auth/rbac';
+import type { TenantTransactionRunner } from '../db/tenant-transaction';
 
 /**
  * D-044 / #1768 — the owner's hosted-site controls (Settings → Website).
@@ -63,6 +64,15 @@ export interface TenantSiteRouteDeps {
   aboutTask: Pick<TenantSiteAboutTask, 'draft'>;
   proposalRepo: ProposalRepository;
   /**
+   * The about-copy draft runs outside the request transaction
+   * (LLM_LONG_CALL_ROUTES — it awaits the LLM call), so its writes after the
+   * call (supersede the pending draft, create the new one, audit) commit
+   * together in one run of this runner, or not at all. Must match the repos:
+   * PgTenantTransactionRunner on the app pool, InMemoryTransactionRunner with
+   * the in-memory repos.
+   */
+  transactionRunner: TenantTransactionRunner;
+  /**
    * #1770 — what connecting a domain needs. Undefined when no certificate
    * provider is configured (D-046): the feature is then off.
    */
@@ -71,6 +81,15 @@ export interface TenantSiteRouteDeps {
 }
 
 const PENDING_STATUSES = ['draft', 'ready_for_review'] as const;
+
+/**
+ * Serializes a tenant's about-copy drafts once their LLM calls return. Without
+ * it, two drafts that finish together read the same pending draft: one
+ * supersedes it and the other's supersede then fails (409), or, with nothing
+ * pending yet, neither sees the other and both stay pending, which breaks the
+ * one-draft-awaiting-the-owner rule.
+ */
+const ABOUT_DRAFT_LOCK = 'tenant_site.about_draft';
 
 const addressSchema = z.object({ slug: z.string().max(200) });
 
@@ -244,8 +263,11 @@ export function createTenantSiteRouter(deps: TenantSiteRouteDeps): Router {
     }),
   );
 
+  // One status at a time: inside the draft's transaction every read shares one
+  // client, and pg deprecates queueing a query on a client that is still busy.
   async function pendingAboutProposals(tenantId: string) {
-    const lists = await Promise.all(PENDING_STATUSES.map((s) => deps.proposalRepo.findByStatus(tenantId, s)));
+    const lists = [];
+    for (const status of PENDING_STATUSES) lists.push(await deps.proposalRepo.findByStatus(tenantId, status));
     return lists
       .flat()
       .filter((p) => p.proposalType === 'update_tenant_site_about')
@@ -290,6 +312,8 @@ export function createTenantSiteRouter(deps: TenantSiteRouteDeps): Router {
       );
 
       // The model call goes through the LLM gateway (aboutTask); it only drafts.
+      // No transaction is open across it: the route is an LLM_LONG_CALL_ROUTE,
+      // and the reads above each ran in their own short one.
       const { aboutText } = await deps.aboutTask.draft({
         tenantId,
         businessName: settings.businessName.trim(),
@@ -298,35 +322,43 @@ export function createTenantSiteRouter(deps: TenantSiteRouteDeps): Router {
         brandVoice: settings.brandVoice ?? null,
       });
 
-      // One draft awaiting the owner at a time: a new draft replaces the old.
-      for (const stale of await pendingAboutProposals(tenantId)) {
-        await rejectProposal(
-          deps.proposalRepo,
-          tenantId,
-          stale.id,
-          req.auth!.userId,
-          req.auth!.role as Role,
-          'superseded',
-          'Replaced by a new draft',
-          undefined,
-          deps.auditRepo,
-        );
-      }
+      // One short tenant transaction, opened only now: supersede, create and
+      // audit commit together, so a failure part-way leaves the old draft
+      // pending rather than superseded with nothing in its place.
+      const proposal = await deps.transactionRunner.run(tenantId, async (scope) => {
+        await scope.lock(ABOUT_DRAFT_LOCK);
 
-      // No trust tier is passed: the proposal lands as a draft and only an
-      // explicit owner approval can run it (manual action class).
-      const proposal = createProposal({
-        tenantId,
-        proposalType: 'update_tenant_site_about',
-        payload: { aboutText },
-        summary: 'Add an "About us" section to your website',
-        explanation: 'Drafted from your business name, services and service area. Edit it before approving if you like.',
-        createdBy: req.auth!.userId,
-        targetEntityType: 'tenant_site',
-        targetEntityId: tenantId,
+        // One draft awaiting the owner at a time: a new draft replaces the old.
+        for (const stale of await pendingAboutProposals(tenantId)) {
+          await rejectProposal(
+            deps.proposalRepo,
+            tenantId,
+            stale.id,
+            req.auth!.userId,
+            req.auth!.role as Role,
+            'superseded',
+            'Replaced by a new draft',
+            undefined,
+            deps.auditRepo,
+          );
+        }
+
+        // No trust tier is passed: the proposal lands as a draft and only an
+        // explicit owner approval can run it (manual action class).
+        const created = createProposal({
+          tenantId,
+          proposalType: 'update_tenant_site_about',
+          payload: { aboutText },
+          summary: 'Add an "About us" section to your website',
+          explanation: 'Drafted from your business name, services and service area. Edit it before approving if you like.',
+          createdBy: req.auth!.userId,
+          targetEntityType: 'tenant_site',
+          targetEntityId: tenantId,
+        });
+        await deps.proposalRepo.create(created);
+        await audit(req, 'tenant_site.about_drafted', { proposalId: created.id, length: aboutText.length });
+        return created;
       });
-      await deps.proposalRepo.create(proposal);
-      await audit(req, 'tenant_site.about_drafted', { proposalId: proposal.id, length: aboutText.length });
       res.status(201).json({ data: { proposalId: proposal.id, aboutText } });
     }),
   );

@@ -403,12 +403,21 @@ export class PgOnboardingDraftRepository extends PgBaseRepository implements Onb
 
 export class InMemoryOnboardingDraftRepository implements OnboardingDraftRepository {
   private readonly byTenant = new Map<string, OnboardingDraft>();
+  /** The tail of each tenant's queue of `updateLocked` calls: the in-memory stand-in for the row lock. */
+  private readonly writing = new Map<string, Promise<void>>();
 
   async getForTenant(tenantId: string): Promise<OnboardingDraft | null> {
     return this.byTenant.get(tenantId) ?? null;
   }
 
-  /** Plain read: in-memory callers are single-threaded, so there is nothing to lock. */
+  /**
+   * A plain read: it locks NOTHING, and there is no request transaction to
+   * hold a lock to. Requests interleave at every await, so another writer can
+   * land between this read and the caller's write. A caller writing from it
+   * must write through a writer that compares the version it read
+   * (`markApproved` / `markRetried` take it as `expectedVersion`), never one
+   * that writes the row back unchecked.
+   */
   async getForTenantForUpdate(tenantId: string): Promise<OnboardingDraft | null> {
     return this.byTenant.get(tenantId) ?? null;
   }
@@ -434,23 +443,46 @@ export class InMemoryOnboardingDraftRepository implements OnboardingDraftReposit
     return draft;
   }
 
-  /** Same four steps, same order of refusals; single-threaded, so the "lock" is the current entry. */
+  /**
+   * Same four steps, same order of refusals. The row is taken one call at a
+   * time per tenant, from the read to the store, as the Pg `SELECT ... FOR
+   * UPDATE` makes a second writer wait and then read what the first stored.
+   * Without it requests interleave at the `await compute(row)`: two writers
+   * from one version both passed the version check, and the later one stored
+   * a copy of the row it read, erasing the earlier write. `compute` must not
+   * call back into this repository's writers for the same tenant (it would
+   * wait on itself); none does.
+   */
   async updateLocked(
     tenantId: string,
     opts: UpdateLockedOptions,
     compute: (row: OnboardingDraft) => Promise<DraftPatch> | DraftPatch,
   ): Promise<OnboardingDraft> {
-    const row = this.byTenant.get(tenantId);
-    if (!row) throw new DraftNotFoundError(tenantId);
-    assertWritable(row, opts);
-    const patch = await compute(row);
-    // An undefined field is "not in the patch", exactly as the Pg UPDATE skips it.
-    const next: OnboardingDraft = { ...row, version: row.version + 1, updatedAt: new Date() };
-    for (const key of PATCH_KEYS) {
-      if (patch[key] !== undefined) Object.assign(next, { [key]: patch[key] });
+    const prior = this.writing.get(tenantId) ?? Promise.resolve();
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const tail = prior.then(() => released);
+    this.writing.set(tenantId, tail);
+    await prior;
+    try {
+      const row = this.byTenant.get(tenantId);
+      if (!row) throw new DraftNotFoundError(tenantId);
+      assertWritable(row, opts);
+      const patch = await compute(row);
+      // An undefined field is "not in the patch", exactly as the Pg UPDATE skips it.
+      const next: OnboardingDraft = { ...row, version: row.version + 1, updatedAt: new Date() };
+      for (const key of PATCH_KEYS) {
+        if (patch[key] !== undefined) Object.assign(next, { [key]: patch[key] });
+      }
+      this.byTenant.set(tenantId, next);
+      return next;
+    } finally {
+      release();
+      // Drop the entry once nobody holds or waits for this tenant's row.
+      if (this.writing.get(tenantId) === tail) this.writing.delete(tenantId);
     }
-    this.byTenant.set(tenantId, next);
-    return next;
   }
 
   async stageChoice(tenantId: string, settingKey: AnyChoiceKey, choice: StagedChoice, expectedVersion: number): Promise<OnboardingDraft> {

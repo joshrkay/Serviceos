@@ -19,6 +19,7 @@ import { InMemoryInvoiceRepository } from '../../src/invoices/invoice';
 import { invoiceReferenceCheck } from '../../src/proposals/approval-reference-checks';
 import { buildInvoice } from '../factories/invoice.factory';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
+import { InMemoryTransactionRunner } from '../../src/db/tenant-transaction';
 
 const TENANT = 'tenant-ast04-route';
 const USER = 'user-ast04-route';
@@ -37,6 +38,7 @@ function buildApp(invoiceRepo: InMemoryInvoiceRepository) {
     '/api/proposals',
     createProposalsRouter(
       proposalRepo,
+      new InMemoryTransactionRunner(),
       undefined,
       undefined,
       undefined,

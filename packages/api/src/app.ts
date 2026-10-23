@@ -5463,6 +5463,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           store: voiceSessionStore,
           gateway: llmGateway,
           ...(pool ? { pool } : {}),
+          // A4-2 — without it the summary call still runs at the end of a
+          // chat but its call_summaries row is never written (A2).
+          ...(callSummaryRepo ? { callSummaryRepo } : {}),
           auditRepo,
           proposalRepo,
           customerRepo,
@@ -6113,6 +6116,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // arrives as an owner-approved proposal.
       aboutTask: new TenantSiteAboutTask(llmGateway),
       proposalRepo,
+      // The draft runs outside the request transaction (it awaits the LLM
+      // call); its writes after the call commit together in one short
+      // transaction. Matches the repos: Pg with a pool.
+      transactionRunner: pool ? new PgTenantTransactionRunner(pool) : new InMemoryTransactionRunner(),
       ...(customDomainProvider
         ? { domain: { provider: customDomainProvider, dns: customDomainDns, reservedHosts: appHostnames } }
         : {}),
@@ -7024,6 +7031,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     '/api/proposals',
     createProposalsRouter(
       proposalRepo,
+      // A1 / A3-3 — resolve-entity runs outside the request transaction; its
+      // row lock and writes commit together in one short transaction after
+      // the re-draft's LLM call. Matches the repos: Pg with a pool.
+      pool ? new PgTenantTransactionRunner(pool) : new InMemoryTransactionRunner(),
       appointmentRepo,
       auditRepo,
       feasibilityDeps,
@@ -7048,9 +7059,6 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // #1405 — the card's "which accepted estimate?" pick re-drafts the
       // invoice's lines, discount and tax from the picked estimate.
       estimateRepo,
-      // A1 — resolve-entity runs outside the request transaction; its writes
-      // commit together in one short transaction after the re-draft's LLM call.
-      pool ? new PgTenantTransactionRunner(pool) : undefined,
     ),
   );
   if (entityAliasRepo) {

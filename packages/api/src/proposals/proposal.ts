@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import { v4 as uuidv4 } from 'uuid';
 import { ConflictError } from '../shared/errors';
 import { assertStatusWrite } from './lifecycle';
@@ -316,6 +317,23 @@ export function missingFieldsFor(proposal: Proposal): string[] {
   const mf = (ctx as Record<string, unknown>).missingFields;
   if (!Array.isArray(mf)) return [];
   return mf.filter((s): s is string => typeof s === 'string');
+}
+
+/**
+ * A3-1 / A4-4 — whether `now` (the row as it stands) differs from `read` (the
+ * row a writer built its patch from). updated_at moves on every proposal
+ * write, but the domain Date keeps milliseconds only, so the fields a writer
+ * builds from are compared too: two writes in the same millisecond can't
+ * hide a change.
+ */
+export function proposalChangedSince(read: Proposal, now: Proposal): boolean {
+  return (
+    now.updatedAt.getTime() !== read.updatedAt.getTime() ||
+    now.status !== read.status ||
+    now.proposalType !== read.proposalType ||
+    !isDeepStrictEqual(now.payload, read.payload) ||
+    !isDeepStrictEqual(now.sourceContext ?? null, read.sourceContext ?? null)
+  );
 }
 
 // ─── Decision 3: action class + trust tier ───────────────────────────────
@@ -970,13 +988,21 @@ export interface ProposalRepository {
   createMany(proposals: Proposal[]): Promise<Proposal[]>;
   findById(tenantId: string, id: string): Promise<Proposal | null>;
   /**
-   * The locking read of a proposal SET (onboarding/draft/locked-set.ts): this
-   * tenant's rows among `ids`, ordered by id, each `SELECT ... FOR UPDATE` until
-   * the request transaction ends. A missing or foreign id is simply absent from
-   * the result. The fixed order means two callers locking the same set cannot
-   * deadlock. Only meaningful inside the /api request transaction: the Pg
-   * implementation refuses to run outside one (a lock taken on a throwaway
-   * connection is released at once). In memory it is a plain ordered read.
+   * The locking read of a proposal SET (onboarding/draft/locked-set.ts) or of
+   * one row (resolve-entity.ts, resolve-line.ts): this tenant's rows among
+   * `ids`, ordered by id, each `SELECT ... FOR UPDATE` until the transaction
+   * ends. A missing or foreign id is simply absent from the result. The fixed
+   * order means two callers locking the same set cannot deadlock. Only
+   * meaningful inside a tenant transaction: the Pg implementation refuses to
+   * run outside one (a lock taken on a throwaway connection is released at
+   * once).
+   *
+   * The in-memory implementation locks NOTHING. A caller that writes from the
+   * result must not rely on the lock: write through `updateIfUnchanged`
+   * against the row it read (or a write conditional on what it decided from,
+   * such as `updateStatusIf` for a status move), or hold `scope.lock` on the
+   * row's id for the whole read-decide-write. Under the Pg lock the compare
+   * always passes, so the outcome there is the same.
    */
   findByIdsForUpdate(tenantId: string, ids: string[]): Promise<Proposal[]>;
   findByTenant(tenantId: string): Promise<Proposal[]>;
@@ -1180,6 +1206,30 @@ export interface ProposalRepository {
     id: string,
     updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt' | 'status'>>
   ): Promise<Proposal | null>;
+  /**
+   * A4-4 — `update`, but only while the row is still `read` (the row the
+   * caller built `updates` from): it is re-read under the row lock and
+   * compared with `proposalChangedSince`, in the same transaction as the
+   * write. Returns null, writing nothing, when the row moved since `read` or
+   * is missing (or another tenant's). Runs inside the caller's tenant
+   * transaction when there is one, otherwise in its own; for a writer that
+   * cannot hold the row lock across its read (editProposal is also called
+   * outside a request transaction, from the voice and text edit paths).
+   */
+  updateIfUnchanged(
+    tenantId: string,
+    id: string,
+    read: Proposal,
+    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt' | 'status'>>
+  ): Promise<Proposal | null>;
+  /**
+   * R2-2 — sets these top-level sourceContext keys on the row as it stands,
+   * leaving every other key as it is now, in one write with no read. For a
+   * writer that only adds an annotation (the voice and text "your note is
+   * attached" stamps) and must not put back a sourceContext it read earlier.
+   * Returns null when the row is missing (or another tenant's).
+   */
+  mergeSourceContext(tenantId: string, id: string, entries: Record<string, unknown>): Promise<Proposal | null>;
 
   /**
    * System-level query for the auto-delivery worker. Returns all
@@ -1453,19 +1503,35 @@ export class InMemoryProposalRepository implements ProposalRepository {
     return created;
   }
 
+  /**
+   * R2-1 — a deep copy, as a Postgres read is a fresh object: a writer that
+   * changes part of the row it read in place must not change the stored row
+   * with it (tests would then miss what that does on Postgres).
+   */
   async findById(tenantId: string, id: string): Promise<Proposal | null> {
     const proposal = this.proposals.get(id);
     if (!proposal || proposal.tenantId !== tenantId) return null;
-    return { ...proposal };
+    return structuredClone(proposal);
   }
 
-  /** Plain ordered read: in-memory callers are single-threaded, so there is nothing to lock. */
+  /**
+   * A plain ordered read of deep copies (like findById). It locks NOTHING:
+   * there is no row lock here, and InMemoryTransactionRunner holds a lock only
+   * when asked through `scope.lock`. Requests interleave at every await, so
+   * another pick, an edit or a decision can land between this read and the
+   * caller's write. Every caller that writes from the result must therefore
+   * write through `updateIfUnchanged` against the row it read (or a write
+   * conditional on what it decided from, such as `updateStatusIf`), or hold a
+   * `scope.lock` on the row for the whole read-decide-write; a plain `update`
+   * built from this read erases whatever landed in between (Codex on #1811,
+   * resolve-entity.ts and resolve-line.ts).
+   */
   async findByIdsForUpdate(tenantId: string, ids: string[]): Promise<Proposal[]> {
     return [...new Set(ids)]
       .sort()
       .map((id) => this.proposals.get(id))
       .filter((p): p is Proposal => !!p && p.tenantId === tenantId)
-      .map((p) => ({ ...p }));
+      .map((p) => structuredClone(p));
   }
 
   async findByTenant(tenantId: string): Promise<Proposal[]> {
@@ -1770,6 +1836,28 @@ export class InMemoryProposalRepository implements ProposalRepository {
     Object.assign(proposal, fields, { updatedAt: new Date() });
     this.proposals.set(id, proposal);
     return { ...proposal };
+  }
+
+  /**
+   * The check and the write run in one synchronous step: an `await` between
+   * them would let a second edit from the same read pass the check before the
+   * first one writes, and overwrite it.
+   */
+  async updateIfUnchanged(
+    tenantId: string,
+    id: string,
+    read: Proposal,
+    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt' | 'status'>>
+  ): Promise<Proposal | null> {
+    const now = this.proposals.get(id);
+    if (!now || now.tenantId !== tenantId || proposalChangedSince(read, now)) return null;
+    return this.update(tenantId, id, updates);
+  }
+
+  async mergeSourceContext(tenantId: string, id: string, entries: Record<string, unknown>): Promise<Proposal | null> {
+    const now = this.proposals.get(id);
+    if (!now || now.tenantId !== tenantId) return null;
+    return this.update(tenantId, id, { sourceContext: { ...(now.sourceContext ?? {}), ...entries } });
   }
 
   async findReadyForExecution(windowMs: number): Promise<Proposal[]> {
