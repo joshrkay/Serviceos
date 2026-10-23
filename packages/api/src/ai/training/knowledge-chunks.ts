@@ -1,5 +1,6 @@
 import { Pool, PoolClient } from 'pg';
 import { PgBaseRepository } from '../../db/pg-base';
+import { knowledgeChunkDedupeCollisionsTotal } from '../../monitoring/metrics';
 
 /**
  * Repository for `knowledge_chunks` — the unified per-tenant + global
@@ -25,6 +26,12 @@ import { PgBaseRepository } from '../../db/pg-base';
  * tenant has its own key space: a colliding tuple from another tenant
  * gets its own row instead of updating this tenant's. The index is
  * NULLS NOT DISTINCT, so global rows still dedupe among themselves.
+ *
+ * Until 351's contract migration ships, a database that ran 062's
+ * original body also keeps its tenant-blind unique index. There a
+ * colliding tuple from another tenant is refused
+ * (KnowledgeChunkDedupeCollisionError) instead of getting its own row.
+ * Either way the first tenant's row is never touched.
  */
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -109,6 +116,45 @@ export interface SearchHit {
 export interface KnowledgeChunkRepository {
   insert(input: KnowledgeChunkInput): Promise<KnowledgeChunk>;
   search(opts: SearchOptions): Promise<SearchHit[]>;
+}
+
+/** 062's tenant-blind dedupe index; 351 keeps it until its contract migration. */
+const LEGACY_DEDUPE_INDEX = 'idx_knowledge_chunks_dedupe';
+
+/**
+ * Thrown by `PgKnowledgeChunkRepository.insert` when another tenant already
+ * holds this (scope, source_type, source_id, source_version) on the
+ * tenant-blind dedupe index. That tenant's row is untouched and this chunk is
+ * not written. Retrying cannot help while the index exists, so callers skip
+ * the chunk. In a race narrower than one insert, the holder can instead be a
+ * concurrent insert of this same tenant's tuple; that row then exists.
+ *
+ * Only raised while 062's index exists: on a database that ran 062's
+ * original body and never ran #1813's drop (production), until 351's
+ * contract migration drops it. Remove this class, its metric and the
+ * workers' branches with that migration.
+ */
+export class KnowledgeChunkDedupeCollisionError extends Error {
+  constructor(
+    readonly sourceType: string,
+    readonly sourceId: string,
+    readonly sourceVersion: number,
+  ) {
+    super(
+      `knowledge_chunks: another tenant holds (${sourceType}, ${sourceId}, v${sourceVersion}) on ${LEGACY_DEDUPE_INDEX}`,
+    );
+    this.name = 'KnowledgeChunkDedupeCollisionError';
+  }
+}
+
+/**
+ * The INSERT's conflict target is the tenant-aware key, so ON CONFLICT never
+ * covers 062's index: a tuple held there by another tenant raises 23505 on it.
+ */
+function isLegacyDedupeViolation(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  const pgErr = err as { code?: unknown; constraint?: unknown };
+  return pgErr.code === '23505' && pgErr.constraint === LEGACY_DEDUPE_INDEX;
 }
 
 // ─── Validation ──────────────────────────────────────────────────────────────
@@ -272,9 +318,16 @@ export class PgKnowledgeChunkRepository extends PgBaseRepository implements Know
     // INSERT regardless of GUC (the WITH CHECK is implicit-true for
     // null tenant_id). Tenant rows must have the GUC set so the WITH
     // CHECK clause permits the row.
-    const row = input.tenantId
-      ? await this.withTenantTransaction(input.tenantId, exec)
-      : await this.withClient(exec);
+    let row: KnowledgeChunkRow;
+    try {
+      row = input.tenantId
+        ? await this.withTenantTransaction(input.tenantId, exec)
+        : await this.withClient(exec);
+    } catch (err) {
+      if (!isLegacyDedupeViolation(err)) throw err;
+      knowledgeChunkDedupeCollisionsTotal.inc({ source_type: input.sourceType });
+      throw new KnowledgeChunkDedupeCollisionError(input.sourceType, input.sourceId, sourceVersion);
+    }
 
     return rowToChunk(row, input.embedding);
   }

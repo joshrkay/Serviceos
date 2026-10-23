@@ -8888,17 +8888,39 @@ export const MIGRATIONS = {
   // re-ingestion duplicate rows. Existing data cannot violate the new index:
   // it only ever adds a column to a key that was already unique.
   //
-  // 062's body no longer builds the old index. The runner replays the whole
-  // corpus on every deploy (no ledger), so a surviving 062 copy would re-build
-  // the tenant-blind index over live data before this migration dropped it
-  // again — and the first source tuple two tenants share fails that build
-  // (23505), rolling back the corpus and blocking every later deploy (the
-  // 154/268 precedent). Pinned by migration-replay-populated-db.test.ts.
+  // EXPAND only: 062's tenant-blind idx_knowledge_chunks_dedupe stays. The
+  // corpus runs in the web service's preDeployCommand while the old web
+  // replica still serves (overlapSeconds), and the worker service, which runs
+  // both knowledge-chunk writers, deploys after web. Both keep running the
+  // previous release, whose insert names ON CONFLICT (scope, source_type,
+  // source_id, source_version). With that index gone, every such insert fails
+  // 42P10 and the workers drop the chunk. While both indexes exist, this
+  // release's insert of a tuple another tenant holds is refused by the old
+  // index (KnowledgeChunkDedupeCollisionError), never overwriting that row.
+  // A later release drops the old index (CONTRACT) once this one has rolled
+  // out on every service that runs app code (web, worker, and voice if it
+  // is deployed).
+  //
+  // This body first shipped with `DROP INDEX IF EXISTS
+  // idx_knowledge_chunks_dedupe` (#1813). It is edited in place, not
+  // followed by a new migration, so that a database which never ran that
+  // drop (production, as long as no main deploy since #1813 reached it) keeps
+  // the index. A database that did run it (dev auto-deploys main) stays
+  // without it: nothing here or in 062 rebuilds it,
+  // because two tenants may now share a tuple there and the build would fail
+  // 23505 and block every later deploy.
+  //
+  // 062's body no longer builds the old index either. The runner replays the
+  // whole corpus on every deploy (no ledger), so a surviving 062 copy would
+  // rebuild it over live data once the contract migration had dropped it, and
+  // the first tuple two tenants share would fail that build (the 154/268
+  // precedent). So fresh databases only ever get the tenant-aware key. Pinned
+  // by migration-replay-populated-db.test.ts and
+  // knowledge-chunks-dedupe-expand-contract.test.ts.
   '351_knowledge_chunks_tenant_dedupe': `
     CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_chunks_tenant_dedupe
       ON knowledge_chunks (tenant_id, scope, source_type, source_id, source_version)
       NULLS NOT DISTINCT;
-    DROP INDEX IF EXISTS idx_knowledge_chunks_dedupe;
   `,
 
   // P2-030 durable shadow-comparison store. PgShadowComparisonStore reached
@@ -8941,16 +8963,17 @@ export const MIGRATIONS = {
   `,
 };
 
-function makePoliciesIdempotent(sql: string): string {
-  return sql.replace(
-    /CREATE POLICY\s+([a-zA-Z0-9_]+)\s+ON\s+([a-zA-Z0-9_]+)\s+USING\s*\(([^;]+)\);/g,
-    (_match, policyName: string, tableName: string, usingClause: string) =>
-      `DROP POLICY IF EXISTS ${policyName} ON ${tableName};\n    CREATE POLICY ${policyName} ON ${tableName}\n      USING (${usingClause});`
-  );
+export function getMigrationSQL(): string {
+  return compileMigrationSQL(MIGRATIONS);
 }
 
-export function getMigrationSQL(): string {
-  return Object.values(MIGRATIONS)
+/**
+ * The one SQL batch the runner executes for a migration registry, in
+ * registry order. getMigrationSQL() compiles this release's MIGRATIONS; the
+ * rolling-deploy tests compile an earlier release's corpus the same way.
+ */
+export function compileMigrationSQL(migrations: Readonly<Record<string, string>>): string {
+  return Object.values(migrations)
     .map((migration) =>
       migration
         .replace(

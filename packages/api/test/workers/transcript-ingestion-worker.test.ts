@@ -12,6 +12,8 @@ import {
   EMBEDDING_DIMENSIONS,
   EMBEDDING_MODEL,
   InMemoryKnowledgeChunkRepository,
+  KnowledgeChunkDedupeCollisionError,
+  type KnowledgeChunkRepository,
 } from '../../src/ai/training/knowledge-chunks';
 import type {
   EmbeddingProvider,
@@ -635,5 +637,54 @@ describe('transcript-ingestion-worker', () => {
     // Turns still persisted (Step 1 doesn't depend on embedder).
     const turns = await callTranscriptTurnRepo.listByRecording(TENANT_A, recordingId);
     expect(turns.length).toBe(2);
+  });
+
+  it("a chunk another tenant holds on 062's tenant-blind key is skipped with its own warning, not as a failed insert", async () => {
+    const callTranscriptTurnRepo = new InMemoryCallTranscriptTurnRepository();
+    const voiceRepo = new InMemoryVoiceRepository();
+    const recordingId = await seedRecording(voiceRepo);
+    const attempted: string[] = [];
+    // PgKnowledgeChunkRepository raises this while 351's contract migration is pending.
+    const knowledgeChunkRepo: KnowledgeChunkRepository = {
+      insert: async (input) => {
+        attempted.push(input.sourceId);
+        throw new KnowledgeChunkDedupeCollisionError(input.sourceType, input.sourceId, 1);
+      },
+      search: async () => [],
+    };
+    const workerLogger = createLogger({ service: 'test', environment: 'test', level: 'error' });
+    const warn = vi.spyOn(workerLogger, 'warn');
+
+    const worker = createTranscriptIngestionWorker({
+      callTranscriptTurnRepo,
+      voiceRepo,
+      knowledgeChunkRepo,
+      embeddings: stubEmbedder(),
+    });
+    await expect(
+      worker.handle(
+        buildMessage({
+          tenantId: TENANT_A,
+          voiceRecordingId: recordingId,
+          turns: turnsFrom(['agent: hi', 'caller: hello']),
+          summary: 'short',
+        }),
+        workerLogger,
+      ),
+    ).resolves.toBeUndefined();
+
+    // Every chunk (summary + each window) was tried and each refusal named as a collision.
+    expect(attempted.length).toBeGreaterThan(1);
+    const messages = warn.mock.calls.map(([message]) => message);
+    expect(messages.filter((m) => m === 'knowledge_chunks insert skipped: another tenant holds this source tuple')).toHaveLength(
+      attempted.length,
+    );
+    expect(messages).not.toContain('knowledge_chunks insert failed');
+    expect(warn).toHaveBeenCalledWith('knowledge_chunks insert skipped: another tenant holds this source tuple', {
+      sourceType: 'call_summary',
+      sourceId: recordingId,
+    });
+    // Turns still persisted (Step 1 doesn't depend on chunk ingestion).
+    expect((await callTranscriptTurnRepo.listByRecording(TENANT_A, recordingId)).length).toBe(2);
   });
 });

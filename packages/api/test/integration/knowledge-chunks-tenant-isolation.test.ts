@@ -14,6 +14,10 @@
  * `tenant_id`: a second tenant writing a colliding source tuple either
  * overwrote the first tenant's content and embedding (policy inert) or failed
  * the RLS check (policy on). The key is now tenant-aware (migration 351).
+ * This file runs on a fresh database, which only has that key, so a colliding
+ * tuple gets its own row. A database that ran 062's original body keeps the
+ * tenant-blind key too until 351's contract migration, and there the second
+ * tenant's insert is refused instead: knowledge-chunks-dedupe-expand-contract.test.ts.
  *
  * Both flag states are pinned: ON proves the policy and the SQL agree, OFF
  * proves the SQL alone bounds the read and the write (the defense-in-depth

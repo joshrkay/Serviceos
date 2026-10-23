@@ -470,6 +470,21 @@ export const demoCallBudgetRefusalsTotal = new Counter({
   registers: [metricsRegistry],
 });
 
+/**
+ * Knowledge-chunk inserts refused because another tenant already holds the
+ * same (scope, source_type, source_id, source_version) on 062's tenant-blind
+ * dedupe index, which 351 keeps until its contract migration drops it. The
+ * chunk is not written; the other tenant's row is untouched. `source_type` is
+ * the bounded KnowledgeChunkSourceType whitelist. Source ids are server UUIDs,
+ * so any count here is unexpected; remove with the contract migration.
+ */
+export const knowledgeChunkDedupeCollisionsTotal = new Counter({
+  name: 'knowledge_chunk_dedupe_collisions_total',
+  help: "Knowledge-chunk inserts refused on the tenant-blind dedupe index because another tenant holds the source tuple",
+  labelNames: ['source_type'],
+  registers: [metricsRegistry],
+});
+
 export async function renderMetrics(): Promise<{
   contentType: string;
   body: string;

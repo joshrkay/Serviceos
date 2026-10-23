@@ -4,6 +4,7 @@ import { ProposalRepository, ProposalType } from '../proposals/proposal';
 import { ProposalExecutionRepository } from '../proposals/proposal-execution';
 import {
   EMBEDDING_MODEL,
+  KnowledgeChunkDedupeCollisionError,
   KnowledgeChunkRepository,
   KnowledgeChunkSourceType,
 } from '../ai/training/knowledge-chunks';
@@ -220,6 +221,13 @@ export function createProposalCorrectionWorker(
           },
         });
       } catch (err) {
+        if (err instanceof KnowledgeChunkDedupeCollisionError) {
+          logger.warn('knowledge_chunks insert (correction) skipped: another tenant holds this source tuple', {
+            proposalId,
+            executionId: execution.id,
+          });
+          return;
+        }
         const error = err instanceof Error ? err : new Error(String(err));
         logger.warn('knowledge_chunks insert (correction) failed', {
           proposalId,
