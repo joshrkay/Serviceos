@@ -14,6 +14,7 @@ import {
   InMemoryAppointmentCalendarEventRepository,
 } from '../../src/integrations/calendar-sync';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
+import { oauthBindingCookie } from '../support/oauth-binding-cookie';
 
 const TENANT = 'tenant-cal-1';
 const USER = 'user-cal-1';
@@ -181,7 +182,8 @@ describe('Calendar integrations routes (PR 1)', () => {
 
     const res = await request(app)
       .get('/api/calendar-integrations/google/callback')
-      .query({ code: 'auth-xyz', state: stateId });
+      .query({ code: 'auth-xyz', state: stateId })
+      .set('Cookie', oauthBindingCookie('google', stateId));
 
     expect(res.status).toBe(302);
     expect(res.headers.location).toContain('/settings?calendar_connected=1');
@@ -215,7 +217,8 @@ describe('Calendar integrations routes (PR 1)', () => {
     });
     const res = await request(app)
       .get('/api/calendar-integrations/google/callback')
-      .query({ code: 'auth-xyz', state: stateId });
+      .query({ code: 'auth-xyz', state: stateId })
+      .set('Cookie', oauthBindingCookie('google', stateId));
     expect(res.status).toBe(302);
     expect(res.headers.location).toBe('https://app.example.com/settings/calendar');
   });
@@ -243,7 +246,8 @@ describe('Calendar integrations routes (PR 1)', () => {
     });
     const res = await request(app)
       .get('/api/calendar-integrations/google/callback')
-      .query({ code: 'auth-xyz', state: stateId });
+      .query({ code: 'auth-xyz', state: stateId })
+      .set('Cookie', oauthBindingCookie('google', stateId));
     expect(res.status).toBe(302);
     // Falls back to the default settings target, NOT the attacker's URL.
     expect(res.headers.location).toContain('/settings?calendar_connected=1');
@@ -281,7 +285,8 @@ describe('Calendar integrations routes (PR 1)', () => {
     });
     const res = await request(app)
       .get('/api/calendar-integrations/google/callback')
-      .query({ code: 'xyz', state: 'unknown-state' });
+      .query({ code: 'xyz', state: 'unknown-state' })
+      .set('Cookie', oauthBindingCookie('google', 'unknown-state'));
     expect(res.status).toBe(400);
   });
 

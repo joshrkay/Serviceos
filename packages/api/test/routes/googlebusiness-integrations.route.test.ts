@@ -29,6 +29,7 @@ import { InMemorySettingsRepository } from '../../src/settings/settings';
 import { runGoogleReviewsSweep } from '../../src/workers/google-reviews';
 import { createLogger } from '../../src/logging/logger';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
+import { oauthBindingCookie } from '../support/oauth-binding-cookie';
 
 const TENANT = 'tenant-gbp-1';
 const USER = 'user-gbp-1';
@@ -309,7 +310,8 @@ describe('Google Business integrations routes', () => {
 
     const res = await request(app)
       .get('/api/googlebusiness-integrations/google/callback')
-      .query({ code: 'auth-xyz', state: stateId });
+      .query({ code: 'auth-xyz', state: stateId })
+      .set('Cookie', oauthBindingCookie('google_business', stateId));
 
     expect(res.status).toBe(302);
     expect(res.headers.location).toContain('/settings?googlebusiness_connected=1');
@@ -346,7 +348,8 @@ describe('Google Business integrations routes', () => {
     });
     await request(app)
       .get('/api/googlebusiness-integrations/google/callback')
-      .query({ code: 'auth-xyz', state: stateId });
+      .query({ code: 'auth-xyz', state: stateId })
+      .set('Cookie', oauthBindingCookie('google_business', stateId));
 
     // Now run the REAL sweep with the repo standing in as the
     // CredentialResolver (same `tenant_integrations` row shape).
@@ -408,14 +411,17 @@ describe('Google Business integrations routes', () => {
     });
     const res = await request(app)
       .get('/api/googlebusiness-integrations/google/callback')
-      .query({ code: 'xyz', state: 'unknown-state' });
+      .query({ code: 'xyz', state: 'unknown-state' })
+      .set('Cookie', oauthBindingCookie('google_business', 'unknown-state'));
     expect(res.status).toBe(400);
   });
 
   it('GET /google/callback rejects a state minted by the calendar connect flow', async () => {
     // Calendar connect is open to any member and shares the Google OAuth
     // client; its nonce must not complete this owner-only connect even
-    // when the code exchange would succeed.
+    // when the code exchange would succeed. The browser here holds the nonce
+    // in this flow's cookie, so the provider check in consume() is what
+    // refuses it.
     const { id: stateId } = await stateRepo.create({
       tenantId: TENANT,
       userId: 'technician-1',
@@ -431,7 +437,8 @@ describe('Google Business integrations routes', () => {
     });
     const res = await request(app)
       .get('/api/googlebusiness-integrations/google/callback')
-      .query({ code: 'auth-xyz', state: stateId });
+      .query({ code: 'auth-xyz', state: stateId })
+      .set('Cookie', oauthBindingCookie('google_business', stateId));
     expect(res.status).toBe(400);
     expect(fetchMock).not.toHaveBeenCalled();
     expect(await integrationRepo.get(TENANT)).toBeNull();
@@ -453,7 +460,8 @@ describe('Google Business integrations routes', () => {
     });
     const res = await request(app)
       .get('/api/googlebusiness-integrations/google/callback')
-      .query({ code: 'auth-xyz', state: stateId });
+      .query({ code: 'auth-xyz', state: stateId })
+      .set('Cookie', oauthBindingCookie('google_business', stateId));
     expect(res.status).toBe(302);
     expect(res.headers.location).toContain('/settings?googlebusiness_connected=1');
     expect(res.headers.location).not.toContain('evil.com');
@@ -543,7 +551,8 @@ describe('Google Business integrations routes', () => {
       });
       return request(app)
         .get('/api/googlebusiness-integrations/google/callback')
-        .query({ code: 'auth-xyz', state: stateId });
+        .query({ code: 'auth-xyz', state: stateId })
+        .set('Cookie', oauthBindingCookie('google_business', stateId));
     }
 
     async function settingsWith(googleReviewUrl?: string) {
