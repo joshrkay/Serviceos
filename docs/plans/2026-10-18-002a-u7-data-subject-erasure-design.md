@@ -1518,10 +1518,43 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         row's own id is added only where it becomes the row's only key (see "Phase 1 is sized
         by its fence keys" below).
       - the subject's normalized phone numbers and email addresses, stored as keyed hashes
-        (HMAC-SHA256 with a server-side key), so the tombstone keeps no raw identifier
+        (HMAC-SHA256 with a server-side key, recorded by key id and normalization version, see
+        "A recipient hash records its key, and a key a hash uses is never retired" below), so the tombstone keeps no raw identifier
       A writer that knows only a recipient, with no customer id, still matches. The erased
       customer row no longer holds the identifiers, so without this such a writer could never
       match the tombstone.
+    - **A recipient hash records its key, and a key a hash uses is never retired.** The raw
+      identifiers are deleted once the job finishes, so an existing hash can't be regenerated
+      under a new key. If the key were rotated, or the normalization changed, a recipient-only
+      write would hash differently from every existing permanent tombstone, match none, and
+      reintroduce or export an erased customer's data. So:
+      - Every row that stores a recipient hash records `hash_key_id` and `norm_version` beside it:
+        the tombstone's recipient-hash rows, the write-ahead dispatch rows and the S3 target hash.
+        Key material stays in the server's secret store, under its id. A table of key ids with no
+        material is the database's record of which ids exist, and every column above references it
+        with `ON DELETE RESTRICT`.
+      - New hashes use the current key id and normalization version. The matcher, and the stripe
+        choice of a send with no customer id, take the candidate set: the identifier normalized
+        under each `norm_version` and hashed under each `hash_key_id` that any stored hash still
+        uses, plus the current pair. It is normally one or two pairs. A write matches when any
+        candidate agrees. It takes the stripes of every candidate in ascending order, which
+        includes the stripe of whatever pair phase 1 used.
+      - **Rotation adds a key and never removes one that is referenced.** It is an operator step
+        that adds the new id and material and makes it current. The old key stays verify-only for
+        as long as any row references it, which for a permanent tombstone is indefinitely. Retiring
+        an id that a row references is refused by the foreign key, and the retire path reports
+        which table holds the reference. The same holds for a normalization change: the new
+        version is added, and the old one stays in the candidate set.
+      - **A missing key fails closed.** A boot check loads the material for every referenced key
+        id. If one can't be loaded, the write paths that need the recipient-hash probe refuse with
+        the typed erasure-unavailable error, never proceed unmatched, and `alertOperator` fires.
+        Writes keyed by customer id or another non-hash key are unaffected.
+      - Tests: a tombstone is made under key `k1`, the key is rotated to `k2`, and a recipient-only
+        write of the same phone and the same email is still refused. The same holds after a change
+        of `norm_version`. A boot with a referenced key's material missing refuses recipient-only
+        writes and alerts, and a write by customer id still goes through. Retiring `k1` while a
+        tombstone references it is refused, and retiring it once nothing does succeeds. A new
+        tombstone under `k2` matches a dispatch row hashed under `k1`.
     - **Each tombstone row names its job and its key kind.** Two customers in one tenant can share
       a household phone. A flat key set, unique on `(tenant_id, key)`, would fail the second
       customer's phase 1 with `23505` on every attempt, so that customer could never be erased. A
@@ -2322,7 +2355,7 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         it. A fence that matches the recipient would instead drop household member B's send.
         Phase 1 can't hold the row either, since it has no rendered message. So:
         - Each write-ahead row also records its source (`source_type`, `source_id`) and the
-          recipient's keyed hash.
+          recipient's keyed hash, with the key id and normalization version it was made with.
         - Phase 1, which holds those stripes, applies the rule to `claimed` and `released` rows.
           A row whose `customer_id` is the subject, or that has no customer and a source already
           recorded in the tombstone, moves to `fenced`.
@@ -2536,7 +2569,8 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
       tombstone, find no in-flight row and report success, and the sender would then insert its
       row and send. So:
       - Every customer-facing outbound send writes a durable write-ahead dispatch row with status
-        `claimed`. The row holds the recipient and its keyed hash, the account and the sending
+        `claimed`. The row holds the recipient and its keyed hash (with its key id and
+        normalization version), the account and the sending
         number, Messaging Service or address, the `customer_id`, the source (`source_type`,
         `source_id`) and a hash of the body.
       - It writes that row in one transaction that first takes the subject's erasure lock in
