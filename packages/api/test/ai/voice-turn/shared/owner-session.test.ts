@@ -11,7 +11,7 @@
  *     failed lookup is never an owner session (null).
  */
 import { describe, it, expect } from 'vitest';
-import { resolveOwnerLineApprover } from '../../../../src/ai/voice-turn/shared/owner-session';
+import { ownerLineStamp, resolveOwnerLineApprover } from '../../../../src/ai/voice-turn/shared/owner-session';
 import type { SettingsRepository, TenantSettings } from '../../../../src/settings/settings';
 import type { UserRepository } from '../../../../src/users/user';
 
@@ -52,7 +52,7 @@ describe('resolveOwnerLineApprover (shared)', () => {
     const withBackup = settings({ backupSupervisorUserId: BACKUP_USER_ID });
     await expect(
       resolveOwnerLineApprover({ settingsRepo: withBackup, userRepo: users() }, TENANT, BACKUP_MOBILE),
-    ).resolves.toEqual({ role: 'dispatcher', userId: BACKUP_USER_ID, via: 'backup_supervisor' });
+    ).resolves.toEqual({ role: 'dispatcher', userId: BACKUP_USER_ID, userRowId: BACKUP_USER_ID, via: 'backup_supervisor' });
     await expect(resolveOwnerLineApprover({ settingsRepo: withBackup }, TENANT, BACKUP_MOBILE)).resolves.toBeNull();
   });
 
@@ -66,5 +66,18 @@ describe('resolveOwnerLineApprover (shared)', () => {
       },
     } as unknown as SettingsRepository;
     await expect(resolveOwnerLineApprover({ settingsRepo: broken }, TENANT, OWNER_PHONE)).resolves.toBeNull();
+  });
+});
+
+// B1 / B4-2 — what pick-up carries on the session as `ownerLineApprover`.
+describe('ownerLineStamp', () => {
+  it("a backup's stamp keeps their role, subject and users row; nothing else", () => {
+    expect(
+      ownerLineStamp({ role: 'dispatcher', userId: 'clerk-backup', userRowId: BACKUP_USER_ID, via: 'backup_supervisor' }),
+    ).toEqual({ role: 'dispatcher', userId: 'clerk-backup', userRowId: BACKUP_USER_ID });
+  });
+
+  it("the owner phone's stamp is the role alone (no subject, no users row)", () => {
+    expect(ownerLineStamp({ role: 'owner', via: 'owner_phone' })).toEqual({ role: 'owner' });
   });
 });

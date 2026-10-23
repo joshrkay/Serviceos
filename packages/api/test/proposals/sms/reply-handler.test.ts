@@ -1494,3 +1494,68 @@ describe('B4 — SMS approvals run the approval-time reference checks', () => {
     expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('approved');
   });
 });
+
+// B3-6 — a schedule card's 48-hour window is swept hourly, so between its
+// expiresAt and the sweep a texted Y still reaches approveProposal, which
+// marks it expired and refuses with a ValidationError that names no fields.
+// The reply was "it's missing required info" — wrong, and the next step
+// ("finish it") is impossible. Expiry has its own reply now.
+describe('B3-6 — SMS Y on a card whose window has just expired', () => {
+  it('says it expired, approves nothing, and does not claim missing info', async () => {
+    const h = makeHarness();
+    const proposal = await seedPendingProposal(h, TENANT, { expiresAt: new Date(Date.now() - 60_000) });
+
+    const result = await handleProposalSmsReply(ctx('Y'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'approve_blocked' });
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('expired');
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0].body).toBe("Can't approve — that one expired. You can redo it in the app.");
+    expect(h.sent[0].body).not.toMatch(/missing/i);
+    expect(h.auditRepo.getAll().map((e) => e.eventType)).not.toContain('proposal.approved');
+    expect(
+      h.auditRepo.getAll().find((e) => e.eventType === 'proposal.sms_approve_blocked')?.metadata,
+    ).toMatchObject({ heldBy: 'expired' });
+  });
+
+  // The first Y flips the card to expired, so a second Y found a card that
+  // was no longer reviewable and was told it "was already handled". Nobody
+  // handled it; it expired. Same for a Y after the hourly sweep.
+  it('a second Y on the now-expired card gets the same expiry reply', async () => {
+    const h = makeHarness();
+    const proposal = await seedPendingProposal(h, TENANT, { expiresAt: new Date(Date.now() - 60_000) });
+
+    await handleProposalSmsReply(ctx('Y'), h.deps);
+    const second = await handleProposalSmsReply(ctx('Y'), h.deps);
+
+    expect(second).toMatchObject({ handled: true, reason: 'already_handled' });
+    expect(h.sent).toHaveLength(2);
+    expect(h.sent[1].body).toBe(h.sent[0].body);
+    expect(h.sent[1].body).toBe("Can't approve — that one expired. You can redo it in the app.");
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('expired');
+  });
+
+  it('a Y after the sweep expired the card gets the expiry reply, not "already handled"', async () => {
+    const h = makeHarness();
+    const proposal = await seedPendingProposal(h);
+    await h.proposalRepo.updateStatus(TENANT, proposal.id, 'expired');
+
+    const result = await handleProposalSmsReply(ctx('Y'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'already_handled' });
+    expect(h.sent[0].body).toBe("Can't approve — that one expired. You can redo it in the app.");
+    expect(h.sent[0].body).not.toMatch(/already handled/i);
+  });
+
+  it('an N on an expired card says it expired and changes nothing', async () => {
+    const h = makeHarness();
+    const proposal = await seedPendingProposal(h);
+    await h.proposalRepo.updateStatus(TENANT, proposal.id, 'expired');
+
+    const result = await handleProposalSmsReply(ctx('N'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'already_handled' });
+    expect(h.sent[0].body).toBe("That one expired — this didn't change anything.");
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('expired');
+  });
+});

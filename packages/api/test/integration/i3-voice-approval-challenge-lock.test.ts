@@ -97,7 +97,7 @@ function makeDeps(
       },
       secret: 'i3-one-tap-secret',
       buildApproveUrl: (token) => `https://x.test/approve?token=${token}`,
-      resolveOwnerPhone: async () => ownerPhone,
+      resolveSmsRecipient: async () => ({ phone: ownerPhone, via: 'owner_phone' as const }),
     },
   };
   return { deps, sent };

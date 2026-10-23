@@ -109,7 +109,7 @@ describe('#1051 — tenant-wide money-approval PIN lock at real Postgres', () =>
           },
           secret: 'i3-tenant-pin-lock-one-tap',
           buildApproveUrl: (token) => `https://x.test/approve?token=${token}`,
-          resolveOwnerPhone: async () => ownerPhone,
+          resolveSmsRecipient: async () => ({ phone: ownerPhone, via: 'owner_phone' as const }),
         },
       },
     };

@@ -44,8 +44,8 @@ import type {
   FallbackHandler,
 } from '../../sms/inbound-dispatch';
 import type { Proposal, ProposalRepository } from '../proposal';
-import { actionClassForProposalType, missingFieldsFor } from '../proposal';
-import type { ApprovalReferenceCheck } from '../approval-reference-checks';
+import { actionClassForProposalType } from '../proposal';
+import { isReferenceCheckHold, type ApprovalReferenceCheck } from '../approval-reference-checks';
 import {
   approveChainSet,
   approveProposalsBatch,
@@ -151,6 +151,15 @@ async function resolveSmsApprover(
  */
 const ROLE_CANNOT_APPROVE_REPLY =
   'You can’t approve, reject or change work by text, so nothing changed. Ask the owner to handle it.';
+
+/**
+ * B3-6 — a schedule card whose 48-hour window passed. A Y is told so, the
+ * same words whether this Y found it expiring (handleApprove) or it already
+ * read expired (the first Y, or the hourly sweep, flipped it); it can only
+ * be redone. Any other reply on it changes nothing.
+ */
+const EXPIRED_APPROVE_REPLY = `Can't approve — that one expired. You can redo it in the app.`;
+const EXPIRED_NO_CHANGE_REPLY = `That one expired — this didn't change anything.`;
 
 /** B1 — an approval the sender's role does not reach (a settings change, for a dispatcher). */
 const NEEDS_OWNER_REPLY =
@@ -445,19 +454,29 @@ async function handleApprove(
       // approval-time reference checks (e.g. its job belongs to another
       // customer): nothing is missing, something on it needs fixing — which
       // a text cannot do. Otherwise: missing required fields. Truthful, with
-      // the next step, either way.
-      const heldByReferenceCheck =
-        Array.isArray(err.details?.missingFields) && missingFieldsFor(proposal).length === 0;
+      // the next step, either way. B3-4 — not the linked-step gate (today
+      // the action-class guard above stops every card it holds).
+      // B3-6 — a schedule card whose 48-hour window passed before the hourly
+      // sweep: approveProposal marks it expired, then refuses with a
+      // ValidationError that names no fields. Nothing is missing, and it
+      // can no longer be finished — it can only be redone.
+      const heldBy = isReferenceCheckHold(err.details, proposal)
+        ? 'reference_check'
+        : (await deps.proposalRepo.findById(ctx.tenantId, proposal.id).catch(() => null))?.status === 'expired'
+          ? 'expired'
+          : undefined;
       await audit(deps, ctx, 'proposal.sms_approve_blocked', proposal.id, {
         error: err.message,
-        ...(heldByReferenceCheck ? { heldBy: 'reference_check' } : {}),
+        ...(heldBy ? { heldBy } : {}),
       });
       await reply(
         deps,
         ctx.fromE164,
-        heldByReferenceCheck
+        heldBy === 'reference_check'
           ? `Can't approve yet — something on it needs fixing first. Open it in the app to fix it.`
-          : `Can't approve yet — it's missing required info. Open your review queue to finish it.`,
+          : heldBy === 'expired'
+            ? EXPIRED_APPROVE_REPLY
+            : `Can't approve yet — it's missing required info. Open your review queue to finish it.`,
       );
       return { handled: true, handler: HANDLER_NAME, reason: 'approve_blocked' };
     }
@@ -693,10 +712,16 @@ export async function handleProposalSmsReply(
       intent: parsed.intent,
       proposalStatus: target.proposal.status,
     });
+    // B3-6 — nobody handled an expired card; it ran out of time.
+    const expired = target.proposal.status === 'expired';
     await reply(
       deps,
       ctx.fromE164,
-      `"${target.proposal.summary}" was already handled — this didn't change anything. Check your review queue for anything else waiting.`,
+      expired
+        ? parsed.intent === 'approve'
+          ? EXPIRED_APPROVE_REPLY
+          : EXPIRED_NO_CHANGE_REPLY
+        : `"${target.proposal.summary}" was already handled — this didn't change anything. Check your review queue for anything else waiting.`,
     );
     return { handled: true, handler: HANDLER_NAME, reason: 'already_handled' };
   }
