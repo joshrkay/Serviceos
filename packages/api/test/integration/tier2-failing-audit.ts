@@ -45,5 +45,9 @@ export class Tier2FailingAuditRepository implements AuditRepository {
   findByCorrelation(tenantId: string, correlationId: string): Promise<AuditEvent[]> {
     return this.inner.findByCorrelation(tenantId, correlationId);
   }
+
+  findVoiceApprovalPinLockEvents(tenantId: string, since: Date): Promise<AuditEvent[]> {
+    return this.inner.findVoiceApprovalPinLockEvents(tenantId, since);
+  }
 }
 

@@ -880,11 +880,12 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
               // invitation row (pending.tenantId), never the payload.
               //
               // The tenantId is also asserted to look like a UUID
-              // before being interpolated into the SET LOCAL string
-              // (parameterized binding doesn't work for SET names).
-              // The id comes from the DB row (FK-backed), so this is
-              // belt + suspenders, but explicit prevents a future
-              // change from accidentally widening the column.
+              // before it is used. set_config and the INSERT both bind
+              // it as a parameter, so this is a shape check, not an
+              // injection guard. The id comes from the DB row
+              // (FK-backed), so this is belt + suspenders, but explicit
+              // prevents a future change from accidentally widening the
+              // column.
               const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
               if (!UUID_RE.test(pending.tenantId)) {
                 throw new Error(`Invalid tenantId on pending invitation: ${pending.tenantId}`);

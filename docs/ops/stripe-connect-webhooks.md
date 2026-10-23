@@ -29,9 +29,19 @@ Customer charges may be **Connect direct charges** (`Stripe-Account`). Those obj
    - `charge.refund.updated`
    - `charge.dispute.created`
    - `account.updated`
-   - `customer.subscription.created`
-   - `customer.subscription.updated`
-   - `customer.subscription.deleted`
+   - On the **Your account** (platform) destination **only**:
+     - `customer.subscription.created`
+     - `customer.subscription.updated`
+     - `customer.subscription.deleted`
+
+   Do **not** subscribe the **Connected accounts** destination to
+   `customer.subscription.*`. Rivet's own subscriptions live on the platform
+   account, so a connected-account copy is never Rivet billing, and the
+   handler refuses every one by design (audit F6): 403
+   `stripe_subscription_not_platform`, a `webhook.auth_failed` audit row on
+   the tenant its metadata names, and the webhook row left `failed`.
+   Subscribed there, they would only pile up as failed deliveries for Stripe
+   to retry.
 5. Copy **both destinations' signing secrets** into `STRIPE_WEBHOOK_SECRET` as a
    **comma-separated list** (`whsec_platform,whsec_connected`), per environment.
    Stripe issues a distinct secret per endpoint and the handler verifies each

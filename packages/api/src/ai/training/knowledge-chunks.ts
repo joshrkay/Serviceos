@@ -3,7 +3,7 @@ import { PgBaseRepository } from '../../db/pg-base';
 
 /**
  * Repository for `knowledge_chunks` — the unified per-tenant + global
- * RAG corpus introduced in migration `059_create_knowledge_chunks`.
+ * RAG corpus introduced in migration `062_create_knowledge_chunks`.
  *
  * Phase 1 surface: insert + similarity search. The transcript and
  * proposal-correction ingestion workers write through it
@@ -18,11 +18,10 @@ import { PgBaseRepository } from '../../db/pg-base';
  * policy of the same shape enforces it again under the runtime role.
  *
  * Idempotency: every insert uses `ON CONFLICT (tenant_id, scope,
- * source_type, source_id, source_version) DO UPDATE` so the seed workers
- * can safely re-fire on the same source row (e.g., catalog item edited
- * thrice in 60s — the coalescer in Phase 3b leaves at most one queue
- * job, but defense in depth here makes the worker idempotent
- * regardless). `tenant_id` is part of the key (migration 351) so each
+ * source_type, source_id, source_version) DO UPDATE`, so an ingestion
+ * worker that re-runs on the same source row (a retried queue job, a
+ * re-delivered transcript) updates the chunk it already wrote instead of
+ * adding a second one. `tenant_id` is part of the key (migration 351) so each
  * tenant has its own key space: a colliding tuple from another tenant
  * gets its own row instead of updating this tenant's. The index is
  * NULLS NOT DISTINCT, so global rows still dedupe among themselves.

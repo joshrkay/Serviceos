@@ -35,7 +35,7 @@ describe('createCredentialResolver', () => {
   function credentialPool(versions: number[]) {
     const remaining = [...versions];
     const client = {
-      query: vi.fn(async (sql: string) =>
+      query: vi.fn(async (sql: string, _params?: unknown[]) =>
         /FROM tenant_integrations/.test(sql)
           ? { rows: [{ tenant_id: T1, provider: 'twilio', credentials: {}, credential_version: remaining.shift() }] }
           : { rows: [] },
