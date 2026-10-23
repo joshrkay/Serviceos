@@ -2,21 +2,29 @@ import { ZodError, flattenError } from 'zod';
 // #1561 — installs the zod-3-wording global error map (side effect).
 import './zod-messages';
 
+/**
+ * `options.cause` — set when this error re-words another one for the client
+ * (e.g. owner copy in place of a gateway's provider message). The response
+ * shows this error's code, message and details only; server-error telemetry
+ * (captureServerError) reports the cause, so the failure that happened is not
+ * lost behind the re-wording.
+ */
 export class AppError extends Error {
   constructor(
     public readonly code: string,
     message: string,
     public readonly statusCode: number = 500,
-    public readonly details?: Record<string, unknown>
+    public readonly details?: Record<string, unknown>,
+    options?: ErrorOptions,
   ) {
-    super(message);
+    super(message, options);
     this.name = 'AppError';
   }
 }
 
 export class ValidationError extends AppError {
-  constructor(message: string, details?: Record<string, unknown>) {
-    super('VALIDATION_ERROR', message, 400, details);
+  constructor(message: string, details?: Record<string, unknown>, options?: ErrorOptions) {
+    super('VALIDATION_ERROR', message, 400, details, options);
     this.name = 'ValidationError';
   }
 }
@@ -43,8 +51,8 @@ export class ForbiddenError extends AppError {
 }
 
 export class ConflictError extends AppError {
-  constructor(message: string, details?: Record<string, unknown>) {
-    super('CONFLICT', message, 409, details);
+  constructor(message: string, details?: Record<string, unknown>, options?: ErrorOptions) {
+    super('CONFLICT', message, 409, details, options);
     this.name = 'ConflictError';
   }
 }

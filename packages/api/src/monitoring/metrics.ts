@@ -115,6 +115,22 @@ export const gatewayFailoverTotal = new Counter({
   registers: [metricsRegistry],
 });
 
+/**
+ * LLM calls that started while a tenant transaction held a pooled connection
+ * (the /api request transaction, or an explicit unit of work spanning the
+ * call). Each one pins that connection, and under PgBouncer a server backend,
+ * for the whole call. The gateway logs an error with the call site and lets
+ * the call proceed; any non-zero rate is a route that belongs on
+ * LLM_LONG_CALL_ROUTES (middleware/tenant-context.ts). Under NODE_ENV=test the
+ * gateway throws LlmCallInTransactionError instead.
+ */
+export const gatewayLlmCallInTransactionTotal = new Counter({
+  name: 'gateway_llm_call_in_transaction_total',
+  help: 'LLM gateway calls started while a tenant transaction held a pooled connection',
+  labelNames: ['task_type'],
+  registers: [metricsRegistry],
+});
+
 export const gatewayDeadlineExceededTotal = new Counter({
   name: 'gateway_deadline_exceeded_total',
   help: 'Requests aborted because the deadline elapsed',

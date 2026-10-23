@@ -100,7 +100,8 @@ function isFailoverEligible(err: unknown): boolean {
 /**
  * Default cap on the slice of the shared deadline held back for the next
  * provider in a failover chain (GATEWAY-03). Tunable per deploy with
- * AI_FALLBACK_RESERVE_MS (0 disables the reserve).
+ * AI_FALLBACK_RESERVE_MS: below 700 (or 0) disables the reserve, and 700–999
+ * acts as 1000 (`fallbackReserveFor`'s floor).
  */
 export const DEFAULT_FALLBACK_RESERVE_MS = 2_500;
 
@@ -114,8 +115,11 @@ const FALLBACK_RESERVE_TIMER_SLACK_MS = 300;
 
 /**
  * How much of `remainingMs` to hold back for the next provider when a fallback
- * exists: at most a quarter of the budget, at most `reserveCapMs`, and nothing
- * when that would be less than one viable attempt (MIN_RETRY_BUDGET_MS).
+ * exists. It starts from a quarter of the budget capped at `reserveCapMs`:
+ * when that is less than one viable attempt (MIN_RETRY_BUDGET_MS) nothing is
+ * held back, and otherwise the reserve is that amount raised to the floor
+ * below. So it is not always at most a quarter or at most the cap: a 2.8–4s
+ * budget reserves 1s (25–36%), and a cap of 700–999 acts as 1000.
  *
  * A reserve that IS carved is at least a viable attempt plus
  * FALLBACK_RESERVE_TIMER_SLACK_MS (1s), even above the quarter or the cap: a

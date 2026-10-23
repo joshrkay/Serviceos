@@ -348,19 +348,28 @@ interface OneTapPayload {
    */
   c?: true;
   /**
-   * B1 — the recipient's user id and role, present (both) ONLY on a link
-   * sent to someone other than the owner (the backup supervisor, when the
-   * tenant has no owner phone). The route approves as them. OMITTED for an
-   * owner link so its shape (and byte-identity) is unchanged.
+   * B1 — the recipient's user id (subject) and role, present (both) ONLY on
+   * a link sent to someone other than the owner (the backup supervisor, when
+   * the tenant has no owner phone). The route approves as them. OMITTED for
+   * an owner link so its shape (and byte-identity) is unchanged.
    */
   u?: string;
   r?: Role;
+  /**
+   * B4-2 parity — the recipient's users row id, beside `u` on a link minted
+   * for the backup. `u` is their subject, which changes when they link a
+   * login; this does not, so the tap compares it. A link minted before it
+   * rode in the token has none (subjects are compared).
+   */
+  i?: string;
 }
 
 /** B1 — who a one-tap link approves as when its recipient is not the owner. */
 export interface OneTapApprover {
   userId: string;
   role: Role;
+  /** B4-2 parity — their users row id (`ResolvedApprover.userRowId`). */
+  userRowId?: string;
 }
 
 function sign(payloadB64: string, secret: string): string {
@@ -432,7 +441,13 @@ export function createOneTapApproveToken(
     // tokens; omitted otherwise so the legacy approve shape stays byte-identical.
     ...(action === 'approve' && input.confirm ? { c: true as const } : {}),
     // B1 — a non-owner recipient's identity; omitted for an owner link.
-    ...(action === 'approve' && input.approver ? { u: input.approver.userId, r: input.approver.role } : {}),
+    ...(action === 'approve' && input.approver
+      ? {
+          u: input.approver.userId,
+          r: input.approver.role,
+          ...(input.approver.userRowId ? { i: input.approver.userRowId } : {}),
+        }
+      : {}),
   };
   const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
   const token = `${payloadB64}.${sign(payloadB64, input.secret)}`;
@@ -509,7 +524,10 @@ export async function verifyOneTapApproveToken(
       (typeof payload.u !== 'string' ||
         payload.u.length === 0 ||
         typeof payload.r !== 'string' ||
-        !isValidRole(payload.r)))
+        !isValidRole(payload.r))) ||
+    // B4-2 parity: the users row id rides only with a recipient, non-empty.
+    (payload.i !== undefined &&
+      (payload.u === undefined || typeof payload.i !== 'string' || payload.i.length === 0))
   ) {
     return { ok: false, reason: 'malformed' };
   }
@@ -536,7 +554,13 @@ export async function verifyOneTapApproveToken(
     ...(payload.c === true ? { confirm: true as const } : {}),
     // B1 — the non-owner recipient the route approves as.
     ...(payload.u !== undefined && payload.r !== undefined
-      ? { approver: { userId: payload.u, role: payload.r } }
+      ? {
+          approver: {
+            userId: payload.u,
+            role: payload.r,
+            ...(payload.i !== undefined ? { userRowId: payload.i } : {}),
+          },
+        }
       : {}),
   };
 }
@@ -807,7 +831,13 @@ export async function routeUnsupervisedProposal(
           ...(input.confirmNonCapture ? { confirm: true } : {}),
           // B1 — a link to anyone but the owner approves as them.
           ...(recipient && recipient.via !== 'owner_phone' && recipient.userId
-            ? { approver: { userId: recipient.userId, role: recipient.role } }
+            ? {
+                approver: {
+                  userId: recipient.userId,
+                  role: recipient.role,
+                  ...(recipient.userRowId ? { userRowId: recipient.userRowId } : {}),
+                },
+              }
             : {}),
           ...(input.nowMs !== undefined ? { nowMs: input.nowMs } : {}),
         });

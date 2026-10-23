@@ -1047,7 +1047,7 @@ const LINKED_STEP_LINES: Readonly<Record<LinkedStepHoldReason, string>> = {
   approve_parent_first:
     "Can't approve that yet — it depends on an earlier step. Approve that one first; this one unlocks once it has run.",
   issue_invoice_first:
-    "Can't approve that yet — the invoice it sends will be a draft. Issue the invoice first, then approve this one.",
+    "Can't approve that yet — the invoice this sends has to be issued first. Issue it in the app, then approve this one.",
   parent_did_not_run:
     "Can't approve that one — the earlier step it depends on didn't run, so there's nothing for it to act on.",
 };
@@ -1702,6 +1702,26 @@ export interface StartVoiceEditInput extends VoiceApprovalSessionRef {
 }
 
 /**
+ * The owner's instruction, stamped on sourceContext for the review queue.
+ * R2-2 — added to the row as it stands (mergeSourceContext), never written
+ * back from `proposal`: that copy was read before the interpreter's LLM
+ * call, so a pick that landed in between had its picker put back and its
+ * resolution dropped.
+ */
+async function stampVoiceEditNote(
+  deps: VoiceApprovalDeps,
+  input: StartVoiceEditInput,
+  proposalId: string,
+): Promise<void> {
+  await deps.proposalRepo.mergeSourceContext(input.tenantId, proposalId, {
+    pendingVoiceEditRequest: {
+      instruction: input.instruction,
+      receivedAt: new Date().toISOString(),
+    },
+  });
+}
+
+/**
  * RV-225 — "change the second line to $200" on a verified owner line.
  *
  *   1. Owner gate (defense in depth — routing already gates).
@@ -1805,15 +1825,7 @@ export async function startVoiceEdit(
           // to change — parity with the edit_recorded path and the SMS handler.
           // The edit_request was already recorded above (record-first parity),
           // so approval is blocked on every channel until the queue resolves it.
-          await deps.proposalRepo.update(input.tenantId, proposal.id, {
-            sourceContext: {
-              ...(proposal.sourceContext ?? {}),
-              pendingVoiceEditRequest: {
-                instruction: input.instruction,
-                receivedAt: new Date().toISOString(),
-              },
-            },
-          });
+          await stampVoiceEditNote(deps, input, proposal.id);
           return {
             speak:
               'That one’s waiting on an earlier step — approval by text is paused until then. Edit it after that step runs.',
@@ -1856,15 +1868,7 @@ export async function startVoiceEdit(
   // stays recorded (edit_request — approval is blocked on every channel)
   // and the instruction is stamped on sourceContext so the review queue
   // shows WHAT the owner asked to change. Never a silent guess.
-  await deps.proposalRepo.update(input.tenantId, proposal.id, {
-    sourceContext: {
-      ...(proposal.sourceContext ?? {}),
-      pendingVoiceEditRequest: {
-        instruction: input.instruction,
-        receivedAt: new Date().toISOString(),
-      },
-    },
-  });
+  await stampVoiceEditNote(deps, input, proposal.id);
   await audit(deps, input, 'proposal.voice_edit_requested', proposal.id);
   return {
     speak: EDIT_RECORDED_LINE,

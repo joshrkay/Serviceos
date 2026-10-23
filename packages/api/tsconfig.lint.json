@@ -1,5 +1,15 @@
 {
   "extends": "./tsconfig.json",
   "include": ["src/**/*"],
-  "exclude": ["test/**/*"]
+  "exclude": ["test/**/*"],
+  // Type-level contracts that live in the test tree. `exclude` does not apply
+  // to `files`, so each one is checked here, by `npm run lint` in CI, and its
+  // `@ts-expect-error` lines fail the build the moment the contract they pin
+  // stops holding. vitest does not type-check, and tsconfig.build.json is
+  // src-only, so without this nothing in CI ever compiled them. Keep the list
+  // to files whose point is the type check, not every test with a directive.
+  "files": [
+    // A3-3 — the entity pick's transaction runner stays required.
+    "test/proposals/resolve-entity-runner-required.test.ts"
+  ]
 }

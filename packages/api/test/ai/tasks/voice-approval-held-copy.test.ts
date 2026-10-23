@@ -286,7 +286,7 @@ describe('B4-3 — a voice yes on a linked step held for its earlier step says w
       'step 1 drafts the invoice this sends',
       { parentType: 'draft_invoice', parentStatus: 'approved', childType: 'send_invoice', kind: 'invoiceId' },
       'issue_invoice_first',
-      "Can't approve that yet — the invoice it sends will be a draft. Issue the invoice first, then approve this one.",
+      "Can't approve that yet — the invoice this sends has to be issued first. Issue it in the app, then approve this one.",
     ],
     [
       'step 1 did not run',
