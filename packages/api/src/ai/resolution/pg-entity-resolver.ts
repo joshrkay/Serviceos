@@ -1592,7 +1592,7 @@ export class PgEntityResolver implements EntityResolver {
              LEFT JOIN jobs j ON j.id = a.job_id AND j.tenant_id = a.tenant_id
              LEFT JOIN appointment_assignments aa
                ON aa.appointment_id = a.id AND aa.tenant_id = a.tenant_id AND aa.is_primary = true
-             LEFT JOIN users u ON u.id = aa.technician_id
+             LEFT JOIN users u ON u.id = aa.technician_id AND u.tenant_id = aa.tenant_id
             WHERE a.tenant_id = $1
               AND a.status <> 'canceled'
               AND a.scheduled_start >= $2
@@ -1714,7 +1714,7 @@ export class PgEntityResolver implements EntityResolver {
              FROM appointments a
              LEFT JOIN appointment_assignments aa
                ON aa.appointment_id = a.id AND aa.tenant_id = a.tenant_id AND aa.is_primary = true
-             LEFT JOIN users u ON u.id = aa.technician_id
+             LEFT JOIN users u ON u.id = aa.technician_id AND u.tenant_id = aa.tenant_id
             WHERE a.tenant_id = $1
               AND a.job_id = $2
               AND a.status <> 'canceled'
@@ -1793,7 +1793,7 @@ export class PgEntityResolver implements EntityResolver {
                ON j.id = a.job_id AND j.tenant_id = a.tenant_id
              LEFT JOIN appointment_assignments aa
                ON aa.appointment_id = a.id AND aa.tenant_id = a.tenant_id AND aa.is_primary = true
-             LEFT JOIN users u ON u.id = aa.technician_id
+             LEFT JOIN users u ON u.id = aa.technician_id AND u.tenant_id = aa.tenant_id
             WHERE a.tenant_id = $1
               AND j.customer_id = $2
               AND a.status <> 'canceled'
@@ -2024,7 +2024,7 @@ export class PgEntityResolver implements EntityResolver {
              FROM appointments a
              LEFT JOIN appointment_assignments aa
                ON aa.appointment_id = a.id AND aa.tenant_id = a.tenant_id AND aa.is_primary = true
-             LEFT JOIN users u ON u.id = aa.technician_id
+             LEFT JOIN users u ON u.id = aa.technician_id AND u.tenant_id = aa.tenant_id
             WHERE a.tenant_id = $1
               AND a.job_id = ANY($2::uuid[])
               AND a.status <> 'canceled'
