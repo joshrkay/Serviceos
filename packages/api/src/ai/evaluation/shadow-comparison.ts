@@ -37,8 +37,6 @@ export interface ShadowComparisonPage {
 
 export interface ShadowComparisonStore {
   save(result: ShadowComparisonResult): Promise<ShadowComparisonResult>;
-  findByGroup(groupId: string): Promise<ShadowComparisonResult[]>;
-  getAll(): Promise<ShadowComparisonResult[]>;
   /** P2-030: paginated tenant-scoped read for the admin API. */
   listForTenant(tenantId: string, opts?: ShadowComparisonListOptions): Promise<ShadowComparisonPage>;
 }
@@ -52,12 +50,7 @@ export class InMemoryShadowComparisonStore implements ShadowComparisonStore {
     return { ...stored };
   }
 
-  async findByGroup(groupId: string): Promise<ShadowComparisonResult[]> {
-    return this.results
-      .filter((r) => r.comparisonGroupId === groupId)
-      .map((r) => ({ ...r }));
-  }
-
+  /** Every stored comparison, across tenants: in-process inspection for tests. */
   async getAll(): Promise<ShadowComparisonResult[]> {
     return this.results.map((r) => ({ ...r }));
   }

@@ -2,7 +2,6 @@ import {
   InMemoryShadowComparisonStore,
   ShadowComparisonGateway,
   ShadowComparisonConfig,
-  ShadowComparisonStore,
 } from '../../src/ai/evaluation/shadow-comparison';
 import { StubProvider } from '../../src/ai/gateway/providers';
 import { LLMRequest } from '../../src/ai/gateway/gateway';
@@ -16,7 +15,7 @@ function makeRequest(overrides?: Partial<LLMRequest>): LLMRequest {
 }
 
 describe('P2-030 — Model performance shadow comparison', () => {
-  let store: ShadowComparisonStore;
+  let store: InMemoryShadowComparisonStore;
   let primaryProvider: StubProvider;
   let shadowProvider: StubProvider;
 

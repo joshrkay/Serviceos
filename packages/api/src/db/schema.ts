@@ -8900,6 +8900,44 @@ export const MIGRATIONS = {
       NULLS NOT DISTINCT;
     DROP INDEX IF EXISTS idx_knowledge_chunks_dedupe;
   `,
+
+  // P2-030 durable shadow-comparison store. PgShadowComparisonStore reached
+  // main (#1615) without its table: 101_create_shadow_comparisons stayed on
+  // its feature branch (101 went to 101_google_reviews). With
+  // SHADOW_LLM_ENABLED=true and a pool (app.ts) every SAMPLED LLM call's
+  // save() hit 42P01 and failed the call after the primary response had
+  // already come back — and inside a request, on the ambient request client,
+  // that failed INSERT aborted the whole request transaction. Same columns as
+  // that branch's 101 (which the store's INSERT/SELECT already name), FORCE
+  // RLS added, and only the index the one reader (listForTenant) uses.
+  // tenant_id carries no tenants FK, as on the branch: save() writes a
+  // sentinel tenant id for a call that has none.
+  '352_create_shadow_comparisons': `
+    CREATE TABLE IF NOT EXISTS shadow_comparisons (
+      id UUID PRIMARY KEY,
+      tenant_id UUID NOT NULL,
+      ai_run_id UUID REFERENCES ai_runs(id) ON DELETE SET NULL,
+      comparison_group_id UUID,
+      task_type TEXT,
+      primary_model TEXT,
+      shadow_model TEXT NOT NULL,
+      primary_response_text TEXT,
+      shadow_response_text TEXT,
+      primary_latency_ms INTEGER,
+      shadow_latency_ms INTEGER,
+      primary_token_usage JSONB,
+      shadow_token_usage JSONB,
+      divergence_score NUMERIC,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    );
+    CREATE INDEX IF NOT EXISTS idx_shadow_comparisons_tenant_created
+      ON shadow_comparisons (tenant_id, created_at DESC);
+    ALTER TABLE shadow_comparisons ENABLE ROW LEVEL SECURITY;
+    ALTER TABLE shadow_comparisons FORCE ROW LEVEL SECURITY;
+    DROP POLICY IF EXISTS tenant_isolation_shadow_comparisons ON shadow_comparisons;
+    CREATE POLICY tenant_isolation_shadow_comparisons ON shadow_comparisons
+      USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
 };
 
 function makePoliciesIdempotent(sql: string): string {

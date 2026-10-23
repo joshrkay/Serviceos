@@ -667,6 +667,8 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['350_drip_membership_renewals', '536ef8dff6092437cfed38d2ad2b1db3436232b65347acabec26ac0b2107a85d'],
   // knowledge_chunks dedupe key gains tenant_id (NULLS NOT DISTINCT) — new migration.
   ['351_knowledge_chunks_tenant_dedupe', 'e70fec7cec3c9abfb58bb4a88bec25ea2e8c98211628350273aa0d53d72d2181'],
+  // P2-030 shadow_comparisons table (lost with the branch's 101) — new migration.
+  ['352_create_shadow_comparisons', '54735dd7ffef5d55b5cc454f15973499e4eb8aa2147b9d247015577f176ae09a'],
 ];
 
 function hashMigration(value: string): string {
