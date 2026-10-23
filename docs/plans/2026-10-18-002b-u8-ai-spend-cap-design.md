@@ -73,10 +73,11 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           the same insert, so it carries the tag too. It costs nothing and has no reservation.
       - **A cap can be enabled only after a recorded legacy-shutdown confirmation, and only in a
         month that began after it.** One platform-wide `ai_spend_cutover` row holds the confirming
-        operator, `confirmed_at` and a note on how the shutdown was verified (the orchestrator's
-        instance listing shows no pre-ledger release running). Only an operator-only path writes
-        it, with an audit event, as a deploy step after the old release's last instance has
-        stopped. No timer, month change or app code writes it. The cap-enable path reads it under
+        operator, `confirmed_at`, the ledger release (the first release id and git sha that carry
+        the ledger) and a note on how the shutdown was verified (the orchestrator's instance
+        listing shows no pre-ledger release running). Only an operator-only path writes or
+        revokes it, with an audit event each time, as a deploy step after the old release's last
+        instance has stopped. No timer, month change or app code writes it. The cap-enable path reads it under
         the spend lock, as it reads the ceiling. Like `ai_spend_bound_breaches`, it is global,
         holds no subject content, and is classified `keep` in the U7 manifest.
         - The calendar can't stand in for it. If the ledger deploy crosses a month boundary, an old
@@ -88,14 +89,33 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           written by ledger-era code, so `spent` is the month's real spend. The month in progress
           at the confirmation is excluded, since an old writer may have
           written untagged rows in it.
-        - Without a confirmation, or in the month it was recorded, the settings write that enables
-          a cap is refused, and says which: "not available: legacy shutdown not confirmed" or
-          "available from <date>".
+        - Without an active confirmation, or in the month it was recorded, the settings write that
+          enables a cap is refused, and says which: "not available: legacy shutdown not confirmed",
+          "paused: a pre-ledger release may be running" or "available from <date>".
+        - **A rollback to a pre-ledger release revokes the confirmation first.** The documented
+          rollback (`railway rollback --service api --to <previous-release-id>`,
+          `docs/runbooks/rollback.md` step 2) can start a pre-ledger release after caps are
+          active, and the old code can't check anything itself, so the fence has to sit in the
+          rollback path. This unit's scope therefore includes the runbook change and a rollback
+          wrapper script that step 2 names in place of the raw command.
+          - The wrapper compares the target release with the recorded ledger release. It refuses
+            a pre-ledger target while the cutover is active, until the operator has revoked it
+            through the operator-only path. A target at or after the ledger release goes through.
+          - **Revoking is immediate and fail-safe.** Cap enforcement is suspended: the reserve
+            under the spend lock skips the comparison when no confirmation is active, as it does
+            for a null ceiling, and keeps writing the reservation. Ledger-era instances keep
+            reserving and settling, and existing ceilings stay as configured. The settings page
+            and the enable path say caps are paused because a pre-ledger release may be running.
+            The tripwire is not checked while revoked, since untagged rows are then expected.
+          - **Caps resume only after a new confirmation, and only in a month that began after
+            it**, the same rule as the first cutover.
+          - **Residual risk.** An operator who runs raw `railway rollback` bypasses the wrapper,
+            and no code prevents it. The runbook forbids it, and the tripwire stays as detection.
       - **A tripwire stays in place, as detection and not enforcement.** A capped tenant's reserve transaction checks a partial index
         for the current month:
         `ai_runs (tenant_id, created_at) WHERE NOT ledger_era`.
         - An untagged row means an old-version writer is still alive, so the confirmation was
-          wrong. The capped reservation is then refused, and `alertOperator` fires. The old
+          wrong or a rollback bypassed the wrapper. The capped reservation is then refused, and `alertOperator` fires. The old
           writer's own charge has already happened, which is why the confirmation gates the
           cap and the tripwire does not.
         - A ledger-era run is tagged before its first reserve, so neither its own pending row, nor
@@ -228,11 +248,12 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           must never await it on its routine path, and `middleware/tenant-context.ts:222-226`
           records the incident: in-app voice turns that each held two connections "deadlocked on
           checkout and 500'd every tenant's /api". `POST /api/tenant-site/about/draft`
-          (`routes/tenant-site.ts:279`) calls the gateway inside the request transaction and
-          isn't on `LLM_LONG_CALL_ROUTES` (`middleware/tenant-context.ts:212`). At the default
-          `DB_MAX_CONNECTIONS` of 20 (`db/pool.ts:110`), 20 such drafts at once would each hold
-          a client and wait for a second, every reserve would fail closed after the 5-second
-          `connectionTimeoutMillis`, and the rest of `/api` would wait on the pool. So:
+          (`routes/tenant-site.ts:279`) had the same shape: it calls the gateway inside the
+          request transaction. U1 owns that fix, as mandatory scope that doesn't wait on this
+          unit, and it lands in #1811. At the default `DB_MAX_CONNECTIONS` of 20
+          (`db/pool.ts:110`), 20 such callers at once would each hold a client and wait for a
+          second, every reserve would fail closed after the 5-second `connectionTimeoutMillis`,
+          and the rest of `/api` would wait on the pool. So:
           - The spend module, and U7's claim, flip and terminal writes, use a dedicated pool
             with its own size, as the session-lock holders use the direct pool
             (`db/pool.ts:155-175`).
@@ -242,10 +263,11 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         - **Every gateway-calling path leaves the request transaction.** Inside one, the pending
           `ai_runs` insert, a local-write fence that may join the caller's transaction, holds its
           shared stripes until the request commits, across the whole LLM call, and an erase's
-          phase 1 times out behind it while a draft is in flight. So `POST
-          /tenant-site/about/draft`, and every other route and proposal handler that calls the
-          gateway, moves onto `LLM_LONG_CALL_ROUTES`, or makes its gateway call before it opens
-          its transaction.
+          phase 1 times out behind it while a draft is in flight. So every route and proposal
+          handler that calls the gateway moves onto `LLM_LONG_CALL_ROUTES`, or makes its gateway
+          call before it opens its transaction. U1 moves `POST /tenant-site/about/draft` and adds
+          the guard that fails tests on a gateway call made while a request transaction is held;
+          this unit relies on both and doesn't repeat them.
         - Entering the spend module while `currentTenantContext()` (`:619`) is present throws
           under test and logs its caller in production. A structural test fails on a gateway or
           provider-sink call reachable from `executeAudited`, `PgTenantTransactionRunner.run`,
@@ -979,6 +1001,14 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
       first of the next month as the date it becomes available, and a cap can be enabled from then.
     - The confirmation can't be written by a tenant route, a proposal handler or a timer, and each
       write leaves one audit row.
+    - The rollback wrapper refuses a pre-ledger target while the cutover is active, and passes a
+      target at or after the ledger release.
+    - After a revoke, the settings page and the enable path report caps paused, and a capped
+      tenant's request is not refused for cap reasons while reservations and the ledger are still
+      written.
+    - A new confirmation mid-month doesn't resume caps that month; they resume the next month.
+    - Each revoke and each confirm writes one audit row, and only the operator path can write
+      either.
     - An untagged run after the confirmation trips the wire: the capped reservation is refused, and
       an alert fires.
   - **Integration (unpriced):**

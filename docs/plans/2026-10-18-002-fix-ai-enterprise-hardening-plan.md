@@ -242,6 +242,7 @@ flowchart LR
   - `packages/api/src/ai/agents/customer-calling/inapp-adapter.ts` (the `runSummary` spawns)
   - `packages/api/src/proposals/supervisor/service.ts` (`refresh`)
   - `packages/api/src/ai/gateway/cache.ts` (`writeAiRunForCacheHit`)
+  - `packages/api/src/routes/tenant-site.ts` (`POST /about/draft`)
   - the onboarding conversation session lock
   - Tests:
     - `packages/api/test/db/pg-base.test.ts`
@@ -264,6 +265,15 @@ flowchart LR
     - `POST /conversations/[^/]+/suggest-reply$`
     - `POST /estimates/suggest$`
     - `POST /onboarding/conversation/turn$`
+    - `POST /tenant-site/about/draft$`. This is mandatory U1 scope, not part of optional U8: the
+      route awaits the gateway inside the request transaction, and U8's design confirms that 20
+      concurrent drafts can exhaust the default pool and stall all `/api` traffic. It lands in
+      #1811.
+  - Make that route's post-LLM writes (reject stale proposals, create the proposal, audit) commit
+    together in one short tenant transaction of their own, after the gateway call returns, the way
+    the resolve-entity route does.
+  - Add a guard that makes any gateway call made while a request transaction is held fail tests,
+    so the next such route can't slip through.
   - Make the onboarding `withSessionLock` hold no main-pool connection across LLM calls, and make it
     safe under PgBouncer transaction mode. Use either the direct pool, or a transaction-scoped lock
     held only around the writes. Pick the smallest correct option and justify it in the commit
@@ -280,6 +290,10 @@ flowchart LR
     commits normally.
   - **Integration:** concurrent suggest-reply calls under a small pool do not starve another tenant's
     request.
+  - **Integration** (Docker-gated, under `packages/api/test/integration/`): concurrent
+    `POST /tenant-site/about/draft` calls against a small pool do not stall other `/api` requests,
+    and a draft's post-LLM writes commit or roll back together.
+  - **Unit:** a gateway call made while a request transaction is held fails the guard.
 - **Verification:** the integration test fails on `main` and passes on the branch.
 
 ### U2. Approval and action safety — batch B, `fix/ai-hardening-action-safety`
