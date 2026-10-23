@@ -101,6 +101,15 @@ async function idsFor(tenantId: string, taskType?: string): Promise<string[]> {
   return rows.map((r) => r.id);
 }
 
+/** A recording on `tenantId` at `createdAt`; `legalHold` as given. */
+async function recording(tenantId: string, createdAt: Date, legalHold: boolean): Promise<void> {
+  await pool.query(
+    `INSERT INTO voice_recordings (tenant_id, created_by, legal_hold, created_at)
+     VALUES ($1, 'shadow-retention-test', $2, $3)`,
+    [tenantId, legalHold, createdAt],
+  );
+}
+
 async function purgeAudits(tenantId: string) {
   const events = await auditRepo.findByEntity(tenantId, 'tenant', tenantId);
   return events.filter((e) => e.eventType === 'shadow_comparison.purged');
@@ -143,6 +152,7 @@ afterAll(async () => {
   for (const tenantId of createdTenantIds) {
     await pool.query('DELETE FROM shadow_comparisons WHERE tenant_id = $1', [tenantId]).catch(() => undefined);
     await pool.query('DELETE FROM audit_events WHERE tenant_id = $1', [tenantId]).catch(() => undefined);
+    await pool.query('DELETE FROM voice_recordings WHERE tenant_id = $1', [tenantId]).catch(() => undefined);
     await pool.query('DELETE FROM users WHERE tenant_id = $1', [tenantId]).catch(() => undefined);
     await pool.query('DELETE FROM tenants WHERE id = $1', [tenantId]).catch(() => undefined);
   }
@@ -227,6 +237,48 @@ describe('shadow-comparison retention sweep (real Postgres, RLS_RUNTIME_ROLE=tru
     // The selection is cross-tenant: B's due row is still found.
     expect(await repo.findTenantsWithDue(NOW, WINDOW_DAYS, 100)).toContain(b.tenantId);
     await repo.purgeDue(b.tenantId, NOW, WINDOW_DAYS, 500);
+  });
+
+  it('a call on legal hold keeps its shadow rows; an unheld call in the same tenant loses them', async () => {
+    // Every other retention phase exempts a held call (PRIV-1 keeps ai_runs
+    // content within a day of a held recording); these rows are the same
+    // model replies, scrubbed.
+    const t = await seedTenant();
+    const heldCallAt = at(400 * DAY_MS);
+    const otherCallAt = at(420 * DAY_MS);
+    await recording(t.tenantId, heldCallAt, true);
+    await recording(t.tenantId, otherCallAt, false);
+    const heldClassify = await save(t.tenantId, 'classify_intent', new Date(heldCallAt.getTime() - 5 * 60_000));
+    const heldSummary = await save(t.tenantId, 'summarize_conversation', new Date(heldCallAt.getTime() + 10 * 60_000));
+    const otherClassify = await save(t.tenantId, 'classify_intent', new Date(otherCallAt.getTime() - 5 * 60_000));
+    const otherSummary = await save(t.tenantId, 'summarize_conversation', new Date(otherCallAt.getTime() + 10 * 60_000));
+    // Just over a day before the held recording: not that call's row.
+    const outsideHold = await save(t.tenantId, 'classify_intent', new Date(heldCallAt.getTime() - DAY_MS - HOUR_MS));
+
+    await sweep();
+    expect(await idsFor(t.tenantId)).toEqual([heldClassify, heldSummary]);
+    for (const gone of [otherClassify, otherSummary, outsideHold]) {
+      expect((await pool.query('SELECT 1 FROM shadow_comparisons WHERE id = $1', [gone])).rowCount).toBe(0);
+    }
+    const audits = await purgeAudits(t.tenantId);
+    expect(audits.map((e) => e.metadata?.rowsPurged)).toEqual([3]);
+
+    // Later sweeps keep the held call's rows for as long as the hold stands.
+    await sweep();
+    expect(await idsFor(t.tenantId)).toEqual([heldClassify, heldSummary]);
+  });
+
+  it('a tenant whose only due rows belong to a held call takes no selection slot, and its purge deletes nothing', async () => {
+    const t = await seedTenant();
+    // Far older than any other due row, so without the hold it would rank first.
+    const heldCallAt = at(4000 * DAY_MS);
+    await recording(t.tenantId, heldCallAt, true);
+    const held = await save(t.tenantId, 'classify_intent', heldCallAt);
+
+    expect(await repo.findTenantsWithDue(NOW, WINDOW_DAYS, 100)).not.toContain(t.tenantId);
+    expect(await repo.purgeDue(t.tenantId, NOW, WINDOW_DAYS, 500)).toEqual([]);
+    expect(await idsFor(t.tenantId)).toEqual([held]);
+    expect(await purgeAudits(t.tenantId)).toEqual([]);
   });
 
   it('runs as the leader tick app.ts registers it under; a replica that does not hold the lock deletes nothing', async () => {

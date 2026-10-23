@@ -23,6 +23,19 @@
  * Deleted, not tombstoned: the rows are evaluation samples with no reader but
  * the owner/admin list route, and nothing references them.
  *
+ * Legal hold: exempt, as in every phase of the recording-retention sweep. A
+ * row is the same kind of content PRIV-1 strips from `ai_runs` (a model reply
+ * to the call, here scrubbed), and like `ai_runs` it carries no CallSid or
+ * session key (`ai_run_id` stays NULL, see pg-shadow-comparison.ts). So the
+ * PRIV-1 probe applies as is: a row created within a day of a same-tenant
+ * recording on legal hold is treated as that call's and kept; the tenant's
+ * other due rows are still deleted. The window can also keep another call's
+ * row from the same day, which errs toward the hold. The probe sits in both
+ * the tenant selection (a tenant whose only due rows are held takes no slot,
+ * and its MIN(created_at) does not rank it) and the DELETE, and migration
+ * 321's partial index idx_voice_recordings_legal_hold serves it. The
+ * placeholder bucket has no recordings, so nothing in it is ever held.
+ *
  * Shape: the PRIV-1 / #1208 phases of recording-retention-worker.ts.
  *   - Selection is cross-tenant (`withCrossTenantSweep`, the named
  *     `rls_cross_tenant` role under RLS_RUNTIME_ROLE): the tenants holding
@@ -61,6 +74,20 @@ export const SHADOW_COMPARISON_RETENTION_SWEEP_BATCH = 500;
 
 const RETENTION_ACTOR = 'shadow-comparison-retention-worker';
 
+/**
+ * The PRIV-1 legal-hold probe (recording-retention-worker.ts,
+ * HELD_CALL_WINDOW_PROBE) over `shadow_comparisons sc`: a same-tenant
+ * recording on legal hold within a day of the row. Served by the
+ * migration-321 partial index idx_voice_recordings_legal_hold
+ * (tenant_id, created_at) WHERE legal_hold.
+ */
+const HELD_CALL_WINDOW_PROBE = `SELECT 1
+                   FROM voice_recordings vr
+                  WHERE vr.tenant_id = sc.tenant_id
+                    AND vr.legal_hold
+                    AND vr.created_at BETWEEN sc.created_at - interval '1 day'
+                                          AND sc.created_at + interval '1 day'`;
+
 /** One deleted row, for the audit metadata. */
 export interface PurgedShadowComparison {
   taskType: string | null;
@@ -70,12 +97,13 @@ export interface PurgedShadowComparison {
 export interface ShadowComparisonRetentionRepository {
   /**
    * Cross-tenant: tenant ids holding a row older than `retentionDays` before
-   * `now`, oldest backlog first, at most `limit`.
+   * `now` that no legal hold keeps, oldest such backlog first, at most `limit`.
    */
   findTenantsWithDue(now: Date, retentionDays: number, limit: number): Promise<string[]>;
   /**
    * Delete up to `limit` of the tenant's rows older than `retentionDays`
-   * before `now`, oldest first, in one tenant-scoped transaction.
+   * before `now` that no legal hold keeps, oldest first, in one tenant-scoped
+   * transaction.
    */
   purgeDue(
     tenantId: string,
@@ -99,6 +127,7 @@ export class PgShadowComparisonRetentionRepository
         `SELECT sc.tenant_id
            FROM shadow_comparisons sc
           WHERE sc.created_at < $1::timestamptz - make_interval(days => $2::int)
+            AND NOT EXISTS (${HELD_CALL_WINDOW_PROBE})
           GROUP BY sc.tenant_id
           ORDER BY MIN(sc.created_at) ASC
           LIMIT $3`,
@@ -124,6 +153,7 @@ export class PgShadowComparisonRetentionRepository
               FROM shadow_comparisons sc
              WHERE sc.tenant_id = $1
                AND sc.created_at < $2::timestamptz - make_interval(days => $3::int)
+               AND NOT EXISTS (${HELD_CALL_WINDOW_PROBE})
              ORDER BY sc.created_at ASC
              LIMIT $4
           ) due

@@ -1787,7 +1787,8 @@ accepting unsigned traffic — a deliberate fail-closed.
   stripped past the tenant's `recording_retention_days` (default 365, rows
   kept), and sampled `shadow_comparisons` rows are deleted past
   `SHADOW_COMPARISON_RETENTION_DAYS` (default 365, the same default), flag on
-  or off.
+  or off. Both keep model content from within a day of a recording on legal
+  hold.
 - **Transcripts are not retained at all** when no encryption key is configured.
 
 > **Two compliance gaps are named in §12:** the AI-identity disclosure module is
