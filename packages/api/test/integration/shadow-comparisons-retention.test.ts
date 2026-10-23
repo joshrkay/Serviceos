@@ -35,7 +35,9 @@ import { runLeaderGatedTick } from '../../src/workers/leader-tick';
 import {
   FIND_TENANTS_WITH_DUE_SQL,
   PgShadowComparisonRetentionRepository,
+  buildShadowComparisonPurgeAudit,
   runShadowComparisonRetentionSweep,
+  type PurgedShadowComparison,
 } from '../../src/workers/shadow-comparison-retention-worker';
 import type { Logger } from '../../src/logging/logger';
 
@@ -122,11 +124,16 @@ async function seedTenant(): Promise<TestTenant> {
   return t;
 }
 
-function sweep(batchSize?: number) {
+/** The audit builder the sweep hands purgeDue, for direct repository calls. */
+function auditFor(tenantId: string) {
+  return (rows: ReadonlyArray<PurgedShadowComparison>) =>
+    buildShadowComparisonPurgeAudit(tenantId, rows, WINDOW_DAYS);
+}
+
+function sweep(batchSize?: number, logger: Logger = silentLogger) {
   return runShadowComparisonRetentionSweep({
     repo,
-    auditRepo,
-    logger: silentLogger,
+    logger,
     retentionDays: WINDOW_DAYS,
     ...(batchSize ? { batchSize } : {}),
     now: () => NOW,
@@ -230,14 +237,14 @@ describe('shadow-comparison retention sweep (real Postgres, RLS_RUNTIME_ROLE=tru
     await save(a.tenantId, 'classify_intent', old);
     const bOld = await save(b.tenantId, 'classify_intent', old);
 
-    const purged = await repo.purgeDue(a.tenantId, NOW, WINDOW_DAYS, 500);
-    expect(purged).toEqual([{ taskType: 'classify_intent', createdAt: old }]);
+    const purged = await repo.purgeDue(a.tenantId, NOW, WINDOW_DAYS, 500, auditFor(a.tenantId));
+    expect(purged).toEqual({ rows: [{ taskType: 'classify_intent', createdAt: old }], audited: true });
     expect(await idsFor(a.tenantId)).toEqual([]);
     expect(await idsFor(b.tenantId)).toEqual([bOld]);
 
     // The selection is cross-tenant: B's due row is still found.
     expect(await repo.findTenantsWithDue(NOW, WINDOW_DAYS, 100)).toContain(b.tenantId);
-    await repo.purgeDue(b.tenantId, NOW, WINDOW_DAYS, 500);
+    await repo.purgeDue(b.tenantId, NOW, WINDOW_DAYS, 500, auditFor(b.tenantId));
   });
 
   it('a call on legal hold keeps its shadow rows; an unheld call in the same tenant loses them', async () => {
@@ -277,9 +284,78 @@ describe('shadow-comparison retention sweep (real Postgres, RLS_RUNTIME_ROLE=tru
     const held = await save(t.tenantId, 'classify_intent', heldCallAt);
 
     expect(await repo.findTenantsWithDue(NOW, WINDOW_DAYS, 100)).not.toContain(t.tenantId);
-    expect(await repo.purgeDue(t.tenantId, NOW, WINDOW_DAYS, 500)).toEqual([]);
+    expect(await repo.purgeDue(t.tenantId, NOW, WINDOW_DAYS, 500, auditFor(t.tenantId))).toEqual({
+      rows: [],
+      audited: false,
+    });
     expect(await idsFor(t.tenantId)).toEqual([held]);
     expect(await purgeAudits(t.tenantId)).toEqual([]);
+  });
+
+  it('the audit row commits with the delete: an audit insert that fails rolls the batch back for the next sweep', async () => {
+    // Without this, the delete committed first and the audit was a separate,
+    // best-effort write, so a crash or a failed insert between the two left
+    // an unaudited purge.
+    const t = await seedTenant();
+    const due1 = await save(t.tenantId, 'classify_intent', at(WINDOW_DAYS * DAY_MS + 3 * DAY_MS));
+    const due2 = await save(t.tenantId, 'summarize_conversation', at(WINDOW_DAYS * DAY_MS + 2 * DAY_MS));
+    const trigger = `shadow_retention_audit_fail_${RUN}`;
+    await pool.query(
+      `CREATE FUNCTION ${trigger}() RETURNS trigger LANGUAGE plpgsql AS $f$
+         BEGIN
+           IF NEW.tenant_id = '${t.tenantId}'::uuid AND NEW.event_type = 'shadow_comparison.purged' THEN
+             RAISE EXCEPTION 'injected audit failure';
+           END IF;
+           RETURN NEW;
+         END $f$`,
+    );
+    await pool.query(
+      `CREATE TRIGGER ${trigger} BEFORE INSERT ON audit_events FOR EACH ROW EXECUTE FUNCTION ${trigger}()`,
+    );
+    try {
+      await sweep();
+      expect(await idsFor(t.tenantId)).toEqual([due1, due2]);
+      expect(await purgeAudits(t.tenantId)).toEqual([]);
+    } finally {
+      await pool.query(`DROP TRIGGER IF EXISTS ${trigger} ON audit_events`);
+      await pool.query(`DROP FUNCTION IF EXISTS ${trigger}()`);
+    }
+
+    await sweep();
+    expect(await idsFor(t.tenantId)).toEqual([]);
+    const audits = await purgeAudits(t.tenantId);
+    expect(audits.map((e) => e.metadata?.rowsPurged)).toEqual([2]);
+  });
+
+  it("a deprovisioned tenant's late rows (no tenants row) are purged unaudited, not retried forever", async () => {
+    // shadow_comparisons has no tenants FK, so a sample saved after its
+    // tenant was deprovisioned outlives the tenants row that audit_events
+    // references. Failing that batch on the FK every sweep would keep the
+    // rows and the tenant's selection slot forever.
+    const orphan = crypto.randomUUID();
+    const lines: Array<{ message: string; meta?: Record<string, unknown> }> = [];
+    const logger: Logger = {
+      ...silentLogger,
+      warn: (message, meta) => {
+        lines.push({ message, ...(meta ? { meta } : {}) });
+      },
+      child: () => logger,
+    };
+    try {
+      await save(orphan, 'classify_intent', at(WINDOW_DAYS * DAY_MS + 5 * DAY_MS));
+      await sweep(undefined, logger);
+      expect(await idsFor(orphan)).toEqual([]);
+      expect(lines.filter((l) => l.meta?.tenantId === orphan)).toEqual([
+        {
+          message: 'shadow-comparison retention sweep: purged rows of a tenant with no tenants row, unaudited',
+          meta: { tenantId: orphan, rowsPurged: 1 },
+        },
+      ]);
+      const { rowCount } = await pool.query('SELECT 1 FROM audit_events WHERE tenant_id = $1', [orphan]);
+      expect(rowCount).toBe(0);
+    } finally {
+      await pool.query('DELETE FROM shadow_comparisons WHERE tenant_id = $1', [orphan]);
+    }
   });
 
   it('runs as the leader tick app.ts registers it under; a replica that does not hold the lock deletes nothing', async () => {

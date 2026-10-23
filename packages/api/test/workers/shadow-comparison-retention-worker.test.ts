@@ -4,9 +4,11 @@
  * The repository seam is faked over an in-test row list so the loop's own
  * behaviour is pinned here: the horizon and bounds it hands the repository,
  * one bounded batch per tenant per sweep (oldest first), per-tenant failure
- * isolation, one audit event per real-tenant batch (none for the placeholder
- * bucket, which has no tenants row to hang one on), the completion log line
- * and the purge counter. The SQL itself is pinned at real Postgres in
+ * isolation, the audit event each batch hands the repository to write in the
+ * DELETE's own transaction (none lands for a tenant with no tenants row: the
+ * placeholder bucket, or a deprovisioned tenant's late sample, which is
+ * logged), the completion log line and the purge counter. The SQL and the
+ * transaction itself are pinned at real Postgres in
  * test/integration/shadow-comparisons-retention.test.ts.
  */
 import { describe, it, expect } from 'vitest';
@@ -15,11 +17,12 @@ import {
   summarizePurgedShadowComparisons,
   SHADOW_COMPARISON_RETENTION_SWEEP_BATCH,
   SHADOW_COMPARISON_RETENTION_SWEEP_TENANT_LIMIT,
-  type PurgedShadowComparison,
+  type ShadowComparisonPurge,
+  type ShadowComparisonPurgeAudit,
   type ShadowComparisonRetentionRepository,
 } from '../../src/workers/shadow-comparison-retention-worker';
 import { PLACEHOLDER_TENANT_ID } from '../../src/ai/evaluation/pg-shadow-comparison';
-import { InMemoryAuditRepository, type AuditEvent } from '../../src/audit/audit';
+import type { AuditEvent } from '../../src/audit/audit';
 import { shadowComparisonsPurgedTotal } from '../../src/monitoring/metrics';
 import type { Logger } from '../../src/logging/logger';
 
@@ -59,12 +62,21 @@ function ageDays(days: number): Date {
   return new Date(NOW.getTime() - days * DAY_MS);
 }
 
-/** The repository contract over an in-memory row list, recording every call. */
+/**
+ * The repository contract over an in-memory row list, recording every call.
+ * A batch and its audit row commit together, as in the Pg repository's one
+ * transaction: a failed audit insert keeps the batch's rows.
+ */
 class FakeRepo implements ShadowComparisonRetentionRepository {
   selections: Array<{ now: Date; retentionDays: number; limit: number }> = [];
   purges: Array<{ tenantId: string; now: Date; retentionDays: number; limit: number }> = [];
   failSelection = false;
   failPurgeFor = new Set<string>();
+  /** Tenants with a tenants row (audit_events.tenant_id references tenants). */
+  tenantRows = new Set<string>([TENANT_A, TENANT_B]);
+  failAuditFor = new Set<string>();
+  /** Audit rows committed with their batch. */
+  audits: AuditEvent[] = [];
 
   constructor(public rows: FakeRow[]) {}
 
@@ -92,16 +104,26 @@ class FakeRepo implements ShadowComparisonRetentionRepository {
     now: Date,
     retentionDays: number,
     limit: number,
-  ): Promise<PurgedShadowComparison[]> {
+    audit: ShadowComparisonPurgeAudit,
+  ): Promise<ShadowComparisonPurge> {
     this.purges.push({ tenantId, now, retentionDays, limit });
     if (this.failPurgeFor.has(tenantId)) throw new Error(`purge exploded for ${tenantId}`);
     const batch = this.due(now, retentionDays)
       .filter((r) => r.tenantId === tenantId)
       .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime())
       .slice(0, limit);
+    const rows = batch.map((r) => ({ taskType: r.taskType, createdAt: r.createdAt }));
+    let audited = false;
+    if (rows.length > 0 && this.tenantRows.has(tenantId)) {
+      const event = audit(rows);
+      // Rolled back with the audit insert: the rows are not removed.
+      if (this.failAuditFor.has(tenantId)) throw new Error(`audit insert failed for ${tenantId}`);
+      this.audits.push(event);
+      audited = true;
+    }
     const ids = new Set(batch.map((r) => r.id));
     this.rows = this.rows.filter((r) => !ids.has(r.id));
-    return batch.map((r) => ({ taskType: r.taskType, createdAt: r.createdAt }));
+    return { rows, audited };
   }
 }
 
@@ -118,8 +140,8 @@ function seed(): FakeRow[] {
   ];
 }
 
-function purgeAudits(auditRepo: InMemoryAuditRepository): AuditEvent[] {
-  return auditRepo.getAll().filter((e) => e.eventType === 'shadow_comparison.purged');
+function purgeAudits(repo: FakeRepo): AuditEvent[] {
+  return repo.audits.filter((e) => e.eventType === 'shadow_comparison.purged');
 }
 
 describe('runShadowComparisonRetentionSweep — the batch loop', () => {
@@ -235,15 +257,16 @@ describe('runShadowComparisonRetentionSweep — the batch loop', () => {
 
   it('writes one audit event per real-tenant batch, none for the placeholder bucket', async () => {
     const repo = new FakeRepo(seed());
-    const auditRepo = new InMemoryAuditRepository();
+    const lines: LoggedLine[] = [];
     await runShadowComparisonRetentionSweep({
       repo,
-      auditRepo,
-      logger: capturingLogger([]),
+      logger: capturingLogger(lines),
       retentionDays: 365,
       now: () => NOW,
     });
-    const events = purgeAudits(auditRepo);
+    // The placeholder's batch is expected to go unaudited: nothing is logged for it.
+    expect(lines.filter((l) => l.level !== 'info')).toEqual([]);
+    const events = purgeAudits(repo);
     expect(events.map((e) => e.tenantId).sort()).toEqual([TENANT_A, TENANT_B].sort());
     expect(events.some((e) => e.tenantId === PLACEHOLDER_TENANT_ID)).toBe(false);
     const a = events.find((e) => e.tenantId === TENANT_A)!;
@@ -263,22 +286,54 @@ describe('runShadowComparisonRetentionSweep — the batch loop', () => {
     });
   });
 
-  it('a failed audit write is logged and the purge stands', async () => {
+  it('a failed audit write fails its batch: the rows stay for the next sweep and the other tenants go on', async () => {
     const repo = new FakeRepo(seed());
-    const auditRepo = new InMemoryAuditRepository();
-    auditRepo.create = async () => {
-      throw new Error('audit down');
-    };
+    repo.failAuditFor.add(TENANT_A);
+    const lines: LoggedLine[] = [];
+    const deps = { repo, logger: capturingLogger(lines), retentionDays: 365, now: () => NOW };
+
+    const result = await runShadowComparisonRetentionSweep(deps);
+    // B (1 row) and the placeholder (1 row) are purged; A's 3 rows are kept.
+    expect(result).toEqual({ tenantsDue: 3, purged: 2, tenantsFailed: 1 });
+    expect(repo.rows.filter((r) => r.tenantId === TENANT_A).map((r) => r.id).sort()).toEqual([
+      'a-inside',
+      'a-old-1',
+      'a-old-2',
+      'a-old-3',
+    ]);
+    expect(purgeAudits(repo).map((e) => e.tenantId)).toEqual([TENANT_B]);
+    expect(lines).toContainEqual({
+      level: 'warn',
+      message: 'shadow-comparison retention sweep: purge failed for tenant',
+      meta: { tenantId: TENANT_A, error: `audit insert failed for ${TENANT_A}` },
+    });
+
+    // Next sweep, the audit insert works: A's batch goes, with its audit row.
+    repo.failAuditFor.clear();
+    expect(await runShadowComparisonRetentionSweep(deps)).toEqual({ tenantsDue: 1, purged: 3, tenantsFailed: 0 });
+    expect(purgeAudits(repo).find((e) => e.tenantId === TENANT_A)?.metadata?.rowsPurged).toBe(3);
+  });
+
+  it("a tenant with no tenants row (a deprovisioned tenant's late sample) is purged unaudited, and that is logged", async () => {
+    const repo = new FakeRepo(seed());
+    repo.tenantRows.delete(TENANT_B);
     const lines: LoggedLine[] = [];
     const result = await runShadowComparisonRetentionSweep({
       repo,
-      auditRepo,
       logger: capturingLogger(lines),
       retentionDays: 365,
       now: () => NOW,
     });
-    expect(result.purged).toBe(5);
-    expect(lines.filter((l) => l.message === 'shadow-comparison retention sweep: audit write failed')).toHaveLength(2);
+    expect(result).toEqual({ tenantsDue: 3, purged: 5, tenantsFailed: 0 });
+    expect(repo.rows.some((r) => r.id === 'b-old-1')).toBe(false);
+    expect(purgeAudits(repo).map((e) => e.tenantId)).toEqual([TENANT_A]);
+    expect(lines.filter((l) => l.level === 'warn')).toEqual([
+      {
+        level: 'warn',
+        message: 'shadow-comparison retention sweep: purged rows of a tenant with no tenants row, unaudited',
+        meta: { tenantId: TENANT_B, rowsPurged: 1 },
+      },
+    ]);
   });
 
   it('logs one completion line with the counts and increments the purge counter', async () => {

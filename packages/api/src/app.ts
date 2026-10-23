@@ -7240,7 +7240,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // Shadow-comparison retention (#1813 follow-up). Hourly; pool-gated like the
   // recording retention purge above (the Pg repository is the only one). NOT
   // gated on SHADOW_LLM_ENABLED: rows written while the flag was on must still
-  // age out after it is turned off. WS2: worker-only.
+  // age out after it is turned off. The repository writes each batch's audit
+  // row in the DELETE's own transaction, so the sweep takes no audit
+  // repository. WS2: worker-only.
   if (pool && shouldRunWorkers) {
     const shadowComparisonRetentionLogger = createLogger({
       service: 'shadow-comparison-retention-worker',
@@ -7251,7 +7253,6 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       void runAsLeader(SWEEP_LOCK.shadowComparisonRetention, async () => {
         await runShadowComparisonRetentionSweep({
           repo: shadowComparisonRetentionRepo,
-          auditRepo,
           logger: shadowComparisonRetentionLogger,
           retentionDays: config.SHADOW_COMPARISON_RETENTION_DAYS,
         });

@@ -54,9 +54,15 @@
  *     oldest first. A backlog drains across hourly sweeps.
  *   - One tenant's failure is logged and retried next sweep; the rest
  *     continue. Never throws.
- *   - One `shadow_comparison.purged` audit event per tenant batch, except for
- *     the placeholder bucket (audit_events.tenant_id references tenants and
- *     the placeholder has no row; its purges show in the completion log).
+ *   - One `shadow_comparison.purged` audit event per tenant batch, written
+ *     in the DELETE's own transaction: the batch commits only with its audit
+ *     row, so a crash or a failed insert leaves the rows for the next sweep,
+ *     never an unaudited purge. A tenant with no `tenants` row has nowhere
+ *     to hang one (audit_events.tenant_id references tenants): the
+ *     placeholder bucket, whose purges show in the completion log, and a
+ *     row saved after its tenant was deprovisioned (the table has no tenants
+ *     FK), which is logged. Those batches commit unaudited rather than fail
+ *     the tenant every sweep and hold its selection slot forever.
  *     The owner's activity feed (GET /api/analytics/activity) leaves the
  *     event out: hourly internal housekeeping, not something the owner did
  *     or needs to act on.
@@ -67,7 +73,7 @@
  */
 import type { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
-import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { createAuditEvent, type AuditEvent } from '../audit/audit';
 import type { Logger } from '../logging/logger';
 import { PLACEHOLDER_TENANT_ID } from '../ai/evaluation/pg-shadow-comparison';
 import { shadowComparisonsPurgedTotal } from '../monitoring/metrics';
@@ -106,6 +112,16 @@ export interface PurgedShadowComparison {
   createdAt: Date;
 }
 
+/** One tenant batch: the rows deleted, and whether its audit row was written. */
+export interface ShadowComparisonPurge {
+  rows: PurgedShadowComparison[];
+  /** False only when the tenant has no `tenants` row (or nothing was deleted). */
+  audited: boolean;
+}
+
+/** Builds a batch's audit event from the rows the DELETE returned. */
+export type ShadowComparisonPurgeAudit = (rows: ReadonlyArray<PurgedShadowComparison>) => AuditEvent;
+
 export interface ShadowComparisonRetentionRepository {
   /**
    * Cross-tenant: tenant ids holding a row older than `retentionDays` before
@@ -114,15 +130,18 @@ export interface ShadowComparisonRetentionRepository {
   findTenantsWithDue(now: Date, retentionDays: number, limit: number): Promise<string[]>;
   /**
    * Delete up to `limit` of the tenant's rows older than `retentionDays`
-   * before `now` that no legal hold keeps, oldest first, in one tenant-scoped
-   * transaction.
+   * before `now` that no legal hold keeps, oldest first, and write
+   * `audit(rows)` in the same tenant-scoped transaction when anything was
+   * deleted and the tenant has a `tenants` row. A failed audit insert rolls
+   * the delete back.
    */
   purgeDue(
     tenantId: string,
     now: Date,
     retentionDays: number,
     limit: number,
-  ): Promise<PurgedShadowComparison[]>;
+    audit: ShadowComparisonPurgeAudit,
+  ): Promise<ShadowComparisonPurge>;
 }
 
 /**
@@ -157,7 +176,8 @@ export class PgShadowComparisonRetentionRepository
     now: Date,
     retentionDays: number,
     limit: number,
-  ): Promise<PurgedShadowComparison[]> {
+    audit: ShadowComparisonPurgeAudit,
+  ): Promise<ShadowComparisonPurge> {
     // shadow_comparisons is FORCE RLS on app.current_tenant_id; the
     // `tenant_id = $1` predicates are defense in depth.
     return this.withTenantTransaction(tenantId, async (client) => {
@@ -177,17 +197,44 @@ export class PgShadowComparisonRetentionRepository
           RETURNING s.task_type, s.created_at`,
         [tenantId, now, retentionDays, limit],
       );
-      return rows.map((row) => ({
+      const purged = rows.map((row) => ({
         taskType: (row.task_type as string | null) ?? null,
         createdAt: new Date(row.created_at as string),
       }));
+      if (purged.length === 0) return { rows: purged, audited: false };
+
+      // The audit row goes in on this transaction, so the DELETE commits only
+      // with it. audit_events.tenant_id references tenants: with no tenants
+      // row (the placeholder bucket, a deprovisioned tenant's late sample)
+      // the batch commits unaudited instead of failing on the FK every sweep.
+      const tenant = await client.query('SELECT 1 FROM tenants WHERE id = $1', [tenantId]);
+      if (tenant.rowCount === 0) return { rows: purged, audited: false };
+      const event = audit(purged);
+      await client.query(
+        `INSERT INTO audit_events
+           (id, tenant_id, actor_id, actor_role, event_type, entity_type,
+            entity_id, correlation_id, metadata, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)`,
+        [
+          event.id,
+          event.tenantId,
+          event.actorId,
+          event.actorRole,
+          event.eventType,
+          event.entityType,
+          event.entityId,
+          event.correlationId ?? null,
+          JSON.stringify(event.metadata ?? {}),
+          event.createdAt,
+        ],
+      );
+      return { rows: purged, audited: true };
     });
   }
 }
 
 export interface ShadowComparisonRetentionSweepDeps {
   repo: ShadowComparisonRetentionRepository;
-  auditRepo?: AuditRepository;
   logger: Logger;
   /** SHADOW_COMPARISON_RETENTION_DAYS — a positive whole number of days. */
   retentionDays: number;
@@ -201,7 +248,7 @@ export interface ShadowComparisonRetentionSweepResult {
   tenantsDue: number;
   /** Rows deleted. */
   purged: number;
-  /** Tenants whose delete failed (retried next sweep). */
+  /** Tenants whose delete or audit failed and rolled back (retried next sweep). */
   tenantsFailed: number;
 }
 
@@ -229,9 +276,26 @@ export function summarizePurgedShadowComparisons(
   };
 }
 
+/** The audit event of one tenant batch. */
+export function buildShadowComparisonPurgeAudit(
+  tenantId: string,
+  rows: ReadonlyArray<PurgedShadowComparison>,
+  retentionDays: number,
+): AuditEvent {
+  return createAuditEvent({
+    tenantId,
+    actorId: RETENTION_ACTOR,
+    actorRole: 'system',
+    eventType: SHADOW_COMPARISON_PURGED_EVENT,
+    entityType: 'tenant',
+    entityId: tenantId,
+    metadata: summarizePurgedShadowComparisons(rows, retentionDays),
+  });
+}
+
 /**
  * One sweep: select the tenants with rows past the window, delete one bounded
- * batch per tenant, audit each real tenant's batch. Never throws.
+ * batch per tenant with its audit row in the same transaction. Never throws.
  */
 export async function runShadowComparisonRetentionSweep(
   deps: ShadowComparisonRetentionSweepDeps,
@@ -267,10 +331,13 @@ export async function runShadowComparisonRetentionSweep(
   let purged = 0;
   let tenantsFailed = 0;
   for (const tenantId of tenantIds) {
-    let rows: PurgedShadowComparison[];
+    let batch: ShadowComparisonPurge;
     try {
-      rows = await deps.repo.purgeDue(tenantId, now(), retentionDays, batchSize);
+      batch = await deps.repo.purgeDue(tenantId, now(), retentionDays, batchSize, (rows) =>
+        buildShadowComparisonPurgeAudit(tenantId, rows, retentionDays),
+      );
     } catch (err) {
+      // The delete and its audit row roll back together; the rows stay due.
       tenantsFailed++;
       deps.logger.warn('shadow-comparison retention sweep: purge failed for tenant', {
         tenantId,
@@ -278,29 +345,13 @@ export async function runShadowComparisonRetentionSweep(
       });
       continue;
     }
-    if (rows.length === 0) continue;
-    purged += rows.length;
-    shadowComparisonsPurgedTotal.inc(rows.length);
-    if (!deps.auditRepo || tenantId === PLACEHOLDER_TENANT_ID) continue;
-    try {
-      await deps.auditRepo.create(
-        createAuditEvent({
-          tenantId,
-          actorId: RETENTION_ACTOR,
-          actorRole: 'system',
-          eventType: SHADOW_COMPARISON_PURGED_EVENT,
-          entityType: 'tenant',
-          entityId: tenantId,
-          metadata: summarizePurgedShadowComparisons(rows, retentionDays),
-        }),
-      );
-    } catch (err) {
-      // Best-effort: the rows are already gone, so the purge stands, but a
-      // missing audit row must not be silent.
-      deps.logger.warn('shadow-comparison retention sweep: audit write failed', {
+    if (batch.rows.length === 0) continue;
+    purged += batch.rows.length;
+    shadowComparisonsPurgedTotal.inc(batch.rows.length);
+    if (!batch.audited && tenantId !== PLACEHOLDER_TENANT_ID) {
+      deps.logger.warn('shadow-comparison retention sweep: purged rows of a tenant with no tenants row, unaudited', {
         tenantId,
-        rowsPurged: rows.length,
-        error: err instanceof Error ? err.message : String(err),
+        rowsPurged: batch.rows.length,
       });
     }
   }

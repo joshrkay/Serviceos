@@ -89,7 +89,9 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
     expect(block).toMatch(/runAsLeader\(SWEEP_LOCK\.shadowComparisonRetention,/);
     expect(block).toContain('runShadowComparisonRetentionSweep({');
     expect(block).toContain('retentionDays: config.SHADOW_COMPARISON_RETENTION_DAYS');
-    expect(block).toContain('auditRepo,');
+    // The audit row is written in the purge's own transaction by the
+    // repository, never as a separate best-effort write after it.
+    expect(block).not.toContain('auditRepo');
     expect(block).toMatch(/registerInterval\(setInterval\(/);
   });
 
