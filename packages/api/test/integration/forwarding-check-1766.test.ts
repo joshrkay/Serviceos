@@ -144,6 +144,10 @@ describe('#1766 forwarding check (real Postgres)', () => {
     expect(await service.recognizeInbound({ tenantId, from: RIVET, callSid: 'CA-old' })).toBe(true);
     // ...but forwarding to the released number proves nothing about the new one.
     expect((await forwardingRepo.get(tenantId))?.checkPassedAt).toBeNull();
+    // ...and the owner reads "test again", never "Forwarding works".
+    const view = await service.latestView(tenantId, { id: 'u-owner', role: 'owner' });
+    expect(view?.status).toBe('failed');
+    expect(view?.guidance).toMatch(/test again/i);
   });
 
   it('rejects a status outside the allowed set', async () => {

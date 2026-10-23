@@ -32,6 +32,8 @@ import type { AuthenticatedRequest } from '../../src/auth/clerk';
 import type { VapiClient } from '../../src/integrations/vapi/client';
 import { runOrphanedNumberSweep } from '../../src/workers/orphaned-number-sweep';
 import type { OperatorAlert } from '../../src/monitoring/alert-operator';
+import { ForwardingCheckService, PgForwardingCheckRepository } from '../../src/onboarding/forwarding-check';
+import { PgCallForwardingRepository } from '../../src/onboarding/call-forwarding';
 
 const KEY = 'a'.repeat(64);
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
@@ -281,8 +283,20 @@ describe('Postgres integration — change-number cleanup (#1575)', () => {
     const byId = new Map(checks.rows.map((r) => [r.id, r]));
     expect(byId.get(pendingId)?.status).toBe('failed');
     expect(byId.get(pendingId)?.completed_at).not.toBeNull();
-    // A check that already settled is history, left as it was.
+    // A check that already settled is history, left as it was...
     expect(byId.get(settledId)?.status).toBe('passed');
+    // ...but with the proof cleared it no longer reads as "Forwarding works".
+    const service = new ForwardingCheckService({
+      repo: new PgForwardingCheckRepository(pool),
+      forwardingRepo: new PgCallForwardingRepository(pool),
+      getBusinessPhone: async () => null,
+      getCreds: async () => {
+        throw new Error('unused');
+      },
+    });
+    const view = await service.latestView(tenantId, { id: 'u-owner', role: 'owner' });
+    expect(view?.guidance).not.toMatch(/Forwarding works/);
+    expect(view?.guidance).toMatch(/test again/i);
   });
 
   function sweepDeps(tenantId: string) {
