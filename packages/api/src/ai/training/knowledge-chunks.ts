@@ -5,11 +5,11 @@ import { PgBaseRepository } from '../../db/pg-base';
  * Repository for `knowledge_chunks` — the unified per-tenant + global
  * RAG corpus introduced in migration `059_create_knowledge_chunks`.
  *
- * Phase 1 surface: insert + similarity search. Ingestion workers
- * (transcript / proposal-correction / tenant-knowledge-seed) and the
- * retrieval skill in `ai/skills/retrieve-context.ts` consume this
- * interface. No caller in main reads or writes today; wiring lands in
- * Phases 3b and 4a.
+ * Phase 1 surface: insert + similarity search. The transcript and
+ * proposal-correction ingestion workers write through it
+ * (`workers/transcript-ingestion-worker.ts`,
+ * `workers/proposal-correction-worker.ts`), and the retrieval skill
+ * (`ai/skills/retrieve-context.ts`) reads through it.
  *
  * Tenant scoping: a row is visible iff `tenant_id IS NULL` (global tier)
  * OR `tenant_id` is the asking tenant. Search states that predicate in

@@ -857,11 +857,14 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                 });
                 throw new Error('pool not configured for invitee join');
               }
-              // Insert the users row directly. RLS requires the
-              // tenant GUC to be set; SET LOCAL only persists inside
-              // a transaction (PR 319 review P1), so the BEGIN /
-              // COMMIT block is mandatory — without it the SET LOCAL
-              // is a no-op and the INSERT fails the RLS policy.
+              // Insert the users row directly. The tenant GUC is set
+              // with set_config(..., true), which only lasts inside a
+              // transaction (PR 319 review P1), hence the BEGIN /
+              // COMMIT block. This raw pool client never switches to
+              // rls_app_runtime, so it keeps the pool's privileged
+              // principal (db/rls-runtime-role.ts) and the users policy
+              // does not scope this INSERT: the tenant comes from the
+              // invitation row (pending.tenantId), never the payload.
               //
               // The tenantId is also asserted to look like a UUID
               // before being interpolated into the SET LOCAL string
