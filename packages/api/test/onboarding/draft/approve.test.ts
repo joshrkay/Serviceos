@@ -325,3 +325,56 @@ describe('InMemoryOnboardingDraftRepository.markApproved (compare-and-swap)', ()
     expect(await repo.getForTenant(TENANT)).toMatchObject({ status: 'approved', version: draft.version + 1, proposalIds: ['p1'] });
   });
 });
+
+/**
+ * Without a pool getForTenantForUpdate holds no lock, so a PUT /choices can
+ * land between approve's read and its markApproved write. That write already
+ * compares the version approve read, so a choice saved before it is never
+ * erased; the in-memory updateLocked now also takes the row one writer at a
+ * time, so a choice saved while it is being written cannot slip through the
+ * compare either. (The two proposals a refused approve minted stay in this
+ * repository: nothing rolls back in memory. On Postgres the PUT waits on the
+ * row lock and the refused request's transaction drops them.)
+ */
+describe('approveDraft without a row lock (no pool): a choice saved after the locked read', () => {
+  it('a choice saved before the approval is written is kept, and approve is refused with VERSION_CONFLICT', async () => {
+    const h = await approveHarness();
+    const realLock = h.repo.getForTenantForUpdate.bind(h.repo);
+    h.repo.getForTenantForUpdate = async (t) => {
+      const row = await realLock(t);
+      await h.repo.stageChoice(t, 'greeting', { option: 'b' }, row!.version);
+      return row;
+    };
+
+    const err = await approveDraft(h.deps, TENANT, ACTOR).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(DraftVersionConflictError);
+    expect(err).toMatchObject({ expected: h.draft.version, actual: h.draft.version + 1 });
+    const stored = (await h.repo.getForTenant(TENANT))!;
+    expect(stored).toMatchObject({ status: 'draft', proposalIds: [], version: h.draft.version + 1 });
+    expect(stored.choices.greeting).toEqual({ option: 'b' });
+    expect(await approvedAudits(h.auditRepo)).toHaveLength(0);
+  });
+
+  it('a choice saved while the approval is being written: only one lands, and the choice is never erased', async () => {
+    const h = await approveHarness();
+    const realMarkApproved = h.repo.markApproved.bind(h.repo);
+    let put: Promise<OnboardingDraft> | undefined;
+    h.repo.markApproved = (t, ids, v) => {
+      // The PUT from the same read-back starts writing first; the approval's write follows it.
+      put = h.repo.stageChoice(t, 'greeting', { option: 'b' }, v);
+      return realMarkApproved(t, ids, v);
+    };
+
+    const [approved] = await Promise.allSettled([approveDraft(h.deps, TENANT, ACTOR)]);
+    const staged = await put!;
+
+    expect(approved.status).toBe('rejected');
+    expect((approved as PromiseRejectedResult).reason).toBeInstanceOf(DraftVersionConflictError);
+    expect(staged.choices.greeting).toEqual({ option: 'b' });
+    const stored = (await h.repo.getForTenant(TENANT))!;
+    expect(stored).toMatchObject({ status: 'draft', proposalIds: [], version: h.draft.version + 1 });
+    expect(stored.choices.greeting).toEqual({ option: 'b' });
+    expect(await approvedAudits(h.auditRepo)).toHaveLength(0);
+  });
+});

@@ -19,6 +19,7 @@ import { InMemoryEstimateRepository } from '../../src/estimates/estimate';
 import { buildEstimate } from '../factories/estimate.factory';
 import { buildLineItem, calculateDocumentTotals } from '../../src/shared/billing-engine';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
+import { InMemoryTransactionRunner } from '../../src/db/tenant-transaction';
 
 const TENANT = 'tenant-1405-pick';
 const USER = 'user-1405-pick';
@@ -27,78 +28,89 @@ const EST_1 = 'a1b2c3d4-e5f6-4a7b-8c9d-0e1f2a3b4c5d';
 const EST_2 = 'b2c3d4e5-f6a7-4b8c-9d0e-1f2a3b4c5d6e';
 const JOB_2 = 'c3d4e5f6-a7b8-4c9d-8e0f-1a2b3c4d5e6f';
 
+/**
+ * A draft_invoice gated on "which accepted estimate?" (`payload` adds to its
+ * placeholder payload), and the card's pick of EST-0002 PUT to the route.
+ */
+async function pickEstimate2(payload: Record<string, unknown> = {}) {
+  const estimateRepo = new InMemoryEstimateRepository();
+  const lines = [buildLineItem('li-b', 'Repipe kitchen', 1, 120000, 0, true)];
+  await estimateRepo.create(
+    buildEstimate({
+      id: EST_2,
+      tenantId: TENANT,
+      jobId: JOB_2,
+      estimateNumber: 'EST-0002',
+      status: 'accepted',
+      lineItems: lines,
+      totals: calculateDocumentTotals(lines, 20000, 825),
+    }),
+  );
+
+  const proposalRepo = new InMemoryProposalRepository();
+  const proposal = createProposal({
+    tenantId: TENANT,
+    proposalType: 'draft_invoice',
+    payload: {
+      customerId: CUSTOMER,
+      estimateReference: 'the accepted estimate',
+      lineItems: [
+        { description: 'Service as per accepted estimate', quantity: 1, unitPriceCents: 1000, totalCents: 1000 },
+      ],
+      ...payload,
+    },
+    summary: 'Invoice the accepted estimate',
+    createdBy: USER,
+    missingFields: ['estimateId'],
+    sourceContext: {
+      pendingEntityAmbiguity: {
+        entityKind: 'estimate',
+        reference: 'the accepted estimate',
+        refKey: 'estimateId',
+        candidates: [
+          { id: EST_1, name: 'EST-0001', hint: 'accepted · $1,000.00', score: 1 },
+          { id: EST_2, name: 'EST-0002', hint: 'accepted · $1,082.50', score: 1 },
+        ],
+        partialRefs: {},
+        attemptCount: 0,
+      },
+    },
+  });
+  await proposalRepo.create(proposal);
+
+  const app = express();
+  app.use(express.json());
+  app.use((req: Request, _res: Response, next: NextFunction) => {
+    (req as AuthenticatedRequest).auth = { userId: USER, sessionId: 's', tenantId: TENANT, role: 'owner' };
+    next();
+  });
+  app.use(
+    '/api/proposals',
+    createProposalsRouter(
+      proposalRepo,
+      new InMemoryTransactionRunner(),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      estimateRepo,
+    ),
+  );
+
+  const res = await request(app).put(`/api/proposals/${proposal.id}`).send({ edits: { estimateId: EST_2 } });
+  const picked = (await proposalRepo.findById(TENANT, proposal.id))!;
+  return { res, picked, proposal };
+}
+
 describe('#1405 — PUT /api/proposals/:id picking the accepted estimate re-drafts the invoice', () => {
   it('replaces the placeholder lines with the picked estimate’s lines, discount and tax', async () => {
-    const estimateRepo = new InMemoryEstimateRepository();
-    const lines = [buildLineItem('li-b', 'Repipe kitchen', 1, 120000, 0, true)];
-    await estimateRepo.create(
-      buildEstimate({
-        id: EST_2,
-        tenantId: TENANT,
-        jobId: JOB_2,
-        estimateNumber: 'EST-0002',
-        status: 'accepted',
-        lineItems: lines,
-        totals: calculateDocumentTotals(lines, 20000, 825),
-      }),
-    );
-
-    const proposalRepo = new InMemoryProposalRepository();
-    const proposal = createProposal({
-      tenantId: TENANT,
-      proposalType: 'draft_invoice',
-      payload: {
-        customerId: CUSTOMER,
-        estimateReference: 'the accepted estimate',
-        lineItems: [
-          { description: 'Service as per accepted estimate', quantity: 1, unitPriceCents: 1000, totalCents: 1000 },
-        ],
-      },
-      summary: 'Invoice the accepted estimate',
-      createdBy: USER,
-      missingFields: ['estimateId'],
-      sourceContext: {
-        pendingEntityAmbiguity: {
-          entityKind: 'estimate',
-          reference: 'the accepted estimate',
-          refKey: 'estimateId',
-          candidates: [
-            { id: EST_1, name: 'EST-0001', hint: 'accepted · $1,000.00', score: 1 },
-            { id: EST_2, name: 'EST-0002', hint: 'accepted · $1,082.50', score: 1 },
-          ],
-          partialRefs: {},
-          attemptCount: 0,
-        },
-      },
-    });
-    await proposalRepo.create(proposal);
-
-    const app = express();
-    app.use(express.json());
-    app.use((req: Request, _res: Response, next: NextFunction) => {
-      (req as AuthenticatedRequest).auth = { userId: USER, sessionId: 's', tenantId: TENANT, role: 'owner' };
-      next();
-    });
-    app.use(
-      '/api/proposals',
-      createProposalsRouter(
-        proposalRepo,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        estimateRepo,
-      ),
-    );
-
-    const res = await request(app).put(`/api/proposals/${proposal.id}`).send({ edits: { estimateId: EST_2 } });
+    const { res, picked } = await pickEstimate2();
     expect(res.status).toBe(200);
 
-    const picked = (await proposalRepo.findById(TENANT, proposal.id))!;
     expect(picked.payload.estimateId).toBe(EST_2);
     expect(missingFieldsFor(picked)).toEqual([]);
     const pickedLines = picked.payload.lineItems as Array<{ description: string; unitPriceCents: number }>;
@@ -106,5 +118,30 @@ describe('#1405 — PUT /api/proposals/:id picking the accepted estimate re-draf
     expect(picked.payload.discountCents).toBe(20000);
     expect(picked.payload.taxRateBps).toBe(825);
     expect(picked.status).toBe('draft');
+  });
+
+  // R2-1 — what the drafter really writes: the placeholder line is
+  // uncatalogued, so `_meta` carries that line's confidence markers, which
+  // the re-draft drops. It dropped them in place, on the `_meta` the row the
+  // edit read shares, so the edit's "unchanged since my read?" check saw a
+  // change nobody wrote and every such pick answered 409.
+  it('re-drafts an AI-drafted invoice whose placeholder line carries confidence markers', async () => {
+    const meta = () => ({
+      overallConfidence: 'low',
+      fieldConfidence: { 'lineItems[0].unitPriceCents': 'low' },
+      markers: [{ path: 'lineItems[0].unitPriceCents', reason: 'Not in your price list' }],
+    });
+    const { res, picked } = await pickEstimate2({ _meta: meta() });
+
+    expect(res.status, JSON.stringify(res.body)).toBe(200);
+    expect(picked.payload.estimateId).toBe(EST_2);
+    expect(missingFieldsFor(picked)).toEqual([]);
+    const pickedLines = picked.payload.lineItems as Array<{ description: string; unitPriceCents: number }>;
+    expect(pickedLines.map((l) => [l.description, l.unitPriceCents])).toEqual([['Repipe kitchen', 120000]]);
+    // The placeholder line's markers went with it; the rest of `_meta` stays.
+    expect(picked.payload._meta).toEqual({ overallConfidence: 'low' });
+    // The payload as first proposed keeps them (the correction recorder
+    // diffs it against what executes).
+    expect(picked.originalPayload?._meta).toEqual(meta());
   });
 });

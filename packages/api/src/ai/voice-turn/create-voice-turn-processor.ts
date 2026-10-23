@@ -3610,6 +3610,9 @@ export function createVoiceTurnProcessor(
   const ownRevocationTx: TenantTransactionRunner = deps.pool
     ? new PgTenantTransactionRunner(deps.pool)
     : new InMemoryTransactionRunner();
+  // The in-place path uses InMemoryTransactionRunner even with a pool: its
+  // scope.lock is a process-local mutex, not an advisory lock, so code run
+  // here must not rely on lock() to serialize across instances.
   const revocationTx: Pick<TenantTransactionRunner, 'run'> = {
     run: (tenantId, fn) =>
       currentTenantContext()?.tenantId === tenantId

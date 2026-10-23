@@ -759,6 +759,62 @@ describe('P2-005 — Approve / reject / edit interactions', () => {
     ).rejects.toThrow(NotFoundError);
   });
 
+  // A4-4 — editProposal read the row, then wrote the whole payload back. A
+  // change that landed in between (an entity pick clearing its picker, a
+  // line pick, a decision) was overwritten with the stale copy. The write is
+  // now refused when the row moved since the edit read it.
+  describe('A4-4 — an edit never overwrites a change that landed after its read', () => {
+    /** The edit's read returns its snapshot, then `concurrent` commits first. */
+    function afterTheEditRead(repo: InMemoryProposalRepository, concurrent: () => Promise<unknown>) {
+      const realFindById = repo.findById.bind(repo);
+      vi.spyOn(repo, 'findById').mockImplementationOnce(async (t, id) => {
+        const snapshot = await realFindById(t, id);
+        await concurrent();
+        return snapshot;
+      });
+    }
+
+    it('refuses with a plain 409 and writes nothing when the payload changed after the read', async () => {
+      const repo = makeRepo();
+      const auditRepo = new InMemoryAuditRepository();
+      const proposal = await createReadyProposal(repo);
+      afterTheEditRead(repo, () =>
+        repo.update(tenantId, proposal.id, { payload: { name: 'John Doe', customerId: 'cust-b' } }),
+      );
+
+      const err = await editProposal(repo, tenantId, proposal.id, actorId, 'owner', { name: 'Jane Doe' }, auditRepo).catch(
+        (e: unknown) => e,
+      );
+
+      expect(err).toBeInstanceOf(ConflictError);
+      expect((err as ConflictError).message).toBe('This changed while you were editing. Please try again.');
+      const after = await repo.findById(tenantId, proposal.id);
+      expect(after!.payload).toEqual({ name: 'John Doe', customerId: 'cust-b' });
+      expect(after!.originalPayload).toBeUndefined();
+      expect(await auditRepo.findByEntity(tenantId, 'proposal', proposal.id)).toEqual([]);
+    });
+
+    it('refuses when the row was decided after the read (the payload of an approved row is never rewritten)', async () => {
+      const repo = makeRepo();
+      const proposal = await createReadyProposal(repo);
+      afterTheEditRead(repo, () => repo.updateStatus(tenantId, proposal.id, 'approved', {}));
+
+      await expect(
+        editProposal(repo, tenantId, proposal.id, actorId, 'owner', { name: 'Jane Doe' }),
+      ).rejects.toBeInstanceOf(ConflictError);
+      expect((await repo.findById(tenantId, proposal.id))!.payload).toEqual({ name: 'John Doe' });
+    });
+
+    it('an unchanged row is edited as before', async () => {
+      const repo = makeRepo();
+      const proposal = await createReadyProposal(repo);
+      const { proposal: updated } = await editProposal(repo, tenantId, proposal.id, actorId, 'owner', {
+        name: 'Jane Doe',
+      });
+      expect(updated.payload).toEqual({ name: 'Jane Doe' });
+    });
+  });
+
   // ── Decision 9: undoProposal ────────────────────────────────────────
 
   describe('undoProposal — 5-second undo window', () => {

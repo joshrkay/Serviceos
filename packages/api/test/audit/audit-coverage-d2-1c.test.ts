@@ -41,6 +41,7 @@ import {
   TenantSettings,
 } from '../../src/settings/settings';
 import { InMemoryUserRepository } from '../../src/users/user';
+import { InMemoryTransactionRunner } from '../../src/db/tenant-transaction';
 import {
   InMemoryFeatureFlagRepository,
   InMemoryFeatureFlagStore,
@@ -96,7 +97,7 @@ describe('D2-1c — audit coverage smoke test', () => {
     app.use(withAuth());
     app.use(
       '/api/proposals',
-      createProposalsRouter(proposalRepo, undefined, auditRepo),
+      createProposalsRouter(proposalRepo, new InMemoryTransactionRunner(), undefined, auditRepo),
     );
 
     const res = await request(app).post(`/api/proposals/${proposal.id}/approve`);
@@ -129,7 +130,7 @@ describe('D2-1c — audit coverage smoke test', () => {
     app.use(withAuth());
     app.use(
       '/api/proposals',
-      createProposalsRouter(proposalRepo, undefined, auditRepo),
+      createProposalsRouter(proposalRepo, new InMemoryTransactionRunner(), undefined, auditRepo),
     );
 
     const res = await request(app)

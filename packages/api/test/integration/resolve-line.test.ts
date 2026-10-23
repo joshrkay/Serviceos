@@ -5,6 +5,7 @@ import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { createProposal } from '../../src/proposals/proposal';
 import { resolveProposalLine } from '../../src/proposals/resolve-line';
+import { PgTenantTransactionRunner } from '../../src/db/tenant-transaction';
 
 /**
  * U2 integration — pins resolveProposalLine against real Postgres: the jsonb
@@ -63,8 +64,13 @@ describe('Postgres integration — resolve ambiguous catalog line (U2)', () => {
     await closeSharedTestDb();
   });
 
+  const inTenantTransaction = <T>(work: () => Promise<T>): Promise<T> =>
+    new PgTenantTransactionRunner(pool).run(tenant.tenantId, work);
+
   it('stamps the catalog price into jsonb, clears missingFields, and moves to ready_for_review', async () => {
-    const result = await resolveProposalLine(
+    // A4-4 — as the route runs it: inside the request's tenant transaction,
+    // which holds the row lock resolveProposalLine reads under.
+    const result = await inTenantTransaction(() => resolveProposalLine(
       {
         tenantId: tenant.tenantId,
         proposalId,
@@ -74,7 +80,7 @@ describe('Postgres integration — resolve ambiguous catalog line (U2)', () => {
         actorRole: 'owner',
       },
       { proposalRepo, auditRepo },
-    );
+    ));
 
     expect(result.status).toBe('ready_for_review'); // never 'approved'
 
@@ -163,8 +169,13 @@ describe('Postgres integration — resolve ambiguous editAction line (B3)', () =
     await closeSharedTestDb();
   });
 
+  const inTenantTransaction = <T>(work: () => Promise<T>): Promise<T> =>
+    new PgTenantTransactionRunner(pool).run(tenant.tenantId, work);
+
   it('stamps BOTH price fields + catalogItemId into jsonb, clears the editAction gate, and moves to ready_for_review', async () => {
-    const result = await resolveProposalLine(
+    // A4-4 — as the route runs it: inside the request's tenant transaction,
+    // which holds the row lock resolveProposalLine reads under.
+    const result = await inTenantTransaction(() => resolveProposalLine(
       {
         tenantId: tenant.tenantId,
         proposalId,
@@ -174,7 +185,7 @@ describe('Postgres integration — resolve ambiguous editAction line (B3)', () =
         actorRole: 'owner',
       },
       { proposalRepo, auditRepo },
-    );
+    ));
 
     expect(result.status).toBe('ready_for_review'); // never 'approved'
 

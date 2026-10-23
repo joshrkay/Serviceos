@@ -367,6 +367,38 @@ describe('retryFailedDraftProposals', () => {
     expect(order.indexOf('findById')).toBeGreaterThan(order.indexOf('reset'));
   });
 
+  // Without a pool getForTenantForUpdate and the set's findByIdsForUpdate
+  // lock nothing, so two retries can read the same set. Each write is already
+  // conditional (resetFailedForRetry only moves a row still execution_failed;
+  // markRetried compares the version read first), so the second retry is
+  // refused before it writes anything.
+  it('two retries that read the same set: one re-queues, the other is NOTHING_FAILED and writes nothing', async () => {
+    await force(ids[0], 'execution_failed');
+    const realRead = proposalRepo.findByIdsForUpdate.bind(proposalRepo);
+    let reads = 0;
+    let allRead!: () => void;
+    const together = new Promise<void>((resolve) => {
+      allRead = resolve;
+    });
+    proposalRepo.findByIdsForUpdate = async (...args: Parameters<typeof realRead>) => {
+      const rows = await realRead(...args);
+      reads += 1;
+      if (reads === 2) allRead();
+      await together;
+      return rows;
+    };
+
+    const results = await Promise.allSettled([retry(), retry()]);
+
+    expect(results.map((r) => r.status)).toEqual(['fulfilled', 'rejected']);
+    expect(((results[1] as PromiseRejectedResult).reason as ConflictError).message).toContain('DRAFT_RETRY_NOTHING_FAILED');
+    expect((results[0] as PromiseFulfilledResult<{ retriedProposalIds: string[] }>).value.retriedProposalIds).toEqual([ids[0]]);
+    expect((await draftRepo.getForTenant(TENANT))!.version).toBe(preApprovalVersion + 2);
+    expect(await events('onboarding.draft_retry')).toHaveLength(1);
+    expect(await events('proposal.retried')).toHaveLength(1);
+    expect((await proposalRepo.findById(TENANT, ids[0]))!.status).toBe('approved');
+  });
+
   describe('S4: expectedVersion', () => {
     const retryAt = (expectedVersion: number) => retryFailedDraftProposals(deps(), TENANT, OWNER, { expectedVersion });
 
@@ -469,6 +501,20 @@ describe('InMemoryOnboardingDraftRepository.markRetried (compare-and-swap)', () 
     const retried = await repo.markRetried(TENANT, approved.version);
     expect(retried).toEqual({ ...approved, version: approved.version + 1, updatedAt: retried.updatedAt });
     expect(await repo.getForTenant(TENANT)).toEqual(retried);
+  });
+
+  // Without a pool nothing locks the row between a retry's read and this
+  // write: two retries of the same attempt that write at once must not both
+  // move the version from it (one version would then name two attempts).
+  it('two writes from the same version that overlap: one moves the version, the other is refused', async () => {
+    const { repo, draft } = await approvedRepo();
+    const approved = await repo.markApproved(TENANT, ['p1', 'p2'], draft.version);
+
+    const results = await Promise.allSettled([repo.markRetried(TENANT, approved.version), repo.markRetried(TENANT, approved.version)]);
+
+    expect(results.map((r) => r.status)).toEqual(['fulfilled', 'rejected']);
+    expect((results[1] as PromiseRejectedResult).reason).toMatchObject({ expected: approved.version, actual: approved.version + 1 });
+    expect((await repo.getForTenant(TENANT))!.version).toBe(approved.version + 1);
   });
 
   it('refuses a stale version, a draft that was never approved, and no draft, and writes nothing', async () => {
