@@ -1304,6 +1304,57 @@ describe('PRIV-6 — prompt/reply export to Langfuse Cloud is refused in prod/st
     ).toThrow(/LANGFUSE_CAPTURE_CONTENT=true/);
   });
 
+  // A fully qualified host keeps its terminal dot in URL.hostname, and the SDK
+  // reaches the same Langfuse Cloud endpoint through it. Case and port never
+  // change the host either.
+  it.each([
+    'https://cloud.langfuse.com.',
+    'https://us.cloud.langfuse.com.',
+    'https://langfuse.com.',
+    'https://CLOUD.Langfuse.COM',
+    'https://Hipaa.Cloud.LANGFUSE.com.',
+    'https://cloud.langfuse.com:443',
+    'https://eu.cloud.langfuse.com.:8443/',
+  ])('production — %s is Langfuse Cloud, so capture without an acknowledgement is refused', (baseUrl) => {
+    expect(() =>
+      loadConfig({
+        ...baseProdEnv,
+        ...liveExport,
+        LANGFUSE_BASE_URL: baseUrl,
+        LANGFUSE_CAPTURE_CONTENT: 'true',
+      }),
+    ).toThrow(/LANGFUSE_CAPTURE_CONTENT=true[\s\S]*LANGFUSE_CLOUD_CONTENT_ACKNOWLEDGED=true/);
+  });
+
+  it('production — a trailing-dot Langfuse Cloud host is accepted once acknowledged', () => {
+    const config = loadConfig({
+      ...baseProdEnv,
+      ...liveExport,
+      LANGFUSE_BASE_URL: 'https://us.cloud.langfuse.com.',
+      LANGFUSE_CAPTURE_CONTENT: 'true',
+      LANGFUSE_CLOUD_CONTENT_ACKNOWLEDGED: 'true',
+    });
+    expect(config.LANGFUSE_CLOUD_CONTENT_ACKNOWLEDGED).toBe(true);
+  });
+
+  // Ending in "langfuse.com" is not enough: only langfuse.com itself or one of
+  // its subdomains is Langfuse Cloud.
+  it.each([
+    'https://langfuse.example.com',
+    'https://langfuse.example.com.',
+    'https://notcloud.langfuse.com.evil',
+    'https://notcloud.langfuse.com.evil.',
+    'https://notlangfuse.com.',
+  ])('production — %s is not Langfuse Cloud, so capture needs no acknowledgement', (baseUrl) => {
+    const config = loadConfig({
+      ...baseProdEnv,
+      ...liveExport,
+      LANGFUSE_BASE_URL: baseUrl,
+      LANGFUSE_CAPTURE_CONTENT: 'true',
+    });
+    expect(config.LANGFUSE_CAPTURE_CONTENT).toBe(true);
+  });
+
   it('production — an acknowledgement of "false" or blank (an unset Railway secret) does not count', () => {
     for (const ack of ['false', ''] as const) {
       resetConfig();

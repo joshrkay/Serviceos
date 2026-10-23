@@ -517,10 +517,12 @@ function validateProductionConfig(config: AppConfig): void {
 /**
  * True for Langfuse Cloud, the third-party hosted service, in every region
  * (cloud.langfuse.com, us./eu./hipaa.cloud.langfuse.com, …). Anything else is
- * treated as an instance the operator runs.
+ * treated as an instance the operator runs. URL.hostname keeps the terminal
+ * dot of a fully qualified name (cloud.langfuse.com.), which reaches the same
+ * Langfuse Cloud endpoint, so one trailing dot is dropped before the match.
  */
 function isLangfuseCloudHost(baseUrl: string): boolean {
-  const host = new URL(baseUrl).hostname.toLowerCase();
+  const host = new URL(baseUrl).hostname.toLowerCase().replace(/\.$/, '');
   return host === 'langfuse.com' || host.endsWith('.langfuse.com');
 }
 
