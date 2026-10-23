@@ -991,6 +991,11 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     why: "Its only caller (PUT /api/onboarding/voice) passes currentTenantContext()?.client cast to Pool, so both tenant_settings statements run on the request client. The Pool-typed parameter is a latent trap for a future raw caller.",
   },
   {
+    file: 'src/voice/voice-config.ts', fn: 'refreshVapiFirstMessage', access: 'pool.query', count: 1,
+    category: 'tenant_context_applied', tables: ['tenant_settings'],
+    why: "Both callers (PATCH /api/settings/language after commit, and scripts/backfill-vapi-assistant-notice.ts) pass { query } wrapping tenantQuery(pool, tenantId, …), so the tenant_settings read runs under rls_app_runtime for that tenant. The Pick<Pool, 'query'> parameter is a latent trap for a future raw caller.",
+  },
+  {
     file: 'src/voice/voice-gate.ts', fn: 'createVoiceGate', access: 'pool.query', count: 2,
     category: 'tenant_filtered_no_rls', tables: ['tenant_settings', 'voice_sessions'], migrateBy: 'audit 2026-10-23 §4 P1.3',
     why: 'The inbound /voice gate reads owner_phone and the live-call count for the dialled-number tenant on the raw pool; WHERE tenant_id = $1 is the only boundary. One withTenantSession per decision is the fix.',
