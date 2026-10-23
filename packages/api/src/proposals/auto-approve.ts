@@ -309,7 +309,7 @@ import type { UnsupervisedProposalRouting } from '../settings/settings';
 import type { OutboundAnchorKind } from './sms/sms-event';
 import { notifyOwner } from '../notifications/owner-notifications-instance';
 import { hasPermission, isValidRole, type Role } from '../auth/rbac';
-import type { ResolvedApprover } from './approver-identity';
+import type { ApprovalSmsRecipient, ResolvedApprover } from './approver-identity';
 import { voidsCustomerAcceptance } from './acceptance-void';
 
 /** Hard ceiling on one-tap link lifetime (risk note: TTL ≤ 30 minutes). */
@@ -601,7 +601,8 @@ export interface RouteUnsupervisedProposalDeps {
    * role, so the tap approves as them; an unrecognised recipient (null), one
    * whose role cannot approve, or a failed lookup gets no link at all — the
    * review form only. Production wires it at every routing site (app.ts);
-   * absent → the legacy owner link.
+   * absent → the legacy owner link. B3-2 — not asked when the input says
+   * the phone is the owner phone (`recipientVia`).
    */
   resolveLinkApprover?: (tenantId: string, phone: string) => Promise<ResolvedApprover | null>;
   /**
@@ -633,6 +634,14 @@ export interface RouteUnsupervisedProposalInput {
   channel: 'voice_inbound' | 'inapp' | 'sms' | 'other';
   /** Owner's E.164 mobile for the one-tap SMS. Null/undefined skips the SMS. */
   ownerPhone?: string | null;
+  /**
+   * B3-2 — whose phone `ownerPhone` is, as the recipient resolver found it
+   * (`resolveApprovalSmsRecipient`). `owner_phone` is the owner by
+   * definition: no `resolveLinkApprover` lookup, the normal copy and link
+   * rules. Anything else (the backup's mobile, or not said) is looked up and
+   * fails closed when the lookup fails.
+   */
+  recipientVia?: ApprovalSmsRecipient['via'];
   /** Short human label for the SMS body, e.g. "New booking for Jane D." */
   summaryText?: string;
   /**
@@ -765,7 +774,11 @@ export async function routeUnsupervisedProposal(
       // refused as well, so even that form must not ask them for a reply.
       const smsWillGoOut = reviewFormAnyway || Boolean(deps.secret);
       let recipient: ResolvedApprover | null | undefined;
-      if (smsWillGoOut && deps.resolveLinkApprover) {
+      if (input.recipientVia === 'owner_phone') {
+        // B3-2 — the owner phone is the owner by definition; a lookup here
+        // could only fail and cost the owner their approval link.
+        recipient = { role: 'owner', via: 'owner_phone' };
+      } else if (smsWillGoOut && deps.resolveLinkApprover) {
         try {
           recipient = await deps.resolveLinkApprover(input.tenantId, input.ownerPhone);
         } catch (err) {

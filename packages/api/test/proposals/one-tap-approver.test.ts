@@ -75,6 +75,7 @@ describe('B1 — routeUnsupervisedProposal mints the link for its recipient', ()
   function route(
     resolved: Awaited<ReturnType<NonNullable<Parameters<typeof routeUnsupervisedProposal>[0]['resolveLinkApprover']>>> | Error,
     ownerPhone: string,
+    recipientVia?: 'owner_phone' | 'backup_supervisor',
   ) {
     const auditRepo = new InMemoryAuditRepository();
     const sms: { to: string; body: string }[] = [];
@@ -103,6 +104,7 @@ describe('B1 — routeUnsupervisedProposal mints the link for its recipient', ()
         proposalId: 'prop-1',
         channel: 'other',
         ownerPhone,
+        ...(recipientVia ? { recipientVia } : {}),
         summaryText: 'Book Mrs Lee',
         renderSmsBody: (url, form) => {
           forms.push(form);
@@ -152,5 +154,29 @@ describe('B1 — routeUnsupervisedProposal mints the link for its recipient', ()
     expect(r.forms).toEqual([{ recipientCannotApprove: true }]);
     const routed = r.auditRepo.getAll().find((e) => e.eventType === 'unsupervised_proposal_routed');
     expect(routed?.metadata).toMatchObject({ suppressReason: 'recipient_cannot_approve' });
+  });
+
+  // B3-2 — the phone resolver says whose phone it is. The owner phone is the
+  // owner by definition, so a transient lookup failure must not turn the
+  // owner's approval text into the for-your-info form.
+  it('an owner-phone recipient is not looked up: a lookup that would fail still gets the owner link', async () => {
+    const r = route(new Error('settings read timed out'), OWNER_PHONE, 'owner_phone');
+    const result = await r.run;
+
+    expect(r.lookups).toEqual([]);
+    expect(r.forms).toEqual([{ recipientCannotApprove: false }]);
+    expect(result.approveLinkExpiresAt).toBeInstanceOf(Date);
+    expect(Object.keys(payloadOf(tokenIn(r.sms[0].body)!)).sort()).toEqual(['e', 'n', 'p', 't']);
+    expect(r.anchors).toEqual(['proposal_rendered']);
+  });
+
+  it("a backup recipient whose lookup fails still gets no link (fail closed)", async () => {
+    const r = route(new Error('settings read timed out'), BACKUP_PHONE, 'backup_supervisor');
+    const result = await r.run;
+
+    expect(r.lookups).toEqual([BACKUP_PHONE]);
+    expect(result.approveLinkExpiresAt).toBeUndefined();
+    expect(r.sms[0].body).not.toContain('token=');
+    expect(r.forms).toEqual([{ recipientCannotApprove: true }]);
   });
 });

@@ -27,6 +27,7 @@ import {
 import { renderProposalSms, renderChainSms } from '../proposals/sms/render';
 import type { OutboundAnchorKind } from '../proposals/sms/sms-event';
 import type { RouteUnsupervisedProposalDeps } from '../proposals/auto-approve';
+import type { ApprovalSmsRecipient } from '../proposals/approver-identity';
 import type { AuditRepository } from '../audit/audit';
 import type {
   SettingsRepository,
@@ -185,7 +186,12 @@ export interface RecentReferentProvider {
 }
 
 export interface UnsupervisedRoutingDeps extends RouteUnsupervisedProposalDeps {
-  resolveOwnerPhone?: (tenantId: string) => Promise<string | null | undefined>;
+  /**
+   * Where the approval SMS goes (owner phone, else the active backup's
+   * mobile) and — B3-2 — whose phone it is, so an owner-phone text is never
+   * degraded by a second approver lookup (`resolveApprovalSmsRecipient`).
+   */
+  resolveSmsRecipient?: (tenantId: string) => Promise<ApprovalSmsRecipient | null | undefined>;
   resolveRouting?: (tenantId: string) => Promise<UnsupervisedProposalRouting | undefined>;
   /**
    * P2-034 — records the outbound proposal SMS (`proposal_sms_events`,
@@ -2465,7 +2471,7 @@ async function processChain(
     const tenantId = base.tenantId;
     try {
       const routing = await ur.resolveRouting?.(tenantId);
-      const ownerPhone = await ur.resolveOwnerPhone?.(tenantId);
+      const recipient = await ur.resolveSmsRecipient?.(tenantId);
       // Head slot carries the gate-reviewed proposal (N-002 markers); dependents
       // stay as built. renderChainSms + the blocking/token predicates below all
       // read from this ordered list, so the head's supervisor marker propagates.
@@ -2493,7 +2499,8 @@ async function processChain(
           proposalId: reviewedHead.id,
           ...(routing ? { routing } : {}),
           channel: 'other',
-          ...(ownerPhone ? { ownerPhone } : {}),
+          // B3-2 — and whose phone it is (the owner phone needs no lookup).
+          ...(recipient ? { ownerPhone: recipient.phone, recipientVia: recipient.via } : {}),
           summaryText: reviewedHead.summary,
           renderSmsBody: (approveUrl: string, { recipientCannotApprove }) =>
             renderChainSms(
@@ -2870,7 +2877,7 @@ export function createVoiceActionRouterWorker(
           const ur = deps.unsupervisedRouting;
           try {
             const routing = await ur.resolveRouting?.(tenantId);
-            const ownerPhone = await ur.resolveOwnerPhone?.(tenantId);
+            const recipient = await ur.resolveSmsRecipient?.(tenantId);
             // Use the gate-reviewed proposal (carries any N-002 supervisor
             // markers) so the rendered SMS reflects the supervisor findings.
             const proposal = reviewedProposal;
@@ -2919,7 +2926,8 @@ export function createVoiceActionRouterWorker(
                 // Operator voice recordings are not a live inbound call, so
                 // `escalate_to_oncall` falls back to queue_only here by design.
                 channel: 'other',
-                ...(ownerPhone ? { ownerPhone } : {}),
+                // B3-2 — and whose phone it is (the owner phone needs no lookup).
+                ...(recipient ? { ownerPhone: recipient.phone, recipientVia: recipient.via } : {}),
                 summaryText: proposal.summary,
                 // P2-034 — full reply-token body (summary + facts +
                 // "Reply Y/N/EDIT" + the one-tap link).

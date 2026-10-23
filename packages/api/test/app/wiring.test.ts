@@ -224,8 +224,18 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
       /const resolveUnsupervisedOwnerPhone = \(tenantId: string\): Promise<string \| null> =>\s*resolveApprovalSmsPhone\(\{ settingsRepo, userRepo \}, tenantId\);/,
     );
     expect(src).not.toMatch(/backup\?\.mobileNumber/);
-    for (const site of [/resolveOwnerPhone: resolveUnsupervisedOwnerPhone,/g, /ownerPhoneResolver: resolveUnsupervisedOwnerPhone,/g]) {
-      expect(src.match(site)?.length ?? 0).toBeGreaterThan(0);
+    expect(src.match(/resolveOwnerPhone: resolveUnsupervisedOwnerPhone,/g)?.length ?? 0).toBeGreaterThan(0);
+    // B3-2 — the three approval-link senders get the same recipient, with
+    // whose phone it is (the owner phone needs no second lookup).
+    expect(src).toMatch(
+      /const resolveApprovalRecipient = \(tenantId: string\) =>\s*resolveApprovalSmsRecipient\(\{ settingsRepo, userRepo \}, tenantId\);/,
+    );
+    const block = (opener: string) => {
+      const from = src.slice(src.indexOf(`\n    ${opener}`));
+      return from.slice(0, from.indexOf('\n    },'));
+    };
+    for (const opener of ['unsupervisedRouting: {', 'voiceApprovalOneTap: {', 'autonomousClose: {']) {
+      expect(block(opener)).toMatch(/\bresolveSmsRecipient: resolveApprovalRecipient,/);
     }
   });
 

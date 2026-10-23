@@ -478,6 +478,7 @@ import { createMemoCreatorModeLoader } from './workers/memo-creator-mode';
 import {
   isApproverPhone,
   resolveApprovalSmsPhone,
+  resolveApprovalSmsRecipient,
   resolveApproverRole,
   resolveBackupSupervisorApprover,
 } from './proposals/approver-identity';
@@ -1863,11 +1864,17 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     sendSms: oneTapSmsSender,
     secret: oneTapSecret,
   });
-  // Owner/backup-supervisor phone for the unsupervised SMS: tenant_settings
-  // owner_phone first, then the backup supervisor's mobile_number — only
-  // while the backup is an active member (B1 follow-up).
+  // Owner/backup-supervisor phone for the owner texts that only need a number
+  // (PIN-lock alert, weekly HFCR, owner notices): tenant_settings owner_phone
+  // first, then the backup supervisor's mobile_number — only while the backup
+  // is an active member (B1 follow-up).
   const resolveUnsupervisedOwnerPhone = (tenantId: string): Promise<string | null> =>
     resolveApprovalSmsPhone({ settingsRepo, userRepo }, tenantId);
+  // B3-2 — the same recipient for the three approval-link senders, with whose
+  // phone it is: the owner phone is the owner by definition, so its link
+  // needs no second lookup (one that fails would degrade the owner's text).
+  const resolveApprovalRecipient = (tenantId: string) =>
+    resolveApprovalSmsRecipient({ settingsRepo, userRepo }, tenantId);
   // B1 — who a one-tap link sent to that phone approves as: the owner phone
   // mints the plain owner link, the backup supervisor's mobile a link that
   // carries their own role and id, an unrecognised recipient no link at all.
@@ -3224,7 +3231,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // (minted with the same one-tap secret), only when the channel can
       // deliver; without it the router's lane refuses autonomy.
       ...(laneUndoChannel ? { laneUndo: laneUndoChannel } : {}),
-      resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
+      resolveSmsRecipient: resolveApprovalRecipient,
       resolveLinkApprover,
       resolveRouting: async (tenantId: string) =>
         (await settingsRepo.findByTenant(tenantId))?.unsupervisedProposalRouting,
@@ -4235,7 +4242,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       ...(oneTapSecret ? { secret: oneTapSecret } : {}),
       buildApproveUrl: (token: string) =>
         `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
-      resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
+      resolveSmsRecipient: resolveApprovalRecipient,
       resolveLinkApprover,
       recordSmsEvent: recordProposalSmsRender,
     },
@@ -4518,7 +4525,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     autonomousClose: {
       platformDisabled: config.AUTONOMOUS_CLOSE_DISABLED === 'true',
       bookingPlatformDisabled: config.AUTONOMOUS_BOOKING_DISABLED === 'true',
-      ownerPhoneResolver: resolveUnsupervisedOwnerPhone,
+      resolveSmsRecipient: resolveApprovalRecipient,
       resolveLinkApprover,
       ...(oneTapSmsSender ? { sendOwnerSms: oneTapSmsSender } : {}),
       ...(oneTapSecret ? { oneTapSecret } : {}),
