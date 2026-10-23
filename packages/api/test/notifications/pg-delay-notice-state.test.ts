@@ -169,19 +169,21 @@ describe('P0-022 — PgDelayNoticeStateRepository', () => {
   });
 
   describe('PgDelayNoticeState.findByKey', () => {
-    it('PgDelayNoticeState findByKey looks up a row by idempotency_key (parameterized)', async () => {
+    it('PgDelayNoticeState findByKey sets tenant context, then filters by tenant_id AND idempotency_key (parameterized)', async () => {
       const state = makeState();
-      // Note: findByKey uses withClient, NOT withTenant, because the InMemory
-      // interface is locked and does not expose a tenantId. So there is no
-      // SET app.current_tenant_id call before the SELECT.
-      const { pool, calls } = makeMockPool([[rowFor(state)]]);
+      // findByKey runs inside withTenant: calls[0] is the tenant set_config,
+      // calls[1] the lookup. The tenant predicate is a backstop for the case
+      // where the runtime role is off and the GUC alone binds nothing.
+      const { pool, calls } = makeMockPool([undefined, [rowFor(state)]]);
       const repo = new PgDelayNoticeStateRepository(pool);
 
-      const result = await repo.findByKey(state.idempotencyKey);
+      const result = await repo.findByKey(TENANT_A, state.idempotencyKey);
 
-      expect(calls[0].sql).toContain('SELECT * FROM delay_notice_state');
-      expect(calls[0].sql).toMatch(/WHERE\s+idempotency_key\s*=\s*\$1/);
-      expect(calls[0].params).toEqual([state.idempotencyKey]);
+      expect(calls[0].sql).toContain('app.current_tenant_id');
+      expect(calls[0].params).toEqual([TENANT_A]);
+      expect(calls[1].sql).toContain('SELECT * FROM delay_notice_state');
+      expect(calls[1].sql).toMatch(/WHERE\s+tenant_id\s*=\s*\$1\s+AND\s+idempotency_key\s*=\s*\$2/);
+      expect(calls[1].params).toEqual([TENANT_A, state.idempotencyKey]);
 
       expect(result).not.toBeNull();
       expect(result?.idempotencyKey).toBe(state.idempotencyKey);
@@ -190,15 +192,18 @@ describe('P0-022 — PgDelayNoticeStateRepository', () => {
     });
 
     it('PgDelayNoticeState findByKey returns null when no row matches', async () => {
-      const { pool } = makeMockPool([[]]);
+      const { pool } = makeMockPool([undefined, []]);
       const repo = new PgDelayNoticeStateRepository(pool);
-      const result = await repo.findByKey('missing-key');
+      const result = await repo.findByKey(TENANT_A, 'missing-key');
       expect(result).toBeNull();
     });
 
     it('PgDelayNoticeState findByKey releases the connection even when the query throws', async () => {
       const failingClient: Partial<PoolClient> = {
-        query: vi.fn().mockRejectedValueOnce(new Error('pg down')),
+        query: vi.fn(async (sql: string) => {
+          if (/^\s*(BEGIN|ROLLBACK|RESET\b|SET\s+(LOCAL\s+)?ROLE\b)/i.test(sql)) return { rows: [] };
+          throw new Error('pg down');
+        }) as unknown as PoolClient['query'],
         release: vi.fn(),
       };
       const pool: Partial<Pool> = {
@@ -206,7 +211,7 @@ describe('P0-022 — PgDelayNoticeStateRepository', () => {
       };
 
       const repo = new PgDelayNoticeStateRepository(pool as Pool);
-      await expect(repo.findByKey('any-key')).rejects.toThrow('pg down');
+      await expect(repo.findByKey(TENANT_A, 'any-key')).rejects.toThrow('pg down');
       expect(failingClient.release).toHaveBeenCalledTimes(1);
     });
   });

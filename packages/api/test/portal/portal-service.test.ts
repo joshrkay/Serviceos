@@ -126,6 +126,26 @@ describe('P10-001 portal-service: resolvePortalToken', () => {
     const after = await repo.findById(TENANT, id);
     expect(after!.lastAccessedAt).toBeInstanceOf(Date);
   });
+
+  it("touches the session under the session's own tenant (the touch is tenant-scoped)", async () => {
+    const repo = new InMemoryPortalSessionRepository();
+    const touches: Array<{ tenantId: string; id: string }> = [];
+    const original = repo.touchLastAccessed.bind(repo);
+    repo.touchLastAccessed = async (tenantId, id, at) => {
+      touches.push({ tenantId, id });
+      return original(tenantId, id, at);
+    };
+    const { token, id } = await createPortalSession(TENANT, CUSTOMER, ACTOR, repo);
+    await resolvePortalToken(token, repo);
+    expect(touches).toEqual([{ tenantId: TENANT, id }]);
+  });
+
+  it("InMemory touchLastAccessed ignores another tenant's session id", async () => {
+    const repo = new InMemoryPortalSessionRepository();
+    const { id } = await createPortalSession(TENANT, CUSTOMER, ACTOR, repo);
+    await repo.touchLastAccessed(uuidv4(), id, new Date());
+    expect((await repo.findById(TENANT, id))!.lastAccessedAt).toBeUndefined();
+  });
 });
 
 describe('P10-001 portal-service: revokePortalSession', () => {
