@@ -803,14 +803,27 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         // (clerkPrimaryEmail). An unverified address proves nothing about
         // who holds the inbox: it skips the join and falls through to the
         // bootstrap path, like a refused id.
+        const publicMeta = userData.public_metadata as Record<string, unknown> | undefined;
+        const invitationId = publicMeta?.invitation_id as string | undefined;
         if (deps.pendingInvitationRepo && primary && !primary.verified) {
-          logger.warn('user.created primary email is not verified — invitation join skipped', {
-            userId,
-          });
+          // Warn only when the skipped join was an invitation's: the
+          // sign-up carries an invitation id, or a pending invitation
+          // exists for the address. Most unverified sign-ups are ordinary
+          // owners who bootstrap, and a warn on each would bury this case.
+          // The lookup only decides the log line; it grants nothing.
+          const invited =
+            Boolean(invitationId) ||
+            Boolean(
+              await deps.pendingInvitationRepo.findPendingByEmail(primary.address).catch(() => null),
+            );
+          if (invited) {
+            logger.warn('user.created primary email is not verified — invitation join skipped', {
+              userId,
+              ...(invitationId ? { invitationId } : {}),
+            });
+          }
         }
         if (deps.pendingInvitationRepo && primary?.verified && primaryEmail) {
-          const publicMeta = userData.public_metadata as Record<string, unknown> | undefined;
-          const invitationId = publicMeta?.invitation_id as string | undefined;
           let pending = null;
           if (invitationId) {
             if (deps.pendingInvitationRepo.findById) {

@@ -13,12 +13,30 @@
  *
  * Payloads are real-shaped (primary_email_address_id + email_addresses[]
  * with verification), see test/support/clerk-user-created.ts.
+ *
+ * The skipped join is logged at warn only when the sign-up was an
+ * invitation's — it carries an invitation id, or a pending invitation exists
+ * for the address. Most unverified sign-ups are ordinary owners who
+ * bootstrap; warning on every one of them would bury the invitee case.
  */
 import express from 'express';
 import request from 'supertest';
 import crypto from 'crypto';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Pool } from 'pg';
+
+const warn = vi.fn();
+vi.mock('../../src/logging/logger', async (orig) => {
+  const real = await orig<typeof import('../../src/logging/logger')>();
+  return {
+    ...real,
+    createLogger: (opts: Parameters<typeof real.createLogger>[0]) => {
+      const l = real.createLogger(opts);
+      return { ...l, warn: (...a: unknown[]) => warn(...a) };
+    },
+  };
+});
+
 import { createWebhookRouter } from '../../src/webhooks/routes';
 import type { AppConfig } from '../../src/shared/config';
 import { TenantRepository, Tenant } from '../../src/auth/clerk';
@@ -83,6 +101,7 @@ describe('Clerk user.created — invitation join requires a verified primary ema
   let app: express.Express;
 
   beforeEach(() => {
+    warn.mockClear();
     tenantRepo = new FakeTenantRepo();
     findPendingByEmail = vi.fn(async (email: string) => invitation(email));
     findById = vi.fn(async () => invitation('invitee@example.com'));
@@ -132,6 +151,13 @@ describe('Clerk user.created — invitation join requires a verified primary ema
     expect(tenantRepo.created.map((t) => t.ownerId)).toEqual([userId]);
   }
 
+  /** The "join skipped" warns this handler logged, as [message, meta] pairs. */
+  function joinSkippedWarns(): Array<[string, Record<string, unknown>]> {
+    return (warn.mock.calls as Array<[string, Record<string, unknown>]>).filter(([message]) =>
+      /not verified — invitation join skipped/.test(message),
+    );
+  }
+
   it('email fallback: a verified primary address joins the inviting tenant', async () => {
     const res = await post(
       clerkUserCreatedEvent({
@@ -159,8 +185,9 @@ describe('Clerk user.created — invitation join requires a verified primary ema
           emails: [{ address: 'invitee@example.com', status }],
         }),
       );
-      expect(findPendingByEmail).not.toHaveBeenCalled();
       expectBootstrappedNotJoined(res, `user_${status}`);
+      // A pending invitation exists for the address, so the skip is warned.
+      expect(joinSkippedWarns()).toEqual([[expect.any(String), { userId: `user_${status}` }]]);
     },
   );
 
@@ -171,7 +198,6 @@ describe('Clerk user.created — invitation join requires a verified primary ema
         emails: [{ address: 'invitee@example.com', status: null }],
       }),
     );
-    expect(findPendingByEmail).not.toHaveBeenCalled();
     expectBootstrappedNotJoined(res, 'user_noverif');
   });
 
@@ -180,7 +206,6 @@ describe('Clerk user.created — invitation join requires a verified primary ema
       type: 'user.created',
       data: { id: 'user_bare', email_addresses: [{ email_address: 'invitee@example.com' }] },
     });
-    expect(findPendingByEmail).not.toHaveBeenCalled();
     expectBootstrappedNotJoined(res, 'user_bare');
   });
 
@@ -195,7 +220,6 @@ describe('Clerk user.created — invitation join requires a verified primary ema
         primaryIndex: 1,
       }),
     );
-    expect(findPendingByEmail).not.toHaveBeenCalled();
     expectBootstrappedNotJoined(res, 'user_secondary');
   });
 
@@ -226,6 +250,9 @@ describe('Clerk user.created — invitation join requires a verified primary ema
     expect(findById).not.toHaveBeenCalled();
     expect(findPendingByEmail).not.toHaveBeenCalled();
     expectBootstrappedNotJoined(res, 'user_id_unverified');
+    expect(joinSkippedWarns()).toEqual([
+      [expect.any(String), { userId: 'user_id_unverified', invitationId: 'inv-1' }],
+    ]);
   });
 
   it('id lookup: a verified primary address that matches the invitation joins', async () => {
@@ -241,5 +268,57 @@ describe('Clerk user.created — invitation join requires a verified primary ema
     expect(findById).toHaveBeenCalledWith('inv-1');
     expect(findPendingByEmail).not.toHaveBeenCalled();
     expect(userInserts).toHaveLength(1);
+    expect(joinSkippedWarns()).toEqual([]);
+  });
+
+  describe('the skipped-join warn', () => {
+    it('is not logged for an unverified sign-up with no invitation id and no pending invitation', async () => {
+      findPendingByEmail.mockResolvedValue(null);
+      const res = await post(
+        clerkUserCreatedEvent({
+          userId: 'user_owner_unverified',
+          emails: [{ address: 'new-owner@example.com', status: 'unverified' }],
+        }),
+      );
+      expectBootstrappedNotJoined(res, 'user_owner_unverified');
+      expect(findPendingByEmail).toHaveBeenCalledWith('new-owner@example.com');
+      expect(joinSkippedWarns()).toEqual([]);
+    });
+
+    it('is not logged when the pending-invitation lookup fails (no evidence of an invitation)', async () => {
+      findPendingByEmail.mockRejectedValue(new Error('db down'));
+      const res = await post(
+        clerkUserCreatedEvent({
+          userId: 'user_lookup_down',
+          emails: [{ address: 'invitee@example.com', status: 'unverified' }],
+        }),
+      );
+      expectBootstrappedNotJoined(res, 'user_lookup_down');
+      expect(joinSkippedWarns()).toEqual([]);
+    });
+
+    it('is logged once for an unverified sign-up whose address has a pending invitation', async () => {
+      const res = await post(
+        clerkUserCreatedEvent({
+          userId: 'user_invited_unverified',
+          emails: [{ address: 'invitee@example.com', status: 'unverified' }],
+        }),
+      );
+      expectBootstrappedNotJoined(res, 'user_invited_unverified');
+      expect(findPendingByEmail).toHaveBeenCalledTimes(1);
+      expect(joinSkippedWarns()).toEqual([[expect.any(String), { userId: 'user_invited_unverified' }]]);
+    });
+
+    it('is not logged for a verified sign-up with no invitation', async () => {
+      findPendingByEmail.mockResolvedValue(null);
+      const res = await post(
+        clerkUserCreatedEvent({
+          userId: 'user_owner_verified',
+          emails: [{ address: 'new-owner@example.com', status: 'verified' }],
+        }),
+      );
+      expect(res.status).toBe(200);
+      expect(joinSkippedWarns()).toEqual([]);
+    });
   });
 });
