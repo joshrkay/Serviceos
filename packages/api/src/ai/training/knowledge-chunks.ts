@@ -11,11 +11,11 @@ import { PgBaseRepository } from '../../db/pg-base';
  * interface. No caller in main reads or writes today; wiring lands in
  * Phases 3b and 4a.
  *
- * Tenant scoping: the RLS policy on `knowledge_chunks` allows a row to
- * be visible iff `tenant_id IS NULL` (global tier) OR `tenant_id`
- * matches the request's `app.current_tenant_id` GUC. Search runs
- * inside `withTenant(tenantId, ...)` so the policy yields both tiers
- * in a single query without an explicit UNION.
+ * Tenant scoping: a row is visible iff `tenant_id IS NULL` (global tier)
+ * OR `tenant_id` is the asking tenant. Search states that predicate in
+ * its own WHERE, so both tiers come back in a single query without a
+ * UNION, and it also runs inside `withTenant(tenantId, ...)` so the RLS
+ * policy of the same shape enforces it again under the runtime role.
  *
  * Idempotency: every insert uses `ON CONFLICT (scope, source_type,
  * source_id, source_version) DO UPDATE` so the seed workers can
@@ -290,7 +290,11 @@ export class PgKnowledgeChunkRepository extends PgBaseRepository implements Know
     const sourceTypes = opts.sourceTypes;
 
     return this.withTenant(opts.tenantId, async (client) => {
-      const params: unknown[] = [queryLiteral, maxDistance, k];
+      // $4 is the tenant backstop: the WHERE itself bounds retrieval to the
+      // asking tenant plus the global tier, so it holds even where the RLS
+      // policy is inert (RLS_RUNTIME_ROLE unset — the client is then still
+      // the privileged principal).
+      const params: unknown[] = [queryLiteral, maxDistance, k, opts.tenantId];
       let sourceFilter = '';
       if (sourceTypes && sourceTypes.length > 0) {
         sourceFilter = `AND source_type = ANY($${params.length + 1}::text[])`;
@@ -301,6 +305,7 @@ export class PgKnowledgeChunkRepository extends PgBaseRepository implements Know
                 (embedding <=> $1::vector) AS distance
            FROM knowledge_chunks
           WHERE (embedding <=> $1::vector) <= $2
+            AND (tenant_id IS NULL OR tenant_id = $4::uuid)
                 ${sourceFilter}
           ORDER BY embedding <=> $1::vector ASC
           LIMIT $3`,
