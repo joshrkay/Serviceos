@@ -61,6 +61,13 @@ export interface ResolvedApprover {
    * the one-tap actor) exactly as before.
    */
   userId?: string;
+  /**
+   * B4-2 — the backup supervisor's users row id. `userId` is their subject,
+   * which changes when they link a login (row id → Clerk subject); this does
+   * not, so "is this the same person as before" compares it. Absent for the
+   * owner phone.
+   */
+  userRowId?: string;
   via: 'owner_phone' | 'backup_supervisor';
 }
 
@@ -120,12 +127,24 @@ async function activeBackup(
 }
 
 function backupApprover(backup: User & { role: Role }): ResolvedApprover {
-  return { role: backup.role, userId: backup.clerkUserId ?? backup.id, via: 'backup_supervisor' };
+  return { role: backup.role, userId: backup.clerkUserId ?? backup.id, userRowId: backup.id, via: 'backup_supervisor' };
 }
 
 export interface ApprovalSmsRecipientDeps extends ApproverIdentityDeps {
   /** Where the skipped-backup line goes; defaults to this module's logger. */
   logger?: Pick<Logger, 'warn'>;
+}
+
+/** B3-2 — where an approval SMS goes, and whose phone that is. */
+export interface ApprovalSmsRecipient {
+  phone: string;
+  /**
+   * `owner_phone` — the owner by definition: the router needs no approver
+   * lookup (one that fails would turn the owner's approval text into the
+   * for-your-info form). `backup_supervisor` — the backup's mobile; the
+   * router looks up who they approve as and fails closed if it cannot.
+   */
+  via: ResolvedApprover['via'];
 }
 
 /**
@@ -138,13 +157,14 @@ export interface ApprovalSmsRecipientDeps extends ApproverIdentityDeps {
  * audit records smsSent: false), and the skip is logged. The role is NOT
  * checked here — a backup who cannot approve still hears about the work, as
  * a for-your-info text (renderProposalSms `recipientCannotApprove`).
+ * B3-2 — it says which of the two the phone is, from this same read.
  */
-export async function resolveApprovalSmsPhone(
+export async function resolveApprovalSmsRecipient(
   deps: ApprovalSmsRecipientDeps,
   tenantId: string,
-): Promise<string | null> {
+): Promise<ApprovalSmsRecipient | null> {
   const settings = await deps.settingsRepo.findByTenant(tenantId);
-  if (settings?.ownerPhone) return settings.ownerPhone;
+  if (settings?.ownerPhone) return { phone: settings.ownerPhone, via: 'owner_phone' };
   const backupUserId = settings?.backupSupervisorUserId;
   if (!backupUserId || !deps.userRepo) return null;
   const backup = await findActiveTenantMember(deps.userRepo, tenantId, backupUserId);
@@ -155,7 +175,15 @@ export async function resolveApprovalSmsPhone(
     );
     return null;
   }
-  return backup.mobileNumber ?? null;
+  return backup.mobileNumber ? { phone: backup.mobileNumber, via: 'backup_supervisor' } : null;
+}
+
+/** The approval SMS phone alone (`resolveApprovalSmsRecipient`), for the owner alerts that only need a number. */
+export async function resolveApprovalSmsPhone(
+  deps: ApprovalSmsRecipientDeps,
+  tenantId: string,
+): Promise<string | null> {
+  return (await resolveApprovalSmsRecipient(deps, tenantId))?.phone ?? null;
 }
 
 /**

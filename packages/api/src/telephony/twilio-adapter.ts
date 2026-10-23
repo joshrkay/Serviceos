@@ -80,7 +80,7 @@ import {
   injectSafetySayLines,
 } from './shared/safety-say-lines';
 import { isBlockedCallerId } from '../ai/voice-turn/shared/blocked-caller-id';
-import { resolveOwnerLineApprover } from '../ai/voice-turn/shared/owner-session';
+import { ownerLineStamp, resolveOwnerLineApprover } from '../ai/voice-turn/shared/owner-session';
 import { switchSessionLanguage } from '../ai/voice-turn/shared/language-switch';
 import {
   queueCallbackProposal as queueCallbackProposalShared,
@@ -1217,12 +1217,7 @@ export class TwilioGatherAdapter {
     // stays as defense-in-depth but is no longer the sole source.
     if (opts.from) session.callerPhone = opts.from;
     if (opts.stirVerstat) session.stirVerstat = opts.stirVerstat;
-    if (ownerSession && lineApprover) {
-      session.ownerLineApprover = {
-        role: lineApprover.role,
-        ...(lineApprover.userId ? { userId: lineApprover.userId } : {}),
-      };
-    }
+    if (ownerSession && lineApprover) session.ownerLineApprover = ownerLineStamp(lineApprover);
     if (approverCallerId) {
       if (!ownerSession) session.ownerLineUnverified = true;
       this.auditOwnerLineAttestation(session, opts.stirVerstat, ownerSession);
@@ -1233,12 +1228,15 @@ export class TwilioGatherAdapter {
     // carry only the ownerSession boolean. Fail-soft: never blocks the call.
     // #1223 — the actor is a caller-ID identity too (a registered mobile), so
     // it is only resolved on an A-attested call; otherwise no actor.
+    // B4-1 — it is told which owner line the caller-ID was recognised as (on an
+    // attested call, `lineApprover` is exactly the owner line), so a backup's
+    // line is authorised as that backup or nobody, never as the owner.
     const actor = attested
       ? await resolvePhoneActor(
           { ...(this.deps.userRepo ? { userRepo: this.deps.userRepo } : {}) },
           opts.tenantId,
           opts.from,
-          ownerSession,
+          ownerSession ? lineApprover : null,
         )
       : null;
     if (actor) {
@@ -2171,6 +2169,9 @@ export class TwilioGatherAdapter {
     session: VoiceSession,
     tenantId: string,
   ): Promise<SideEffect[] | null> {
+    // B3-1 / B4-4 — a silence is a turn too: the owner line is re-checked
+    // first, as the speech turns do, and the approval step below uses that.
+    await this.processor.refreshOwnerLine(session, tenantId);
     const approvalTurn = await this.processor.handlePendingVoiceApproval(session, '', tenantId);
     if (approvalTurn) {
       await this.processor.executeSideEffects(session, approvalTurn, tenantId);
@@ -2363,6 +2364,10 @@ export class TwilioGatherAdapter {
         timing: { transport: 'gather', sttFinalAt: new Date() },
       });
     }
+
+    // B3-1 — the owner line's privileges as of this turn (re-checked from
+    // the pinned caller-ID), before anything below reads them.
+    await this.processor.refreshOwnerLine(session, opts.tenantId);
 
     // RV-140 — shared deterministic safety scan (see
     // runDeterministicSafetyScan). Runs after the transcript append so the

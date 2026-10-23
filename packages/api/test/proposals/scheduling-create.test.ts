@@ -7,6 +7,7 @@ import { InMemoryAppointmentRepository, createAppointment } from '../../src/appo
 import { FeasibilityDependencies } from '../../src/scheduling/feasibility-types';
 import { noSkillConstraints } from '../helpers/no-skill-constraints';
 import { HaversineFallbackProvider } from '../../src/scheduling/travel-time/haversine-fallback';
+import { InMemoryTransactionRunner } from '../../src/db/tenant-transaction';
 
 describe('POST /api/proposals — scheduling create with version + feasibility gates', () => {
   let app: express.Express;
@@ -41,7 +42,7 @@ describe('POST /api/proposals — scheduling create with version + feasibility g
     app = express();
     app.use(express.json());
     app.use((req: any, _r, n) => { req.auth = { tenantId, userId: 'user-1', role: 'dispatcher' }; n(); });
-    app.use('/api/proposals', createProposalsRouter(proposalRepo, appointmentRepo, undefined, feasibilityDeps));
+    app.use('/api/proposals', createProposalsRouter(proposalRepo, new InMemoryTransactionRunner(), appointmentRepo, undefined, feasibilityDeps));
   });
 
   function send(over: Record<string, unknown> = {}, headers: Record<string, string> = {}) {

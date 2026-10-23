@@ -346,6 +346,7 @@ import {
 } from './shared/low-stt-ladder';
 import { createLogger } from '../../logging/logger';
 import { resolveOwnerLineApprover } from './shared/owner-session';
+import type { ApprovalSmsRecipient, ResolvedApprover } from '../../proposals/approver-identity';
 import type { UserRepository } from '../../users/user';
 import type { VoiceApprovalSessionRef } from '../tasks/proposal-approval-task';
 import {
@@ -873,8 +874,8 @@ export interface VoiceTurnProcessorDeps {
     platformDisabled?: boolean;
     /** AUTONOMOUS_BOOKING_DISABLED === 'true' — the composed D-015 leg. */
     bookingPlatformDisabled?: boolean;
-    /** Owner phone for the one-tap approval chain SMS. */
-    ownerPhoneResolver?: (tenantId: string) => Promise<string | null | undefined>;
+    /** Owner phone for the one-tap approval chain SMS, and (B3-2) whose phone it is. */
+    resolveSmsRecipient?: (tenantId: string) => Promise<ApprovalSmsRecipient | null | undefined>;
     /** Owner-class SMS sender (never customer-gated). */
     sendOwnerSms?: (to: string, body: string) => Promise<void>;
     /** One-tap HMAC secret (approve token). */
@@ -941,8 +942,10 @@ export interface VoiceTurnProcessorDeps {
   /**
    * B1 follow-up — with `settingsRepo`, re-resolves the owner line's approver
    * (role + active membership, `resolveOwnerLineApprover`) at every voice
-   * approve / reject / edit turn. The Gather adapter passes its own through
-   * the deps spread. Absent → a caller-ID-established line approves nothing.
+   * approve / reject / edit turn, and (B3-1) at the start of every turn for
+   * the line's other privileges (`refreshOwnerLine`). The Gather adapter
+   * passes its own through the deps spread. Absent → a caller-ID-established
+   * backup line approves nothing and keeps no owner-line privilege.
    */
   userRepo?: Pick<UserRepository, 'findById'>;
   /**
@@ -1151,6 +1154,18 @@ export interface VoiceTurnProcessor {
     speechResult: string,
     tenantId: string,
   ): Promise<SideEffect[] | null>;
+  /**
+   * B3-1 — re-check a caller-ID-established owner line at the start of a
+   * turn, before anything reads its privileges (`ownerSession`,
+   * `extendedIntents`, `actorUserId`): kept while the line still resolves,
+   * dropped for the turn when it does not. `speechTurn` runs it first; the
+   * Gather loop, which drives the turn itself, calls it at its own start, and
+   * so does the silence turn (`handlePendingDialogueSilence`). B4-4 — the
+   * turn's approval step reuses its answer.
+   * Resolves who the line approves as now (null: it no longer resolves),
+   * or undefined — a no-op — for a session with no `ownerLineApprover`.
+   */
+  refreshOwnerLine(session: VoiceSession, tenantId: string): Promise<ResolvedApprover | null | undefined>;
   /**
    * WS18 — consume the turn when an on-call SMS-consent capture is pending
    * on the session (the caller's utterance is the yes/no answer to "is it
@@ -3595,6 +3610,9 @@ export function createVoiceTurnProcessor(
   const ownRevocationTx: TenantTransactionRunner = deps.pool
     ? new PgTenantTransactionRunner(deps.pool)
     : new InMemoryTransactionRunner();
+  // The in-place path uses InMemoryTransactionRunner even with a pool: its
+  // scope.lock is a process-local mutex, not an advisory lock, so code run
+  // here must not rely on lock() to serialize across instances.
   const revocationTx: Pick<TenantTransactionRunner, 'run'> = {
     run: (tenantId, fn) =>
       currentTenantContext()?.tenantId === tenantId
@@ -4078,23 +4096,46 @@ export function createVoiceTurnProcessor(
   }
 
   /**
-   * B1 follow-up — who the line approves as AT THIS TURN. The telephony
-   * establishment stamps `ownerLineApprover` from the caller-ID once; a line
-   * carrying it is re-resolved from that same caller-ID (role + active
-   * membership) before every approve / reject / edit step — the way a one-tap
-   * link re-checks when tapped — so a backup demoted, deactivated or replaced
-   * mid-call acts as who they are now: a technician is turned away, and a
-   * caller-ID that no longer names an approver (or cannot be looked up) is no
-   * owner line for approvals at all. A session whose owner authority did not
-   * come from caller-ID (in-app) carries no stamp and is the owner, as before.
+   * B3-1 — the owner line's privileges for THIS turn. The telephony
+   * establishment stamps `ownerLineApprover` from the caller-ID once, with
+   * `ownerSession`, `extendedIntents` and the phone actor (`actorUserId`, the
+   * subject every owner lookup is authorised by). A line carrying the stamp
+   * is re-resolved from that same caller-ID (role + active membership,
+   * `resolveOwnerLineApprover`) at the start of every turn and before every
+   * approval step: while it resolves, the line keeps what it was granted at
+   * pick-up; on a turn where it does not (the backup deactivated or replaced
+   * mid-call, the owner phone changed, the lookup failed, or it now resolves
+   * to someone other than who the line was picked up as) the caller is an
+   * unrecognised caller for that turn: no owner session, no extended
+   * lookups, no actor. A later turn that resolves the line again restores
+   * them. Returns who the line approves as now, null when it no longer
+   * resolves, or undefined for a session whose owner authority did not come
+   * from caller-ID (in-app, a harness fixture) — that session is untouched.
+   * B4-4 — the answer is kept on the session for this turn's approval step
+   * (`currentApprovalLine`), so an approval turn reads the line once.
    */
-  async function currentApprovalLine(
+  async function refreshOwnerLine(
     session: VoiceSession,
     tenantId: string,
-  ): Promise<Pick<VoiceApprovalSessionRef, 'ownerSession' | 'approver'>> {
-    const ownerSession = session.machine.currentContext.ownerSession === true;
-    if (!ownerSession || !session.ownerLineApprover) return { ownerSession };
-    const now = await resolveOwnerLineApprover(
+  ): Promise<ResolvedApprover | null | undefined> {
+    if (!session.ownerLineApprover) return undefined;
+    const now = await recheckOwnerLine(session, session.ownerLineApprover, tenantId);
+    session.ownerLineThisTurn = { approver: now };
+    return now;
+  }
+
+  /** The re-check itself (`refreshOwnerLine`): resolve the line, set or drop its privileges. */
+  async function recheckOwnerLine(
+    session: VoiceSession,
+    pickedUpAs: NonNullable<VoiceSession['ownerLineApprover']>,
+    tenantId: string,
+  ): Promise<ResolvedApprover | null> {
+    // What establishment granted, recorded before the first re-check can drop it.
+    const grant = (session.ownerLineGrant ??= {
+      extendedIntents: session.machine.currentContext.extendedIntents === true,
+      ...(session.actorUserId ? { actorUserId: session.actorUserId } : {}),
+    });
+    const resolved = await resolveOwnerLineApprover(
       {
         ...(deps.settingsRepo ? { settingsRepo: deps.settingsRepo } : {}),
         ...(deps.userRepo ? { userRepo: deps.userRepo } : {}),
@@ -4102,7 +4143,46 @@ export function createVoiceTurnProcessor(
       tenantId,
       session.callerPhone,
     );
-    if (!now) return { ownerSession: false };
+    // The grant belongs to whoever the line was picked up as: the owner phone
+    // (no users row) or that one backup (their users row — B4-2: not their
+    // subject, which changes when they link a login mid-call). A caller-ID
+    // that now resolves to someone else (the owner phone moved to the
+    // backup's mobile, another teammate made backup on it) is not that line:
+    // it gets nothing while it does, and only a turn that names the same
+    // person again gets the grant back.
+    const now = resolved && resolved.userRowId === pickedUpAs.userRowId ? resolved : null;
+    session.machine.setOwnerLinePrivileges({
+      ownerSession: now !== null,
+      extendedIntents: now !== null && grant.extendedIntents,
+    });
+    if (now !== null && grant.actorUserId) session.actorUserId = grant.actorUserId;
+    else delete session.actorUserId;
+    return now;
+  }
+
+  /**
+   * B1 follow-up — who the line approves as AT THIS STEP, re-checked before
+   * every approve / reject / edit step — the way a one-tap link re-checks
+   * when tapped — so a backup demoted, deactivated or replaced mid-call acts
+   * as who they are now: a technician is turned away, and a caller-ID that
+   * no longer names an approver (or cannot be looked up) is no owner line for
+   * approvals at all. A session whose owner authority did not come from
+   * caller-ID (in-app) carries no stamp and is the owner, as before.
+   * B4-4 — the check is the one this turn ran at its start
+   * (`refreshOwnerLine`), taken once: a second settings + users read on the
+   * same turn told it nothing new. A step that finds none re-checks now. A
+   * turn whose check failed (lookup error) refuses its step — fail closed,
+   * the same turn the lookups were refused.
+   */
+  async function currentApprovalLine(
+    session: VoiceSession,
+    tenantId: string,
+  ): Promise<Pick<VoiceApprovalSessionRef, 'ownerSession' | 'approver'>> {
+    if (!session.ownerLineApprover) return { ownerSession: session.machine.currentContext.ownerSession === true };
+    const turnCheck = session.ownerLineThisTurn;
+    delete session.ownerLineThisTurn;
+    const now = turnCheck ? turnCheck.approver : await recheckOwnerLine(session, session.ownerLineApprover, tenantId);
+    if (now === null) return { ownerSession: false };
     return { ownerSession: true, approver: { role: now.role, ...(now.userId ? { userId: now.userId } : {}) } };
   }
 
@@ -4313,8 +4393,8 @@ export function createVoiceTurnProcessor(
                   ...(ac.oneTapSecret ? { secret: ac.oneTapSecret } : {}),
                   ...(ac.buildApproveUrl ? { buildApproveUrl: ac.buildApproveUrl } : {}),
                   ...(ac.resolveLinkApprover ? { resolveLinkApprover: ac.resolveLinkApprover } : {}),
-                  ...(ac.ownerPhoneResolver
-                    ? { ownerPhoneResolver: ac.ownerPhoneResolver }
+                  ...(ac.resolveSmsRecipient
+                    ? { resolveSmsRecipient: ac.resolveSmsRecipient }
                     : {}),
                 },
               }
@@ -5932,6 +6012,10 @@ export function createVoiceTurnProcessor(
       });
     }
 
+    // B3-1 — the owner line's privileges as of this turn, before anything
+    // below reads them.
+    await refreshOwnerLine(session, tenantId);
+
     // RV-071 — an in-flight owner approval dialogue consumes the turn
     // BEFORE the FSM-state branch (including silence: an empty utterance
     // is "anything else" → no action, keep for later). #962 (PR-B): gated
@@ -6744,6 +6828,7 @@ export function createVoiceTurnProcessor(
     resolveThresholdOverride,
     runSummary,
     handlePendingVoiceApproval,
+    refreshOwnerLine,
     handlePendingConsentCapture,
     handleVoiceApprovalIntent,
     handleVoiceEditIntent,

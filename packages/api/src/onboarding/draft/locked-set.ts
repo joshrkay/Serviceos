@@ -11,6 +11,14 @@
  * cannot deadlock, and nothing else can move a member between the decision and
  * the write: the worker's `claimForExecution` and the inbox's per-proposal undo
  * both wait on these row locks and then see the committed outcome.
+ *
+ * That is Postgres. Without a pool this read locks nothing (see
+ * InMemoryProposalRepository.findByIdsForUpdate), so each writer's member
+ * writes are conditional on the status it decided from (`updateStatusIf`,
+ * `resetFailedForRetry`) and the draft write compares the version: no write
+ * overwrites a change another writer made, and one that misses refuses. What
+ * memory cannot give is all-or-nothing: the member writes made before such a
+ * refusal stay, since nothing rolls back without a pool.
  */
 import type { Proposal, ProposalRepository } from '../../proposals/proposal';
 import { MISSING_PROPOSAL, type DraftProposalsFact } from '../derive-status';

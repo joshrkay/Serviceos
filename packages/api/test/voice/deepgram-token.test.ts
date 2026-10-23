@@ -98,6 +98,25 @@ describe('Story 3.2 — mintDeepgramStreamToken', () => {
     ).rejects.toBeInstanceOf(DeepgramTokenMintError);
   });
 
+  it('gives up with a mint error when Deepgram does not answer in time', async () => {
+    const fetchImpl = vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(init.signal!.reason));
+        }),
+    ) as unknown as typeof fetch;
+    await expect(
+      mintDeepgramStreamToken({ apiKey: 'k', fetchImpl, timeoutMs: 20 }),
+    ).rejects.toBeInstanceOf(DeepgramTokenMintError);
+  });
+
+  it('bounds the grant request by default', async () => {
+    const fetchImpl = okFetch({ access_token: 't', expires_in: 30 });
+    await mintDeepgramStreamToken({ apiKey: 'k', fetchImpl });
+    const [, init] = (fetchImpl as unknown as ReturnType<typeof vi.fn>).mock.calls[0];
+    expect((init as RequestInit).signal).toBeInstanceOf(AbortSignal);
+  });
+
   it('wraps a network failure as a mint error', async () => {
     const fetchImpl = vi.fn(async () => {
       throw new Error('ECONNREFUSED');

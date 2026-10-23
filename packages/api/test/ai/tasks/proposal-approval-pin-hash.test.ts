@@ -52,7 +52,7 @@ function makeHashHarness(pin = '4271') {
       },
       secret: 'test-secret',
       buildApproveUrl: (token) => `https://x.test/approve?token=${token}`,
-      resolveOwnerPhone: async () => '+15125550100',
+      resolveSmsRecipient: async () => ({ phone: '+15125550100', via: 'owner_phone' as const }),
       recordSmsEvent: async () => {},
     },
   };

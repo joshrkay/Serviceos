@@ -309,7 +309,7 @@ import type { UnsupervisedProposalRouting } from '../settings/settings';
 import type { OutboundAnchorKind } from './sms/sms-event';
 import { notifyOwner } from '../notifications/owner-notifications-instance';
 import { hasPermission, isValidRole, type Role } from '../auth/rbac';
-import type { ResolvedApprover } from './approver-identity';
+import type { ApprovalSmsRecipient, ResolvedApprover } from './approver-identity';
 import { voidsCustomerAcceptance } from './acceptance-void';
 
 /** Hard ceiling on one-tap link lifetime (risk note: TTL ≤ 30 minutes). */
@@ -348,19 +348,28 @@ interface OneTapPayload {
    */
   c?: true;
   /**
-   * B1 — the recipient's user id and role, present (both) ONLY on a link
-   * sent to someone other than the owner (the backup supervisor, when the
-   * tenant has no owner phone). The route approves as them. OMITTED for an
-   * owner link so its shape (and byte-identity) is unchanged.
+   * B1 — the recipient's user id (subject) and role, present (both) ONLY on
+   * a link sent to someone other than the owner (the backup supervisor, when
+   * the tenant has no owner phone). The route approves as them. OMITTED for
+   * an owner link so its shape (and byte-identity) is unchanged.
    */
   u?: string;
   r?: Role;
+  /**
+   * B4-2 parity — the recipient's users row id, beside `u` on a link minted
+   * for the backup. `u` is their subject, which changes when they link a
+   * login; this does not, so the tap compares it. A link minted before it
+   * rode in the token has none (subjects are compared).
+   */
+  i?: string;
 }
 
 /** B1 — who a one-tap link approves as when its recipient is not the owner. */
 export interface OneTapApprover {
   userId: string;
   role: Role;
+  /** B4-2 parity — their users row id (`ResolvedApprover.userRowId`). */
+  userRowId?: string;
 }
 
 function sign(payloadB64: string, secret: string): string {
@@ -432,7 +441,13 @@ export function createOneTapApproveToken(
     // tokens; omitted otherwise so the legacy approve shape stays byte-identical.
     ...(action === 'approve' && input.confirm ? { c: true as const } : {}),
     // B1 — a non-owner recipient's identity; omitted for an owner link.
-    ...(action === 'approve' && input.approver ? { u: input.approver.userId, r: input.approver.role } : {}),
+    ...(action === 'approve' && input.approver
+      ? {
+          u: input.approver.userId,
+          r: input.approver.role,
+          ...(input.approver.userRowId ? { i: input.approver.userRowId } : {}),
+        }
+      : {}),
   };
   const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
   const token = `${payloadB64}.${sign(payloadB64, input.secret)}`;
@@ -509,7 +524,10 @@ export async function verifyOneTapApproveToken(
       (typeof payload.u !== 'string' ||
         payload.u.length === 0 ||
         typeof payload.r !== 'string' ||
-        !isValidRole(payload.r)))
+        !isValidRole(payload.r))) ||
+    // B4-2 parity: the users row id rides only with a recipient, non-empty.
+    (payload.i !== undefined &&
+      (payload.u === undefined || typeof payload.i !== 'string' || payload.i.length === 0))
   ) {
     return { ok: false, reason: 'malformed' };
   }
@@ -536,7 +554,13 @@ export async function verifyOneTapApproveToken(
     ...(payload.c === true ? { confirm: true as const } : {}),
     // B1 — the non-owner recipient the route approves as.
     ...(payload.u !== undefined && payload.r !== undefined
-      ? { approver: { userId: payload.u, role: payload.r } }
+      ? {
+          approver: {
+            userId: payload.u,
+            role: payload.r,
+            ...(payload.i !== undefined ? { userRowId: payload.i } : {}),
+          },
+        }
       : {}),
   };
 }
@@ -601,7 +625,8 @@ export interface RouteUnsupervisedProposalDeps {
    * role, so the tap approves as them; an unrecognised recipient (null), one
    * whose role cannot approve, or a failed lookup gets no link at all — the
    * review form only. Production wires it at every routing site (app.ts);
-   * absent → the legacy owner link.
+   * absent → the legacy owner link. B3-2 — not asked when the input says
+   * the phone is the owner phone (`recipientVia`).
    */
   resolveLinkApprover?: (tenantId: string, phone: string) => Promise<ResolvedApprover | null>;
   /**
@@ -633,6 +658,14 @@ export interface RouteUnsupervisedProposalInput {
   channel: 'voice_inbound' | 'inapp' | 'sms' | 'other';
   /** Owner's E.164 mobile for the one-tap SMS. Null/undefined skips the SMS. */
   ownerPhone?: string | null;
+  /**
+   * B3-2 — whose phone `ownerPhone` is, as the recipient resolver found it
+   * (`resolveApprovalSmsRecipient`). `owner_phone` is the owner by
+   * definition: no `resolveLinkApprover` lookup, the normal copy and link
+   * rules. Anything else (the backup's mobile, or not said) is looked up and
+   * fails closed when the lookup fails.
+   */
+  recipientVia?: ApprovalSmsRecipient['via'];
   /** Short human label for the SMS body, e.g. "New booking for Jane D." */
   summaryText?: string;
   /**
@@ -765,7 +798,11 @@ export async function routeUnsupervisedProposal(
       // refused as well, so even that form must not ask them for a reply.
       const smsWillGoOut = reviewFormAnyway || Boolean(deps.secret);
       let recipient: ResolvedApprover | null | undefined;
-      if (smsWillGoOut && deps.resolveLinkApprover) {
+      if (input.recipientVia === 'owner_phone') {
+        // B3-2 — the owner phone is the owner by definition; a lookup here
+        // could only fail and cost the owner their approval link.
+        recipient = { role: 'owner', via: 'owner_phone' };
+      } else if (smsWillGoOut && deps.resolveLinkApprover) {
         try {
           recipient = await deps.resolveLinkApprover(input.tenantId, input.ownerPhone);
         } catch (err) {
@@ -794,7 +831,13 @@ export async function routeUnsupervisedProposal(
           ...(input.confirmNonCapture ? { confirm: true } : {}),
           // B1 — a link to anyone but the owner approves as them.
           ...(recipient && recipient.via !== 'owner_phone' && recipient.userId
-            ? { approver: { userId: recipient.userId, role: recipient.role } }
+            ? {
+                approver: {
+                  userId: recipient.userId,
+                  role: recipient.role,
+                  ...(recipient.userRowId ? { userRowId: recipient.userRowId } : {}),
+                },
+              }
             : {}),
           ...(input.nowMs !== undefined ? { nowMs: input.nowMs } : {}),
         });

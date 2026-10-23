@@ -495,6 +495,43 @@ describe('Postgres integration — assignee must be an active tenant member (#14
       expect(changed.status).toBe(400);
       expect(changed.body.message).toBe("That team member can't approve work, so they can't be your backup.");
     });
+
+    // B3-3 — the active-member check ran on the unchanged value too, so a
+    // client re-sending a backup deactivated since (users.status
+    // 'suspended') got a 400 on every save. Only a NEW backup must be active.
+    it('accepts the unchanged backup after they were deactivated; a new inactive or foreign one is refused', async () => {
+      const backup = await makeUser(tenantA.tenantId, 'dispatcher');
+      const set = await request(app).put('/api/settings').send({ backupSupervisorUserId: backup });
+      expect(set.status).toBe(200);
+      await pool.query(`UPDATE users SET status = 'suspended' WHERE tenant_id = $1 AND id = $2`, [
+        tenantA.tenantId,
+        backup,
+      ]);
+
+      const res = await request(app)
+        .put('/api/settings')
+        .send({ backupSupervisorUserId: backup, unsupervisedProposalRouting: 'queue_only' });
+      expect(res.status).toBe(200);
+      const { rows } = await pool.query(
+        `SELECT backup_supervisor_user_id, unsupervised_proposal_routing FROM tenant_settings WHERE tenant_id = $1`,
+        [tenantA.tenantId],
+      );
+      expect(rows[0]).toEqual({ backup_supervisor_user_id: backup, unsupervised_proposal_routing: 'queue_only' });
+
+      for (const other of [
+        await makeUser(tenantA.tenantId, 'dispatcher', { status: 'suspended' }),
+        await makeUser(tenantB.tenantId, 'dispatcher'),
+      ]) {
+        const changed = await request(app).put('/api/settings').send({ backupSupervisorUserId: other });
+        expect(changed.status).toBe(400);
+        expect(changed.body.details).toMatchObject({ field: 'backupSupervisorUserId' });
+      }
+      const { rows: after } = await pool.query(
+        `SELECT backup_supervisor_user_id FROM tenant_settings WHERE tenant_id = $1`,
+        [tenantA.tenantId],
+      );
+      expect(after[0]).toEqual({ backup_supervisor_user_id: backup });
+    });
   });
 
   describe('POST /api/time-entries/clock-in userId (office clocks in on behalf)', () => {

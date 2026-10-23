@@ -51,6 +51,21 @@ describe('B1 — the one-tap token carries a non-owner recipient', () => {
     });
   });
 
+  // B4-2 parity — the subject (`u`) changes when the backup links a login;
+  // the users row id does not, so the tap compares it (one-tap route).
+  it("round-trips the recipient's users row id beside their subject", async () => {
+    const { token } = createOneTapApproveToken({
+      proposalId: 'p-1',
+      tenantId: 't-1',
+      secret: SECRET,
+      approver: { userId: 'clerk-backup', role: 'dispatcher', userRowId: 'row-backup' },
+    });
+    expect(payloadOf(token)).toMatchObject({ u: 'clerk-backup', r: 'dispatcher', i: 'row-backup' });
+    await expect(verify(token)).resolves.toMatchObject({
+      approver: { userId: 'clerk-backup', role: 'dispatcher', userRowId: 'row-backup' },
+    });
+  });
+
   it('an owner token is unchanged: exactly p, t, n, e and no approver on verify', async () => {
     const { token } = createOneTapApproveToken({ proposalId: 'p-1', tenantId: 't-1', secret: SECRET });
     expect(Object.keys(payloadOf(token)).sort()).toEqual(['e', 'n', 'p', 't']);
@@ -62,6 +77,9 @@ describe('B1 — the one-tap token carries a non-owner recipient', () => {
     ['a user id without a role', { u: 'clerk-backup' }],
     ['a role without a user id', { r: 'dispatcher' }],
     ['an empty user id', { u: '', r: 'dispatcher' }],
+    ['a users row id without a recipient', { i: 'row-backup' }],
+    ['an empty users row id', { u: 'clerk-backup', r: 'dispatcher', i: '' }],
+    ['a users row id that is not a string', { u: 'clerk-backup', r: 'dispatcher', i: 42 }],
   ])('a signed token with %s is malformed', async (_label, claims) => {
     const { token } = createOneTapApproveToken({ proposalId: 'p-1', tenantId: 't-1', secret: SECRET });
     await expect(verify(resign({ ...payloadOf(token), ...claims }))).resolves.toEqual({
@@ -75,6 +93,7 @@ describe('B1 — routeUnsupervisedProposal mints the link for its recipient', ()
   function route(
     resolved: Awaited<ReturnType<NonNullable<Parameters<typeof routeUnsupervisedProposal>[0]['resolveLinkApprover']>>> | Error,
     ownerPhone: string,
+    recipientVia?: 'owner_phone' | 'backup_supervisor',
   ) {
     const auditRepo = new InMemoryAuditRepository();
     const sms: { to: string; body: string }[] = [];
@@ -103,6 +122,7 @@ describe('B1 — routeUnsupervisedProposal mints the link for its recipient', ()
         proposalId: 'prop-1',
         channel: 'other',
         ownerPhone,
+        ...(recipientVia ? { recipientVia } : {}),
         summaryText: 'Book Mrs Lee',
         renderSmsBody: (url, form) => {
           forms.push(form);
@@ -115,15 +135,18 @@ describe('B1 — routeUnsupervisedProposal mints the link for its recipient', ()
 
   const tokenIn = (body: string) => body.match(/token=([A-Za-z0-9._-]+)/)?.[1];
 
-  it("the backup's link carries their user id and role", async () => {
-    const r = route({ role: 'dispatcher', userId: 'clerk-backup', via: 'backup_supervisor' }, BACKUP_PHONE);
+  it("the backup's link carries their user id, role and users row id", async () => {
+    const r = route(
+      { role: 'dispatcher', userId: 'clerk-backup', userRowId: 'row-backup', via: 'backup_supervisor' },
+      BACKUP_PHONE,
+    );
     await r.run;
 
     expect(r.lookups).toEqual([BACKUP_PHONE]);
     const token = tokenIn(r.sms[0].body)!;
-    expect(payloadOf(token)).toMatchObject({ u: 'clerk-backup', r: 'dispatcher' });
+    expect(payloadOf(token)).toMatchObject({ u: 'clerk-backup', r: 'dispatcher', i: 'row-backup' });
     await expect(verify(token)).resolves.toMatchObject({
-      approver: { userId: 'clerk-backup', role: 'dispatcher' },
+      approver: { userId: 'clerk-backup', role: 'dispatcher', userRowId: 'row-backup' },
     });
   });
 
@@ -152,5 +175,29 @@ describe('B1 — routeUnsupervisedProposal mints the link for its recipient', ()
     expect(r.forms).toEqual([{ recipientCannotApprove: true }]);
     const routed = r.auditRepo.getAll().find((e) => e.eventType === 'unsupervised_proposal_routed');
     expect(routed?.metadata).toMatchObject({ suppressReason: 'recipient_cannot_approve' });
+  });
+
+  // B3-2 — the phone resolver says whose phone it is. The owner phone is the
+  // owner by definition, so a transient lookup failure must not turn the
+  // owner's approval text into the for-your-info form.
+  it('an owner-phone recipient is not looked up: a lookup that would fail still gets the owner link', async () => {
+    const r = route(new Error('settings read timed out'), OWNER_PHONE, 'owner_phone');
+    const result = await r.run;
+
+    expect(r.lookups).toEqual([]);
+    expect(r.forms).toEqual([{ recipientCannotApprove: false }]);
+    expect(result.approveLinkExpiresAt).toBeInstanceOf(Date);
+    expect(Object.keys(payloadOf(tokenIn(r.sms[0].body)!)).sort()).toEqual(['e', 'n', 'p', 't']);
+    expect(r.anchors).toEqual(['proposal_rendered']);
+  });
+
+  it("a backup recipient whose lookup fails still gets no link (fail closed)", async () => {
+    const r = route(new Error('settings read timed out'), BACKUP_PHONE, 'backup_supervisor');
+    const result = await r.run;
+
+    expect(r.lookups).toEqual([BACKUP_PHONE]);
+    expect(result.approveLinkExpiresAt).toBeUndefined();
+    expect(r.sms[0].body).not.toContain('token=');
+    expect(r.forms).toEqual([{ recipientCannotApprove: true }]);
   });
 });

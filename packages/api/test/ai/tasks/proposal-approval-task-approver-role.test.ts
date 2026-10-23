@@ -9,7 +9,7 @@
  * resolves the line's approver once (`resolveApproverRole`) and carries it on
  * the session; every turn acts with it.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   startVoiceApproval,
   startVoiceEdit,
@@ -203,7 +203,7 @@ describe('B1 — the voice one-tap fallback link approves as its recipient', () 
       },
       secret: 'voice-b1-secret',
       buildApproveUrl: (token) => `https://x.test/approve?token=${token}`,
-      resolveOwnerPhone: async () => '+15125550111',
+      resolveSmsRecipient: async () => ({ phone: '+15125550111', via: 'backup_supervisor' as const }),
       resolveLinkApprover: async () => ({ role: 'dispatcher', userId: BACKUP_SUBJECT, via: 'backup_supervisor' }),
     };
     await seed(h.proposalRepo, {
@@ -233,7 +233,7 @@ describe('B1 — the voice one-tap fallback link approves as its recipient', () 
       },
       secret: 'voice-b1-secret',
       buildApproveUrl: (token) => `https://x.test/approve?token=${token}`,
-      resolveOwnerPhone: async () => '+15125550111',
+      resolveSmsRecipient: async () => ({ phone: '+15125550111', via: 'backup_supervisor' as const }),
       resolveLinkApprover: async () => ({ role: 'technician', userId: BACKUP_SUBJECT, via: 'backup_supervisor' }),
     };
     await seed(h.proposalRepo, {
@@ -247,5 +247,109 @@ describe('B1 — the voice one-tap fallback link approves as its recipient', () 
     expect(sent).toHaveLength(1);
     expect(sent[0].body).toContain('For your info — the owner needs to review this in the app.');
     expect(sent[0].body).not.toMatch(/approve in the app|reply N|EDIT|token=/);
+  });
+});
+
+// B3-2 — the fallback texts the phone the recipient resolver picked, then
+// asks who that phone approves as. A lookup that failed there used to read
+// as "cannot approve", so the OWNER was sent the for-your-info text with no
+// link. The owner phone is the owner by definition and is not looked up; a
+// backup whose lookup fails still gets no link.
+describe('B3-2 — the voice one-tap fallback when the link lookup fails after the phone was picked', () => {
+  function failingLookupHarness(recipient: { phone: string; via: 'owner_phone' | 'backup_supervisor' }) {
+    const h = makeHarness();
+    const sent: { to: string; body: string }[] = [];
+    const resolveLinkApprover = vi.fn(async () => {
+      throw new Error('settings read timed out');
+    });
+    h.deps.oneTapFallback = {
+      sendSms: async (to, body) => {
+        sent.push({ to, body });
+      },
+      secret: 'voice-b3-2-secret',
+      buildApproveUrl: (token) => `https://x.test/approve?token=${token}`,
+      resolveSmsRecipient: async () => recipient,
+      resolveLinkApprover,
+    };
+    return { ...h, sent, resolveLinkApprover };
+  }
+  const seedPayment = (repo: InMemoryProposalRepository) =>
+    seed(repo, {
+      proposalType: 'record_payment',
+      payload: { customerName: 'Acme Corp', amountCents: 20000 },
+      summary: 'Record $200 payment from Acme',
+    });
+
+  async function expectOwnerLink(sent: { to: string; body: string }[], proposalId: string) {
+    expect(sent).toHaveLength(1);
+    expect(sent[0].to).toBe('+15125550100');
+    expect(sent[0].body).toContain('Tap the link to approve, reply N to reject, or EDIT to change.');
+    expect(sent[0].body).not.toContain('For your info');
+    const token = sent[0].body.match(/token=([A-Za-z0-9._-]+)/)![1];
+    const verified = await verifyOneTapApproveToken({
+      token,
+      secret: 'voice-b3-2-secret',
+      consumeNonce: createInMemoryNonceStore(),
+    });
+    expect(verified).toMatchObject({ ok: true, proposalId, confirm: true });
+    // The plain owner link: no backup identity rides on it.
+    expect(verified).not.toHaveProperty('approver');
+  }
+
+  it('a refused money approval on the owner line still texts the owner the link', async () => {
+    const h = failingLookupHarness({ phone: '+15125550100', via: 'owner_phone' });
+    const proposal = await seedPayment(h.proposalRepo);
+
+    const result = await startVoiceApproval(h.deps, {
+      ...lineRef({ role: 'owner' }),
+      action: 'approve',
+      reference: 'the Acme payment',
+    });
+
+    expect(result.outcome).toBe('refused_challenge_unset');
+    expect(result.speak).toBe('That one needs a tap to confirm — I’ve sent you a text link.');
+    await expectOwnerLink(h.sent, proposal.id);
+    expect(h.resolveLinkApprover).not.toHaveBeenCalled();
+    const routed = h.auditRepo.getAll().find((e) => e.eventType === 'unsupervised_proposal_routed');
+    expect(routed?.metadata).toMatchObject({ smsSent: true });
+    expect(routed?.metadata).not.toHaveProperty('suppressReason');
+  });
+
+  it('the confirm-stage fallback (the PIN cleared mid-call) texts the owner the link too', async () => {
+    const h = failingLookupHarness({ phone: '+15125550100', via: 'owner_phone' });
+    h.deps.settingsRepo = {
+      findByTenant: async () => ({
+        ownerPhone: '+15125550100',
+        escalationSettings: { voice_approval_challenge: '4271' },
+      }),
+    } as unknown as SettingsRepository;
+    const proposal = await seedPayment(h.proposalRepo);
+    const owner = lineRef({ role: 'owner' });
+
+    const start = await startVoiceApproval(h.deps, { ...owner, action: 'approve', reference: 'the Acme payment' });
+    expect(start.outcome).toBe('readback');
+    h.deps.settingsRepo = {
+      findByTenant: async () => ({ ownerPhone: '+15125550100', escalationSettings: {} }),
+    } as unknown as SettingsRepository;
+    const result = await continueVoiceApproval(h.deps, { ...owner, utterance: 'yes, approve it', pending: start.pending! });
+
+    expect(result.outcome).toBe('refused_challenge_unset');
+    await expectOwnerLink(h.sent, proposal.id);
+    expect(h.resolveLinkApprover).not.toHaveBeenCalled();
+  });
+
+  it("the backup's mobile fails closed: the for-your-info text, no link", async () => {
+    const h = failingLookupHarness({ phone: '+15125550111', via: 'backup_supervisor' });
+    await seedPayment(h.proposalRepo);
+
+    await startVoiceApproval(h.deps, { ...backupDispatcher, action: 'approve', reference: 'the Acme payment' });
+
+    expect(h.resolveLinkApprover).toHaveBeenCalledWith(TENANT, '+15125550111');
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0].to).toBe('+15125550111');
+    expect(h.sent[0].body).toContain('For your info — the owner needs to review this in the app.');
+    expect(h.sent[0].body).not.toMatch(/Tap the link|reply N|EDIT|token=/);
+    const routed = h.auditRepo.getAll().find((e) => e.eventType === 'unsupervised_proposal_routed');
+    expect(routed?.metadata).toMatchObject({ approveLinkSuppressed: true, suppressReason: 'recipient_cannot_approve' });
   });
 });
