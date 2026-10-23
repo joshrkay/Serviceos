@@ -26,6 +26,7 @@ import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryCorrectionLessonRepository } from '../../src/learning/corrections/correction-lesson';
 import { FakeConfigPorts } from '../../src/learning/corrections/lesson-applicator';
 import { recordCorrectionLessons } from '../../src/learning/corrections/apply-undo';
+import { InMemoryTransactionRunner } from '../../src/db/tenant-transaction';
 
 const baseInput: CreateProposalInput = {
   tenantId: TEST_TENANT_ID,
@@ -48,7 +49,7 @@ function buildAppWithRole(role: Role): { app: Express; proposalRepo: InMemoryPro
     next();
   });
   const proposalRepo = new InMemoryProposalRepository();
-  app.use('/api/proposals', createProposalsRouter(proposalRepo));
+  app.use('/api/proposals', createProposalsRouter(proposalRepo, new InMemoryTransactionRunner()));
   return { app, proposalRepo };
 }
 
@@ -93,7 +94,7 @@ async function buildSchedulingAppWithRole(role: Role) {
     };
     next();
   });
-  app.use('/api/proposals', createProposalsRouter(proposalRepo, appointmentRepo, undefined, feasibilityDeps));
+  app.use('/api/proposals', createProposalsRouter(proposalRepo, new InMemoryTransactionRunner(), appointmentRepo, undefined, feasibilityDeps));
   return { app, proposalRepo, appointmentRepo, appointment };
 }
 
@@ -417,7 +418,7 @@ describe('POST /api/proposals/:id/undo', () => {
     const auditRepo = new InMemoryAuditRepository();
     const lessonRepo = new InMemoryCorrectionLessonRepository();
     const ports = new FakeConfigPorts({ laborRateCents: 11500 });
-    app.use('/api/proposals', createProposalsRouter(proposalRepo, undefined, auditRepo, undefined, { lessonRepo, ports }));
+    app.use('/api/proposals', createProposalsRouter(proposalRepo, new InMemoryTransactionRunner(), undefined, auditRepo, undefined, { lessonRepo, ports }));
 
     // Seeded executed: the status-write gate refuses draft → executed.
     const proposal = { ...createProposal(baseInput), status: 'executed' as const };
@@ -519,7 +520,7 @@ describe('RV-073 — UI route approvals/rejections tag channel ui', () => {
     });
     const proposalRepo = new InMemoryProposalRepository();
     const auditRepo = new InMemoryAuditRepository();
-    app.use('/api/proposals', createProposalsRouter(proposalRepo, undefined, auditRepo));
+    app.use('/api/proposals', createProposalsRouter(proposalRepo, new InMemoryTransactionRunner(), undefined, auditRepo));
     return { app, proposalRepo, auditRepo };
   }
 

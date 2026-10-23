@@ -14,7 +14,9 @@
 import { describe, it, expect, vi } from 'vitest';
 import express from 'express';
 import request from 'supertest';
-import { EventEmitter } from 'node:events';
+import { EventEmitter, once } from 'node:events';
+import { request as httpRequest, type IncomingMessage } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import type { Pool, PoolClient, QueryResult } from 'pg';
@@ -29,6 +31,7 @@ import {
 } from '../../src/middleware/tenant-context';
 import { PgBaseRepository } from '../../src/db/pg-base';
 import { asyncRoute } from '../../src/middleware/async-route';
+import { escalationEventsRouter } from '../../src/escalations/events-route';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
 const TENANT_A = '11111111-1111-1111-1111-111111111111';
@@ -586,6 +589,15 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       ['post', '/api/onboarding/conversation/turn'],
       // A1 — the "which Bob?" pick re-drafts through the task handler's LLM call.
       ['post', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity'],
+      // The website "About us" draft awaits the tenant_site_about LLM call.
+      ['post', '/api/tenant-site/about/draft'],
+      // Speech synthesis: each clip awaits the TTS provider (30s timeout each).
+      ['post', '/api/voice/tts'],
+      ['post', '/api/voice/tts/batch'],
+      // Speech-to-text: the upload, then the Whisper call (60s timeout).
+      ['post', '/api/voice/transcribe'],
+      // The Deepgram grant fetch has no deadline of its own.
+      ['post', '/api/voice/stream-token'],
     ] as const)('%s %s holds no request transaction', async (method, path) => {
       const seen = await probe(method, path);
       expect(seen).toEqual({ connects: 0, began: false, storeAtHandler: undefined });
@@ -611,10 +623,27 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       ['post', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-line'],
       ['get', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity'],
       ['post', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity/extra'],
+      // The rest of the website routes keep the request transaction.
+      ['get', '/api/tenant-site/about'],
+      ['get', '/api/tenant-site/about/draft'],
+      ['post', '/api/tenant-site/publish'],
+      ['post', '/api/tenant-site/about/draft/extra'],
       // A nested router sharing the suffix does not inherit the bypass.
       ['post', '/api/admin/voice/sessions'],
       ['post', '/api/leads/estimates/suggest'],
       ['post', '/api/admin/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity'],
+      ['post', '/api/admin/tenant-site/about/draft'],
+      // The cached-clip read and the other voice routes keep it.
+      ['get', '/api/voice/tts/clip/0123abcd'],
+      ['get', '/api/voice/tts'],
+      ['post', '/api/voice/tts/batch/extra'],
+      ['post', '/api/voice/recordings'],
+      ['post', '/api/admin/voice/tts'],
+      ['get', '/api/voice/transcribe'],
+      ['post', '/api/voice/transcribe/extra'],
+      ['post', '/api/admin/voice/transcribe'],
+      ['get', '/api/voice/stream-token'],
+      ['post', '/api/admin/voice/stream-token'],
     ] as const)('%s %s still opens the transaction', async (method, path) => {
       const seen = await probe(method, path);
       expect(seen.connects).toBe(1);
@@ -639,6 +668,12 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       ['post', '/api/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity/'],
       ['post', '/api/Proposals/3f1c9a52-0000-4000-8000-000000000004/Resolve-Entity'],
       ['post', '/api/ASSISTANT/CHAT/'],
+      ['post', '/api/tenant-site/about/draft/'],
+      ['post', '/api/Tenant-Site/About/Draft'],
+      ['post', '/api/voice/tts/'],
+      ['post', '/api/Voice/TTS/Batch/'],
+      ['post', '/api/voice/Transcribe/'],
+      ['post', '/api/Voice/Stream-Token/'],
     ] as const)('%s %s (trailing slash / letter case) holds no request transaction', async (method, path) => {
       const seen = await probe(method, path);
       expect(seen).toEqual({ connects: 0, began: false, storeAtHandler: undefined });
@@ -665,6 +700,13 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       ['post', '/api/admin/voice/quality/grade/'],
       ['post', '/api/admin/voice/sessions/'],
       ['post', '/api/admin/proposals/3f1c9a52-0000-4000-8000-000000000004/resolve-entity/'],
+      ['post', '/api/tenant-site/about/draft//'],
+      ['post', '/api/tenant-site/about/draft/extra/'],
+      ['post', '/api/admin/tenant-site/about/draft/'],
+      ['post', '/api/voice/tts//'],
+      ['post', '/api/voice/tts/batch/extra/'],
+      ['post', '/api/voice/transcribe//'],
+      ['post', '/api/voice/stream-token/extra'],
     ] as const)('%s %s still opens the transaction', async (method, path) => {
       const seen = await probe(method, path);
       expect(seen.connects).toBe(1);
@@ -700,6 +742,257 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       expect(storeAtHandler).toBeUndefined();
       expect((pool.connect as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
       expect(calls.some((c) => /^\s*BEGIN/i.test(c.sql))).toBe(false);
+    });
+  });
+
+  // A3-5 — the SSE stream bypass had the A-R4 gap: its patterns were
+  // suffix-only and case-sensitive with no trailing slash. Express reaches the
+  // same stream handler for `/escalations/events/` and `/Escalations/Events`,
+  // and those forms held a request transaction and a pooled connection for
+  // the whole life of the stream - the pool-exhaustion shape the bypass
+  // exists to prevent. Suffix-only also let a nested router sharing the
+  // suffix inherit the bypass.
+  describe('A3-5 — SSE stream routes bypass the request transaction the way Express routes them', () => {
+    const SESSION = '3f1c9a52-0000-4000-8000-000000000005';
+
+    async function probe(method: 'get' | 'head' | 'post', path: string) {
+      const { pool, calls } = makeMockPool();
+      let storeAtHandler: unknown = 'unset';
+      const app = express();
+      app.use((req, _res, next) => {
+        (req as AuthenticatedRequest).auth = { userId: 'u1', sessionId: 's1', tenantId: TENANT_A, role: 'owner' };
+        next();
+      });
+      app.use('/api', withTenantTransaction(pool));
+      app.all('/api/*splat', (_req, res) => {
+        storeAtHandler = currentTenantContext();
+        res.json({ ok: true });
+      });
+      const response = await request(app)[method](path);
+      expect(response.status).toBe(200);
+      return {
+        connects: (pool.connect as unknown as ReturnType<typeof vi.fn>).mock.calls.length,
+        began: calls.some((c) => /^\s*BEGIN/i.test(c.sql)),
+        storeAtHandler,
+      };
+    }
+
+    it.each([
+      '/api/escalations/events',
+      '/api/escalations/events/',
+      '/api/Escalations/Events',
+      '/api/ESCALATIONS/EVENTS/',
+      '/api/dispatch/board/events',
+      '/api/dispatch/board/events/',
+      '/api/Dispatch/Board/Events',
+      `/api/voice/sessions/${SESSION}/events`,
+      `/api/voice/sessions/${SESSION}/events/`,
+      `/api/Voice/Sessions/${SESSION}/EVENTS`,
+    ])('GET %s holds no request transaction', async (path) => {
+      const seen = await probe('get', path);
+      expect(seen).toEqual({ connects: 0, began: false, storeAtHandler: undefined });
+    });
+
+    // R-1 — Express sends HEAD to a route's GET handler when the route has no
+    // HEAD handler of its own, so HEAD reaches the same stream handler. Inside
+    // the request transaction it held a pooled connection until the client
+    // closed the socket, one per keep-alive socket.
+    it.each([
+      '/api/escalations/events',
+      '/api/escalations/events/',
+      '/api/Escalations/Events',
+      '/api/dispatch/board/events',
+      '/api/dispatch/board/events/',
+      '/api/Dispatch/Board/Events',
+      `/api/voice/sessions/${SESSION}/events`,
+      `/api/voice/sessions/${SESSION}/events/`,
+      `/api/Voice/Sessions/${SESSION}/EVENTS`,
+    ])('HEAD %s holds no request transaction', async (path) => {
+      const seen = await probe('head', path);
+      expect(seen).toEqual({ connects: 0, began: false, storeAtHandler: undefined });
+    });
+
+    it.each([
+      // Other methods, with or without the slash.
+      ['post', '/api/escalations/events'],
+      ['post', '/api/escalations/events/'],
+      ['post', '/api/dispatch/board/events/'],
+      ['post', `/api/voice/sessions/${SESSION}/events/`],
+      // The optional slash is one slash at the very end, nothing more.
+      ['get', '/api/escalations/events//'],
+      ['get', '/api/escalations/events/extra'],
+      ['get', '/api/dispatch/board/events/extra/'],
+      ['get', `/api/voice/sessions/${SESSION}/events/extra`],
+      // The session id is exactly one segment.
+      ['get', '/api/voice/sessions/events'],
+      ['get', '/api/voice/sessions//events'],
+      ['get', `/api/voice/sessions/${SESSION}/x/events`],
+      // Nested routers sharing a suffix inherit nothing, with or without it.
+      ['get', '/api/admin/escalations/events'],
+      ['get', '/api/admin/escalations/events/'],
+      ['get', '/api/admin/dispatch/board/events'],
+      ['get', '/api/reports/dispatch/board/events/'],
+      ['get', `/api/admin/voice/sessions/${SESSION}/events`],
+      ['get', `/api/admin/voice/sessions/${SESSION}/events/`],
+      // HEAD gets the GET bypass and nothing wider.
+      ['head', '/api/escalations/events//'],
+      ['head', '/api/escalations/events/extra'],
+      ['head', `/api/voice/sessions/${SESSION}/x/events`],
+      ['head', '/api/admin/escalations/events'],
+      ['head', '/api/admin/dispatch/board/events/'],
+      ['head', `/api/admin/voice/sessions/${SESSION}/events`],
+    ] as const)('%s %s still opens the transaction', async (method, path) => {
+      const seen = await probe(method, path);
+      expect(seen.connects).toBe(1);
+      expect(seen.began).toBe(true);
+    });
+
+    /**
+     * The production mounts: each stream's router at its /api/<name> prefix
+     * with a GET handler only, as app.ts mounts them, plus a nested router
+     * that shares every suffix. Requests go through Express's own routing
+     * (not strict, not case-sensitive, HEAD served by the GET handler).
+     */
+    async function routeThroughProductionMounts(method: 'get' | 'head', path: string) {
+      const { pool, calls } = makeMockPool();
+      const reached: { stream: string; method: string; inTx: boolean }[] = [];
+      const app = express();
+      app.use((req, _res, next) => {
+        (req as AuthenticatedRequest).auth = { userId: 'u1', sessionId: 's1', tenantId: TENANT_A, role: 'owner' };
+        next();
+      });
+      app.use('/api', withTenantTransaction(pool));
+      const handler = (name: string) => (req: express.Request, res: express.Response) => {
+        reached.push({
+          stream: req.params.id ? `${name}:${req.params.id}` : name,
+          method: req.method,
+          inTx: currentTenantContext() !== undefined,
+        });
+        res.json({ ok: true });
+      };
+      const escalations = express.Router();
+      escalations.get('/events', handler('escalations'));
+      const dispatch = express.Router();
+      dispatch.get('/board/events', handler('dispatch'));
+      const voice = express.Router();
+      voice.get('/:id/events', handler('voice'));
+      const admin = express.Router();
+      admin.get('/escalations/events', handler('admin-escalations'));
+      admin.get('/dispatch/board/events', handler('admin-dispatch'));
+      admin.get('/voice/sessions/:id/events', handler('admin-voice'));
+      app.use('/api/escalations', escalations);
+      app.use('/api/dispatch', dispatch);
+      app.use('/api/voice/sessions', voice);
+      app.use('/api/admin', admin);
+
+      const response = await request(app)[method](path);
+
+      expect(response.status).toBe(200);
+      return {
+        reached,
+        connects: (pool.connect as unknown as ReturnType<typeof vi.fn>).mock.calls.length,
+        began: calls.some((c) => /^\s*BEGIN/i.test(c.sql)),
+      };
+    }
+
+    it.each([
+      ['escalations', '/api/escalations/events/'],
+      ['escalations', '/api/Escalations/Events'],
+      ['dispatch', '/api/dispatch/board/events/'],
+      ['dispatch', '/api/DISPATCH/board/EVENTS'],
+      ['voice', `/api/voice/sessions/${SESSION}/events/`],
+      ['voice', `/api/Voice/Sessions/${SESSION}/Events`],
+    ] as const)('Express routes GET %s stream %s to its handler, and it runs with no request transaction', async (stream, path) => {
+      const seen = await routeThroughProductionMounts('get', path);
+      expect(seen).toEqual({
+        reached: [{ stream: stream === 'voice' ? `voice:${SESSION}` : stream, method: 'GET', inTx: false }],
+        connects: 0,
+        began: false,
+      });
+    });
+
+    it.each([
+      ['escalations', '/api/escalations/events'],
+      ['escalations', '/api/escalations/events/'],
+      ['escalations', '/api/Escalations/Events'],
+      ['dispatch', '/api/dispatch/board/events'],
+      ['dispatch', '/api/dispatch/board/events/'],
+      ['dispatch', '/api/DISPATCH/board/EVENTS'],
+      ['voice', `/api/voice/sessions/${SESSION}/events`],
+      ['voice', `/api/voice/sessions/${SESSION}/events/`],
+      ['voice', `/api/Voice/Sessions/${SESSION}/Events`],
+    ] as const)('Express routes HEAD %s stream %s to its GET handler, and it runs with no request transaction', async (stream, path) => {
+      const seen = await routeThroughProductionMounts('head', path);
+      expect(seen).toEqual({
+        reached: [{ stream: stream === 'voice' ? `voice:${SESSION}` : stream, method: 'HEAD', inTx: false }],
+        connects: 0,
+        began: false,
+      });
+    });
+
+    // The real escalation stream handler flushes its headers and never ends
+    // the response. Before R-1, a HEAD to it held the request transaction's
+    // pooled connection until the client closed the socket.
+    it('HEAD to the real escalation stream holds no pooled connection while the stream stays open', async () => {
+      const { pool, calls } = makeMockPool();
+      const unsubscribe = vi.fn();
+      let subscribed = false;
+      const app = express();
+      app.use((req, _res, next) => {
+        (req as AuthenticatedRequest).auth = { userId: 'u1', sessionId: 's1', tenantId: TENANT_A, role: 'owner' };
+        next();
+      });
+      app.use('/api', withTenantTransaction(pool));
+      app.use(
+        '/api/escalations',
+        escalationEventsRouter({
+          authUserIdFromRequest: async () => 'u1',
+          authTenantIdFromRequest: async () => TENANT_A,
+          subscribeToVoiceEvents: () => {
+            subscribed = true;
+            return unsubscribe;
+          },
+        }),
+      );
+      const server = app.listen(0);
+      try {
+        await once(server, 'listening');
+        const { port } = server.address() as AddressInfo;
+        const req = httpRequest({ method: 'HEAD', host: '127.0.0.1', port, path: '/api/escalations/events' });
+        req.end();
+        const [res] = (await once(req, 'response')) as [IncomingMessage];
+
+        // Headers are out and the stream is open: the handler subscribed and
+        // has not ended the response.
+        expect(res.statusCode).toBe(200);
+        expect(res.headers['content-type']).toMatch(/text\/event-stream/);
+        expect(subscribed).toBe(true);
+        expect(unsubscribe).not.toHaveBeenCalled();
+        expect((pool.connect as unknown as ReturnType<typeof vi.fn>).mock.calls.length).toBe(0);
+        expect(calls.some((c) => /^\s*BEGIN/i.test(c.sql))).toBe(false);
+
+        req.destroy();
+        await vi.waitFor(() => expect(unsubscribe).toHaveBeenCalledTimes(1));
+      } finally {
+        server.closeAllConnections();
+        server.close();
+      }
+    });
+
+    it.each([
+      ['admin-escalations', '/api/admin/escalations/events'],
+      ['admin-escalations', '/api/admin/escalations/events/'],
+      ['admin-dispatch', '/api/admin/dispatch/board/events'],
+      ['admin-dispatch', '/api/Admin/Dispatch/Board/Events/'],
+      ['admin-voice', `/api/admin/voice/sessions/${SESSION}/events`],
+      ['admin-voice', `/api/admin/voice/sessions/${SESSION}/events/`],
+    ] as const)('HEAD to the nested %s router at %s still runs inside the request transaction', async (stream, path) => {
+      const seen = await routeThroughProductionMounts('head', path);
+      expect(seen).toEqual({
+        reached: [{ stream: stream === 'admin-voice' ? `admin-voice:${SESSION}` : stream, method: 'HEAD', inTx: true }],
+        connects: 1,
+        began: true,
+      });
     });
   });
 

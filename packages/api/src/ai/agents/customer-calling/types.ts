@@ -405,8 +405,11 @@ export interface CallingAgentContext {
    * RV-070 — true when the inbound caller-ID matched an approver phone
    * (`tenant_settings.owner_phone` or the backup supervisor's mobile,
    * normalized — same identity logic as the SMS reply transport; see
-   * `proposals/approver-identity.ts`). Set ONCE where the session is
+   * `proposals/approver-identity.ts`). Set where the session is
    * established (telephony adapter) and never from utterance content.
+   * B3-1 — a caller-ID-established line is re-checked from that caller-ID
+   * before every turn and loses this (and `extendedIntents`) for a turn on
+   * which it no longer resolves (`CallingAgentStateMachine.setOwnerLinePrivileges`).
    *
    * Inert for every existing FSM flow — the transition table does not
    * read it. It gates the voice approval channel (RV-071): the
@@ -415,7 +418,7 @@ export interface CallingAgentContext {
    */
   ownerSession?: boolean;
   /**
-   * Phase-2 Track A — resolved once at session establishment from the
+   * Phase-2 Track A — resolved at session establishment from the
    * tenant `voice_extended_intents` flag + owner session (#1588: the flag
    * is default-ON — `flags/voice-flags.ts` — so every owner session carries
    * this unless the tenant opted out). When true the

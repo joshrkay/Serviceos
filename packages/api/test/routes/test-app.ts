@@ -34,6 +34,7 @@ import { permissiveTenantOwnership } from '../../src/shared/tenant-ownership';
 import { InMemoryQueue } from '../../src/queues/queue';
 import { NoopFeedbackDispatcher } from '../../src/feedback/dispatcher';
 import { MockPaymentLinkProvider } from '../../src/payments/payment-link-provider';
+import { InMemoryTransactionRunner } from '../../src/db/tenant-transaction';
 
 export const TEST_TENANT_ID = 'tenant-test-1';
 export const TEST_USER_ID = 'user-test-1';
@@ -163,7 +164,7 @@ export async function buildTestApp(): Promise<TestApp> {
     createPaymentRouter(paymentRepo, invoiceRepo, jobRepo, estimateRepo, auditRepo),
   );
   app.use('/api/appointments', createAppointmentRouter(appointmentRepo, ownership, jobRepo, timelineRepo, { settingsRepo }));
-  app.use('/api/proposals', createProposalsRouter(proposalRepo));
+  app.use('/api/proposals', createProposalsRouter(proposalRepo, new InMemoryTransactionRunner()));
 
   return { app, jobRepo, customerRepo, estimateRepo, invoiceRepo, paymentRepo, appointmentRepo, assignmentRepo, proposalRepo, settingsRepo, auditRepo, agreementRepo };
 }

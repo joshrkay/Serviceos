@@ -11,7 +11,7 @@ import { createVoiceActionRouterWorker } from '../../src/workers/voice-action-ro
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { verifyOneTapApproveToken, createInMemoryNonceStore } from '../../src/proposals/auto-approve';
-import { resolveApprovalSmsPhone, resolveApproverRole } from '../../src/proposals/approver-identity';
+import { resolveApprovalSmsRecipient, resolveApproverRole } from '../../src/proposals/approver-identity';
 import type { SettingsRepository } from '../../src/settings/settings';
 import type { User, UserRepository } from '../../src/users/user';
 import {
@@ -110,7 +110,7 @@ describe('voice-action-router — P12-004 unsupervised routing', () => {
         sendSms,
         secret: 'test-secret',
         buildApproveUrl: (token) => `https://api.example.com/approve?token=${token}`,
-        resolveOwnerPhone: async () => '+15125550100',
+        resolveSmsRecipient: async () => ({ phone: '+15125550100', via: 'owner_phone' as const }),
         resolveRouting: async () => 'queue_and_sms',
       },
     });
@@ -157,7 +157,7 @@ describe('voice-action-router — P12-004 unsupervised routing', () => {
         sendSms,
         secret: 'test-secret',
         buildApproveUrl: (token) => `https://api.example.com/approve?token=${token}`,
-        resolveOwnerPhone: async () => '+15125550111',
+        resolveSmsRecipient: async () => ({ phone: '+15125550111', via: 'backup_supervisor' as const }),
         resolveLinkApprover: async (_tenantId, phone) => {
           lookups.push(phone);
           return { role: 'dispatcher', userId: 'clerk-backup', via: 'backup_supervisor' };
@@ -197,7 +197,7 @@ describe('voice-action-router — P12-004 unsupervised routing', () => {
         sendSms,
         secret: 'test-secret',
         buildApproveUrl: (token) => `https://api.example.com/approve?token=${token}`,
-        resolveOwnerPhone: async () => '+15125550111',
+        resolveSmsRecipient: async () => ({ phone: '+15125550111', via: 'backup_supervisor' as const }),
         resolveLinkApprover: async () => ({ role: 'technician', userId: 'clerk-tech', via: 'backup_supervisor' }),
         resolveRouting: async () => 'queue_and_sms',
         recordSmsEvent,
@@ -255,7 +255,7 @@ describe('voice-action-router — P12-004 unsupervised routing', () => {
           sendSms,
           secret: 'test-secret',
           buildApproveUrl: (token) => `https://api.example.com/approve?token=${token}`,
-          resolveOwnerPhone: (tenantId) => resolveApprovalSmsPhone({ settingsRepo, userRepo }, tenantId),
+          resolveSmsRecipient: (tenantId) => resolveApprovalSmsRecipient({ settingsRepo, userRepo }, tenantId),
           resolveLinkApprover: (tenantId, phone) => resolveApproverRole({ settingsRepo, userRepo }, tenantId, phone),
           resolveRouting: async () => 'queue_and_sms',
         },
@@ -283,6 +283,81 @@ describe('voice-action-router — P12-004 unsupervised routing', () => {
       expect(sendSms).not.toHaveBeenCalled();
       expect(proposal.status).toBe('ready_for_review');
       expect(routed?.metadata).toMatchObject({ requestedRouting: 'queue_and_sms', smsSent: false });
+    });
+  });
+
+  // B3-2 — the recipient lookup ran again for every outgoing text, and a
+  // failure became "cannot approve": a settings read that failed just after
+  // the phone was picked sent the OWNER the for-your-info form. The owner
+  // phone is the owner by definition and is not looked up again; a backup
+  // whose lookup fails still gets no link.
+  describe('a link lookup that fails after the phone was picked, as production wires it', () => {
+    const BACKUP_ID = 'user-backup';
+    function settingsFailingAfterFirstRead(ownerPhone: string | undefined): SettingsRepository {
+      let reads = 0;
+      return {
+        findByTenant: async () => {
+          reads += 1;
+          if (reads > 1) throw new Error('settings read timed out');
+          return { ownerPhone, backupSupervisorUserId: BACKUP_ID };
+        },
+      } as unknown as SettingsRepository;
+    }
+    const userRepo: Pick<UserRepository, 'findById'> = {
+      findById: async (tenantId: string, id: string) =>
+        id === BACKUP_ID
+          ? ({ id, tenantId, role: 'dispatcher', clerkUserId: 'clerk-backup', mobileNumber: '+15125550111', status: 'active' } as User)
+          : null,
+    };
+
+    async function route(ownerPhone: string | undefined) {
+      const sendSms = vi.fn(async (_to: string, _body: string) => {});
+      const settingsRepo = settingsFailingAfterFirstRead(ownerPhone);
+      const worker = createVoiceActionRouterWorker({
+        tenantSchedulingResolver: async () => ({ timezone: 'America/Phoenix' }),
+        gateway: bookingGateway(),
+        proposalRepo,
+        unsupervisedRouting: {
+          auditRepo,
+          sendSms,
+          secret: 'test-secret',
+          buildApproveUrl: (token) => `https://api.example.com/approve?token=${token}`,
+          resolveSmsRecipient: (tenantId) => resolveApprovalSmsRecipient({ settingsRepo, userRepo }, tenantId),
+          resolveLinkApprover: (tenantId, phone) => resolveApproverRole({ settingsRepo, userRepo }, tenantId, phone),
+          resolveRouting: async () => 'queue_and_sms',
+        },
+      });
+      await worker.handle(
+        msg({ tenantId: 't-unsup', userId: 'u-1', transcript: 'Book Mrs Lee next Tuesday at 2pm' }),
+        silentLogger(),
+      );
+      const [proposal] = await proposalRepo.findByTenant('t-unsup');
+      return { sendSms, proposal };
+    }
+
+    it('the owner phone still gets the approval link and the normal reply prompt', async () => {
+      const { sendSms, proposal } = await route('+15125550100');
+
+      expect(sendSms).toHaveBeenCalledTimes(1);
+      const [to, body] = sendSms.mock.calls[0];
+      expect(to).toBe('+15125550100');
+      expect(body).toContain('https://api.example.com/approve?token=');
+      expect(body).toMatch(/Reply Y/);
+      expect(body).not.toContain('For your info');
+      const routed = (await auditRepo.findByEntity('t-unsup', 'proposal', proposal.id)).find(
+        (e) => e.eventType === 'unsupervised_proposal_routed',
+      );
+      expect(routed?.metadata).not.toHaveProperty('suppressReason');
+    });
+
+    it("the backup's mobile fails closed: the for-your-info form, no link", async () => {
+      const { sendSms } = await route(undefined);
+
+      expect(sendSms).toHaveBeenCalledTimes(1);
+      const [to, body] = sendSms.mock.calls[0];
+      expect(to).toBe('+15125550111');
+      expect(body).toContain('For your info — the owner needs to review this in the app.');
+      expect(body).not.toContain('token=');
     });
   });
 
@@ -318,7 +393,7 @@ describe('voice-action-router — P12-004 unsupervised routing', () => {
         sendSms,
         secret: 'test-secret',
         buildApproveUrl: (token) => `https://api.example.com/approve?token=${token}`,
-        resolveOwnerPhone: async () => '+15125550100',
+        resolveSmsRecipient: async () => ({ phone: '+15125550100', via: 'owner_phone' as const }),
         resolveRouting: async () => 'queue_and_sms',
       },
     });
@@ -347,7 +422,7 @@ describe('voice-action-router — P12-004 unsupervised routing', () => {
         auditRepo,
         sendSms,
         secret: 'test-secret',
-        resolveOwnerPhone: async () => '+15125550100',
+        resolveSmsRecipient: async () => ({ phone: '+15125550100', via: 'owner_phone' as const }),
         resolveRouting: async () => 'queue_only',
       },
     });
@@ -377,7 +452,7 @@ describe('voice-action-router — P12-004 unsupervised routing', () => {
         auditRepo,
         sendSms,
         secret: 'test-secret',
-        resolveOwnerPhone: async () => '+15125550100',
+        resolveSmsRecipient: async () => ({ phone: '+15125550100', via: 'owner_phone' as const }),
         resolveRouting: async () => 'queue_and_sms',
       },
     });
