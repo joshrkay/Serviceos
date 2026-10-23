@@ -125,7 +125,7 @@ const LINKED_STEP_PAGES: Readonly<Record<LinkedStepHoldReason, { title: string; 
   },
   issue_invoice_first: {
     title: 'Issue the invoice first',
-    body: 'The invoice this sends will be a draft. Once it exists, issue it, then approve this one from your review queue.',
+    body: 'The invoice this sends has to be issued first. Issue it in the app, then approve this one from your review queue.',
   },
   parent_did_not_run: {
     title: 'Nothing to act on',

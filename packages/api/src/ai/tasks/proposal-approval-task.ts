@@ -1047,7 +1047,7 @@ const LINKED_STEP_LINES: Readonly<Record<LinkedStepHoldReason, string>> = {
   approve_parent_first:
     "Can't approve that yet — it depends on an earlier step. Approve that one first; this one unlocks once it has run.",
   issue_invoice_first:
-    "Can't approve that yet — the invoice it sends will be a draft. Issue the invoice first, then approve this one.",
+    "Can't approve that yet — the invoice this sends has to be issued first. Issue it in the app, then approve this one.",
   parent_did_not_run:
     "Can't approve that one — the earlier step it depends on didn't run, so there's nothing for it to act on.",
 };

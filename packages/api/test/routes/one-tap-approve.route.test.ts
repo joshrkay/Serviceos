@@ -661,6 +661,11 @@ describe('B4 follow-up — one-tap on a linked step says what to do about the ea
     const { res, status } = await linkedStep('draft_invoice', 'approved');
     expect(res.status).toBe(409);
     expect(res.text).toContain('Issue the invoice first');
+    // The same next step the voice line speaks: where to issue it, and then what.
+    expect(res.text).toContain(
+      'The invoice this sends has to be issued first. Issue it in the app, then approve this one from your review queue.',
+    );
+    expect(res.text).not.toContain('Once it exists');
     expect(res.text).not.toContain('needs fixing');
     expect(status).toBe('ready_for_review');
   });
