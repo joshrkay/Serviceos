@@ -19,6 +19,12 @@
  * (the table has no tenants FK). Nothing writes recording_retention_days today
  * (no settings route, migration 169's note), so every tenant is at 365; an
  * operator who shortens a tenant's horizon should shorten this window too.
+ * Not LEAST(window, the tenant's recording_retention_days): with every tenant
+ * at the default it changes nothing today, and a per-tenant horizon is not a
+ * constant bound migration 353's created_at index can range over (it needs a
+ * second, tenant_settings-driven selection arm plus a per-tenant horizon in
+ * the DELETE and the audit). It belongs with whatever first writes that
+ * column.
  *
  * Deleted, not tombstoned: the rows are evaluation samples with no reader but
  * the owner/admin list route, and nothing references them.
@@ -44,11 +50,12 @@
  *     shadow_comparisons itself, so the all-zero placeholder bucket that
  *     platform ('system') calls are filed under is reached like any tenant.
  *     Migration 353's idx_shadow_comparisons_created (created_at, tenant_id)
- *     serves it as an index-only range scan over the due rows alone (each
- *     probed against the legal-hold index), so the hourly cost follows what
- *     is due, not the table's size: in steady state, the rows that aged past
- *     the window since the last sweep plus any held ones. A backlog costs
- *     one pass over its rows per sweep until it drains.
+ *     serves it as a range scan over the due rows alone (index-only once
+ *     vacuum has set the visibility map, a bitmap scan of those rows before),
+ *     each probed against the legal-hold index, so the hourly cost follows
+ *     what is due, not the table's size: in steady state, the rows that aged
+ *     past the window since the last sweep plus any held ones. A backlog
+ *     costs one pass over its rows per sweep until it drains.
  *   - Each tenant's DELETE is tenant-scoped (`withTenantTransaction`, RLS on
  *     app.current_tenant_id plus `tenant_id = $1`), at most `batchSize` rows,
  *     oldest first. A backlog drains across hourly sweeps.
