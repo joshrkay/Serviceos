@@ -897,6 +897,9 @@ export async function rejectProposal(
   return updated;
 }
 
+/** A4-4 — owner copy (the edit routes show it verbatim): short and plain. */
+const EDIT_RACED = 'This changed while you were editing. Please try again.';
+
 export async function editProposal(
   proposalRepo: ProposalRepository,
   tenantId: string,
@@ -926,6 +929,15 @@ export async function editProposal(
   if (proposal.status !== 'draft' && proposal.status !== 'ready_for_review') {
     throw new ValidationError(`Cannot edit proposal in '${proposal.status}' status`);
   }
+
+  // R2-1 — the row exactly as read, apart from `proposal`. The payload and
+  // sourceContext built below are shallow spreads of `proposal`, so their
+  // nested objects are its own: a helper that changes one in place (the
+  // #1405 re-draft once deleted `_meta` keys) changes `proposal` too. What
+  // means "the row as read" below uses this copy: the write's "unchanged
+  // since the read?" check (an altered read refused every such edit as
+  // raced), the payload kept as first proposed, and the before-values.
+  const read = structuredClone(proposal);
 
   // FR-2 phase 3c — overlap consent on a reassign is server-pinned at
   // creation (the dispatch board's explicit "Book anyway"). An edit can
@@ -1016,13 +1028,20 @@ export async function editProposal(
   // by later edits (both fields come from the same row read above).
   const preserveOriginal = editedFields.length > 0 && proposal.originalPayload === undefined;
 
-  const updated = await proposalRepo.update(tenantId, proposalId, {
+  // A4-4 — the whole payload and sourceContext above were built from the row
+  // read at the top. Written only while the row is still that row: a change
+  // that landed in between (an entity pick clearing its picker and stamping
+  // the id, a line pick, another edit, a decision) is never overwritten with
+  // the stale copy. The edit is refused instead, and a retry re-reads.
+  // Refused rather than rebuilt under the row lock because this also runs
+  // outside a request transaction (the voice and text edit paths).
+  const updated = await proposalRepo.updateIfUnchanged(tenantId, proposalId, read, {
     payload: updatedPayload,
-    ...(preserveOriginal ? { originalPayload: proposal.payload } : {}),
+    ...(preserveOriginal ? { originalPayload: read.payload } : {}),
     ...(sourceContextUpdate ? { sourceContext: sourceContextUpdate } : {}),
   });
   if (!updated) {
-    throw new NotFoundError('Proposal', proposalId);
+    throw new ConflictError(EDIT_RACED, { status: proposal.status });
   }
 
   // D2-1c — audit-log the edit. Custom event (vs. logProposalEvent) so
@@ -1063,7 +1082,7 @@ export async function editProposal(
         intent: updated.proposalType,
         actorId,
         fields: editedFields,
-        before: proposal.payload,
+        before: read.payload,
         after: updatedPayload,
       });
       if (corrections.length > 0) {
@@ -1085,7 +1104,7 @@ export async function editProposal(
         tenantId,
         actorId,
         actorRole,
-        groundingProposal: proposal,
+        groundingProposal: read,
         updatedProposal: updated,
         editedFields,
       });

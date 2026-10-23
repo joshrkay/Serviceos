@@ -1786,6 +1786,103 @@ describe('Track E — voice edit chain-ref guard', () => {
   });
 });
 
+// R2-2 — the "your note is attached" writes stamped the instruction onto a
+// sourceContext copied from the row read BEFORE the interpreter's LLM call,
+// and wrote that whole sourceContext back. A pick that landed in between
+// (the picker it cleared, the resolution it recorded) was put back the way
+// it was. Now the one note key is added to the row as it stands.
+describe('R2-2 — a voice edit recorded as a note keeps what landed while it ran', () => {
+  const PICKER = { source: 'voice', entityCandidates: [{ id: CUSTOMER_UUID, label: 'Henderson', score: 0.8 }] };
+  const PICKED = { source: 'voice', resolvedEntity: { id: CUSTOMER_UUID, kind: 'customer' } };
+
+  /** What an entity pick does to sourceContext: the picker cleared, the resolution recorded. */
+  async function pickLands(repo: InMemoryProposalRepository, id: string): Promise<void> {
+    const ctx = { ...((await repo.findById(TENANT, id))!.sourceContext ?? {}) };
+    delete ctx.entityCandidates;
+    ctx.resolvedEntity = PICKED.resolvedEntity;
+    await repo.update(TENANT, id, { sourceContext: ctx });
+  }
+
+  function seedWithPicker(repo: InMemoryProposalRepository, overrides: Partial<CreateProposalInput> = {}) {
+    return seedPending(repo, {
+      payload: {
+        customerId: CUSTOMER_UUID,
+        customerName: 'Henderson Family LLC',
+        lineItems: [{ description: 'Water heater replacement', quantity: 1, unitPrice: 45000 }],
+        totalCents: 45000,
+      },
+      sourceContext: PICKER,
+      ...overrides,
+    });
+  }
+
+  it('nothing could be applied: the note is added and the pick that landed meanwhile is kept', async () => {
+    const h = makeEditHarness();
+    const proposal = await seedWithPicker(h.proposalRepo);
+    h.deps.editInterpreter = async () => {
+      await pickLands(h.proposalRepo, proposal.id);
+      return null;
+    };
+
+    const result = await startVoiceEdit(h.deps, { ...ref, reference: 'it', instruction: 'make it nicer somehow' });
+
+    expect(result.outcome).toBe('edit_recorded');
+    const stored = (await h.proposalRepo.findById(TENANT, proposal.id))!;
+    expect(stored.sourceContext).toEqual({
+      ...PICKED,
+      pendingVoiceEditRequest: { instruction: 'make it nicer somehow', receivedAt: expect.any(String) },
+    });
+  });
+
+  it('a pick that lands between the edit\'s read and its write refuses the edit; the note is added and the pick kept', async () => {
+    const h = makeEditHarness({ delta: { totalCents: 20000 } });
+    const proposal = await seedWithPicker(h.proposalRepo);
+    const realUpdateIfUnchanged = h.proposalRepo.updateIfUnchanged.bind(h.proposalRepo);
+    vi.spyOn(h.proposalRepo, 'updateIfUnchanged').mockImplementationOnce(async (...args) => {
+      await pickLands(h.proposalRepo, proposal.id);
+      return realUpdateIfUnchanged(...args);
+    });
+
+    const result = await startVoiceEdit(h.deps, {
+      ...ref,
+      reference: 'it',
+      instruction: 'change the total to 200 dollars',
+    });
+
+    expect(result.outcome).toBe('edit_recorded');
+    const failed = h.auditRepo.getAll().find((e) => e.eventType === 'proposal.voice_edit_failed');
+    expect(failed?.metadata).toMatchObject({ error: 'This changed while you were editing. Please try again.' });
+    const stored = (await h.proposalRepo.findById(TENANT, proposal.id))!;
+    expect(stored.payload.totalCents).toBe(45000);
+    expect(stored.sourceContext).toEqual({
+      ...PICKED,
+      pendingVoiceEditRequest: { instruction: 'change the total to 200 dollars', receivedAt: expect.any(String) },
+    });
+  });
+
+  it('the chain-ref refusal adds its note the same way', async () => {
+    const h = makeEditHarness();
+    const proposal = await seedWithPicker(h.proposalRepo, {
+      proposalType: 'issue_invoice',
+      payload: { invoiceId: '$ref:chain[0].invoiceId' },
+      summary: 'Issue the new invoice',
+    });
+    h.deps.editInterpreter = async () => {
+      await pickLands(h.proposalRepo, proposal.id);
+      return { invoiceId: 'INV-1024' };
+    };
+
+    const result = await startVoiceEdit(h.deps, { ...ref, reference: 'it', instruction: 'issue invoice 1024 instead' });
+
+    expect(result.outcome).toBe('edit_blocked_chain_ref');
+    const stored = (await h.proposalRepo.findById(TENANT, proposal.id))!;
+    expect(stored.sourceContext).toEqual({
+      ...PICKED,
+      pendingVoiceEditRequest: { instruction: 'issue invoice 1024 instead', receivedAt: expect.any(String) },
+    });
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // WS19 — batch voice approval (session-flow over the single-item engine)
 // ─────────────────────────────────────────────────────────────────────────────

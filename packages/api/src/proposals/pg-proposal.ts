@@ -10,6 +10,7 @@ import {
   ProposalRepository,
   ProposalStatus,
   ProposalType,
+  proposalChangedSince,
 } from './proposal';
 
 function mapRow(row: Record<string, unknown>): Proposal {
@@ -554,71 +555,120 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
     id: string,
     updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt' | 'status'>>
   ): Promise<Proposal | null> {
+    return this.withTenantTransaction(tenantId, (client) => this.updateOn(client, tenantId, id, updates));
+  }
+
+  async updateIfUnchanged(
+    tenantId: string,
+    id: string,
+    read: Proposal,
+    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt' | 'status'>>
+  ): Promise<Proposal | null> {
+    // A4-4 — the lock, the check and the write share ONE client and
+    // transaction (the request's when there is one): a second connection here
+    // would wait on this very row lock.
     return this.withTenantTransaction(tenantId, async (client) => {
-      // Status transitions MUST go through updateStatus() which uses
-      // SELECT ... FOR UPDATE. Excluded here so the generic path can't
-      // race against concurrent status changes.
-      const fieldMap: Record<string, string> = {
-        proposalType: 'proposal_type',
-        payload: 'payload',
-        // #1139 — set once by editProposal (payload as first proposed).
-        originalPayload: 'original_payload',
-        summary: 'summary',
-        explanation: 'explanation',
-        confidenceScore: 'confidence_score',
-        confidenceFactors: 'confidence_factors',
-        sourceContext: 'source_context',
-        aiRunId: 'ai_run_id',
-        promptVersionId: 'prompt_version_id',
-        targetEntityType: 'target_entity_type',
-        targetEntityId: 'target_entity_id',
-        resultEntityId: 'result_entity_id',
-        rejectionReason: 'rejection_reason',
-        rejectionDetails: 'rejection_details',
-        idempotencyKey: 'idempotency_key',
-        expiresAt: 'expires_at',
-        approvedAt: 'approved_at',
-        executedAt: 'executed_at',
-        executedBy: 'executed_by',
-        executedByRole: 'executed_by_role',
-        undoneAt: 'undone_at',
-        undoneBy: 'undone_by',
-        // WS18 (D-018) — the live close flow retrofits an EXISTING drafted
-        // estimate proposal as the head of the close chain, so the indexed
-        // chain_id column must be writable post-create (findByChain queries
-        // the column, not sourceContext).
-        chainId: 'chain_id',
-      };
+      const locked = await client.query(
+        'SELECT * FROM proposals WHERE tenant_id = $1 AND id = $2 FOR UPDATE',
+        [tenantId, id]
+      );
+      if (locked.rows.length === 0 || proposalChangedSince(read, mapRow(locked.rows[0]))) return null;
+      return this.updateOn(client, tenantId, id, updates);
+    });
+  }
 
-      const setClauses: string[] = ['updated_at = NOW()'];
-      const params: unknown[] = [tenantId, id];
-      let p = 3;
-
-      for (const [key, column] of Object.entries(fieldMap)) {
-        if (key in updates) {
-          const val = (updates as Record<string, unknown>)[key];
-          const serialized =
-            key === 'payload' ||
-            key === 'originalPayload' ||
-            key === 'confidenceFactors' ||
-            key === 'sourceContext'
-              ? val != null ? JSON.stringify(val) : null
-              : val ?? null;
-          setClauses.push(`${column} = $${p++}`);
-          params.push(serialized);
-        }
-      }
-
-      if (setClauses.length === 1) return this.findById(tenantId, id);
-
+  async mergeSourceContext(tenantId: string, id: string, entries: Record<string, unknown>): Promise<Proposal | null> {
+    // R2-2 — one UPDATE: jsonb `||` adds the keys to source_context as it
+    // stands in the row (a NULL or non-object one counts as empty), so a
+    // write that committed after the caller's read is kept.
+    return this.withTenantTransaction(tenantId, async (client) => {
       const result = await client.query(
-        `UPDATE proposals SET ${setClauses.join(', ')}
-         WHERE tenant_id = $1 AND id = $2
-         RETURNING *`,
-        params
+        `UPDATE proposals
+            SET source_context =
+                  (CASE WHEN jsonb_typeof(source_context) = 'object' THEN source_context ELSE '{}'::jsonb END)
+                  || $3::jsonb,
+                updated_at = NOW()
+          WHERE tenant_id = $1 AND id = $2
+          RETURNING *`,
+        [tenantId, id, JSON.stringify(entries)]
       );
       return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
     });
+  }
+
+  /** The `update` write on `client`, inside a transaction the caller owns. */
+  private async updateOn(
+    client: PoolClient,
+    tenantId: string,
+    id: string,
+    updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt' | 'status'>>
+  ): Promise<Proposal | null> {
+    // Status transitions MUST go through updateStatus() which uses
+    // SELECT ... FOR UPDATE. Excluded here so the generic path can't
+    // race against concurrent status changes.
+    const fieldMap: Record<string, string> = {
+      proposalType: 'proposal_type',
+      payload: 'payload',
+      // #1139 — set once by editProposal (payload as first proposed).
+      originalPayload: 'original_payload',
+      summary: 'summary',
+      explanation: 'explanation',
+      confidenceScore: 'confidence_score',
+      confidenceFactors: 'confidence_factors',
+      sourceContext: 'source_context',
+      aiRunId: 'ai_run_id',
+      promptVersionId: 'prompt_version_id',
+      targetEntityType: 'target_entity_type',
+      targetEntityId: 'target_entity_id',
+      resultEntityId: 'result_entity_id',
+      rejectionReason: 'rejection_reason',
+      rejectionDetails: 'rejection_details',
+      idempotencyKey: 'idempotency_key',
+      expiresAt: 'expires_at',
+      approvedAt: 'approved_at',
+      executedAt: 'executed_at',
+      executedBy: 'executed_by',
+      executedByRole: 'executed_by_role',
+      undoneAt: 'undone_at',
+      undoneBy: 'undone_by',
+      // WS18 (D-018) — the live close flow retrofits an EXISTING drafted
+      // estimate proposal as the head of the close chain, so the indexed
+      // chain_id column must be writable post-create (findByChain queries
+      // the column, not sourceContext).
+      chainId: 'chain_id',
+    };
+
+    const setClauses: string[] = ['updated_at = NOW()'];
+    const params: unknown[] = [tenantId, id];
+    let p = 3;
+
+    for (const [key, column] of Object.entries(fieldMap)) {
+      if (key in updates) {
+        const val = (updates as Record<string, unknown>)[key];
+        const serialized =
+          key === 'payload' ||
+          key === 'originalPayload' ||
+          key === 'confidenceFactors' ||
+          key === 'sourceContext'
+            ? val != null ? JSON.stringify(val) : null
+            : val ?? null;
+        setClauses.push(`${column} = $${p++}`);
+        params.push(serialized);
+      }
+    }
+
+    if (setClauses.length === 1) {
+      const current = await client.query('SELECT * FROM proposals WHERE tenant_id = $1 AND id = $2', [tenantId, id]);
+      return current.rows.length > 0 ? mapRow(current.rows[0]) : null;
+    }
+
+    const result = await client.query(
+      `UPDATE proposals SET ${setClauses.join(', ')}
+       WHERE tenant_id = $1 AND id = $2
+       RETURNING *`,
+      params
+    );
+    return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
   }
 
   async findReadyForExecution(windowMs: number): Promise<Proposal[]> {

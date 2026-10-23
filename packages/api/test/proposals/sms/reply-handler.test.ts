@@ -9,7 +9,7 @@
  * the webhook layer (test/webhooks/twilio-sms-dispatch.test.ts) — here we
  * prove a REPEATED approval intent (new sid) cannot double-execute.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ACCEPTANCE_VOID_MARKER } from '../../../src/proposals/acceptance-void';
 import {
   handleProposalSmsReply,
@@ -856,6 +856,64 @@ describe('edit session flow', () => {
     await handleProposalSmsFallback(ctx('first change'), h.deps);
     const session = await h.smsEventRepo.findOpenEditSession(TENANT, "5125550100", now);
     expect(session).toBeNull();
+  });
+});
+
+// R2-2 — the "I attached your note" write stamped the instruction onto a
+// sourceContext copied from the row read BEFORE the interpreter's LLM call,
+// and wrote that whole sourceContext back. A pick that landed in between
+// (the picker it cleared, the resolution it recorded) was put back the way
+// it was. Now the one note key is added to the row as it stands.
+describe('R2-2 — a text edit recorded as a note keeps what landed while it ran', () => {
+  const PICKER = { source: 'voice', entityCandidates: [{ id: 'cust-a', label: 'Bob Smith', score: 0.8 }] };
+  const PICKED = { source: 'voice', resolvedEntity: { id: 'cust-a', kind: 'customer' } };
+
+  /** What an entity pick does to sourceContext: the picker cleared, the resolution recorded. */
+  async function pickLands(h: Harness, id: string): Promise<void> {
+    const ctx = { ...((await h.proposalRepo.findById(TENANT, id))!.sourceContext ?? {}) };
+    delete ctx.entityCandidates;
+    ctx.resolvedEntity = PICKED.resolvedEntity;
+    await h.proposalRepo.update(TENANT, id, { sourceContext: ctx });
+  }
+
+  it('nothing could be applied: the note is added and the pick that landed meanwhile is kept', async () => {
+    const h = makeHarness();
+    const proposal = await seedPendingProposal(h, TENANT, { sourceContext: PICKER });
+    h.deps.interpretEdit = async () => {
+      await pickLands(h, proposal.id);
+      return null;
+    };
+
+    await handleProposalSmsReply(ctx('EDIT'), h.deps);
+    const result = await handleProposalSmsFallback(ctx('make it nicer somehow'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'edit_recorded' });
+    const stored = (await h.proposalRepo.findById(TENANT, proposal.id))!;
+    expect(stored.sourceContext).toEqual({
+      ...PICKED,
+      pendingSmsEditRequest: { instruction: 'make it nicer somehow', receivedAt: expect.any(String) },
+    });
+  });
+
+  it("a pick that lands between the edit's read and its write refuses the edit; the note is added and the pick kept", async () => {
+    const h = makeHarness({ interpretEdit: async () => ({ customerName: 'Mr Chen' }) });
+    const proposal = await seedPendingProposal(h, TENANT, { sourceContext: PICKER });
+    const realUpdateIfUnchanged = h.proposalRepo.updateIfUnchanged.bind(h.proposalRepo);
+    vi.spyOn(h.proposalRepo, 'updateIfUnchanged').mockImplementationOnce(async (...args) => {
+      await pickLands(h, proposal.id);
+      return realUpdateIfUnchanged(...args);
+    });
+
+    await handleProposalSmsReply(ctx('EDIT'), h.deps);
+    const result = await handleProposalSmsFallback(ctx('it is for Mr Chen'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'edit_recorded' });
+    const stored = (await h.proposalRepo.findById(TENANT, proposal.id))!;
+    expect(stored.payload.customerName).toBe('Mrs Lee');
+    expect(stored.sourceContext).toEqual({
+      ...PICKED,
+      pendingSmsEditRequest: { instruction: 'it is for Mr Chen', receivedAt: expect.any(String) },
+    });
   });
 });
 

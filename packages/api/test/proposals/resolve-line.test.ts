@@ -5,7 +5,8 @@ import {
 } from '../../src/proposals/proposal';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { resolveProposalLine } from '../../src/proposals/resolve-line';
-import { ForbiddenError, NotFoundError, ValidationError } from '../../src/shared/errors';
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../../src/shared/errors';
+import { editProposal } from '../../src/proposals/actions';
 
 const TENANT = 't-resolve';
 const PROPOSAL = 'p-resolve';
@@ -716,5 +717,151 @@ describe('B3 — resolveProposalLine — editActions branch', () => {
         { proposalRepo: repo, auditRepo },
       ),
     ).rejects.toBeInstanceOf(ForbiddenError);
+  });
+});
+
+/**
+ * Without a pool there is no request transaction and no row lock: the
+ * in-memory findByIdsForUpdate is a plain read. The write puts back the whole
+ * payload and sourceContext built from that read, so it goes through
+ * updateIfUnchanged: a pick whose row changed since its read is refused with
+ * the pick paths' plain 409 and writes nothing, instead of erasing the change.
+ */
+describe('A4-4 — resolveProposalLine when the row changes after its read (no row lock)', () => {
+  const PICK_CHANGED = 'This changed while you were choosing. Please try again.';
+  let repo: InMemoryProposalRepository;
+  let auditRepo: InMemoryAuditRepository;
+
+  beforeEach(() => {
+    repo = new InMemoryProposalRepository();
+    auditRepo = new InMemoryAuditRepository();
+  });
+
+  const pick = (catalogItemId: string, lineIndex: number) =>
+    resolveProposalLine(
+      { tenantId: TENANT, proposalId: PROPOSAL, lineIndex, catalogItemId, actorId: OWNER, actorRole: 'owner' },
+      { proposalRepo: repo, auditRepo },
+    );
+
+  /** Every pick's read waits here until `count` picks have read the row. */
+  function readTogether(count: number): void {
+    const realRead = repo.findByIdsForUpdate.bind(repo);
+    let reads = 0;
+    let allRead!: () => void;
+    const together = new Promise<void>((resolve) => {
+      allRead = resolve;
+    });
+    repo.findByIdsForUpdate = async (...args: Parameters<typeof realRead>) => {
+      const rows = await realRead(...args);
+      reads += 1;
+      if (reads === count) allRead();
+      await together;
+      return rows;
+    };
+  }
+
+  /** `then` runs after the pick has read the row and before it writes. */
+  function afterRead(then: () => Promise<unknown>): void {
+    const realRead = repo.findByIdsForUpdate.bind(repo);
+    repo.findByIdsForUpdate = async (...args: Parameters<typeof realRead>) => {
+      const rows = await realRead(...args);
+      await then();
+      return rows;
+    };
+  }
+
+  const lineResolvedAudits = async () =>
+    (await auditRepo.findByEntity(TENANT, 'proposal', PROPOSAL)).filter((a) => a.eventType === 'proposal.line_resolved');
+
+  function twoAmbiguousLines(): Proposal {
+    return ambiguousProposal({
+      payload: {
+        customerReference: 'Dana Lee',
+        lineItems: [
+          { id: 'l1', description: 'a', quantity: 1, unitPrice: 0, pricingSource: 'ambiguous', needsPricing: true },
+          { id: 'l2', description: 'b', quantity: 1, unitPrice: 0, pricingSource: 'ambiguous', needsPricing: true },
+        ],
+      },
+      sourceContext: {
+        missingFields: ['lineItems[0].catalogItemId', 'lineItems[1].catalogItemId'],
+        catalogResolution: {
+          0: [{ id: 'cat-a', name: 'A', unitPriceCents: 4500, score: 0.7 }],
+          1: [{ id: 'cat-c', name: 'C', unitPriceCents: 3000, score: 0.7 }],
+        },
+      },
+    });
+  }
+
+  it('two picks of different lines that read the same row: one is saved, the other gets the plain 409 and writes nothing', async () => {
+    await repo.create(twoAmbiguousLines());
+    readTogether(2);
+
+    const [first, second] = await Promise.allSettled([pick('cat-a', 0), pick('cat-c', 1)]);
+
+    expect(first.status).toBe('fulfilled');
+    expect(second.status).toBe('rejected');
+    const err = (second as PromiseRejectedResult).reason;
+    expect(err).toBeInstanceOf(ConflictError);
+    expect(err.statusCode).toBe(409);
+    expect(err.message).toBe(PICK_CHANGED);
+
+    // The first pick is kept; the refused one changed nothing.
+    const stored = (await repo.findById(TENANT, PROPOSAL))!;
+    expect(stored.status).toBe('draft');
+    const lines = stored.payload.lineItems as Array<Record<string, unknown>>;
+    expect(lines[0]).toMatchObject({ catalogItemId: 'cat-a', unitPrice: 4500, pricingSource: 'catalog' });
+    expect(lines[1]).toMatchObject({ unitPrice: 0, pricingSource: 'ambiguous' });
+    expect(lines[1].catalogItemId).toBeUndefined();
+    const ctx = stored.sourceContext as Record<string, unknown>;
+    expect(ctx.missingFields).toEqual(['lineItems[1].catalogItemId']);
+    expect(Object.keys(ctx.catalogResolution as Record<string, unknown>)).toEqual(['1']);
+    expect((await lineResolvedAudits()).map((a) => a.metadata?.lineIndex)).toEqual([0]);
+
+    // A retry reads the row as it is now and goes through.
+    const retried = await pick('cat-c', 1);
+    expect(retried.status).toBe('ready_for_review');
+    expect((retried.payload.lineItems as Array<Record<string, unknown>>).map((l) => l.catalogItemId)).toEqual([
+      'cat-a',
+      'cat-c',
+    ]);
+  });
+
+  it('an edit that commits after the pick read the row refuses the pick; the edit is kept', async () => {
+    await repo.create(twoAmbiguousLines());
+    afterRead(() =>
+      editProposal(repo, TENANT, PROPOSAL, OWNER, 'owner', { notes: 'Call before arriving' }, auditRepo),
+    );
+
+    const err = await pick('cat-a', 0).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(ConflictError);
+    expect((err as ConflictError).message).toBe(PICK_CHANGED);
+    const stored = (await repo.findById(TENANT, PROPOSAL))!;
+    expect(stored.payload.notes).toBe('Call before arriving');
+    const lines = stored.payload.lineItems as Array<Record<string, unknown>>;
+    expect(lines[0]).toMatchObject({ unitPrice: 0, pricingSource: 'ambiguous' });
+    expect((stored.sourceContext as Record<string, unknown>).missingFields).toEqual([
+      'lineItems[0].catalogItemId',
+      'lineItems[1].catalogItemId',
+    ]);
+    expect(await lineResolvedAudits()).toEqual([]);
+  });
+
+  it('an editActions pick is refused the same way when the row changed after its read', async () => {
+    await repo.create(editActionProposal());
+    readTogether(2);
+
+    const results = await Promise.allSettled([pick('cat-heater', 0), pick('spoken:0', 0)]);
+
+    expect(results.map((r) => r.status)).toEqual(['fulfilled', 'rejected']);
+    expect(((results[1] as PromiseRejectedResult).reason as Error).message).toBe(PICK_CHANGED);
+    const stored = (await repo.findById(TENANT, PROPOSAL))!;
+    const lineItem = (stored.payload.editActions as Array<Record<string, unknown>>)[0].lineItem as Record<
+      string,
+      unknown
+    >;
+    expect(lineItem).toMatchObject({ catalogItemId: 'cat-heater', unitPrice: 15_000, pricingSource: 'catalog' });
+    expect(stored.status).toBe('ready_for_review');
+    expect(await lineResolvedAudits()).toHaveLength(1);
   });
 });
