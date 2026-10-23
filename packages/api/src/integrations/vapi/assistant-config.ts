@@ -6,6 +6,8 @@
  * overridden by the operator; both the chosen voice and greeting are
  * persisted onto the tenant's Vapi assistant and mirrored to tenant_settings.
  */
+import { buildAiDisclosureText } from '../../ai/skills/disclose-ai-identity';
+import type { Language } from '../../ai/i18n/i18n';
 
 export interface VoicePreset {
   /** Stable key stored in tenant_settings.voice_id. */
@@ -49,6 +51,49 @@ export function autoGenerateGreeting(businessName: string, services: string[] = 
   return `Thanks for calling ${name}.${svc} How can I help you today?`;
 }
 
+/**
+ * PRIV-4 — the first message a Vapi-routed caller hears. A number imported
+ * into Vapi never reaches `/api/telephony/voice`, so `buildTelephonyGreeting`
+ * (which carries the virtual-assistant notice on the phone path) never runs;
+ * the notice rides on `firstMessage` instead, mirroring that function's
+ * custom-greeting branch: the tenant's words first, then the notice. The
+ * stored `voice_greeting` stays notice-free, because the phone path appends
+ * its own. `language` is the tenant's `default_language`, so a Spanish
+ * tenant's callers hear the Spanish notice.
+ */
+export function vapiFirstMessage(
+  greeting: string,
+  businessName: string,
+  language: Language = 'en',
+): string {
+  return `${greeting.trim()} ${buildAiDisclosureText({ businessName, language })}`.trim();
+}
+
+/**
+ * The first message an existing assistant should carry for these
+ * `tenant_settings` values, built exactly as provisioning builds it (stored
+ * greeting, else the auto greeting; `default_language` picks the notice's
+ * language). Shared by every re-push so they cannot drift apart.
+ */
+export function vapiFirstMessageForSettings(s: {
+  businessName: string | null;
+  greeting: string | null;
+  services: string[] | null;
+  defaultLanguage: string | null;
+}): string {
+  return buildAssistantConfig({
+    businessName: s.businessName ?? 'ServiceOS',
+    greeting: s.greeting,
+    services: s.services ?? [],
+    language: vapiNoticeLanguage(s.defaultLanguage),
+  }).firstMessage;
+}
+
+/** Narrow a `tenant_settings.default_language` value to a supported language. */
+export function vapiNoticeLanguage(defaultLanguage: string | null | undefined): Language {
+  return defaultLanguage === 'es' ? 'es' : 'en';
+}
+
 export interface VapiAssistantConfig {
   name: string;
   firstMessage: string;
@@ -71,6 +116,8 @@ export function buildAssistantConfig(input: {
   services?: string[];
   serverUrl?: string;
   serverUrlSecret?: string;
+  /** Tenant default language; picks the virtual-assistant notice's language. */
+  language?: Language;
 }): VapiAssistantConfig {
   const preset = resolveVoicePreset(input.voicePresetId);
   const firstMessage =
@@ -79,7 +126,7 @@ export function buildAssistantConfig(input: {
       : autoGenerateGreeting(input.businessName, input.services ?? []);
   return {
     name: `${(input.businessName || 'ServiceOS').trim()} AI Receptionist`,
-    firstMessage,
+    firstMessage: vapiFirstMessage(firstMessage, input.businessName, input.language),
     voiceId: preset.elevenLabsVoiceId,
     ...(input.serverUrl ? { serverUrl: input.serverUrl } : {}),
     ...(input.serverUrlSecret ? { serverUrlSecret: input.serverUrlSecret } : {}),

@@ -11,7 +11,7 @@
  * CLAUDE.md). This file runs the production worker against real Postgres so the
  * actual statements are pinned to the live `tenant_settings` columns:
  *   - the SELECT of business_name, voice_greeting, voice_id, services_offered,
- *     vapi_assistant_id,
+ *     vapi_assistant_id, default_language,
  *   - the UPDATE that persists vapi_assistant_id,
  *   - the tenant_integrations provider_data writes + active transition.
  * Twilio HTTP is stubbed (global fetch) and the Vapi client is injected; only
@@ -88,17 +88,24 @@ function makeVapiMock() {
 async function seedSettings(
   pool: Pool,
   tenantId: string,
-  overrides: { businessName?: string; greeting?: string | null; voiceId?: string; services?: string[] } = {},
+  overrides: {
+    businessName?: string;
+    greeting?: string | null;
+    voiceId?: string;
+    services?: string[];
+    defaultLanguage?: 'en' | 'es';
+  } = {},
 ): Promise<void> {
   await pool.query(
-    `INSERT INTO tenant_settings (id, tenant_id, business_name, voice_greeting, voice_id, services_offered)
-       VALUES (gen_random_uuid(), $1, $2, $3, $4, $5::text[])`,
+    `INSERT INTO tenant_settings (id, tenant_id, business_name, voice_greeting, voice_id, services_offered, default_language)
+       VALUES (gen_random_uuid(), $1, $2, $3, $4, $5::text[], $6)`,
     [
       tenantId,
       overrides.businessName ?? "Bob's Plumbing",
       overrides.greeting ?? null,
       overrides.voiceId ?? 'adam',
       overrides.services ?? ['drain cleaning', 'water heaters'],
+      overrides.defaultLanguage ?? 'en',
     ],
   );
   // PR #1438: the provision worker only buys a number for a tenant that has
@@ -177,6 +184,22 @@ describe('Postgres integration — provision-twilio Vapi assistant (voice agent)
     expect(ti.rows[0].status).toBe('full_readiness');
     expect(ti.rows[0].provider_data.vapiAssistantId).toBe('asst_int_123');
     expect(ti.rows[0].provider_data.phoneE164).toBe('+15125550123');
+  });
+
+  it("reads the tenant's default_language so a Spanish tenant's first message carries the Spanish notice", async () => {
+    const { tenantId } = await createTestTenant(pool);
+    await seedSettings(pool, tenantId, { greeting: 'Gracias por llamar.', defaultLanguage: 'es' });
+    stubTwilioFetch('+15125550129');
+    const vapi = makeVapiMock();
+    const worker = createProvisionTwilioWorker({ pool, vapiClient: vapi.client });
+
+    await worker.handle(
+      buildMessage({ tenantId, region: null, baseUrl: 'https://api.test', phoneNumber: '+15125550129' }),
+      logger,
+    );
+
+    const cfg = vapi.createAssistant.mock.calls[0][0];
+    expect(cfg.firstMessage).toBe('Gracias por llamar. Para que lo sepa, soy un asistente virtual, no una persona real.');
   });
 
   it('generates a random PER-TENANT webhook secret, stores it, and uses it as serverUrlSecret (never the global secret)', async () => {

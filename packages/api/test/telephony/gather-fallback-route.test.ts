@@ -16,6 +16,7 @@ import { createTelephonyRouter } from '../../src/routes/telephony';
 import { TwilioGatherAdapter } from '../../src/telephony/twilio-adapter';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 
 const AUTH_TOKEN = 'test-fallback-token';
 const PUBLIC_BASE_URL = 'https://api.test';
@@ -48,6 +49,7 @@ function signedFallbackPost(app: express.Application, params: Record<string, str
 function mountApp(opts: {
   adapter: Parameters<typeof createTelephonyRouter>[0]['adapter'];
   voiceSessionStore?: VoiceSessionStore;
+  auditRepo?: InMemoryAuditRepository;
 }) {
   const app = express();
   app.use(
@@ -58,6 +60,8 @@ function mountApp(opts: {
       publicBaseUrl: PUBLIC_BASE_URL,
       resolveTenantId: () => 'tenant-1',
       ...(opts.voiceSessionStore ? { voiceSessionStore: opts.voiceSessionStore } : {}),
+      ...(opts.auditRepo ? { auditRepo: opts.auditRepo } : {}),
+      businessName: 'Test Co',
     }),
   );
   return app;
@@ -254,5 +258,75 @@ describe('WS7 — full continued turn after degrade (stream session → Gather)'
     expect(res.text).toContain('<Gather');
     expect(res.text).not.toContain('<Stream');
     expect(session.ended).toBe(false);
+  });
+});
+
+// ─── PRIV-4 (review round 1) — a degrade before the greeting was heard ──────
+
+const NOTICE = "Just so you know, I'm a virtual assistant, not a live person.";
+const RECORDING_NOTICE =
+  'This call may be recorded for quality and training purposes. By continuing, you consent to this recording.';
+
+/** The <Say> verbs spoken BEFORE the <Gather> opens (the preamble). */
+function preambleOf(twiml: string): string {
+  const head = twiml.slice(0, twiml.indexOf('<Gather'));
+  return [...head.matchAll(/<Say[^>]*>([^<]*)<\/Say>/g)].map((m) => m[1]).join(' ').replace(/&apos;/g, "'");
+}
+
+async function noticeRows(audit: InMemoryAuditRepository, tenantId: string, sessionId: string) {
+  return (await audit.findByEntity(tenantId, 'voice_session', sessionId)).filter(
+    (e) => e.eventType === 'virtual_assistant_notice.played',
+  );
+}
+
+describe('PRIV-4 (review round 1) — the Gather fallback tells the caller they are talking to an assistant', () => {
+  it('a degrade before establishment (STT never opened) speaks the assistant notice and the recording notice before the Gather, and ledgers the notice', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    const session = store.create(TENANT, 'telephony', { callSid: 'CA-degrade-early' });
+    const audit = new InMemoryAuditRepository();
+    const { adapter } = makeFakeAdapter();
+    const app = mountApp({ adapter, voiceSessionStore: store, auditRepo: audit });
+
+    const res = await signedFallbackPost(app, { CallSid: 'CA-degrade-early', From: '+15125550100', To: '+15125550999' });
+
+    expect(res.status).toBe(200);
+    expect(preambleOf(res.text)).toBe(`${NOTICE} ${RECORDING_NOTICE}`);
+    const rows = await noticeRows(audit, TENANT, session.id);
+    expect(rows).toHaveLength(1);
+    expect(rows[0].metadata).toMatchObject({ text: NOTICE, language: 'en' });
+  });
+
+  it('a degrade mid-greeting (recording notice latched, greeting never heard) still speaks the assistant notice', async () => {
+    const h = realHarness();
+    const audit = new InMemoryAuditRepository();
+    const app = mountApp({ adapter: h.adapter, voiceSessionStore: h.store, auditRepo: audit });
+    // Establishment ran (the greeting is queued) but the stream dropped before
+    // its playback finished, so the point-of-evidence commit never ran.
+    const session = await establishStreamSession(h, 'CA-degrade-mid');
+    expect(session.recordingDisclosed).toBe(true);
+
+    const res = await signedFallbackPost(app, { CallSid: 'CA-degrade-mid', From: '+15125550100', To: '+15125550999' });
+
+    expect(preambleOf(res.text)).toBe(NOTICE);
+    expect(await noticeRows(audit, TENANT, session.id)).toHaveLength(1);
+  });
+
+  it('a degrade after the greeting played speaks no notice again, and a second degrade never repeats it', async () => {
+    const h = realHarness();
+    const audit = new InMemoryAuditRepository();
+    const app = mountApp({ adapter: h.adapter, voiceSessionStore: h.store, auditRepo: audit });
+    const session = await establishStreamSession(h, 'CA-degrade-late');
+    // The stream transport's point of evidence: the greeting finished playing.
+    await h.adapter.commitRecordingConsent({ callSid: 'CA-degrade-late' });
+
+    const first = await signedFallbackPost(app, { CallSid: 'CA-degrade-late', From: '+15125550100', To: '+15125550999' });
+    expect(preambleOf(first.text)).toBe('');
+
+    const early = h.store.create(TENANT, 'telephony', { callSid: 'CA-degrade-twice' });
+    await signedFallbackPost(app, { CallSid: 'CA-degrade-twice', From: '+15125550100', To: '+15125550999' });
+    const again = await signedFallbackPost(app, { CallSid: 'CA-degrade-twice', From: '+15125550100', To: '+15125550999' });
+    expect(preambleOf(again.text)).toBe('');
+    expect(await noticeRows(audit, TENANT, early.id)).toHaveLength(1);
+    expect(await noticeRows(audit, TENANT, session.id)).toHaveLength(0);
   });
 });
