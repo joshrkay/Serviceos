@@ -8,6 +8,7 @@
  * test can deliver each delayed poll itself.
  */
 import { describe, it, expect, vi } from 'vitest';
+import type { Pool } from 'pg';
 import { FakeTwilioA2p } from '../integrations/a2p-10dlc/fake-twilio-a2p';
 import { createA2pRegistrationWorker } from '../../src/workers/a2p-10dlc-registration';
 import {
@@ -61,7 +62,19 @@ function harness() {
     sends.push({ type, payload: payload as A2pRegistrationJobPayload, key, delaySeconds: options?.delaySeconds });
     return realSend(type, payload, key, options);
   });
-  const service = createA2pRegistrationService({ store, queue, auditRepo: new InMemoryAuditRepository(), encryptionKey: KEY });
+  // Outside a request the service's withTenantClient opens a transaction of
+  // its own; InMemoryQueue.sendOn ignores the client, so one that answers
+  // every statement empty stands in for it.
+  const pool = {
+    connect: async () => ({ query: async () => ({ rows: [], rowCount: 0 }), release: () => undefined }),
+  } as unknown as Pool;
+  const service = createA2pRegistrationService({
+    store,
+    queue,
+    auditRepo: new InMemoryAuditRepository(),
+    encryptionKey: KEY,
+    pool,
+  });
   const worker = createA2pRegistrationWorker({
     store,
     queue,
