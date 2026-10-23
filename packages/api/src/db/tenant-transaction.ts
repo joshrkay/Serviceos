@@ -87,11 +87,19 @@ const inMemoryLockTails = new Map<string, Promise<void>>();
  */
 export class InMemoryTransactionRunner implements TenantTransactionRunner {
   async run<T>(tenantId: string, fn: (scope: TransactionScope) => Promise<T>): Promise<T> {
-    const held = new Map<string, () => void>();
+    // Each key this run asked for: its release, and the wait until it is granted.
+    const held = new Map<string, { release: () => void; granted: Promise<void> }>();
+    let settled = false;
     const scope: TransactionScope = {
       lock: async (key: string) => {
+        // A lock taken after the run settled would never be released; on
+        // Postgres it cannot outlive its transaction either.
+        if (settled) throw new Error('lock() called after its transaction settled');
         const lockKey = `${tenantId}\0${key}`;
-        if (held.has(lockKey)) return;
+        const mine = held.get(lockKey);
+        // Asking again for a key this run already asked for waits for that
+        // first grant, as a second query queues behind the first on one client.
+        if (mine) return mine.granted;
         const prior = inMemoryLockTails.get(lockKey) ?? Promise.resolve();
         let release!: () => void;
         const released = new Promise<void>((resolve) => {
@@ -103,7 +111,7 @@ export class InMemoryTransactionRunner implements TenantTransactionRunner {
         void tail.then(() => {
           if (inMemoryLockTails.get(lockKey) === tail) inMemoryLockTails.delete(lockKey);
         });
-        held.set(lockKey, release);
+        held.set(lockKey, { release, granted: prior });
         await prior;
       },
       savepoint: (work) => work(),
@@ -111,7 +119,8 @@ export class InMemoryTransactionRunner implements TenantTransactionRunner {
     try {
       return await fn(scope);
     } finally {
-      for (const release of held.values()) release();
+      settled = true;
+      for (const { release } of held.values()) release();
     }
   }
 }

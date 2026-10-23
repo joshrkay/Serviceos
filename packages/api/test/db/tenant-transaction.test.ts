@@ -358,6 +358,50 @@ describe('InMemoryTransactionRunner', () => {
     expect(await within(result, 'the relocking run')).toBe('relocked');
   });
 
+  it('a second lock() of the same key in one run waits for the first to be granted', async () => {
+    const runner = new InMemoryTransactionRunner();
+    const order: string[] = [];
+    const firstHasLock = gate();
+    const finishFirst = gate();
+
+    const holder = runner.run(tenantId, async ({ lock }) => {
+      await lock('about');
+      firstHasLock.open();
+      await finishFirst.promise;
+      order.push('holder:done');
+    });
+    await firstHasLock.promise;
+
+    const waiter = runner.run(tenantId, async ({ lock }) => {
+      await Promise.all([
+        lock('about').then(() => order.push('waiter:first-lock')),
+        lock('about').then(() => order.push('waiter:second-lock')),
+      ]);
+    });
+    await settle();
+    expect(order).toEqual([]);
+
+    finishFirst.open();
+    await within(Promise.all([holder, waiter]), 'the two runs');
+    expect(order[0]).toBe('holder:done');
+    expect(order.slice(1).sort()).toEqual(['waiter:first-lock', 'waiter:second-lock']);
+  });
+
+  it('refuses a lock() through a scope whose run has already settled, so it cannot be held forever', async () => {
+    const runner = new InMemoryTransactionRunner();
+    let escaped: ((key: string) => Promise<void>) | undefined;
+    await runner.run(tenantId, async ({ lock }) => {
+      escaped = lock;
+    });
+
+    await expect(escaped!('about')).rejects.toThrow(/settled/);
+    const next = runner.run(tenantId, async ({ lock }) => {
+      await lock('about');
+      return 'next';
+    });
+    expect(await within(next, 'a later run of the same key')).toBe('next');
+  });
+
   it('runs savepoint work directly and propagates its errors', async () => {
     const runner = new InMemoryTransactionRunner();
 
