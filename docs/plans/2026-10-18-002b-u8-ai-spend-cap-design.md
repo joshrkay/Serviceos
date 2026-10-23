@@ -910,8 +910,17 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
       `alert_80_due_seq` and `alert_80_sent_seq` (both `BIGINT NOT NULL DEFAULT 0`). So the
       zeroed row that every reserve inserts (see "The month's ledger row exists before anything
       reads or updates it" above) needs no other value.
-    - The transaction that first takes the month to 80% of the ceiling sets `alert_80_crossed` and
-      bumps `alert_80_due_seq`, under the spend lock, guarded on `alert_80_crossed` being false.
+    - The quantity compared is the one the cap compares, `spent + reserved`. The transaction that
+      first takes the month to 80% of the ceiling sets `alert_80_crossed` and bumps
+      `alert_80_due_seq`, under the spend lock, guarded on `alert_80_crossed` being false.
+    - **Every transition that can lower `spent + reserved` clears the flag when the month falls
+      back under 80%.** That covers a settle below its reservation, a release, an expiry, a
+      reconcile and a repricing that lowers a charge, as well as a ceiling raise. Each recomputes
+      the flag in its own transaction, under the spend lock, and there is no hysteresis: a
+      crossing back below 80% clears it. A worst-case `charged_unreconciled` charge that pushed
+      the month past 80% and later settles far lower would otherwise leave the flag set, and the
+      next real crossing would send nothing. Clearing leaves `alert_80_due_seq` and
+      `alert_80_sent_seq` alone, so an alert already due is still sent once.
     - A ceiling write applies the same rule in its transaction, under the same lock. A lower cap
       that puts the month past 80% marks the alert due. A higher cap that puts it back under 80%
       clears `alert_80_crossed`, so the alert can fire again.
@@ -1062,6 +1071,11 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
       crosses 80% of the new cap. The new alert is still sent, once.
     - A crossing alerts exactly once across several sweep passes, including a crossing in a month
       that has since ended.
+    - A worst-case reserve crosses 80% and the alert is sent. The attempt settles at a much lower
+      cost and the month falls under 80%: the flag is cleared and no second alert is sent. A later
+      real crossing sends exactly one new alert.
+    - The same sequence with a repricing that lowers a `charged_unreconciled` charge instead of a
+      settle.
   - **Integration (lock order with U7, real Postgres):** an erase's phase 1 holds the stripes of a
     run's correlation id and customer. A repricing of that run commits its ledger transition
     without waiting, and reserves and settles for other attempts in the tenant don't wait either.

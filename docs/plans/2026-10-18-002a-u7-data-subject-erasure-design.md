@@ -2203,8 +2203,25 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
             the row exists. The row keeps its prefix, which names no file. It retires the backstop
             only if the deploy's storage endpoint is shown to enforce an upper bound on a PUT's
             duration, and then only after that bound plus a margin.
-          - **What bounds the cost:** one listing request per prefix per period, which returns no
-            keys in the normal case. Each row records its next scan time, so the sweep resumes after
+          - **On a versioned bucket, both phases list versions.** A late PUT can become
+            non-current before a pass runs, for example when a lifecycle rule or another delete
+            adds a delete marker. `ListObjectsV2` then shows no key while the bytes are still
+            readable by version id, so the row would never re-open and the version-aware delete
+            (see "On a versioned bucket a HEAD 404 proves nothing" above) would never run. So,
+            when the bucket is versioned or suspended:
+            - Both phases use `ListObjectVersions` on the row's prefix. Any version or delete
+              marker whose key starts with the row's prefix is a hit, and a hit re-opens the job
+              the same way. As for a notification, a key that a `files` row holds is not a hit,
+              so a sibling file sharing the prefix is left alone.
+            - The S3 step then deletes every version and delete marker of the key by `VersionId`
+              and confirms with a version listing that comes back empty for it.
+            - The bucket's status is the boot guard's `GetBucketVersioning` answer, or a delete
+              response carrying `x-amz-delete-marker: true`. It is recorded, and a bucket that was
+              ever versioned stays treated as versioned, since suspending versioning keeps its
+              existing versions.
+            - An unversioned bucket keeps `ListObjectsV2`.
+          - **What bounds the cost:** one listing request per prefix per period (a versions
+            listing on a versioned bucket), which returns nothing in the normal case. Each row records its next scan time, so the sweep resumes after
             a restart, and each pass takes a fixed budget of due rows. The cost grows with the
             number of erased upload keys, never with the size of the bucket.
         - Every S3 target the step takes from a write-ahead claim, rather than from a deleted
@@ -2250,6 +2267,10 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           filename.
         - The same late PUT with its notification dropped is found by the next backstop listing
           and deleted.
+        - On a versioned bucket, a late PUT is followed by a delete marker before the backstop
+          pass. The backstop still finds the non-current version, re-opens the job, deletes every
+          version and marker, and the version listing for the key comes back empty. A sibling
+          object under the same prefix that a `files` row holds is not a hit and is left alone.
         - A PUT completes after the last frequent listing, with its notification dropped. The
           low-frequency backstop still lists the row's prefix, finds the object, re-opens the job
           and deletes it, and the job closes again. With the clock set years past the frequent
