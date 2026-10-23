@@ -29,12 +29,6 @@ function mapRow(row: Record<string, unknown>): DelayNoticeDeliveryState {
  *
  * The PRIMARY KEY is `idempotency_key` so re-deliveries / retries upsert
  * the same row in place (mirrors the InMemory `Map.set` semantics).
- *
- * Note: `findByKey` does NOT take `tenantId` — this matches the InMemory
- * interface exactly (locked). RLS still applies because the lookup is
- * performed inside `withTenant`. Callers always know the tenant before
- * issuing the query because the `idempotencyKey` is constructed from
- * tenant-scoped appointment IDs.
  */
 export class PgDelayNoticeStateRepository
   extends PgBaseRepository
@@ -85,29 +79,18 @@ export class PgDelayNoticeStateRepository
   }
 
   /**
-   * Look up a delivery state by its idempotency key.
+   * Look up a delivery state by its idempotency key, within `tenantId`.
    *
-   * Subtle behavior note: the InMemory implementation has a single global
-   * Map keyed by `idempotencyKey`. To preserve that semantic AND keep RLS
-   * defense-in-depth, this method derives the tenant from the key prefix
-   * convention is NOT possible — instead, we read inside a tenant-less
-   * connection that still relies on RLS via a `SELECT ... WHERE
-   * idempotency_key = $1` (RLS will return zero rows if the row's
-   * tenant_id doesn't match the connection context).
-   *
-   * Because the locked interface gives us no tenantId, we use `withClient`
-   * (no tenant context) and DO NOT add a `WHERE tenant_id` filter — the
-   * idempotency key is unique per row (PRIMARY KEY) so this is a direct
-   * lookup. This intentionally bypasses RLS for this single read; the
-   * upsert path always runs with tenant context, and writers cannot
-   * forge idempotency keys that collide with other tenants because keys
-   * embed appointment IDs (themselves tenant-scoped).
+   * Runs inside `withTenant` (tenant GUC + the RLS runtime role) and also
+   * filters on `tenant_id`, so another tenant's row is invisible to this read
+   * whichever of the two backstops is active. Inside a request it reuses the
+   * request's client instead of taking a second pooled connection.
    */
-  async findByKey(idempotencyKey: string): Promise<DelayNoticeDeliveryState | null> {
-    return this.withClient(async (client) => {
+  async findByKey(tenantId: string, idempotencyKey: string): Promise<DelayNoticeDeliveryState | null> {
+    return this.withTenant(tenantId, async (client) => {
       const result = await client.query(
-        `SELECT * FROM delay_notice_state WHERE idempotency_key = $1`,
-        [idempotencyKey]
+        `SELECT * FROM delay_notice_state WHERE tenant_id = $1 AND idempotency_key = $2`,
+        [tenantId, idempotencyKey]
       );
       if (result.rows.length === 0) return null;
       return mapRow(result.rows[0]);

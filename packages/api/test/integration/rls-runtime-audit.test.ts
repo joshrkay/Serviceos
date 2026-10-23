@@ -17,27 +17,13 @@ import { describe, it, expect, afterAll } from 'vitest';
 import { Pool } from 'pg';
 import { getSharedTestDb, closeSharedTestDb } from './shared';
 import { MIGRATIONS } from '../../src/db/schema';
+import { RLS_EXEMPT_TABLES_SHARED } from '../fixtures/rls-exempt-tables';
 
 // Tables that legitimately carry a tenant_id column but are exempt from
-// per-tenant RLS. Add here ONLY with a documented reason.
-const EXEMPT_TABLES: string[] = [
-  // Single-use OAuth nonce: /callback consumes the state row BEFORE any
-  // tenant context exists — recovering tenant_id from the row is the
-  // point of the lookup. See migration 085's exception comment.
-  'oauth_states',
-  // Platform-scope audit of tenant deletion: written while the tenant is
-  // being destroyed and read by platform admins with no tenant context.
-  // See migration 123.
-  'platform_deprovision_log',
-  // U7 demo call (migration 317): the lease, the in-flight job registry and
-  // the signup handoff ledger. tenant_id only names the demo tenant a call,
-  // a running job or a signup holds; the reaper, the reset and the queue
-  // front door read them with no tenant context. See migration 317's comment
-  // and test/integration/demo-tenants-excluded.test.ts.
-  'demo_tenant_leases',
-  'demo_inflight_jobs',
-  'signup_handoffs',
-];
+// per-tenant RLS: the one reviewed list (test/fixtures/rls-exempt-tables.ts),
+// shared with test/db/schema.test.ts and the raw-pg guard. Add there ONLY with
+// a documented reason.
+const EXEMPT_TABLES: string[] = [...RLS_EXEMPT_TABLES_SHARED];
 
 describe('runtime RLS audit — live pg catalog', () => {
   afterAll(async () => {

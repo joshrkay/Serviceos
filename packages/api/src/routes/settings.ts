@@ -14,6 +14,12 @@ import { resolveCanonicalUser, type UserRepository } from '../users/user';
 import { requireActiveTenantMember } from '../users/tenant-member';
 import { hasPermission, isValidRole } from '../auth/rbac';
 import { z } from 'zod';
+import type { Pool } from 'pg';
+import type { VapiClient } from '../integrations/vapi/client';
+import { refreshVapiFirstMessage } from '../voice/voice-config';
+import { runAfterCommit } from '../middleware/tenant-context';
+import { tenantQuery } from '../workers/tenant-query';
+import { createLogger } from '../logging/logger';
 import {
   getSettings,
   updateSettings,
@@ -327,6 +333,11 @@ function projectDunningConfig(config: DunningConfig, configured: boolean) {
   };
 }
 
+const settingsLogger = createLogger({
+  service: 'settings-route',
+  environment: process.env.NODE_ENV || 'development',
+});
+
 export function createSettingsRouter(
   settingsRepo: SettingsRepository,
   deps?: SettingsRouterDependencies,
@@ -347,6 +358,12 @@ export function createSettingsRouter(
    * write's own (request) transaction; `updateSettings` attaches the hook.
    */
   paymentModeDeps?: { queue: Queue },
+  /**
+   * PRIV-4 — a Vapi assistant's first message carries the virtual-assistant
+   * notice in the tenant's `default_language`, so a language change re-pushes
+   * it. Absent (no pool, or VAPI_API_KEY unset) → no push.
+   */
+  vapiDeps?: { pool: Pool; vapiClient: Pick<VapiClient, 'updateAssistant'> | null },
 ): Router {
   const router = Router();
 
@@ -437,6 +454,33 @@ export function createSettingsRouter(
         // creation, but tests / legacy tenants may not have a row yet).
         await ensureTenantSettings(tenantId, settingsRepo);
         const updated = await updateSettings(tenantId, patch, settingsRepo);
+
+        // PRIV-4 — a Vapi-routed caller hears the notice from the assistant's
+        // first message, built in `default_language`; re-push it so a switch
+        // to Spanish is heard in Spanish. After COMMIT, on its own tenant-scoped
+        // connection, so a slow Vapi never holds the request transaction (or
+        // reads the language before it is durable). The setting is already
+        // saved, so a failure is logged, not thrown; the next voice save or the
+        // backfill script re-pushes.
+        const vapiClient = vapiDeps?.vapiClient;
+        if (patch.defaultLanguage !== undefined && vapiDeps && vapiClient) {
+          const { pool } = vapiDeps;
+          runAfterCommit(res, () => {
+            void refreshVapiFirstMessage(
+              {
+                pool: { query: (sql: string, params?: unknown[]) => tenantQuery(pool, tenantId, sql, params) } as never,
+                vapiClient,
+              },
+              tenantId,
+            )
+              .catch(() => 'failed' as const)
+              .then((outcome) => {
+                if (outcome === 'failed') {
+                  settingsLogger.warn('settings.language: Vapi first-message refresh failed', { tenantId });
+                }
+              });
+          });
+        }
 
         // D2-1c — audit-log the language settings change.
         if (auditRepo) {

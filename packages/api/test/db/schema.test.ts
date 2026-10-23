@@ -1,4 +1,5 @@
 import { MIGRATIONS, getMigrationSQL, setTenantContext } from '../../src/db/schema';
+import { RLS_EXEMPT_TABLES_SHARED } from '../fixtures/rls-exempt-tables';
 
 describe('P0-004 — Tenant-safe Postgres schema + RLS', () => {
   it('happy path — all migrations are defined', () => {
@@ -89,29 +90,10 @@ describe('P0-004 — Tenant-safe Postgres schema + RLS', () => {
   });
 
   // EXCEPTIONS — tables that genuinely should not be RLS-protected even
-  // though they carry a tenant_id column. Hoisted to the describe scope so
-  // both the "FORCE everywhere except here" assertion and the "allowlist
-  // didn't silently grow" pin reference the same set (otherwise the pin
-  // test compares a duplicate constant against itself and can never fail).
-  const RLS_EXEMPT_TABLES_SHARED = new Set<string>([
-    // oauth_states: short-lived Google OAuth state nonces. The /callback
-    // path calls consume(stateId) BEFORE tenant context is set —
-    // recovering tenant_id from the row IS the lookup. RLS would make the
-    // row invisible to the call that needs it.
-    'oauth_states',
-    // platform_deprovision_log: cross-tenant audit trail of tenant
-    // hard-deletes. By design, this row outlives the tenant it records.
-    'platform_deprovision_log',
-    // U7 demo call (migration 317): platform tables whose tenant_id only
-    // NAMES the demo tenant a call, a running job or a signup holds. They are
-    // read by the reaper, the reset and the queue front door with no tenant
-    // context (the lease is how the tenant is discovered), so an
-    // app.current_tenant_id policy would hide every row from the code that
-    // needs it. The runtime role is revoked on them (219 and 317).
-    'demo_tenant_leases',
-    'demo_inflight_jobs',
-    'signup_handoffs',
-  ]);
+  // though they carry a tenant_id column. The set lives in a shared fixture
+  // (test/fixtures/rls-exempt-tables.ts) so this file and the raw-pg guard
+  // (test/invariants/raw-pool-rls.structural.test.ts) use one list; both the
+  // "FORCE everywhere except here" assertion and the pin below reference it.
 
   it('Blocker 3 — every ENABLE-RLS table also FORCEs RLS', () => {
     // Without FORCE, the table OWNER (the app's connection role) bypasses

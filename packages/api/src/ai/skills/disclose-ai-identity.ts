@@ -1,42 +1,46 @@
 /**
- * disclose_ai_identity skill — state-aware AI/bot identity disclosure (Epic 9.b).
+ * disclose_ai_identity skill — tells a phone caller they are talking to a
+ * virtual assistant, not a person (Epic 9.b; wired by PRIV-4).
  *
  * DISTINCT from `disclose-recording` (which discloses call RECORDING). This
- * discloses that the caller is speaking with an AI. Bot-disclosure laws in
- * some states require it (e.g. California's B.O.T. Act, SB 1001). Played at
- * call start, after the greeting. Per-tenant editable copy with a built-in
- * default; tenants may also opt in to play it everywhere.
+ * says WHO is on the line. It is spoken on EVERY telephony call, inside the
+ * greeting turn (`buildTelephonyGreeting` places it straight after the opener
+ * or the tenant's own greeting, before the recording notice), so a tenant
+ * persona name ("This is Sarah.") is never left standing as a human
+ * introduction.
  *
- * Pure decision + copy here (fully unit-tested, no I/O); the greeting-path
- * wiring + consent-ledger/audit are the integration layer.
+ * Deliberately NOT gated on the caller's state: the caller's area code is a
+ * weak proxy for where they are (ported mobiles, VoIP), and an unplaced
+ * number must disclose. Bot-disclosure laws (e.g. California's B.O.T. Act,
+ * Cal. Bus. & Prof. Code § 17940) are the reason the notice exists; playing
+ * it on every call is the fail-safe posture.
  *
- * ⚠️  Legal review required before production use. The state list and copy are
- *     a best-effort starting point — confirm statutes per jurisdiction.
+ * Caller-facing copy is plain words ("virtual assistant", "not a live
+ * person"); it never says "AI".
+ *
+ * Ledgered the way `discloseRecording` ledgers the recording notice: the
+ * write is a DEFERRED thunk the transport commits at its own point of
+ * evidence that the caller heard the greeting (generating copy is not
+ * evidence). The ledger is an `audit_events` row — an identity notice is not
+ * a consent, so it does not belong in `consent_events`.
+ *
+ * ⚠️  Legal review required: counsel should confirm the wording and whether
+ *     any jurisdiction needs a specific placement.
  */
 import type { Language } from '../i18n/i18n';
+import { createAuditEvent, type AuditRepository } from '../../audit/audit';
+
+/** Built-in notice copy. `{business_name}` is substituted when a template uses it. */
+export const DEFAULT_AI_DISCLOSURE_TEMPLATE_EN =
+  "Just so you know, I'm a virtual assistant, not a live person.";
+export const DEFAULT_AI_DISCLOSURE_TEMPLATE_ES =
+  'Para que lo sepa, soy un asistente virtual, no una persona real.';
 
 /**
- * US states with AI/bot identity-disclosure requirements (best-effort starting
- * point — legal review required). Kept as a small set, mirroring the
- * recording-disclosure two-party table; extend as counsel confirms statutes.
+ * Audit event type of the ledger row. The activity feed turns event types
+ * into owner-visible words (`labelForEvent`), so the name stays plain.
  */
-const AI_DISCLOSURE_REQUIRED_STATES: ReadonlySet<string> = new Set([
-  'CA', // B.O.T. Act — Cal. Bus. & Prof. Code § 17940 et seq. (SB 1001)
-  'FL', // per product spec — confirm statute in legal review
-]);
-
-/** True when the caller's US state legally requires an AI-identity disclosure. */
-export function requiresAiDisclosure(callerState: string | null | undefined): boolean {
-  const state = callerState?.toUpperCase().trim();
-  if (!state) return false; // unknown state → not legally required (tenant opt-in still applies)
-  return AI_DISCLOSURE_REQUIRED_STATES.has(state);
-}
-
-/** Built-in default disclosure copy. `{business_name}` is substituted. */
-export const DEFAULT_AI_DISCLOSURE_TEMPLATE_EN =
-  "Just so you know, you're speaking with {business_name}'s AI virtual assistant.";
-export const DEFAULT_AI_DISCLOSURE_TEMPLATE_ES =
-  'Para que lo sepa, está hablando con el asistente virtual de inteligencia artificial de {business_name}.';
+export const AI_DISCLOSURE_PLAYED_EVENT = 'virtual_assistant_notice.played';
 
 function substitute(template: string, businessName: string): string {
   const name = (businessName ?? '').trim() || 'our team';
@@ -44,7 +48,7 @@ function substitute(template: string, businessName: string): string {
 }
 
 /**
- * Build the AI-disclosure sentence. A tenant `customText` override wins (with
+ * Build the notice sentence. A per-tenant `customText` override wins (with
  * `{business_name}` substitution); otherwise the language-appropriate default.
  */
 export function buildAiDisclosureText(input: {
@@ -61,45 +65,64 @@ export function buildAiDisclosureText(input: {
   return substitute(template, input.businessName);
 }
 
-export type AiDisclosureReason = 'state_required' | 'tenant_enabled' | 'none';
-
 export interface AiDisclosureInput {
-  channel: 'telephony' | 'inapp';
-  /** ISO 3166-2 US state (e.g. 'CA'). Null/undefined → not legally required. */
-  callerState?: string | null;
+  tenantId: string;
   businessName: string;
   language?: Language;
   /** Per-tenant override of the wording; empty/undefined → built-in default. */
   customText?: string | null;
-  /** Tenant opt-in: play the disclosure even where not legally required. Default false. */
-  tenantEnabled?: boolean;
+  /** Ledger target. Without it the commit is a no-op (the notice still plays). */
+  auditRepo?: AuditRepository;
+  /** The call's voice session — the audit row's entity and correlation id. */
+  voiceSessionId: string;
+  actorId: string;
+  /** Which transport spoke it (the session channel), recorded on the row. */
+  channel?: string;
 }
 
 export interface AiDisclosureResult {
-  /** Whether the AI disclosure should be spoken on this call. */
-  shouldDisclose: boolean;
-  /** The disclosure text (empty when shouldDisclose is false). */
-  text: string;
-  reason: AiDisclosureReason;
+  /** The sentence to speak inside the greeting turn. Never empty. */
+  disclosureText: string;
+  /**
+   * Appends the `virtual_assistant_notice.played` audit row. The caller
+   * decides WHEN — at the same point of evidence as the recording notice's
+   * `commitConsentLedger`. Idempotent (a second call is a no-op) and
+   * best-effort: never rejects, so a ledger failure never drops a live call.
+   * Needs no caller phone, so a blocked caller ID is still ledgered.
+   */
+  commitDisclosureLedger: () => Promise<void>;
 }
 
-/**
- * Decide whether — and what — to disclose. In-app callers know they're using
- * the product (ToS consent), so no spoken disclosure. On telephony it plays
- * when the caller's state requires it OR the tenant opted in.
- */
-export function resolveAiDisclosure(input: AiDisclosureInput): AiDisclosureResult {
-  if (input.channel === 'inapp') {
-    return { shouldDisclose: false, text: '', reason: 'none' };
-  }
-  const stateRequired = requiresAiDisclosure(input.callerState);
-  const tenantEnabled = input.tenantEnabled === true;
-  if (!stateRequired && !tenantEnabled) {
-    return { shouldDisclose: false, text: '', reason: 'none' };
-  }
-  return {
-    shouldDisclose: true,
-    text: buildAiDisclosureText(input),
-    reason: stateRequired ? 'state_required' : 'tenant_enabled',
+/** Generate the notice for a phone call, plus its deferred ledger write. */
+export function discloseAiIdentity(input: AiDisclosureInput): AiDisclosureResult {
+  const tenantWording = Boolean(input.customText?.trim());
+  const disclosureText = buildAiDisclosureText(input);
+  const auditRepo = input.auditRepo;
+  let committed = false;
+  const commitDisclosureLedger = async (): Promise<void> => {
+    if (!auditRepo || committed) return;
+    committed = true;
+    try {
+      await auditRepo.create(
+        createAuditEvent({
+          tenantId: input.tenantId,
+          actorId: input.actorId,
+          actorRole: 'system',
+          eventType: AI_DISCLOSURE_PLAYED_EVENT,
+          entityType: 'voice_session',
+          entityId: input.voiceSessionId,
+          correlationId: input.voiceSessionId,
+          metadata: {
+            text: disclosureText,
+            wording: tenantWording ? 'tenant' : 'default',
+            language: input.language ?? 'en',
+            ...(input.channel ? { channel: input.channel } : {}),
+          },
+        }),
+      );
+    } catch {
+      // Swallow — the ledger must never block or drop the call.
+    }
   };
+  return { disclosureText, commitDisclosureLedger };
 }
