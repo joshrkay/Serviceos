@@ -88,3 +88,29 @@ describe('A4-4 — InMemoryProposalRepository.updateIfUnchanged', () => {
     expect(await repo.updateIfUnchanged(TENANT, 'missing-id', read, { summary: 'x' })).toBeNull();
   });
 });
+
+// R2-1 — a Postgres read is a fresh object every time. The in-memory read
+// shared the stored row's payload and sourceContext, so a writer that
+// changed part of the row it read in place changed the "stored" row along
+// with it, and these tests could not see what that does on Postgres (the
+// read no longer matches the row, and updateIfUnchanged refuses the write).
+describe('R2-1 — InMemoryProposalRepository reads share nothing with the stored row', () => {
+  it('changing a nested part of a read changes neither the stored row nor the next read', async () => {
+    const repo = new InMemoryProposalRepository();
+    const meta = () => ({ overallConfidence: 'low', markers: [{ path: 'lineItems[0].unitPriceCents', reason: 'x' }] });
+    const created = await repo.create(row({ payload: { transcript: 'invoice Bob', _meta: meta() } }));
+
+    const reads = [
+      await repo.findById(TENANT, created.id),
+      (await repo.findByIdsForUpdate(TENANT, [created.id]))[0],
+    ];
+    for (const read of reads) {
+      delete (read!.payload._meta as Record<string, unknown>).markers;
+      (read!.sourceContext as Record<string, unknown>).entityKind = 'job';
+    }
+
+    const again = (await repo.findById(TENANT, created.id))!;
+    expect(again.payload._meta).toEqual(meta());
+    expect(again.sourceContext).toEqual({ source: 'voice', entityKind: 'customer' });
+  });
+});

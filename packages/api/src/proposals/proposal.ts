@@ -1487,19 +1487,24 @@ export class InMemoryProposalRepository implements ProposalRepository {
     return created;
   }
 
+  /**
+   * R2-1 — a deep copy, as a Postgres read is a fresh object: a writer that
+   * changes part of the row it read in place must not change the stored row
+   * with it (tests would then miss what that does on Postgres).
+   */
   async findById(tenantId: string, id: string): Promise<Proposal | null> {
     const proposal = this.proposals.get(id);
     if (!proposal || proposal.tenantId !== tenantId) return null;
-    return { ...proposal };
+    return structuredClone(proposal);
   }
 
-  /** Plain ordered read: in-memory callers are single-threaded, so there is nothing to lock. */
+  /** Plain ordered read (deep copies, like findById): in-memory callers are single-threaded, so there is nothing to lock. */
   async findByIdsForUpdate(tenantId: string, ids: string[]): Promise<Proposal[]> {
     return [...new Set(ids)]
       .sort()
       .map((id) => this.proposals.get(id))
       .filter((p): p is Proposal => !!p && p.tenantId === tenantId)
-      .map((p) => ({ ...p }));
+      .map((p) => structuredClone(p));
   }
 
   async findByTenant(tenantId: string): Promise<Proposal[]> {

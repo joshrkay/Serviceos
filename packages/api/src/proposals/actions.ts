@@ -930,6 +930,15 @@ export async function editProposal(
     throw new ValidationError(`Cannot edit proposal in '${proposal.status}' status`);
   }
 
+  // R2-1 — the row exactly as read, apart from `proposal`. The payload and
+  // sourceContext built below are shallow spreads of `proposal`, so their
+  // nested objects are its own: a helper that changes one in place (the
+  // #1405 re-draft once deleted `_meta` keys) changes `proposal` too. What
+  // means "the row as read" below uses this copy: the write's "unchanged
+  // since the read?" check (an altered read refused every such edit as
+  // raced), the payload kept as first proposed, and the before-values.
+  const read = structuredClone(proposal);
+
   // FR-2 phase 3c — overlap consent on a reassign is server-pinned at
   // creation (the dispatch board's explicit "Book anyway"). An edit can
   // neither add it nor carry it onto a different appointment/technician.
@@ -1026,9 +1035,9 @@ export async function editProposal(
   // the stale copy. The edit is refused instead, and a retry re-reads.
   // Refused rather than rebuilt under the row lock because this also runs
   // outside a request transaction (the voice and text edit paths).
-  const updated = await proposalRepo.updateIfUnchanged(tenantId, proposalId, proposal, {
+  const updated = await proposalRepo.updateIfUnchanged(tenantId, proposalId, read, {
     payload: updatedPayload,
-    ...(preserveOriginal ? { originalPayload: proposal.payload } : {}),
+    ...(preserveOriginal ? { originalPayload: read.payload } : {}),
     ...(sourceContextUpdate ? { sourceContext: sourceContextUpdate } : {}),
   });
   if (!updated) {
@@ -1073,7 +1082,7 @@ export async function editProposal(
         intent: updated.proposalType,
         actorId,
         fields: editedFields,
-        before: proposal.payload,
+        before: read.payload,
         after: updatedPayload,
       });
       if (corrections.length > 0) {
@@ -1095,7 +1104,7 @@ export async function editProposal(
         tenantId,
         actorId,
         actorRole,
-        groundingProposal: proposal,
+        groundingProposal: read,
         updatedProposal: updated,
         editedFields,
       });
