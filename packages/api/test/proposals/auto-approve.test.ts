@@ -1385,3 +1385,25 @@ describe('RV-065 — one-tap token action variants', () => {
     ).toThrow(/jobId/);
   });
 });
+
+describe('strictestMode — the fail-closed mode for a member whose mode could not be read', () => {
+  it("with no override it is the built-in 'tech' (0.95), above the legacy 0.9", async () => {
+    const { strictestMode, resolveAutoApproveThreshold } = await import('../../src/proposals/auto-approve');
+    expect(strictestMode(undefined)).toBe('tech');
+    expect(resolveAutoApproveThreshold({ supervisorMode: strictestMode(undefined), supervisorPresent: true })).toBe(0.95);
+  });
+
+  it('follows the override when it makes another mode the strictest', async () => {
+    const { strictestMode, resolveAutoApproveThreshold } = await import('../../src/proposals/auto-approve');
+    const override = { supervisor: 0.99, tech: 0.85, both: 0.85 };
+    expect(strictestMode(override)).toBe('supervisor');
+    expect(
+      resolveAutoApproveThreshold({ supervisorMode: strictestMode(override), supervisorPresent: true, tenantOverride: override }),
+    ).toBe(0.99);
+  });
+
+  it("a partial override still counts the built-in default for the modes it leaves out", async () => {
+    const { strictestMode } = await import('../../src/proposals/auto-approve');
+    expect(strictestMode({ tech: 0.8 })).toBe('both');
+  });
+});

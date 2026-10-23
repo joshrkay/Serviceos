@@ -1977,6 +1977,11 @@ callers write a proposal's status directly, and the repository checks no transit
    module that returns a proposal, a clarification, or a refusal with a reason, and runs the
    made-up-id scrub that only chat ran before. Owners keep editing drafts before approval in
    the app and the portal; an edit re-runs the same checks.
+   *As built (first step):* `ai/drafting/draft-proposal.ts#draftProposal`. Chat and voice
+   memos draft through it: verified ids are recorded, a made-up id is scrubbed and a
+   verified one takes its place, the payload's contract gates the card, and a draft that
+   comes back empty is refused with a reason (a memo then gets a clarification card). The
+   live-call, text and estimate-route surfaces and the edit re-check follow.
 
 **Not decided (deferred by the owner).** An auto-send trust ramp (auto-approving customer
 messages after N approvals above a confidence bar) was raised and deliberately set aside.

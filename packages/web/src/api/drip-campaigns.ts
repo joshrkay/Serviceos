@@ -7,7 +7,7 @@
 import { apiFetch } from '../utils/api-fetch';
 
 export type DripChannel = 'sms' | 'call' | 'email';
-export type DripTargetKind = 'lapsed_customers' | 'unsold_estimates';
+export type DripTargetKind = 'lapsed_customers' | 'unsold_estimates' | 'membership_renewals';
 
 export type DripStep =
   | { channel: 'sms'; delayMinutes: number; body: string }

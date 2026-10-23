@@ -109,6 +109,61 @@ function rowFor(
   };
 }
 
+describe('P2-030 PgShadowComparisonStore — a call with no tenant UUID', () => {
+  // The gateway files platform calls (readiness probe, call-quality judges)
+  // under SYSTEM_TENANT_ID = 'system'; withTenant() refuses any non-UUID.
+  const PLACEHOLDER = '00000000-0000-0000-0000-000000000000';
+
+  it.each([
+    { label: 'the system tenant id', tenantId: 'system' },
+    { label: 'a non-UUID string', tenantId: 'tenant-123' },
+    { label: 'an empty string', tenantId: '' },
+    { label: 'undefined', tenantId: undefined },
+  ])('files a comparison for $label under the placeholder tenant', async ({ tenantId }) => {
+    const result = makeResult({ tenantId });
+    const { pool, calls } = makeMockPool([undefined, [rowFor(result, { tenant_id: PLACEHOLDER })]]);
+
+    const saved = await new PgShadowComparisonStore(pool).save(result);
+
+    expect(calls[0].sql).toContain('app.current_tenant_id');
+    expect(calls[0].params).toEqual([PLACEHOLDER]);
+    expect(calls[1].sql).toContain('INSERT INTO shadow_comparisons');
+    expect(calls[1].params[1]).toBe(PLACEHOLDER);
+    expect(saved.tenantId).toBe(PLACEHOLDER);
+  });
+
+  it("reads 'system' comparisons back from the placeholder tenant they were filed under", async () => {
+    const stored = makeResult({ tenantId: PLACEHOLDER });
+    const { pool, calls } = makeMockPool([undefined, [rowFor(stored)]]);
+
+    const page = await new PgShadowComparisonStore(pool).listForTenant('system');
+
+    expect(calls[0].params).toEqual([PLACEHOLDER]);
+    expect(calls[1].params[0]).toBe(PLACEHOLDER);
+    expect(page.comparisons.map((c) => c.id)).toEqual([stored.id]);
+  });
+
+  it.each(['tenant-123', ''])(
+    'refuses a read for the non-UUID tenant id %j instead of opening the shared placeholder bucket',
+    async (tenantId) => {
+      const { pool, calls } = makeMockPool([]);
+
+      await expect(new PgShadowComparisonStore(pool).listForTenant(tenantId)).rejects.toThrow(/tenant/i);
+      expect(calls.some((c) => c.sql.includes('shadow_comparisons'))).toBe(false);
+    },
+  );
+
+  it('keeps a real tenant UUID as-is', async () => {
+    const result = makeResult({ tenantId: TENANT_B });
+    const { pool, calls } = makeMockPool([undefined, [rowFor(result)]]);
+
+    await new PgShadowComparisonStore(pool).save(result);
+
+    expect(calls[0].params).toEqual([TENANT_B]);
+    expect(calls[1].params[1]).toBe(TENANT_B);
+  });
+});
+
 describe('P2-030 PgShadowComparisonStore.save', () => {
   it('inserts with parameterized values and sets tenant context', async () => {
     const result = makeResult();

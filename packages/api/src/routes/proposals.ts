@@ -24,7 +24,7 @@ import {
 } from '../proposals/actions';
 import type { ApprovalReferenceCheck } from '../proposals/approval-reference-checks';
 import { resolveProposalLine } from '../proposals/resolve-line';
-import { resolveProposalEntity } from '../proposals/resolve-entity';
+import { ownerFacingPickError, resolveProposalEntity } from '../proposals/resolve-entity';
 import type { RedraftHandlerFactory } from '../proposals/redraft-handler-factory';
 import type { EntityAliasCandidateCapture } from '../learning/entity-aliases/candidate-service';
 import {
@@ -38,6 +38,7 @@ import { createSchedulingProposal } from '../proposals/create-scheduling';
 import { assertValidProposalPayload } from '../proposals/contracts';
 import type { CorrectionRepository } from '../proposals/corrections/correction';
 import type { EstimateRepository } from '../estimates/estimate';
+import type { TenantTransactionRunner } from '../db/tenant-transaction';
 import { routeParam } from '../shared/route-params';
 
 // P2-035 — Batch approval body schema. Lives inline rather than in
@@ -85,6 +86,11 @@ const resolveEntityBodySchema = z.object({
 
 export function createProposalsRouter(
   proposalRepo: ProposalRepository,
+  // A1 / A3-3 — POST /:id/resolve-entity holds no request transaction (it
+  // awaits the re-draft's LLM call), so its row lock and writes run in this
+  // runner. Required: it must match `proposalRepo` (PgTenantTransactionRunner
+  // with the Pg repos — their row lock refuses to run outside one).
+  transactionRunner: TenantTransactionRunner,
   appointmentRepo?: AppointmentRepository,
   auditRepo?: AuditRepository,
   feasibilityDeps?: FeasibilityDependencies,
@@ -418,8 +424,12 @@ export function createProposalsRouter(
           ...(auditRepo ? { auditRepo } : {}),
           ...(redraftHandlerFactory ? { redraftHandlerFactory } : {}),
           ...(entityAliasCandidateCapture ? { entityAliasCandidateCapture } : {}),
+          transactionRunner,
         },
-      );
+      ).catch((err: unknown) => {
+        // A3-4 — the owner sees this message verbatim.
+        throw ownerFacingPickError(err);
+      });
       res.json(result);
     })
   );

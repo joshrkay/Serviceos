@@ -235,6 +235,132 @@ describe('updateLocked (in-memory)', () => {
   });
 });
 
+/**
+ * Without a pool there is no row lock to wait on: the in-memory updateLocked
+ * read the row, checked it, awaited `compute`, then stored a copy of the row
+ * it read. Two writers in that await both passed the version check and the
+ * later one erased the earlier. It now takes the row one writer at a time,
+ * as the Pg `SELECT ... FOR UPDATE` makes a second writer wait for the first
+ * and then read what it committed.
+ */
+describe('updateLocked (in-memory): writers that overlap take the row one at a time', () => {
+  it('two writers from the same version: one lands, the other is refused with DraftVersionConflictError, and the first is kept', async () => {
+    const { repo, draft } = await draftRepo();
+
+    const [first, second] = await Promise.allSettled([
+      repo.stageChoice(TENANT, 'greeting', { option: 'b' }, draft.version),
+      repo.setOwnerPhone(TENANT, '+12165550142', draft.version),
+    ]);
+
+    expect(first.status).toBe('fulfilled');
+    expect(second.status).toBe('rejected');
+    const err = (second as PromiseRejectedResult).reason;
+    expect(err).toBeInstanceOf(DraftVersionConflictError);
+    expect(err).toMatchObject({ expected: draft.version, actual: draft.version + 1 });
+    const stored = (await repo.getForTenant(TENANT))!;
+    expect(stored.choices.greeting).toEqual({ option: 'b' });
+    expect(stored.ownerPhone).toBeNull();
+    expect(stored.version).toBe(draft.version + 1);
+  });
+
+  it('a choice saved while the approval is written is refused as already approved; the approval is kept', async () => {
+    const { repo, draft } = await draftRepo();
+
+    const [approved, staged] = await Promise.allSettled([
+      repo.markApproved(TENANT, ['p1', 'p2'], draft.version),
+      repo.stageChoice(TENANT, 'greeting', { option: 'b' }, draft.version),
+    ]);
+
+    expect(approved.status).toBe('fulfilled');
+    expect(staged.status).toBe('rejected');
+    expect((staged as PromiseRejectedResult).reason).toBeInstanceOf(DraftAlreadyApprovedError);
+    const stored = (await repo.getForTenant(TENANT))!;
+    expect(stored.status).toBe('approved');
+    expect(stored.proposalIds).toEqual(['p1', 'p2']);
+    expect(stored.choices.greeting).toBeUndefined();
+    expect(stored.version).toBe(draft.version + 1);
+  });
+
+  it('a writer that sends no version waits for the one in flight and lands on top of it', async () => {
+    const { repo, draft } = await draftRepo();
+
+    await Promise.all([
+      repo.stageChoice(TENANT, 'greeting', { option: 'b' }, draft.version),
+      repo.setClientTimezone(TENANT, 'America/Chicago'),
+    ]);
+
+    const stored = (await repo.getForTenant(TENANT))!;
+    expect(stored.choices.greeting).toEqual({ option: 'b' });
+    expect(stored.clientTimezone).toBe('America/Chicago');
+    expect(stored.version).toBe(draft.version + 2);
+  });
+
+  it('a slow compute holds the row until it is stored: a writer arriving meanwhile sees its result', async () => {
+    const { repo, draft } = await draftRepo();
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+
+    const slow = repo.updateLocked(TENANT, { requireStatus: 'draft', expectedVersion: draft.version }, async () => {
+      await gate;
+      return { ownerPhone: '+12165550142' };
+    });
+    const waiting = repo.stageChoice(TENANT, 'greeting', { option: 'b' }, draft.version + 1);
+    finish();
+
+    expect((await slow).version).toBe(draft.version + 1);
+    const staged = await waiting;
+    expect(staged.version).toBe(draft.version + 2);
+    expect(staged.ownerPhone).toBe('+12165550142');
+    expect(staged.choices.greeting).toEqual({ option: 'b' });
+  });
+
+  it('a refused or failed write frees the row for the next writer', async () => {
+    const { repo, draft } = await draftRepo();
+
+    const results = await Promise.allSettled([
+      repo.updateLocked(TENANT, { requireStatus: 'draft' }, async () => {
+        throw new Error('compute failed');
+      }),
+      repo.stageChoice(TENANT, 'greeting', { option: 'b' }, draft.version + 7),
+      repo.stageChoice(TENANT, 'greeting', { option: 'b' }, draft.version),
+    ]);
+
+    expect(results.map((r) => r.status)).toEqual(['rejected', 'rejected', 'fulfilled']);
+    expect((await repo.getForTenant(TENANT))!.version).toBe(draft.version + 1);
+  });
+
+  it('a write for one tenant does not wait on another tenant\'s', async () => {
+    const { repo, draft } = await draftRepo();
+    const OTHER = '00000000-0000-0000-0000-00000000d0b2';
+    const other = await repo.create(OTHER, {
+      packId: draft.packId,
+      trade: draft.trade,
+      metroCode: draft.metroCode,
+      metroName: draft.metroName,
+      businessName: 'Other Plumbing',
+      ownerFirstName: 'Sam',
+      clientTimezone: 'America/New_York',
+      assembled: draft.assembled,
+    });
+    let finish!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      finish = resolve;
+    });
+    const held = repo.updateLocked(TENANT, { requireStatus: 'draft' }, async () => {
+      await gate;
+      return {};
+    });
+
+    const staged = await repo.stageChoice(OTHER, 'greeting', { option: 'b' }, other.version);
+
+    expect(staged.version).toBe(other.version + 1);
+    finish();
+    await held;
+  });
+});
+
 describe('single-UPDATE guard (repository source)', () => {
   const source = readFileSync(resolve(__dirname, '../../../src/onboarding/draft/repository.ts'), 'utf8');
 

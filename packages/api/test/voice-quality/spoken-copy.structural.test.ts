@@ -95,7 +95,7 @@ const GUARDED_FILES: Record<string, Allowed[]> = {
   "ai/voice-turn/shared/session-cost.ts": [],
   "ai/voice-turn/shared/confirm-turn-answer.ts": [],
   "ai/voice-turn/shared/owner-session.ts": [
-    { why: "log", literal: "resolveOwnerSession failed — treating caller as non-owner" },
+    { why: "log", literal: "owner-line approver lookup failed — treating caller as non-owner" },
   ],
 };
 

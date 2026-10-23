@@ -7,8 +7,8 @@ vi.mock('../../../../lib/apiClient', () => ({ useApiClient: () => apiFetchMock }
 import { BillingStep } from './BillingStep';
 
 const PLANS = [
-  { id: 'starter', name: 'Starter', amountCents: 7_900, currency: 'usd', interval: 'month', includedUsers: 2, includedAiMinutes: 20, overageCentsPerAiMinute: 125 },
-  { id: 'growth', name: 'Growth', amountCents: 19_900, currency: 'usd', interval: 'month', includedUsers: 5, includedAiMinutes: 60, overageCentsPerAiMinute: 125 },
+  { id: 'starter', name: 'Starter', amountCents: 7_900, currency: 'usd', interval: 'month', includedUsers: 2, includedAiMinutes: 60, overageCentsPerAiMinute: 125 },
+  { id: 'growth', name: 'Growth', amountCents: 19_900, currency: 'usd', interval: 'month', includedUsers: 5, includedAiMinutes: 200, overageCentsPerAiMinute: 125 },
 ];
 
 function mockPlansOk() {
@@ -36,10 +36,10 @@ describe('BillingStep — explicit plan selection', () => {
       expect(opt).not.toBeChecked();
     }
     expect(group).toBeInTheDocument();
-    expect(screen.getByText('2 users · 20 AI answering minutes · then $1.25/min')).toBeInTheDocument();
-    expect(screen.getByText('5 users · 60 AI answering minutes · then $1.25/min')).toBeInTheDocument();
+    expect(screen.getByText('2 users · 60 AI answering minutes · then $1.25/min')).toBeInTheDocument();
+    expect(screen.getByText('5 users · 200 AI answering minutes · then $1.25/min')).toBeInTheDocument();
     expect(screen.queryByText(/500 voice minutes|\$0\.30/)).not.toBeInTheDocument();
-    expect(screen.getByText('20 AI answering minutes a month on Starter (60 on Growth); $1.25/min after')).toBeInTheDocument();
+    expect(screen.getByText('60 AI answering minutes a month on Starter (200 on Growth); $1.25/min after')).toBeInTheDocument();
   });
 
   it('renders real radio inputs with accessible labels meeting the 44px tap target', async () => {
@@ -161,6 +161,8 @@ describe('BillingStep — explicit plan selection', () => {
 
     expect(await screen.findByRole('alert')).toHaveTextContent(/subscription billing is not configured/i);
     expect(screen.queryByRole('radiogroup')).not.toBeInTheDocument();
+    // No plans, no minutes claim: the bundle line only ever comes from the API's plans.
+    expect(screen.queryByText(/AI answering minutes a month/)).not.toBeInTheDocument();
   });
 
   it('falls back to a generic message on a 503 with no backend message supplied', async () => {

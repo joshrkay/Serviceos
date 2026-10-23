@@ -6,7 +6,7 @@ import { Proposal, ProposalRepository, createProposal, CreateProposalInput, Prop
 import { assertValidProposalPayload } from '../proposals/contracts';
 import { INTENT_TO_PROPOSAL_TYPE } from '../proposals/voice-intent-map';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
-import { routeUnsupervisedProposal, confidenceMetaBlocksAutoApprove } from '../proposals/auto-approve';
+import { routeUnsupervisedProposal, confidenceMetaBlocksAutoApprove, strictestMode } from '../proposals/auto-approve';
 import {
   AUTO_APPROVE_DIRECT_PERMISSION,
   holdIfCallerCannotApprove,
@@ -27,6 +27,7 @@ import {
 import { renderProposalSms, renderChainSms } from '../proposals/sms/render';
 import type { OutboundAnchorKind } from '../proposals/sms/sms-event';
 import type { RouteUnsupervisedProposalDeps } from '../proposals/auto-approve';
+import type { ApprovalSmsRecipient } from '../proposals/approver-identity';
 import type { AuditRepository } from '../audit/audit';
 import type {
   SettingsRepository,
@@ -78,7 +79,8 @@ import {
   EntityResolver,
 } from '../ai/resolution/entity-resolver';
 import { resolveVoiceEntityReferences } from '../ai/agents/customer-calling/entity-resolution';
-import { TaskHandler, TaskContext, TaskResult, withClassifierRun } from '../ai/tasks/task-handlers';
+import { TaskHandler, TaskContext } from '../ai/tasks/task-handlers';
+import { draftProposal } from '../ai/drafting/draft-proposal';
 import type { StandingInstruction } from '../instructions/standing-instructions';
 import { selectInjectedStandingInstructions } from '../ai/standing-instructions-context';
 // B5 — the "core" intent taxonomy's task handlers are now built by the
@@ -184,7 +186,12 @@ export interface RecentReferentProvider {
 }
 
 export interface UnsupervisedRoutingDeps extends RouteUnsupervisedProposalDeps {
-  resolveOwnerPhone?: (tenantId: string) => Promise<string | null | undefined>;
+  /**
+   * Where the approval SMS goes (owner phone, else the active backup's
+   * mobile) and — B3-2 — whose phone it is, so an owner-phone text is never
+   * degraded by a second approver lookup (`resolveApprovalSmsRecipient`).
+   */
+  resolveSmsRecipient?: (tenantId: string) => Promise<ApprovalSmsRecipient | null | undefined>;
   resolveRouting?: (tenantId: string) => Promise<UnsupervisedProposalRouting | undefined>;
   /**
    * P2-034 — records the outbound proposal SMS (`proposal_sms_events`,
@@ -505,8 +512,9 @@ export interface VoiceActionRouterDeps {
    * OVAS-04 — the memo creator's `users.current_mode`, threaded as the
    * proposal's supervisorMode so the per-mode thresholds and the tenant's
    * per-mode override apply to memos exactly as they do to chat (which reads
-   * req.auth.mode). Absent / null / a throw → no mode; the resolver then
-   * applies the strictest defined override (never the bare legacy 0.9).
+   * req.auth.mode). null or a throw → the tenant's strictest mode
+   * (strictestMode: each mode's override or built-in default, highest wins),
+   * never the bare legacy 0.9. Absent → no mode (wiring without a lookup).
    */
   resolveMemberMode?: (tenantId: string, userId: string) => Promise<Mode | null>;
   /**
@@ -771,6 +779,23 @@ export function entitiesForProposal(
   return payload;
 }
 
+/**
+ * The ids this memo's pipeline verified by lookup: the resolver's matches,
+ * the caller-ID customer (wins over a spoken name, as in drafting), and the
+ * job the memo was recorded on. Never classifier output.
+ */
+function voiceVerifiedIds(
+  resolved: EntityAnnotation['resolved'],
+  callerCustomerId: string | undefined,
+  recordedOnJobId: string | undefined,
+): Record<string, string> {
+  const ids: Record<string, string> = {};
+  for (const [key, id] of Object.entries(resolved)) if (id) ids[key] = id;
+  if (callerCustomerId) ids.customerId = callerCustomerId;
+  if (recordedOnJobId) ids.jobId = recordedOnJobId;
+  return ids;
+}
+
 /** Resolved-entity annotation for one utterance (see annotateResolvedEntities). */
 interface EntityAnnotation {
   kind: 'ok';
@@ -1003,13 +1028,20 @@ async function emitClarification(
        */
       additionalAmbiguities?: SingleEntityAmbiguity[];
     };
+    /**
+     * The intent classified fine but its handler drafted nothing. The card
+     * says so in drafting's own words instead of "didn't catch that".
+     */
+    notDrafted?: { explanation: string };
   },
   log: Logger
 ): Promise<void> {
   const { tenantId, userId, transcript, classification, conversationId, recordingId } = input;
   const reason = input.entityAmbiguity
     ? 'ambiguous_entity'
-    : (classification.unknownReason ?? 'unknown_intent');
+    : input.notDrafted
+      ? 'missing_entities'
+      : (classification.unknownReason ?? 'unknown_intent');
 
   const suggestedIntents: string[] = [];
   if (classification.lowConfidenceIntent) {
@@ -1073,7 +1105,9 @@ async function emitClarification(
       (moreAmbiguitiesCount > 0
         ? ` (${moreAmbiguitiesCount} more reference${moreAmbiguitiesCount === 1 ? '' : 's'} will need picking after this.)`
         : '')
-    : clarificationExplanation(classification);
+    : input.notDrafted
+      ? input.notDrafted.explanation
+      : clarificationExplanation(classification);
 
   const proposal = createProposal({
     tenantId,
@@ -1834,7 +1868,7 @@ async function processSegment(
   const memoCreator = memoCreatorResolver(deps, tenantId, recordingId, log);
   const supervisorMode =
     AUTO_APPROVE_DIRECT_PERMISSION[handler.taskType] !== undefined
-      ? await memoCreator.mode()
+      ? await memoCreator.mode(tenantThresholdOverride)
       : undefined;
 
   const context: TaskContext = {
@@ -1917,10 +1951,47 @@ async function processSegment(
     ...(supervisorMode ? { supervisorMode } : {}),
   };
 
-  const { proposal: drafted } = await handler.handle(context);
-  // OBS-2 — the drafting run is the proposal's aiRunId; keep the classifier
-  // run that routed this segment reachable too.
-  const proposal = withClassifierRun(drafted, classification.aiRunId);
+  // D-045 point 8 — the same drafting checks chat runs: ids the resolver or
+  // caller-ID verified are recorded and filled in, an id nobody said and no
+  // lookup verified is scrubbed, and the payload's contract gates the card.
+  const drafted = await draftProposal({
+    handler,
+    context,
+    operatorText: segmentText,
+    entities: entitiesForProposal(classification.intentType, classification.extractedEntities) ?? {},
+    verifiedIds: voiceVerifiedIds(annotation.resolved, customerId, jobId),
+    // OBS-2 — the drafting run is the proposal's aiRunId; keep the classifier
+    // run that routed this segment reachable too.
+    classifierAiRunId: classification.aiRunId,
+    // Held like every other memo hold, so the owner still hears about it.
+    heldStatus: 'ready_for_review',
+  });
+  if (drafted.kind === 'refusal') {
+    // Never silent: the memo still gets a card saying it wasn't acted on.
+    log.warn('voice-action-router: handler drafted nothing', {
+      proposalType: handler.taskType,
+      recordingId,
+    });
+    await emitClarification(
+      deps,
+      {
+        tenantId,
+        userId,
+        transcript: segmentText,
+        classification,
+        conversationId,
+        recordingId,
+        ...(params.sourceChannel ? { sourceChannel: params.sourceChannel } : {}),
+        ...(params.applyDedup && recordingId
+          ? { idempotencyKey: voiceProposalIdempotencyKey(recordingId) }
+          : {}),
+        notDrafted: { explanation: drafted.reason },
+      },
+      log,
+    );
+    return { kind: 'clarified', classification };
+  }
+  const { proposal } = drafted;
   // P8 — references that matched nothing are stamped on sourceContext so
   // the review UI prompts "pick from the list or create new" instead of
   // the operator discovering a dangling name at execution time.
@@ -2043,8 +2114,15 @@ export function holdIfUnsupervised(proposal: Proposal, supervisorPresent: boolea
  */
 interface MemoCreator {
   role(): Promise<string | null>;
-  /** OVAS-04 — users.current_mode; undefined when unresolvable. */
-  mode(): Promise<Mode | undefined>;
+  /**
+   * OVAS-04 — users.current_mode. A lookup that ran but could not name a mode
+   * (no creator on the recording, no users row, a failed read) resolves to
+   * the tenant's strictest mode: an undefined mode would fall back to the
+   * legacy 0.9, below the built-in 'tech' default, so the memo could
+   * auto-approve under a stricter real mode. Undefined only when no mode
+   * lookup is wired.
+   */
+  mode(tenantOverride?: Partial<Record<Mode, number>>): Promise<Mode | undefined>;
 }
 
 function memoCreatorResolver(
@@ -2082,17 +2160,18 @@ function memoCreatorResolver(
         return null;
       }
     },
-    async mode() {
+    async mode(tenantOverride) {
+      if (!deps.resolveMemberMode) return undefined;
       const userId = await id();
-      if (!userId || !deps.resolveMemberMode) return undefined;
+      if (!userId) return strictestMode(tenantOverride);
       try {
-        return (await deps.resolveMemberMode(tenantId, userId)) ?? undefined;
+        return (await deps.resolveMemberMode(tenantId, userId)) ?? strictestMode(tenantOverride);
       } catch (err) {
         log.warn('voice-action-router: memo creator mode lookup failed — strictest tenant rule applies', {
           recordingId,
           error: err instanceof Error ? err.message : String(err),
         });
-        return undefined;
+        return strictestMode(tenantOverride);
       }
     },
   };
@@ -2392,7 +2471,7 @@ async function processChain(
     const tenantId = base.tenantId;
     try {
       const routing = await ur.resolveRouting?.(tenantId);
-      const ownerPhone = await ur.resolveOwnerPhone?.(tenantId);
+      const recipient = await ur.resolveSmsRecipient?.(tenantId);
       // Head slot carries the gate-reviewed proposal (N-002 markers); dependents
       // stay as built. renderChainSms + the blocking/token predicates below all
       // read from this ordered list, so the head's supervisor marker propagates.
@@ -2406,6 +2485,8 @@ async function processChain(
           ...(ur.notifyPush ? { notifyPush: ur.notifyPush } : {}),
           ...(ur.secret ? { secret: ur.secret } : {}),
           ...(ur.buildApproveUrl ? { buildApproveUrl: ur.buildApproveUrl } : {}),
+          // B1 — the link approves as its recipient (owner, or the backup).
+          ...(ur.resolveLinkApprover ? { resolveLinkApprover: ur.resolveLinkApprover } : {}),
           ...(ur.recordSmsEvent
             ? {
                 onSmsSent: async ({ body, kind }: { body: string; kind: OutboundAnchorKind }) =>
@@ -2418,16 +2499,18 @@ async function processChain(
           proposalId: reviewedHead.id,
           ...(routing ? { routing } : {}),
           channel: 'other',
-          ...(ownerPhone ? { ownerPhone } : {}),
+          // B3-2 — and whose phone it is (the owner phone needs no lookup).
+          ...(recipient ? { ownerPhone: recipient.phone, recipientVia: recipient.via } : {}),
           summaryText: reviewedHead.summary,
-          renderSmsBody: (approveUrl: string) =>
+          renderSmsBody: (approveUrl: string, { recipientCannotApprove }) =>
             renderChainSms(
               ordered.map((p) => ({
                 proposalType: p.proposalType,
                 summary: p.summary,
                 payload: p.payload,
               })),
-              { approveUrl: approveUrl || undefined },
+              // B1 follow-up — a recipient who cannot approve is asked for no reply.
+              { approveUrl: approveUrl || undefined, recipientCannotApprove },
             ),
           // Blocking-member payload (if any) drives the token-suppression /
           // review_required_rendered anchoring; otherwise the head's.
@@ -2794,7 +2877,7 @@ export function createVoiceActionRouterWorker(
           const ur = deps.unsupervisedRouting;
           try {
             const routing = await ur.resolveRouting?.(tenantId);
-            const ownerPhone = await ur.resolveOwnerPhone?.(tenantId);
+            const recipient = await ur.resolveSmsRecipient?.(tenantId);
             // Use the gate-reviewed proposal (carries any N-002 supervisor
             // markers) so the rendered SMS reflects the supervisor findings.
             const proposal = reviewedProposal;
@@ -2813,6 +2896,8 @@ export function createVoiceActionRouterWorker(
                 ...(ur.notifyPush ? { notifyPush: ur.notifyPush } : {}),
                 ...(ur.secret ? { secret: ur.secret } : {}),
                 ...(ur.buildApproveUrl ? { buildApproveUrl: ur.buildApproveUrl } : {}),
+                // B1 — the link approves as its recipient (owner, or the backup).
+                ...(ur.resolveLinkApprover ? { resolveLinkApprover: ur.resolveLinkApprover } : {}),
                 // P2-034 — persist the outbound render so the inbound
                 // Y/N/EDIT reply handler can resolve which proposal the
                 // owner is answering.
@@ -2841,11 +2926,12 @@ export function createVoiceActionRouterWorker(
                 // Operator voice recordings are not a live inbound call, so
                 // `escalate_to_oncall` falls back to queue_only here by design.
                 channel: 'other',
-                ...(ownerPhone ? { ownerPhone } : {}),
+                // B3-2 — and whose phone it is (the owner phone needs no lookup).
+                ...(recipient ? { ownerPhone: recipient.phone, recipientVia: recipient.via } : {}),
                 summaryText: proposal.summary,
                 // P2-034 — full reply-token body (summary + facts +
                 // "Reply Y/N/EDIT" + the one-tap link).
-                renderSmsBody: (approveUrl: string) =>
+                renderSmsBody: (approveUrl: string, { recipientCannotApprove }) =>
                   renderProposalSms(
                     {
                       proposalType: proposal.proposalType,
@@ -2855,6 +2941,8 @@ export function createVoiceActionRouterWorker(
                     {
                       approveUrl: approveUrl || undefined,
                       ...(executabilityAsk ? { blockedBy: executabilityAsk } : {}),
+                      // B1 follow-up — a recipient who cannot approve is asked for no reply.
+                      recipientCannotApprove,
                     },
                   ),
                 ...(executabilityAsk ? { suppressApproveLink: true } : {}),

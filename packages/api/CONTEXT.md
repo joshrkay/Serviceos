@@ -32,6 +32,10 @@ terms float.
   the backup supervisor's mobile (`ownerSession`). Transport-level
   recognition, not identity proof; it gates voice approval (RV-071) and is one
   input to actor resolution, but it does not authorise lookups by itself.
+  Recognition is not authority either: every phone-identified approval (the
+  owner line, SMS replies, a one-tap link sent to the backup) acts as
+  `resolveApproverRole` says — the owner phone as the owner, the backup as
+  their own role and user, a role without `proposals:approve` as nobody (B1).
 - **Capability** — one thing a tradesperson can do by speaking: an intent plus
   whatever answers or executes it. The catalog lists them; the map (#833) is
   about making their surface coverage structural.
@@ -181,3 +185,5 @@ Terms for how the product states what it can prove about itself. The PRD's
 - **Draft outcome** — what drafting a proposal returns to a surface: a
   *proposal*, a *clarification* question, or a *refusal* with a reason. The
   surface only decides how to say it.
+  Lives in `src/ai/drafting/draft-proposal.ts` (`draftProposal`); chat and
+  voice memos draft through it so far.

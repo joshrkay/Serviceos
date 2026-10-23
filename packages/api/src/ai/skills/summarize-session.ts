@@ -4,7 +4,7 @@
  * Runs at the end of a customer-calling session to produce a short
  * human-readable summary, surface the inferred intent, and compute a
  * quality score for analytics. Optionally persists the result to the
- * call_summaries table when a pg pool is supplied.
+ * call_summaries table when a call-summary repository is supplied.
  *
  * Design decisions:
  * - Quality score is computed deterministically in code from structured
@@ -16,13 +16,16 @@
  *   fixed at 0.3 — partial credit for capturing the call.
  * - Gateway errors propagate (don't swallow) so the caller can decide
  *   whether to retry or fall back.
- * - DB write errors propagate too: if the caller passed a pool, they
- *   want the row written; failure should surface.
+ * - DB write errors propagate too: if the caller passed a repository, they
+ *   want the row written; failure should surface (every caller catches it,
+ *   so a summary failure never fails the call teardown).
+ * - The row is written through PgCallSummaryRepository (A2), inside a
+ *   tenant transaction under the RLS runtime role — never a raw pool.query.
  */
 
-import type { Pool } from 'pg';
 import { LLMGateway } from '../gateway/gateway';
 import { buildUntrustedContentSection } from '../untrusted-content';
+import type { CallSummaryRepository } from './pg-call-summary';
 
 export interface SummarizeSessionInput {
   tenantId: string;
@@ -40,7 +43,7 @@ export interface SummarizeSessionInput {
   durationMs: number;
   gateway: LLMGateway;
   /** When provided, a row is inserted into call_summaries; omit to skip persistence. */
-  pool?: Pool;
+  callSummaryRepo?: CallSummaryRepository;
   /**
    * RIVET I13 provenance. True/undefined = an inbound UNAUTHENTICATED caller
    * session (S1): the `caller:` turns are untrusted homeowner content and are
@@ -131,7 +134,7 @@ export async function summarizeSession(
     intentDetected,
     durationMs,
     gateway,
-    pool,
+    callSummaryRepo,
   } = input;
 
   const escalated = isEscalated(transcript);
@@ -211,7 +214,7 @@ Return JSON: { "summary": "..." }
   const rawSummary = parsed?.summary ?? 'Call completed; no structured summary available.';
   const summary = capSentences(rawSummary, 3);
 
-  if (pool) {
+  if (callSummaryRepo) {
     // call_id references voice_recordings(id) which only has rows once
     // the P8-014 recording webhook fires. For sessions without a real
     // recording, persist NULL — the column is nullable. The partial
@@ -219,19 +222,13 @@ Return JSON: { "summary": "..." }
     // recordingId is supplied; in-app sessions all share NULL call_id
     // and are deduplicated by the per-session mutex on the adapter
     // side rather than in SQL.
-    await pool.query(
-      `INSERT INTO call_summaries
-         (tenant_id, call_id, summary, detected_intent, proposal_ids, quality_score)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [
-        tenantId,
-        recordingId ?? null,
-        summary,
-        intentDetected ?? null,
-        proposalIds,
-        qualityScore ?? null,
-      ]
-    );
+    await callSummaryRepo.create(tenantId, {
+      callId: recordingId ?? null,
+      summary,
+      detectedIntent: intentDetected ?? null,
+      proposalIds,
+      qualityScore: qualityScore ?? null,
+    });
   }
   // sessionId is intentionally surfaced via metadata only; the FK
   // column is reserved for voice_recordings.id.

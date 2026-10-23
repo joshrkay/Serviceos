@@ -5,6 +5,7 @@ import { writeFileSync } from 'node:fs';
 import { installClerkStub } from '../helpers/clerk-stub';
 import { blockExternalHosts } from '../helpers/api-mocks/shell';
 import { hasViteClerkKey } from '../helpers/clerk-key';
+import { clerkInviteeUserCreated } from '../helpers/clerk-invitee';
 
 /**
  * 4.2 — drag-to-propose reachability, real Postgres.
@@ -181,14 +182,14 @@ async function seedOwnerTechAndTwoAppointments(
   const invitationId = invitation.id!;
 
   const techSub = `user_e2e_${label}tech_${randomUUID().replace(/-/g, '')}`;
-  const joinRes = await postSignedWebhook(page.request, {
-    type: 'user.created',
-    data: {
-      id: techSub,
-      email_addresses: [{ email_address: techEmail }],
-      public_metadata: { invitation_id: invitationId, tenant_id: tenantId, role: 'technician' },
-    },
-  });
+  const joinRes = await postSignedWebhook(
+    page.request,
+    clerkInviteeUserCreated({
+      sub: techSub,
+      email: techEmail,
+      invitation: { id: invitationId, tenantId, role: 'technician' },
+    }),
+  );
   expect(joinRes.status(), `invitee-join webhook (${label}) -> ${await joinRes.text()}`).toBe(200);
 
   const techToken = hmacToken(techSub, tenantId, 'technician');

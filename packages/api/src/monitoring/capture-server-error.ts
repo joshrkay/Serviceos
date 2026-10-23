@@ -2,6 +2,7 @@ import type { Request } from 'express';
 import { redactUrlValue } from '../logging/redact';
 import { getSentryClient } from './sentry';
 import { markServerErrorReported } from './report-server-responses';
+import { AppError } from '../shared/errors';
 
 /**
  * The route label for error telemetry (Sentry tags, PostHog api_error).
@@ -32,6 +33,24 @@ function stripQuery(url: string): string {
   return q === -1 ? url : url.slice(0, q);
 }
 
+/** Deep enough for any real re-wording chain; bounds a cyclic `cause`. */
+const MAX_REWORDINGS = 5;
+
+/**
+ * A4-1 — the error that actually happened. An AppError with a `cause` is a
+ * re-wording of that cause for the client (shared/errors.ts), so it is
+ * unwrapped; any other error, including a plain Error wrapping another to add
+ * its own context, is reported as it is (Sentry links its cause itself).
+ */
+function errorThatHappened(err: unknown): unknown {
+  let current = err;
+  for (let depth = 0; depth < MAX_REWORDINGS; depth++) {
+    if (!(current instanceof AppError) || current.cause === undefined) break;
+    current = current.cause;
+  }
+  return current;
+}
+
 /**
  * R1 — reports a 5xx to Sentry. Shared by the global error handler (app.ts)
  * and asyncRoute (middleware/async-route.ts), which maps handler rejections
@@ -48,7 +67,9 @@ function stripQuery(url: string): string {
  * (the token-scrubbed path with the query string dropped); the request id is the
  * correlation_id request logging minted; the tenant comes from req.auth
  * (webhook/telephony paths have no tenant store — the tag is simply
- * omitted). Callers gate on the mapped status so 4xx never captures. The
+ * omitted). Callers gate on the mapped status so 4xx never captures; the
+ * error reported is the one that happened (`errorThatHappened`), never a
+ * client-facing re-wording of it (A4-1). The
  * no-op client (SENTRY_DSN unset) makes this a no-op; any monitoring failure
  * is swallowed so it can never break the error response.
  */
@@ -64,7 +85,8 @@ export function captureServerError(err: unknown, req: Request): void {
     const route = redactedRoute(req);
     const requestId = anyReq.safeRequestLog?.correlation_id;
     const tenantId = anyReq.auth?.tenantId;
-    const error = err instanceof Error ? err : new Error(String(err));
+    const happened = errorThatHappened(err);
+    const error = happened instanceof Error ? happened : new Error(String(happened));
     getSentryClient().withScope((scope) => {
       scope.setTag('route', route);
       if (requestId) scope.setTag('request_id', requestId);

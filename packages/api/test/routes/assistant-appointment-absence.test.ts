@@ -13,7 +13,8 @@
  *      keeps its gated card and asks).
  */
 import { describe, it, expect, vi } from 'vitest';
-import { applyContractGate, appointmentProvablyAbsent } from '../../src/routes/assistant';
+import { appointmentProvablyAbsent } from '../../src/routes/assistant';
+import { applyContractGate } from '../../src/ai/drafting/draft-proposal';
 import { createProposal, missingFieldsFor } from '../../src/proposals/proposal';
 import type { EntityResolver, EntityResolverResult } from '../../src/ai/resolution/entity-resolver';
 

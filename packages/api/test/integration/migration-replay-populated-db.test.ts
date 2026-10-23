@@ -122,6 +122,26 @@ const RELAXED_SINCE: RelaxedInvariant[] = [
     },
   },
   {
+    // A fresh database never builds 062's tenant-blind key (062 no longer does).
+    // A database that ran 062's original body keeps it until 351's contract
+    // migration drops it; knowledge-chunks-dedupe-expand-contract.test.ts covers that.
+    row: 'knowledge_chunks rows for two tenants sharing one (scope, source_type, source_id, source_version)',
+    strictAt: '062_create_knowledge_chunks (unique scope, source_type, source_id, source_version)',
+    relaxedBy: '062 edited in place + 351_knowledge_chunks_tenant_dedupe (contract migration on older databases)',
+    seed: async (db, t) => {
+      const other = await createTestTenant(db);
+      const sourceId = `replay-${crypto.randomUUID()}`;
+      await db.query(
+        `INSERT INTO knowledge_chunks
+           (tenant_id, scope, source_type, source_id, content, content_scrubbed, embedding, embedding_model)
+         SELECT tid, 'tenant', 'call_summary', $3, 'replay', 'replay',
+                array_fill(0::real, ARRAY[1536])::vector, 'text-embedding-3-small'
+           FROM unnest(ARRAY[$1::uuid, $2::uuid]) AS tid`,
+        [t.tenantId, other.tenantId, sourceId],
+      );
+    },
+  },
+  {
     row: "proposal with status 'executing'",
     strictAt: '039_proposals_v2 (proposals_status_check)',
     relaxedBy: '072_add_executing_status',
@@ -443,6 +463,28 @@ describe('Postgres integration — migration corpus replays over a populated dat
         indexdef:
           'CREATE UNIQUE INDEX idx_cmb_session_reason_unique ON public.call_me_back_tasks ' +
           'USING btree (tenant_id, session_id, reason) WHERE (session_id IS NOT NULL)',
+      },
+    ]);
+  });
+
+  it('knowledge_chunks ends every deploy of a fresh database with exactly the tenant-aware dedupe key', async () => {
+    // 062 no longer builds the tenant-blind key and 351 only adds the
+    // tenant-aware one, so a database this corpus created never has the former
+    // to rebuild, and 351's contract migration is a no-op here.
+    await deploy(pool);
+    const { rows } = await pool.query<{ indexname: string; indexdef: string }>(
+      `SELECT i.relname AS indexname, pg_get_indexdef(i.oid) AS indexdef
+         FROM pg_index x
+         JOIN pg_class i ON i.oid = x.indexrelid
+        WHERE x.indrelid = 'knowledge_chunks'::regclass
+          AND x.indisunique AND NOT x.indisprimary`,
+    );
+    expect(rows).toEqual([
+      {
+        indexname: 'idx_knowledge_chunks_tenant_dedupe',
+        indexdef:
+          'CREATE UNIQUE INDEX idx_knowledge_chunks_tenant_dedupe ON public.knowledge_chunks ' +
+          'USING btree (tenant_id, scope, source_type, source_id, source_version) NULLS NOT DISTINCT',
       },
     ]);
   });

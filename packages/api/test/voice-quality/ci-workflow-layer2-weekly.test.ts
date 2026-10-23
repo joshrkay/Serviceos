@@ -64,7 +64,9 @@ describe('VQ2-017 — Layer 2 weekly-trend CI workflow', () => {
 
   it('VQ2-017 — workflow uploads trend artifact with retention-days: 90', () => {
     const src = readWorkflow();
-    expect(src).toMatch(/actions\/upload-artifact@[0-9a-f]{40} # v7\.0\.1/);
+    // SHA-pinned v7 with its version comment. The patch level is left to
+    // Dependabot: pinning it here failed main on every actions bump.
+    expect(src).toMatch(/actions\/upload-artifact@[0-9a-f]{40} # v7(\.\d+){0,2}\b/);
     expect(src).toMatch(/voice-quality-trend-report/);
     expect(src).toMatch(/voice-quality-trend-report\.json/);
     expect(src).toMatch(/retention-days:\s*90/);

@@ -96,14 +96,14 @@ export class PgPortalSessionRepository
     });
   }
 
-  async touchLastAccessed(id: string, at: Date): Promise<void> {
-    // System-level update — bypass RLS by using withClient. Safe because
-    // the only mutation here is a timestamp on a row already located by
-    // its hash, and the route layer already validated the token.
-    await this.withClient(async (client) => {
+  async touchLastAccessed(tenantId: string, id: string, at: Date): Promise<void> {
+    // Tenant-scoped like revoke: the token lookup has already told the caller
+    // which tenant the session belongs to, so the write runs under that
+    // tenant's context (and filters on it) rather than as the principal.
+    await this.withTenant(tenantId, async (client) => {
       await client.query(
-        'UPDATE portal_sessions SET last_accessed_at = $1 WHERE id = $2',
-        [at, id],
+        'UPDATE portal_sessions SET last_accessed_at = $1 WHERE tenant_id = $2 AND id = $3',
+        [at, tenantId, id],
       );
     });
   }

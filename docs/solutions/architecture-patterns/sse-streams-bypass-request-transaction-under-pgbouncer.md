@@ -33,18 +33,22 @@ in-process event buses and read `req.auth`; any incidental DB read self-manages
 a short `withTenant` transaction (which is itself pooling-safe).
 
 Gate the skip on an **explicit allowlist of the SSE routes**, restricted to
-`GET`, anchored on the path — **not** on the client-supplied `Accept` header:
+`GET` and `HEAD`, anchored on the path — **not** on the client-supplied
+`Accept` header. Match the path the way Express routes it: anchored at both
+ends (the `/api` mount prefix optional, since `app.use('/api', ...)` strips
+it), one optional trailing slash, any letter case:
 
 ```ts
-// suffix-anchored so it matches whether or not the `/api` mount prefix was
-// stripped from req.path by app.use('/api', ...)
 const SSE_STREAM_ROUTES: readonly RegExp[] = [
-  /\/escalations\/events$/,
-  /\/dispatch\/board\/events$/,
-  /\/voice\/sessions\/[^/]+\/events$/,
+  /^(?:\/api)?\/escalations\/events\/?$/i,
+  /^(?:\/api)?\/dispatch\/board\/events\/?$/i,
+  /^(?:\/api)?\/voice\/sessions\/[^/]+\/events\/?$/i,
 ];
 function isSseStreamRoute(req: { method: string; path: string }): boolean {
-  return req.method === 'GET' && SSE_STREAM_ROUTES.some((re) => re.test(req.path));
+  return (
+    (req.method === 'GET' || req.method === 'HEAD') &&
+    SSE_STREAM_ROUTES.some((re) => re.test(req.path))
+  );
 }
 // inside withTenantTransaction, AFTER the tenant-presence (403) guard:
 if (isSseStreamRoute(req)) { next(); return; }
@@ -53,6 +57,14 @@ if (isSseStreamRoute(req)) { next(); return; }
 Tenant presence is still enforced (the 403 guard runs first); only the
 long-held transaction is skipped. Adding a new SSE route = add a matcher; until
 then it keeps the (safe) transactional path.
+
+Every way Express reaches the stream handler must match, or that form holds a
+connection for the whole stream. A suffix-only, case-sensitive pattern with no
+trailing slash missed `/escalations/events/` and `/Escalations/Events` (A3-5),
+and a GET-only gate missed HEAD: Express sends HEAD to a route's GET handler
+when the route has no HEAD handler, and the stream handler never ends the
+response. On these exact paths HEAD reaches only the stream's GET handler
+(none has a HEAD or catch-all handler), so adding it opens no mutating route.
 
 ## Why This Matters
 
@@ -94,7 +106,28 @@ can never bypass, regardless of what `Accept` it sends.
 
 ### Verifying
 
-Mock the pool's `connect`/`query`; assert an allowlisted SSE `GET` issues
-**zero** `pool.connect()` and **no** `BEGIN`, while a `POST` with
+Mock the pool's `connect`/`query`; assert an allowlisted SSE `GET` or `HEAD`
+issues **zero** `pool.connect()` and **no** `BEGIN`, while a `POST` with
 `Accept: text/event-stream` still issues a `BEGIN` (transaction NOT skipped).
+Route the requests through routers mounted the production way, so Express's
+own routing (trailing slash, letter case, HEAD to GET) decides which handler
+runs, and include nested routers that share each suffix as negatives.
 See `packages/api/test/middleware/tenant-context.test.ts`.
+
+### The same rule for slow upstream calls (LLM, TTS, STT)
+
+A handler that awaits an LLM, speech or other provider call inside the request
+transaction pins its pooled connection for the whole call, the same failure as
+a stream. Such routes go on `LLM_LONG_CALL_ROUTES`. Reads before the call name
+their `tenantId` explicitly, and writes that must agree after the call commit
+together in one short `PgTenantTransactionRunner` transaction (see
+`routes/tenant-site.ts` `POST /about/draft` and `proposals/resolve-entity.ts`).
+
+`LLMGateway.complete` refuses a call made while a tenant transaction is held
+(`refuseCallInsideTransaction` in `ai/gateway/gateway.ts`). Under
+`NODE_ENV=test` it throws `LLM_CALL_IN_TRANSACTION`, so a new in-request route
+fails its own route test. Anywhere else it logs and counts
+`gateway_llm_call_in_transaction_total{task_type}`, and the call goes ahead.
+A non-zero counter in production names a route to move. Provider calls that
+skip the gateway (TTS, STT, token mints) are not covered by the guard. Give
+them a fetch deadline and list them by hand.

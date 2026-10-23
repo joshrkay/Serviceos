@@ -109,7 +109,7 @@ describe('onboarding lifecycle emails', () => {
 
   it('describes current AI-minute pricing, not the retired per-minute cost-plus model', () => {
     const { text } = renderTrialEndingEmail({ ...base, daysLeft: 3 });
-    expect(text).toContain('20 AI answering minutes a month on Starter (60 on Growth), then $1.25 a minute');
+    expect(text).toContain('60 AI answering minutes a month on Starter (200 on Growth), then $1.25 a minute');
     expect(text).not.toMatch(/provider cost|30 AI voice minutes/);
   });
 

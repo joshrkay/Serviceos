@@ -1,5 +1,12 @@
 import { v4 as uuidv4 } from 'uuid';
 import { LLMRequest, LLMResponse, LLMProvider, messagesContainImage } from '../gateway/gateway';
+import { runOutsideRequestTransaction } from '../../middleware/tenant-context';
+import { createLogger } from '../../logging/logger';
+
+const logger = createLogger({
+  service: 'shadow-comparison',
+  environment: process.env.NODE_ENV || 'dev',
+});
 
 export interface ShadowComparisonResult {
   id: string;
@@ -37,8 +44,6 @@ export interface ShadowComparisonPage {
 
 export interface ShadowComparisonStore {
   save(result: ShadowComparisonResult): Promise<ShadowComparisonResult>;
-  findByGroup(groupId: string): Promise<ShadowComparisonResult[]>;
-  getAll(): Promise<ShadowComparisonResult[]>;
   /** P2-030: paginated tenant-scoped read for the admin API. */
   listForTenant(tenantId: string, opts?: ShadowComparisonListOptions): Promise<ShadowComparisonPage>;
 }
@@ -52,12 +57,7 @@ export class InMemoryShadowComparisonStore implements ShadowComparisonStore {
     return { ...stored };
   }
 
-  async findByGroup(groupId: string): Promise<ShadowComparisonResult[]> {
-    return this.results
-      .filter((r) => r.comparisonGroupId === groupId)
-      .map((r) => ({ ...r }));
-  }
-
+  /** Every stored comparison, across tenants: in-process inspection for tests. */
   async getAll(): Promise<ShadowComparisonResult[]> {
     return this.results.map((r) => ({ ...r }));
   }
@@ -150,11 +150,44 @@ export class ShadowComparisonGateway implements LLMProvider {
         aiRunId,
       };
 
-      await this.store.save(result);
+      this.persist(result);
       this.comparisonCount++;
     }
 
     return primaryResponse;
+  }
+
+  /**
+   * Store a comparison without letting it touch the call it rides on. The
+   * primary response has already come back, so a save that fails (a refused
+   * tenant id, a missing table, a dangling ai_run_id) must not turn that
+   * success into an error: it is logged at warn — ids and the error only,
+   * never response text — and dropped.
+   *
+   * Detached from the request's tenant context (TI-01): inside a request
+   * whose tenant matches, the Pg store's `withTenant` would otherwise run the
+   * INSERT on the request transaction's client, and a failed INSERT aborts
+   * that whole transaction. Outside it, the save opens its own short tenant
+   * transaction. Not awaited — at DB_MAX_CONNECTIONS=1 a request awaiting a
+   * second checkout would wait on its own client — so the call returns
+   * without waiting on telemetry; the save starts before `complete` returns.
+   */
+  private persist(result: ShadowComparisonResult): void {
+    const report = (err: unknown): void => {
+      logger.warn('Shadow comparison save failed (best-effort; the primary response is unaffected)', {
+        comparisonId: result.id,
+        taskType: result.taskType,
+        tenantId: result.tenantId,
+        aiRunId: result.aiRunId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    };
+    try {
+      void runOutsideRequestTransaction(() => this.store.save(result)).catch(report);
+    } catch (err) {
+      // A store that throws before returning its promise.
+      report(err);
+    }
   }
 
   getComparisonCount(): number {

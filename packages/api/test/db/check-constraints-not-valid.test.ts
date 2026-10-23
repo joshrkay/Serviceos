@@ -57,7 +57,8 @@ const ADD_CHECK_RE = /ADD CONSTRAINT\s+([a-z_][a-z0-9_]*)\s+CHECK\b/g;
 // 46 → 48 (U1 reply-gap, migration 326_call_transcript_turns_reply_timing): call_transcript_turns_transport_check, call_transcript_turns_reply_unacked_reason_check, both NOT VALID.
 // 48 → 49 (dispatch FR-2, migration 327_service_locations_geocode_status): service_locations_geocode_status_check, NOT VALID.
 // 52 → 54 (#1750 Get found online, migration 348_tenant_settings_get_found, originally 334): tenant_settings_presence_path_check, tenant_settings_forwarding_mode_check, both NOT VALID.
-const EXPECTED_CHECK_CONSTRAINT_SITES = 54; // +2: 334_tenant_settings_get_found (NOT VALID); +3: 329_message_dispatch_outcomes (NOT VALID); +1: 327_service_locations_geocode_status (NOT VALID); +2: 326_call_transcript_turns_reply_timing (NOT VALID); +1: 288_payments_card_present_method (NOT VALID); +1: 294_tenant_settings_e1_reviewers (NOT VALID); +1: 299_tenant_settings_business_address (NOT VALID); +1: 308_oauth_states_google_business_provider (NOT VALID); +1: 324_seeded_price_baseline (NOT VALID)
+// 54 → 56 (#1735 membership renewals, migration 350_drip_membership_renewals): drip_sequences_target_kind_check, drip_enrollments_exit_reason_check, both NOT VALID.
+const EXPECTED_CHECK_CONSTRAINT_SITES = 56; // +2: 334_tenant_settings_get_found (NOT VALID); +3: 329_message_dispatch_outcomes (NOT VALID); +1: 327_service_locations_geocode_status (NOT VALID); +2: 326_call_transcript_turns_reply_timing (NOT VALID); +1: 288_payments_card_present_method (NOT VALID); +1: 294_tenant_settings_e1_reviewers (NOT VALID); +1: 299_tenant_settings_business_address (NOT VALID); +1: 308_oauth_states_google_business_provider (NOT VALID); +1: 324_seeded_price_baseline (NOT VALID)
 
 interface CheckSite {
   name: string;

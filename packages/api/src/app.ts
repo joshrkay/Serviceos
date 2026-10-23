@@ -18,7 +18,8 @@ import { registerMarketingRedirects } from './marketing-redirects';
 import { createWebhookRouter } from './webhooks/routes';
 import { createLsaWebhookRouter } from './lsa/lsa-webhook-router';
 import { createLsaIntegrationRouter } from './routes/lsa-integration';
-import { createLsaSpeedToLeadSender } from './lsa/lsa-speed-to-lead-sender';
+import { createLeadConversationSender } from './leads/lead-conversation-sender';
+import { createNewLeadAutoReply, NEW_LEAD_AUTO_REPLY_ACTOR_ID } from './leads/new-lead-auto-reply';
 import { createLsaDispositionReporter } from './lsa/disposition-reporter';
 import { InMemoryLsaIntegrationRepository } from './lsa/lsa-integration';
 import { PgLsaIntegrationRepository } from './lsa/pg-lsa-integration';
@@ -131,15 +132,15 @@ import {
   type MeTenantSettings,
   type UserModeService,
 } from './routes/me';
-import { setUserModeLoader, resolveUserMode } from './middleware/auth';
+import { setUserModeLoader } from './middleware/auth';
 import {
   setSupervisorPresenceLoader,
   pgSupervisorPresenceLoader,
 } from './ai/supervisor-presence';
 import { createConversationRouter } from './routes/conversations';
 import { createSettingsRouter } from './routes/settings';
+import { getVapiClient } from './integrations/vapi/client';
 import { createBrandVoiceRouter } from './tenants/brand/brand-voice-router';
-import { createGetFoundRouter } from './get-found/get-found-router';
 import { listAllTenantIds } from './tenants/list-tenant-ids';
 import { createDncRouter } from './routes/dnc';
 import { createVerticalRouter } from './routes/verticals';
@@ -472,9 +473,16 @@ import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker, voicemailJobContextFromPersisted } from './workers/transcription';
 import { createPinLockAlertRetryWorker, createPinLockAlertRetryScheduler } from './workers/pin-lock-alert-retry';
 import { createTranscriptionRouterHandoff } from './workers/transcription-router-handoff';
+import { createMemoCreatorModeLoader } from './workers/memo-creator-mode';
 // U9 — voicemail router gate: owner/approver caller-ID check (same identity
 // module the SMS reply transport and RV-070 owner-line recognition use).
-import { isApproverPhone } from './proposals/approver-identity';
+import {
+  isApproverPhone,
+  resolveApprovalSmsPhone,
+  resolveApprovalSmsRecipient,
+  resolveApproverRole,
+  resolveBackupSupervisorApprover,
+} from './proposals/approver-identity';
 import { createTranscriptIngestionWorker } from './workers/transcript-ingestion-worker';
 import { createProposalCorrectionWorker } from './workers/proposal-correction-worker';
 // U7 — structured correction-lesson loop (record on execution, undo on undo).
@@ -497,6 +505,7 @@ export { detectLanguage } from './ai/orchestration/language-detector';
 // through detectLanguage (which applies the supported_languages gate).
 import { detectLanguage as detectInitialCallLanguage } from './ai/orchestration/language-detector';
 import { identifyCaller } from './ai/skills/identify-caller';
+import { PgCallSummaryRepository } from './ai/skills/pg-call-summary';
 import type { EmbeddingProvider } from './ai/providers/openai-compatible';
 import {
   autonomousBookingSettingsFrom,
@@ -1201,7 +1210,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     voiceApprovalPinLockAlertRepo,
   } = { ...buildRepositories(pool, directPool, overrides), ...overrides };
   // QA 2026-09-16 (AST-04) — approval-time reference checks, applied on every
-  // approval channel (dashboard single + batch, voice): an id in a payload must
+  // approval channel (dashboard single + batch, voice, SMS reply, one-tap
+  // link — B4): an id in a payload must
   // name a record this tenant owns (proposals/approval-reference-checks.ts).
   const approvalReferenceChecks = [
     invoiceReferenceCheck(invoiceRepo),
@@ -1855,17 +1865,22 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     sendSms: oneTapSmsSender,
     secret: oneTapSecret,
   });
-  // Owner/backup-supervisor phone for the unsupervised SMS: tenant_settings
-  // owner_phone first, then the backup supervisor's mobile_number.
-  const resolveUnsupervisedOwnerPhone = async (tenantId: string): Promise<string | null> => {
-    const settings = await settingsRepo.findByTenant(tenantId);
-    if (settings?.ownerPhone) return settings.ownerPhone;
-    if (settings?.backupSupervisorUserId) {
-      const backup = await userRepo.findById(tenantId, settings.backupSupervisorUserId);
-      return backup?.mobileNumber ?? null;
-    }
-    return null;
-  };
+  // Owner/backup-supervisor phone for the owner texts that only need a number
+  // (PIN-lock alert, weekly HFCR, owner notices): tenant_settings owner_phone
+  // first, then the backup supervisor's mobile_number — only while the backup
+  // is an active member (B1 follow-up).
+  const resolveUnsupervisedOwnerPhone = (tenantId: string): Promise<string | null> =>
+    resolveApprovalSmsPhone({ settingsRepo, userRepo }, tenantId);
+  // B3-2 — the same recipient for the three approval-link senders, with whose
+  // phone it is: the owner phone is the owner by definition, so its link
+  // needs no second lookup (one that fails would degrade the owner's text).
+  const resolveApprovalRecipient = (tenantId: string) =>
+    resolveApprovalSmsRecipient({ settingsRepo, userRepo }, tenantId);
+  // B1 — who a one-tap link sent to that phone approves as: the owner phone
+  // mints the plain owner link, the backup supervisor's mobile a link that
+  // carries their own role and id, an unrecognised recipient no link at all.
+  const resolveLinkApprover = (tenantId: string, phone: string) =>
+    resolveApproverRole({ settingsRepo, userRepo }, tenantId, phone);
 
   const workerLogger = createLogger({
     service: 'transcription-worker',
@@ -2088,6 +2103,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       userRepo,
       auditRepo,
       appointmentRepo,
+      // B4 — a texted Y runs the same reference checks as the dashboard approve.
+      approvalReferenceChecks,
       ...(oneTapSmsSender ? { sendSms: oneTapSmsSender } : {}),
       interpretEdit: createLlmEditInterpreter(llmGateway),
     },
@@ -3215,7 +3232,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // (minted with the same one-tap secret), only when the channel can
       // deliver; without it the router's lane refuses autonomy.
       ...(laneUndoChannel ? { laneUndo: laneUndoChannel } : {}),
-      resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
+      resolveSmsRecipient: resolveApprovalRecipient,
+      resolveLinkApprover,
       resolveRouting: async (tenantId: string) =>
         (await settingsRepo.findByTenant(tenantId))?.unsupervisedProposalRouting,
       // P2-034 — persist each outbound render so inbound Y/N/EDIT replies
@@ -3229,8 +3247,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     voiceRepo,
     // OVAS-02 — the memo creator's DB role gates auto-approval (same loader).
     resolveMemberRole: resolveVoiceMemberRole,
-    // OVAS-04 — and their current_mode sets the threshold (req.auth.mode's loader).
-    resolveMemberMode: (tenantId: string, userId: string) => resolveUserMode(userId, tenantId),
+    // OVAS-04 — and their current_mode sets the threshold. C-1698-P1 — NOT
+    // req.auth.mode's loader, which defaults a missing user or a DB error to
+    // 'supervisor': here those fail closed to the strictest tenant rule.
+    resolveMemberMode: createMemoCreatorModeLoader(() => userModeService),
     // Same object the assistant-chat router gets — see `lookupAnswerDeps`.
     lookupAnswers: lookupAnswerDeps,
     // B5.5 — en_route ("on my way") voice leg: userRepo resolves the memo
@@ -3512,6 +3532,26 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // BUG-2 — share the single `tenantRepo` instance constructed at the
   // top of this module so intake-created customers and dashboard-
   // created customers resolve under the same tenant ID in dev.
+  // #1738 — instant reply text for new web-form / portal leads. Owner opt-in
+  // (`speed_to_lead_enabled`), visitor consent required, DNC-gated send; with
+  // no SMS delivery configured every attempt records 'unavailable'.
+  const newLeadAutoReply = createNewLeadAutoReply({
+    settingsRepo,
+    auditRepo,
+    ...(messageDelivery
+      ? {
+          send: createLeadConversationSender(
+            {
+              reply: { conversationRepo, customerRepo, leadRepo, dncRepo, dispatchRepo, delivery: messageDelivery },
+              conversationRepo,
+              auditRepo,
+              getBusinessName: async (tid) => (await settingsRepo.findByTenant(tid))?.businessName,
+            },
+            { title: 'New lead', actorId: NEW_LEAD_AUTO_REPLY_ACTOR_ID },
+          ),
+        }
+      : {}),
+  });
   const intakeTenantRepo = tenantRepo;
   app.use(
     '/public/intake',
@@ -3523,7 +3563,15 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // Shared Redis store so the cap holds across replicas.
       store: createRateLimitStore(redisUrl, 'public-intake:'),
     }),
-    createPublicIntakeRouter(leadRepo, intakeTenantRepo, auditRepo, settingsRepo, canonicalPackRegistry, pool)
+    createPublicIntakeRouter(
+      leadRepo,
+      intakeTenantRepo,
+      auditRepo,
+      settingsRepo,
+      canonicalPackRegistry,
+      pool,
+      newLeadAutoReply,
+    )
   );
 
   // Public unauthenticated estimate approval flow (token-authenticated).
@@ -3580,6 +3628,12 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // P2-034 — a pending manual edit request blocks the link too, not
       // just SMS Y replies; both paths approve the same stale payload.
       smsEventRepo: proposalSmsEventRepo,
+      // B4 — the link runs the same reference checks as the dashboard approve.
+      approvalReferenceChecks,
+      // B1 — a link minted for the backup supervisor approves as who the
+      // backup is when it is tapped (replaced / deactivated → nothing).
+      resolveBackupApprover: (tenantId: string) =>
+        resolveBackupSupervisorApprover({ settingsRepo, userRepo }, tenantId),
       // RV-065 — digest "invoice it" tokens: mint a draft_invoice proposal
       // for the bound job (batch-invoice eligibility machinery), then
       // redirect into the standard approve flow.
@@ -3670,6 +3724,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         ? { apiKey: process.env.STRIPE_SECRET_KEY }
         : undefined,
       connectAccountResolver,
+      autoReplyToNewLead: newLeadAutoReply,
     }),
   );
 
@@ -4140,6 +4195,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   voiceExtendedIntentsFlagResolver = voiceFlags.extendedIntentsEnabled;
   voiceMultiActionFlagResolver = voiceFlags.multiActionEnabled;
 
+  // A2 — end-of-call summaries (telephony processor + in-app adapter) write
+  // call_summaries through the tenant RLS context, not a raw pool.query.
+  const callSummaryRepo = pool ? new PgCallSummaryRepository(pool) : undefined;
+
   // WS18d — assembled as a VARIABLE (not an inline literal) deliberately: the
   // adapter spreads its deps into createVoiceTurnProcessor, and the processor-
   // only WS18 keys below (consentEventRepo, autonomousClose) are not part of
@@ -4153,6 +4212,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     // U5 — absolute per-call duration cap, checked on every Gather turn.
     maxCallDurationMs: config.VOICE_MAX_CALL_DURATION_MS,
     ...(pool ? { pool } : {}),
+    ...(callSummaryRepo ? { callSummaryRepo } : {}),
     proposalRepo,
     ...(customerNegotiationContextProvider ? { customerNegotiationContextProvider } : {}),
     // P2-036 V2 — live-call discount engine (fail-closed; dormant until a tenant
@@ -4183,7 +4243,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       ...(oneTapSecret ? { secret: oneTapSecret } : {}),
       buildApproveUrl: (token: string) =>
         `${oneTapApiBaseUrl}/public/proposals/one-tap-approve?token=${encodeURIComponent(token)}`,
-      resolveOwnerPhone: resolveUnsupervisedOwnerPhone,
+      resolveSmsRecipient: resolveApprovalRecipient,
+      resolveLinkApprover,
       recordSmsEvent: recordProposalSmsRender,
     },
     // #1051 / #1233 review — the tenant PIN-lock owner alert is claimed
@@ -4465,7 +4526,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     autonomousClose: {
       platformDisabled: config.AUTONOMOUS_CLOSE_DISABLED === 'true',
       bookingPlatformDisabled: config.AUTONOMOUS_BOOKING_DISABLED === 'true',
-      ownerPhoneResolver: resolveUnsupervisedOwnerPhone,
+      resolveSmsRecipient: resolveApprovalRecipient,
+      resolveLinkApprover,
       ...(oneTapSmsSender ? { sendOwnerSms: oneTapSmsSender } : {}),
       ...(oneTapSecret ? { oneTapSecret } : {}),
       buildApproveUrl: (token: string) =>
@@ -5402,6 +5464,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
           store: voiceSessionStore,
           gateway: llmGateway,
           ...(pool ? { pool } : {}),
+          // A4-2 — without it the summary call still runs at the end of a
+          // chat but its call_summaries row is never written (A2).
+          ...(callSummaryRepo ? { callSummaryRepo } : {}),
           auditRepo,
           proposalRepo,
           customerRepo,
@@ -5969,12 +6034,15 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       settingsRepo,
       ...(messageDelivery
         ? {
-            sendSpeedToLead: createLsaSpeedToLeadSender({
-              reply: { conversationRepo, customerRepo, leadRepo, dncRepo, dispatchRepo, delivery: messageDelivery },
-              conversationRepo,
-              auditRepo,
-              getBusinessName: async (tid) => (await settingsRepo.findByTenant(tid))?.businessName,
-            }),
+            sendSpeedToLead: createLeadConversationSender(
+              {
+                reply: { conversationRepo, customerRepo, leadRepo, dncRepo, dispatchRepo, delivery: messageDelivery },
+                conversationRepo,
+                auditRepo,
+                getBusinessName: async (tid) => (await settingsRepo.findByTenant(tid))?.businessName,
+              },
+              { title: 'Google Local Services lead', actorId: 'system:lsa' },
+            ),
           }
         : {}),
     }),
@@ -6049,6 +6117,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // arrives as an owner-approved proposal.
       aboutTask: new TenantSiteAboutTask(llmGateway),
       proposalRepo,
+      // The draft runs outside the request transaction (it awaits the LLM
+      // call); its writes after the call commit together in one short
+      // transaction. Matches the repos: Pg with a pool.
+      transactionRunner: pool ? new PgTenantTransactionRunner(pool) : new InMemoryTransactionRunner(),
       ...(customDomainProvider
         ? { domain: { provider: customDomainProvider, dns: customDomainDns, reservedHosts: appHostnames } }
         : {}),
@@ -6535,6 +6607,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       // S5a-5 (U8) — a PUT that switches to "Collect on the spot" enqueues
       // the pay-link cleanup in the request's own transaction.
       { queue },
+      // PRIV-4 — a language change re-pushes the Vapi first message.
+      pool ? { pool, vapiClient: getVapiClient() } : undefined,
     ),
   );
   // N-011 — Brand-Voice Configurator (behind the brand_voice_configurator flag,
@@ -6545,11 +6619,6 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     '/api/settings/brand-voice',
     createBrandVoiceRouter(brandVoiceRepo, settingsRepo, auditRepo),
   );
-  // #1750 (D-044) — the Get-found checklist: derived from facts on every read;
-  // the owner's answers (presence path, call routing mode, skips) are audited.
-  if (pool) {
-    app.use('/api/get-found', createGetFoundRouter({ pool, settingsRepo, auditRepo }));
-  }
   // #1564 — owner-only A2P 10DLC texting registration (Settings → Phone).
   // Mounted whenever there is a database; answers 503 without
   // TENANT_ENCRYPTION_KEY because the EIN must be stored encrypted.
@@ -6965,6 +7034,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     '/api/proposals',
     createProposalsRouter(
       proposalRepo,
+      // A1 / A3-3 — resolve-entity runs outside the request transaction; its
+      // row lock and writes commit together in one short transaction after
+      // the re-draft's LLM call. Matches the repos: Pg with a pool.
+      pool ? new PgTenantTransactionRunner(pool) : new InMemoryTransactionRunner(),
       appointmentRepo,
       auditRepo,
       feasibilityDeps,
@@ -8185,6 +8258,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     auditRepo,
     onCallRepo: sharedOnCallRepo,
     ...(pool ? { pool } : {}),
+    ...(callSummaryRepo ? { callSummaryRepo } : {}),
     // #1509 — the SAME alias-first resolver chat, memo and phone use (see
     // `sharedEntityResolver` above). Without it the adapter self-built a bare
     // PgEntityResolver from `pool` and an approved tenant alias ("Bobby")

@@ -20,6 +20,11 @@ import { InvoiceRepository } from '../invoices/invoice';
 import { CustomerRepository } from '../customers/customer';
 import { JobRepository } from '../jobs/job';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import {
+  clearOAuthStateCookie,
+  relayOrRefuseUnboundOAuthState,
+  setOAuthStateCookie,
+} from '../integrations/oauth-state-binding';
 import { Logger } from '../logging/logger';
 import type { CallPlanId } from '../billing/call-usage-pricing';
 import { planIncludesQuickBooks, quickBooksUpgradeRequired } from '../billing/plan-features';
@@ -29,7 +34,9 @@ import { planIncludesQuickBooks, quickBooksUpgradeRequired } from '../billing/pl
  *
  *   GET  /api/integrations                         — list tenant integrations
  *   POST /api/integrations/quickbooks/connect      — OAuth URL
- *   GET  /api/integrations/quickbooks/callback     — OAuth landing (unauthenticated)
+ *   GET  /api/integrations/quickbooks/callback     — OAuth landing (unauthenticated;
+ *        the state is accepted only from the browser whose connect-time
+ *        cookie holds it, see integrations/oauth-state-binding.ts)
  *   POST /api/integrations/quickbooks/disconnect   — revoke
  *   GET  /api/integrations/quickbooks/status       — sync status + recent log
  *   POST /api/integrations/quickbooks/sync         — manual retry
@@ -93,11 +100,14 @@ export function createIntegrationsOAuthCallbackRouter(deps: IntegrationsRouteDep
     if (!deps.qboConfig) {
       throw new ValidationError('QuickBooks integration is not configured');
     }
+    // Before consume: a refused browser must not spend the state.
+    if (relayOrRefuseUnboundOAuthState(req, res, 'quickbooks', state, deps.appBaseUrl)) return;
 
     const consumed = await deps.oauthStateRepo.consume(state);
     if (!consumed || consumed.provider !== 'quickbooks') {
       throw new ValidationError('Invalid or expired OAuth state');
     }
+    clearOAuthStateCookie(res, 'quickbooks', deps.appBaseUrl);
 
     const tokens = await exchangeQuickBooksAuthorizationCode(
       deps.qboConfig,
@@ -195,6 +205,7 @@ export function createIntegrationsRouter(deps: IntegrationsRouteDeps): Router {
         redirectAfter,
       });
       const url = buildQuickBooksAuthUrl(deps.qboConfig, stateId);
+      setOAuthStateCookie(res, 'quickbooks', stateId, deps.appBaseUrl);
       res.json({ url });
     }),
   );

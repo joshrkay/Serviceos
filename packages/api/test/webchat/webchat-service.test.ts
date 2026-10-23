@@ -17,6 +17,7 @@ import type { LLMGateway, LLMRequest } from '../../src/ai/gateway/gateway';
 import { setOwnerNotifications } from '../../src/notifications/owner-notifications-instance';
 import { InMemoryWebchatConfigRepository } from '../../src/webchat/webchat-config';
 import { InMemoryWebchatUsageRepository, usageDay } from '../../src/webchat/webchat-usage';
+import type { CallSummaryRepository } from '../../src/ai/skills/pg-call-summary';
 import {
   createWebchatService,
   MAX_MESSAGE_CHARS,
@@ -35,15 +36,18 @@ const BOOKING = JSON.stringify({
 });
 const OPERATOR = JSON.stringify({ intentType: 'operator_request', confidence: 0.95, extractedEntities: {} });
 const UNCLEAR = JSON.stringify({ intentType: 'unknown', confidence: 0.2, extractedEntities: {} });
+const SUMMARY = JSON.stringify({ summary: 'The visitor asked to book HVAC service.' });
 
 function scriptedGateway(): LLMGateway {
   return {
     complete: vi.fn(async (req: LLMRequest) => {
-      const isConfirm = (req.metadata as { skill?: string } | undefined)?.skill === 'confirm_intent';
+      const skill = (req.metadata as { skill?: string } | undefined)?.skill;
       const last = String(req.messages?.[req.messages.length - 1]?.content ?? '');
-      const content = isConfirm
+      const content = skill === 'confirm_intent'
         ? JSON.stringify({ answer: 'no', reasoning: 'scripted' })
-        : /schedule|book/i.test(last)
+        : skill === 'summarize_session'
+          ? SUMMARY
+          : /schedule|book/i.test(last)
           ? BOOKING
           : /human|person|owner/i.test(last)
             ? OPERATOR
@@ -74,6 +78,7 @@ async function harness(opts: {
   turnCap?: number;
   costCapCents?: number;
   now?: () => Date;
+  callSummaryRepo?: CallSummaryRepository;
 } = {}) {
   const store = new VoiceSessionStore({ startInterval: false });
   stores.push(store);
@@ -111,6 +116,8 @@ async function harness(opts: {
         customerRepo,
         leadRepo,
         settingsRepo,
+        // A4-2 — as app.ts wires the webchat processors.
+        ...(opts.callSummaryRepo ? { callSummaryRepo: opts.callSummaryRepo } : {}),
       }),
     auditRepo,
     leadRepo,
@@ -300,6 +307,35 @@ describe('#1737 — turns run through the call pipeline, behind the approval gat
     const types = (await h.auditRepo.findByEntity(TENANT, 'webchat_session', sessionId)).map((e) => e.eventType);
     expect(types).toEqual(expect.arrayContaining(['webchat.session_started', 'webchat.session_ended']));
     await rejectsWith(h.say(sessionId, 'hello'), 'SESSION_NOT_FOUND');
+  });
+});
+
+// A4-2 — a web chat runs the end-of-call summary like a phone call does;
+// since A2 the row is stored only through the processor's callSummaryRepo,
+// and app.ts built the webchat processors without one (wiring pinned in
+// test/app/voice-turn-summary-wiring.test.ts).
+describe('A4-2 — a web chat that ends stores its summary', () => {
+  it('a session that ends during a turn writes its call_summaries row for the tenant', async () => {
+    const create = vi.fn<CallSummaryRepository['create']>(async () => ({ id: 'cs-webchat-1' }));
+    const h = await harness({ callSummaryRepo: { create } });
+    const { sessionId } = await h.start();
+    await h.say(sessionId, 'I would like to book HVAC service');
+    expect(create).not.toHaveBeenCalled();
+
+    // The conversation reaches the call FSM's terminal state (a hang-up puts
+    // a phone call there); the next turn runs the terminal branch.
+    h.store.peek(sessionId)!.machine.dispatch({ type: 'caller_hangup' });
+    const last = await h.say(sessionId, 'thanks, that is all');
+
+    expect(last.ended).toBe(true);
+    await vi.waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+    expect(create).toHaveBeenCalledWith(TENANT, {
+      callId: null,
+      summary: 'The visitor asked to book HVAC service.',
+      detectedIntent: null,
+      proposalIds: [],
+      qualityScore: null,
+    });
   });
 });
 

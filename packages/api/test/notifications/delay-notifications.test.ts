@@ -105,7 +105,7 @@ describe('delay notification flow', () => {
     expect(queued?.payload.idempotencyKey).toBe(`${nextAppt.id}:2`);
     expect(queued?.payload.channel).toBe('sms');
 
-    const state = await stateRepo.findByKey(`${nextAppt.id}:2`);
+    const state = await stateRepo.findByKey(tenantId, `${nextAppt.id}:2`);
     expect(state?.status).toBe('queued');
     expect(state?.triggerContext).toMatchObject({
       thresholdMinutes: 65,
@@ -159,7 +159,7 @@ describe('delay notification flow', () => {
     expect(key).toBe(`${nextAppt.id}:1`);
     expect(await queue.receive()).toBeNull();
 
-    const state = await stateRepo.findByKey(`${nextAppt.id}:1`);
+    const state = await stateRepo.findByKey(tenantId, `${nextAppt.id}:1`);
     expect(state?.status).toBe('fallback_in_app');
     expect(state?.channel).toBe('in_app');
   });
@@ -199,12 +199,12 @@ describe('delay notification flow', () => {
     };
 
     await expect(worker.handle(message, logger)).rejects.toThrow('provider timeout');
-    const retryState = await stateRepo.findByKey('appt-1:1');
+    const retryState = await stateRepo.findByKey(tenantId, 'appt-1:1');
     expect(retryState?.status).toBe('retrying');
 
     await worker.handle({ ...message, attempts: 2 }, logger);
 
-    const finalState = await stateRepo.findByKey('appt-1:1');
+    const finalState = await stateRepo.findByKey(tenantId, 'appt-1:1');
     expect(finalState?.status).toBe('sent');
 
     const sentMetrics = await analyticsRepo.getMetricsByType(tenantId, 'delay_notice_sent');
@@ -263,7 +263,7 @@ describe('delay notification flow', () => {
     ).resolves.toBeUndefined();
 
     expect(sendDelayNotice).toHaveBeenCalledTimes(1);
-    expect((await stateRepo.findByKey('appt-9:en_route'))?.status).toBe('queued');
+    expect((await stateRepo.findByKey(tenantId, 'appt-9:en_route'))?.status).toBe('queued');
     expect(error).toHaveBeenCalledWith(
       'Delay notification sent, but persisting the sent state failed',
       expect.objectContaining({ idempotencyKey: 'appt-9:en_route', error: 'state db down' }),
@@ -450,7 +450,7 @@ describe('en-route notification flow', () => {
     const key = await coordinator.enqueueEnRouteNotice({ tenantId, appointmentId: appt.id, technicianName: 'Taylor' });
     expect(key).toBeNull();
     expect(await queue.receive()).toBeNull();
-    expect(await stateRepo.findByKey(`${appt.id}:en_route`)).toBeNull();
+    expect(await stateRepo.findByKey(tenantId, `${appt.id}:en_route`)).toBeNull();
   });
 
   it('falls back to in_app when the customer has no SMS consent and no email', async () => {
@@ -481,7 +481,7 @@ describe('en-route notification flow', () => {
     expect(key).toBe(`${appt.id}:en_route`);
     // No SMS/email job is queued — it routed to the in-app sink instead.
     expect(await queue.receive()).toBeNull();
-    const state = await stateRepo.findByKey(`${appt.id}:en_route`);
+    const state = await stateRepo.findByKey(tenantId, `${appt.id}:en_route`);
     expect(state?.status).toBe('fallback_in_app');
     expect(state?.channel).toBe('in_app');
   });
@@ -608,7 +608,7 @@ describe('delay notification worker — analytics failures never affect delivery
       (err: Error) => `threw: ${err.message}`,
     );
 
-    const state = await stateRepo.findByKey('appt-9:en_route');
+    const state = await stateRepo.findByKey(tenantId, 'appt-9:en_route');
     expect({
       outcome,
       status: state?.status,
@@ -637,12 +637,34 @@ describe('delay notification worker — analytics failures never affect delivery
       (err: Error) => `threw: ${err.message}`,
     );
 
-    const state = await stateRepo.findByKey('appt-9:en_route');
+    const state = await stateRepo.findByKey(tenantId, 'appt-9:en_route');
     expect({ outcome, status: state?.status, lastError: state?.lastError }).toEqual({
       outcome: 'resolved',
       status: 'failed',
       lastError: 'invalid destination',
     });
     expect(errors.map((e) => e.message)).toContain('Dispatch analytics write failed');
+  });
+});
+
+describe('InMemoryDelayNoticeStateRepository.findByKey — tenant-scoped like the Pg repository', () => {
+  const otherTenantId = '660e8400-e29b-41d4-a716-446655440000';
+
+  it("returns a tenant's own row and hides it from every other tenant, even for an identical key", async () => {
+    const repo = new InMemoryDelayNoticeStateRepository();
+    await repo.upsert({
+      idempotencyKey: 'appt-shared:1',
+      tenantId,
+      appointmentId: 'appt-shared',
+      delayVersion: 1,
+      status: 'sent',
+      channel: 'sms',
+      attempts: 1,
+      maxAttempts: 3,
+      updatedAt: new Date('2026-04-20T09:00:00Z'),
+    });
+
+    expect((await repo.findByKey(tenantId, 'appt-shared:1'))?.status).toBe('sent');
+    expect(await repo.findByKey(otherTenantId, 'appt-shared:1')).toBeNull();
   });
 });

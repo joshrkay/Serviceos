@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { installClerkStub } from '../helpers/clerk-stub';
 import { blockExternalHosts } from '../helpers/api-mocks/shell';
 import { hasViteClerkKey } from '../helpers/clerk-key';
+import { clerkInviteeUserCreated } from '../helpers/clerk-invitee';
 
 /** Scalar `psql -tA` read, trimmed. Returns '' if DATABASE_URL is unset. */
 function queryScalar(sql: string): string {
@@ -222,17 +223,19 @@ test.describe('accept-invitation (1.11) — real Postgres', () => {
     // ── 4. Simulate the invitee's Clerk sign-up completing: a signed
     //      user.created webhook carrying public_metadata.invitation_id —
     //      exactly the payload inviteTeamMember posts to Clerk's real
-    //      Invitations API (invite-team-member.ts). The REAL handler joins
-    //      this NEW clerk_user_id to the SAME tenant with role technician. ──
+    //      Invitations API (invite-team-member.ts) — with the invited
+    //      address verified by the invitation ticket, as Clerk reports it.
+    //      The REAL handler joins this NEW clerk_user_id to the SAME tenant
+    //      with role technician. ──
     const techSub = `user_e2e_tech_${randomUUID().replace(/-/g, '')}`;
-    const joinRes = await postSignedWebhook(page.request, {
-      type: 'user.created',
-      data: {
-        id: techSub,
-        email_addresses: [{ email_address: techEmail }],
-        public_metadata: { invitation_id: invitationId, tenant_id: tenantId, role: 'technician' },
-      },
-    });
+    const joinRes = await postSignedWebhook(
+      page.request,
+      clerkInviteeUserCreated({
+        sub: techSub,
+        email: techEmail,
+        invitation: { id: invitationId, tenantId, role: 'technician' },
+      }),
+    );
     expect(joinRes.status(), `invitee-join webhook -> ${await joinRes.text()}`).toBe(200);
     const joinBody = (await joinRes.json()) as { joined?: string };
     expect(joinBody.joined, 'webhook must report the tenant it joined the invitee into').toBe(tenantId);
@@ -249,6 +252,76 @@ test.describe('accept-invitation (1.11) — real Postgres', () => {
     await expect(page.getByTestId('technician-day-view')).toBeVisible({ timeout: 15_000 });
 
     expect(pageErrors, 'no uncaught page errors during the accept-invitation journey').toEqual([]);
+  });
+
+  test('an unverified sign-up with the invited address does not join the inviting tenant; the verified invitee still does', async ({
+    page,
+  }) => {
+    const ownerSub = `user_e2e_unvowner_${randomUUID().replace(/-/g, '')}`;
+    const ownerHeaders = { Authorization: `Bearer ${unsignedJwt(ownerSub)}` };
+    const bootstrapRes = await postSignedWebhook(page.request, {
+      type: 'user.created',
+      data: { id: ownerSub, email_addresses: [{ email_address: `unvowner-${Date.now()}@serviceos-hermetic.test` }] },
+    });
+    expect(bootstrapRes.status(), `owner bootstrap webhook -> ${await bootstrapRes.text()}`).toBe(200);
+    const meRes = await page.request.get(`${API_URL}/api/me`, { headers: ownerHeaders });
+    expect(meRes.status(), `/api/me failed: ${await meRes.text()}`).toBe(200);
+    const tenantId = ((await meRes.json()) as { tenant_id?: string }).tenant_id!;
+    expect(tenantId).toMatch(UUID_RE);
+
+    const techEmail = `unverified-tech-${Date.now()}@serviceos-hermetic.test`;
+    const inviteRes = await page.request.post(`${API_URL}/api/users/invitations`, {
+      headers: { 'content-type': 'application/json', ...ownerHeaders },
+      data: JSON.stringify({ email: techEmail, role: 'technician' }),
+    });
+    expect(inviteRes.status(), `POST /api/users/invitations -> ${await inviteRes.text()}`).toBe(201);
+    const invitationId = ((await inviteRes.json()) as { id?: string }).id!;
+
+    // ── A sign-up with the invited address that never verified it: once
+    //    outside the invitation link (the join would match by address), and
+    //    once carrying the invitation id. Neither may join. ─────────────────
+    const byAddressSub = `user_e2e_unvaddr_${randomUUID().replace(/-/g, '')}`;
+    const byIdSub = `user_e2e_unvid_${randomUUID().replace(/-/g, '')}`;
+    for (const event of [
+      clerkInviteeUserCreated({ sub: byAddressSub, email: techEmail, emailStatus: 'unverified' }),
+      clerkInviteeUserCreated({
+        sub: byIdSub,
+        email: techEmail,
+        invitation: { id: invitationId, tenantId, role: 'technician' },
+        emailStatus: 'unverified',
+      }),
+    ]) {
+      const res = await postSignedWebhook(page.request, event);
+      expect(res.status(), `unverified sign-up webhook -> ${await res.text()}`).toBe(200);
+      expect(((await res.json()) as { joined?: string }).joined, 'an unverified address must not join').toBeUndefined();
+    }
+
+    expect(
+      queryScalar(
+        `SELECT count(*) FROM users WHERE tenant_id = '${tenantId}' AND clerk_user_id IN ('${byAddressSub}', '${byIdSub}');`,
+      ),
+      'the inviting tenant must have NO users row for an unverified sign-up',
+    ).toBe('0');
+    expect(
+      queryScalar(`SELECT accepted_at IS NULL FROM pending_invitations WHERE id = '${invitationId}';`),
+      'the invitation must still be pending',
+    ).toBe('t');
+
+    // ── The real invitee, verified by the invitation ticket, still joins. ──
+    const techSub = `user_e2e_vtech_${randomUUID().replace(/-/g, '')}`;
+    const joinRes = await postSignedWebhook(
+      page.request,
+      clerkInviteeUserCreated({
+        sub: techSub,
+        email: techEmail,
+        invitation: { id: invitationId, tenantId, role: 'technician' },
+      }),
+    );
+    expect(joinRes.status(), `invitee-join webhook -> ${await joinRes.text()}`).toBe(200);
+    expect(((await joinRes.json()) as { joined?: string }).joined).toBe(tenantId);
+    expect(
+      queryScalar(`SELECT role FROM users WHERE tenant_id = '${tenantId}' AND clerk_user_id = '${techSub}';`),
+    ).toBe('technician');
   });
 
   // ── T2 leg (#995 rung-5 map, row 1.11) ─────────────────────────────────────
@@ -297,14 +370,14 @@ test.describe('accept-invitation (1.11) — real Postgres', () => {
     //    tenant A. The join must resolve the tenant from the invitation
     //    row itself (pending.tenantId), never from this claim. ──────────────
     const techSub = `user_e2e_crosstenant_${randomUUID().replace(/-/g, '')}`;
-    const joinRes = await postSignedWebhook(page.request, {
-      type: 'user.created',
-      data: {
-        id: techSub,
-        email_addresses: [{ email_address: techEmail }],
-        public_metadata: { invitation_id: invitationIdForB, tenant_id: tenantA, role: 'technician' },
-      },
-    });
+    const joinRes = await postSignedWebhook(
+      page.request,
+      clerkInviteeUserCreated({
+        sub: techSub,
+        email: techEmail,
+        invitation: { id: invitationIdForB, tenantId: tenantA, role: 'technician' },
+      }),
+    );
     expect(joinRes.status(), `invitee-join webhook -> ${await joinRes.text()}`).toBe(200);
     const joinBody = (await joinRes.json()) as { joined?: string };
     expect(

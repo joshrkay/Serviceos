@@ -23,6 +23,7 @@ import { runGoogleReviewsSweep } from '../../src/workers/google-reviews';
 import { createLogger } from '../../src/logging/logger';
 import type { CredentialRow } from '../../src/integrations/credentials';
 import { hangingFetch, settleWithin, settleWithinIo, useProviderClock } from '../helpers/hanging-fetch';
+import { oauthBindingCookie } from '../support/oauth-binding-cookie';
 
 const TENANT = 'tenant-gbp-bounds';
 const CONFIG = { clientId: 'cid', clientSecret: 'csec', redirectUri: 'https://api.example.com/cb' };
@@ -67,7 +68,11 @@ describe('Google Business call sites — bounded at 10 s as production composes 
     );
 
     const outcome = await settleWithinIo(
-      request(app).get('/api/googlebusiness-integrations/google/callback').query({ code: 'c', state }).then((r) => r),
+      request(app)
+        .get('/api/googlebusiness-integrations/google/callback')
+        .query({ code: 'c', state })
+        .set('Cookie', oauthBindingCookie('google_business', state))
+        .then((r) => r),
       12_000,
     );
 

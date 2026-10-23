@@ -420,6 +420,21 @@ export class ForwardingCheckService {
       const after = await this.deps.repo.latest(tenantId);
       if (after) return describeForwardingCheck(after, after.mode);
     }
+    if (latest.status === 'passed') {
+      // A pass only stands while the setup still carries its proof: a number
+      // change (or a new carrier/mode) clears it, whichever side of the pass
+      // it landed on, and then "Forwarding works" would describe a line that
+      // is gone.
+      const setup = await this.deps.forwardingRepo.get(tenantId);
+      if (!setup?.checkPassedAt) {
+        return {
+          status: 'failed',
+          checkedAt: null,
+          expiresAt: null,
+          guidance: 'Your Rivet number or forwarding setup changed after this test. Test again to confirm calls still reach Rivet.',
+        };
+      }
+    }
     return describeForwardingCheck(latest, latest.mode);
   }
 
@@ -435,7 +450,17 @@ export class ForwardingCheckService {
     if (!check) return false;
     const system = { id: 'system', role: 'system' };
     if (!(await this.settle(check, system, { status: 'passed' }))) return false;
-    await this.deps.forwardingRepo.recordCheckPassed(input.tenantId, this.now());
+    const recorded = await this.deps.forwardingRepo.recordCheckPassed(input.tenantId, this.now(), check.rivetNumber);
+    if (!recorded) {
+      // The line was repointed while the call came back: forwarding to the
+      // released number proves nothing. latestView asks the owner to test
+      // again; the refusal is recorded here.
+      await this.audit(input.tenantId, system, 'call_forwarding.check_voided', check.id, {
+        mode: check.mode,
+        reason: 'number_changed',
+      });
+    }
+    // Still the check call either way: hang up rather than reach the AI.
     return true;
   }
 }

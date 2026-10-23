@@ -432,7 +432,10 @@ describe('TwilioGatherAdapter.handleInbound', () => {
       to: '+15125550999',
       tenantId: 'tenant-es',
     });
-    expect(replay).toContain('Un momento, por favor.');
+    // PRIV-4 — the retry replays the Spanish greeting (notices included),
+    // since Twilio discarded the first response.
+    expect(replay).toContain('Gracias por llamar a Acme Plumbing');
+    expect(replay).toContain('Para que lo sepa, soy un asistente virtual');
     expect(replay).toContain('language="es-US"');
     expect(replay).toContain('<Say voice="Polly.Lupe-Neural">');
     expect(replay).not.toContain('One moment, please.');
@@ -2264,6 +2267,12 @@ describe('buildTelephonyGreeting', () => {
     expect(result).not.toContain(TTS_COPY.how_can_i_help.en);
   });
 
+  it('a whitespace-only custom greeting falls back to the default opener, so the business name is still said', () => {
+    const result = buildTelephonyGreeting('Joes HVAC', 'This call may be recorded for quality.', { greeting: '   ' });
+    expect(result.startsWith('Thank you for calling Joes HVAC.')).toBe(true);
+    expect(result).toContain("Just so you know, I'm a virtual assistant, not a live person.");
+  });
+
   it('appends default CTA only when no persona is set', () => {
     const result = buildTelephonyGreeting(
       'Joes HVAC',
@@ -2283,14 +2292,214 @@ describe('buildTelephonyGreeting', () => {
     expect((result.match(/\?/g) ?? []).length).toBe(1);
   });
 
-  it('persona greeting without disclosure is returned unchanged', () => {
+  it('persona greeting without a recording notice keeps the tenant wording and adds only the assistant notice', () => {
+    // PRIV-4 — this pin used to assert the custom greeting came back
+    // UNCHANGED; it now carries the assistant notice, which every telephony
+    // greeting must (the tenant's own words stay verbatim and first).
     const result = buildTelephonyGreeting(
       'Joes HVAC',
       '',
       { greeting: 'Hi, this is Sarah. What can I help you with today?', agentName: 'Sarah' },
     );
-    expect(result).toBe('Hi, this is Sarah. What can I help you with today?');
+    expect(result).toBe(
+      "Hi, this is Sarah. What can I help you with today? Just so you know, I'm a virtual assistant, not a live person.",
+    );
     expect((result.match(/\?/g) ?? []).length).toBe(1);
+  });
+});
+
+// ─── PRIV-4 — every telephony greeting says the caller is talking to an assistant ──
+
+describe('PRIV-4 buildTelephonyGreeting — the assistant notice is in every branch', () => {
+  const RECORDING = 'This call may be recorded for quality and training purposes.';
+  const NOTICE_EN = "Just so you know, I'm a virtual assistant, not a live person.";
+
+  it('default branch: opener, then the assistant notice, then the recording notice, then the question', () => {
+    expect(buildTelephonyGreeting('Joes HVAC', RECORDING)).toBe(
+      `Thank you for calling Joes HVAC. ${NOTICE_EN} ${RECORDING} How can I help you today?`,
+    );
+  });
+
+  it('named-agent branch: a persona name is followed straight away by the assistant notice', () => {
+    expect(buildTelephonyGreeting('Joes HVAC', RECORDING, { agentName: 'Sarah' })).toBe(
+      `Thank you for calling Joes HVAC. This is Sarah. ${NOTICE_EN} ${RECORDING} How can I help you today?`,
+    );
+  });
+
+  it("custom-greeting branch: the tenant's wording stays verbatim and first, the notice follows it", () => {
+    expect(
+      buildTelephonyGreeting('Joes HVAC', RECORDING, {
+        greeting: 'Hi, this is Sarah at Joes HVAC. What can I help you with today?',
+        agentName: 'Sarah',
+      }),
+    ).toBe(
+      `Hi, this is Sarah at Joes HVAC. What can I help you with today? ${NOTICE_EN} ${RECORDING}`,
+    );
+  });
+
+  it('Spanish default branch speaks the Spanish notice', () => {
+    const out = buildTelephonyGreeting('Acme', 'Esta llamada puede ser grabada.', null, 'es');
+    expect(out).toBe(
+      'Gracias por llamar a Acme. Para que lo sepa, soy un asistente virtual, no una persona real. ' +
+        'Esta llamada puede ser grabada. ¿En qué puedo ayudarle hoy?',
+    );
+  });
+
+  it('an explicit notice (the per-tenant wording) replaces the built-in one', () => {
+    expect(
+      buildTelephonyGreeting('Joes HVAC', RECORDING, null, 'en', 'Heads up, you are talking to our automated helper.'),
+    ).toBe(
+      `Thank you for calling Joes HVAC. Heads up, you are talking to our automated helper. ${RECORDING} How can I help you today?`,
+    );
+  });
+});
+
+describe('PRIV-4 — the first thing a phone caller hears says they are talking to an assistant', () => {
+  const NOTICE_EN = "Just so you know, I'm a virtual assistant, not a live person.";
+  const NOTICE_EVENT = 'virtual_assistant_notice.played';
+
+  function makeNoticeAdapter(extra: Partial<ConstructorParameters<typeof TwilioGatherAdapter>[0]> = {}) {
+    const store = new VoiceSessionStore({ startInterval: false });
+    const auditRepo = new InMemoryAuditRepository();
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}'),
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      recordingCallbackPath: '/api/telephony/recording',
+      auditRepo,
+      consentEvents: new InMemoryConsentEventRepository(),
+      systemActorId: 'system:inbound-call',
+      ...extra,
+    });
+    return { adapter, store, auditRepo };
+  }
+
+  async function noticeRows(auditRepo: InMemoryAuditRepository, tenantId: string, sessionId: string) {
+    // The Gather commit is fire-and-forget; let it settle.
+    for (let i = 0; i < 5; i += 1) {
+      await new Promise<void>((r) => {
+        setImmediate(r);
+      });
+    }
+    return (await auditRepo.findByEntity(tenantId, 'voice_session', sessionId)).filter(
+      (e) => e.eventType === NOTICE_EVENT,
+    );
+  }
+
+  function firstSay(xml: string): string {
+    const open = xml.indexOf('<Say');
+    return xml.slice(xml.indexOf('>', open) + 1, xml.indexOf('</Say>', open));
+  }
+
+  // A California caller ID, a Texas caller ID and a blocked caller ID: the
+  // notice is never gated on where the caller seems to be.
+  for (const [label, from] of [
+    ['California (415)', '+14155550100'],
+    ['Texas (512)', '+15125550100'],
+    ['blocked caller ID', ''],
+  ] as const) {
+    it(`Gather: ${label} — the first <Say> carries the notice, before <Start><Record>`, async () => {
+      const { adapter, store, auditRepo } = makeNoticeAdapter();
+      const xml = await adapter.handleInbound({
+        callSid: `CA-notice-${label}`,
+        from,
+        to: '+15125550999',
+        tenantId: 'tenant-abc',
+      });
+      expect(firstSay(xml)).toContain(xmlEscape(NOTICE_EN));
+      expect(xml.indexOf(xmlEscape(NOTICE_EN))).toBeLessThan(xml.indexOf('<Start><Record'));
+
+      // Ledgered once the TwiML carrying it is handed back (Gather's point
+      // of evidence), with no caller phone needed.
+      const session = store.findByCallSid(`CA-notice-${label}`)!;
+      const rows = await noticeRows(auditRepo, 'tenant-abc', session.id);
+      expect(rows).toHaveLength(1);
+      expect(rows[0]).toMatchObject({
+        tenantId: 'tenant-abc',
+        actorId: 'system:inbound-call',
+        actorRole: 'system',
+        entityType: 'voice_session',
+        entityId: session.id,
+        correlationId: session.id,
+      });
+      expect(rows[0].metadata).toMatchObject({ text: NOTICE_EN, wording: 'default', language: 'en' });
+    });
+  }
+
+  it('Gather: a tenant persona name is followed by the notice, never left as a human introduction', async () => {
+    const { adapter } = makeNoticeAdapter({
+      voicePersonaResolver: async () => ({ agentName: 'Sarah', businessName: 'Joes HVAC' }),
+    });
+    const xml = await adapter.handleInbound({
+      callSid: 'CA-notice-persona',
+      from: '+14155550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    expect(firstSay(xml)).toContain(xmlEscape(`This is Sarah. ${NOTICE_EN}`));
+  });
+
+  it("Gather: a tenant's custom greeting keeps its words and still carries the notice", async () => {
+    const { adapter } = makeNoticeAdapter({
+      voicePersonaResolver: async () => ({ greeting: 'Hi, this is Sarah at Joes HVAC. What do you need?' }),
+    });
+    const xml = await adapter.handleInbound({
+      callSid: 'CA-notice-custom',
+      from: '+14155550100',
+      to: '+15125550999',
+      tenantId: 'tenant-abc',
+    });
+    expect(firstSay(xml)).toContain(
+      xmlEscape(`Hi, this is Sarah at Joes HVAC. What do you need? ${NOTICE_EN}`),
+    );
+  });
+
+  it('Media Streams: the first spoken turn carries the notice, ledgered only once the transport commits', async () => {
+    const { adapter, store, auditRepo } = makeNoticeAdapter();
+    await adapter.handleInboundForStream({ callSid: 'CA-notice-stream', from: '', tenantId: 'tenant-abc' });
+    const effects = await adapter.initializeStreamSession({ callSid: 'CA-notice-stream', tenantId: 'tenant-abc' });
+    const firstTts = effects.find((fx) => fx.type === 'tts_play');
+    expect(String(firstTts?.payload.text)).toContain(NOTICE_EN);
+
+    // Nothing is ledgered until the stream transport says the greeting turn
+    // played (it calls commitRecordingConsent at that point of evidence).
+    const session = store.findByCallSid('CA-notice-stream')!;
+    expect(await noticeRows(auditRepo, 'tenant-abc', session.id)).toHaveLength(0);
+    await adapter.commitRecordingConsent({ callSid: 'CA-notice-stream' });
+    await adapter.commitRecordingConsent({ callSid: 'CA-notice-stream' });
+    expect(await noticeRows(auditRepo, 'tenant-abc', session.id)).toHaveLength(1);
+  });
+
+  it('Spanish tenant: the notice is spoken in Spanish and ledgered as such', async () => {
+    const settingsRepo = new InMemorySettingsRepository();
+    const now = new Date();
+    await settingsRepo.create({
+      id: 's-es',
+      tenantId: 'tenant-es',
+      businessName: 'Acme Plumbing',
+      timezone: 'America/Chicago',
+      estimatePrefix: 'EST-',
+      invoicePrefix: 'INV-',
+      nextEstimateNumber: 1,
+      nextInvoiceNumber: 1,
+      defaultPaymentTermDays: 30,
+      defaultLanguage: 'es',
+      autoDetectLanguage: true,
+      createdAt: now,
+      updatedAt: now,
+    } as TenantSettings);
+    const { adapter, store, auditRepo } = makeNoticeAdapter({ settingsRepo });
+    const xml = await adapter.handleInbound({
+      callSid: 'CA-notice-es',
+      from: '+14155550100',
+      to: '+15125550999',
+      tenantId: 'tenant-es',
+    });
+    expect(firstSay(xml)).toContain('Para que lo sepa, soy un asistente virtual, no una persona real.');
+    const session = store.findByCallSid('CA-notice-es')!;
+    const rows = await noticeRows(auditRepo, 'tenant-es', session.id);
+    expect(rows[0]?.metadata).toMatchObject({ language: 'es' });
   });
 });
 

@@ -24,7 +24,7 @@ export interface TranscriptionRouterHandoffDeps {
  *
  * U9 — voicemail transcripts reach the action router ONLY when the
  * caller-ID matches the tenant's approver set (owner_phone / backup
- * supervisor — resolveOwnerSession precedent, fail-closed). Every other
+ * supervisor — resolveOwnerLineApprover precedent, fail-closed). Every other
  * caller keeps notify-only voicemail (lead + audit, no router).
  * Non-voicemail events (in-app memos) pass untouched.
  */

@@ -41,9 +41,24 @@ describe('buildAssistantConfig', () => {
     expect(cfg.name).toBe('Acme HVAC AI Receptionist');
   });
 
-  it('honors an explicit greeting override', () => {
+  // PRIV-4 (review round 1) — a number imported into Vapi greets callers with
+  // firstMessage, which never passes through buildTelephonyGreeting; the
+  // virtual-assistant notice must ride on it too.
+  it('the auto-generated first message tells the caller they are talking to a virtual assistant', () => {
+    const cfg = buildAssistantConfig({ businessName: 'Acme HVAC', services: ['repairs'] });
+    expect(cfg.firstMessage).toBe(
+      "Thanks for calling Acme HVAC. We handle repairs. How can I help you today? Just so you know, I'm a virtual assistant, not a live person.",
+    );
+  });
+
+  it('honors an explicit greeting override, tenant words first, then the notice', () => {
     const cfg = buildAssistantConfig({ businessName: 'Acme', greeting: 'Yo, Acme here.' });
-    expect(cfg.firstMessage).toBe('Yo, Acme here.');
+    expect(cfg.firstMessage).toBe("Yo, Acme here. Just so you know, I'm a virtual assistant, not a live person.");
+  });
+
+  it("a Spanish tenant's first message carries the Spanish notice", () => {
+    const cfg = buildAssistantConfig({ businessName: 'Plomería Sol', greeting: 'Gracias por llamar.', language: 'es' });
+    expect(cfg.firstMessage).toBe('Gracias por llamar. Para que lo sepa, soy un asistente virtual, no una persona real.');
   });
 
   it('threads the server webhook url + secret when provided', () => {

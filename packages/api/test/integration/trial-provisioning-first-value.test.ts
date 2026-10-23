@@ -88,6 +88,7 @@ import { decideTrialCall, TRIAL_MINUTE_LIMITS } from '../../src/voice/trial-limi
 import { createLogger } from '../../src/logging/logger';
 import type { QueueMessage } from '../../src/queues/queue';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
+import { InMemoryTransactionRunner } from '../../src/db/tenant-transaction';
 
 const CLERK_SECRET = 'whsec_dHJpYWwtcHJvdmlzaW9uaW5nLXByb29mLXBhY2s='; // base64
 const STRIPE_SECRET = 'whsec_test_trial_provisioning_proof_pack';
@@ -342,7 +343,7 @@ describe('Postgres integration — trial/provisioning proof pack (signup → wor
     app.use('/api/customers', createCustomerRouter(customerRepo, auditRepo));
     app.use('/api/locations', createLocationRouter(locationRepo, permissiveTenantOwnership(), auditRepo));
     app.use('/api/voice/sessions', createVoiceSessionsRouter({ adapter: voiceAdapter, store: voiceStore }));
-    app.use('/api/proposals', createProposalsRouter(proposalRepo, appointmentRepo, auditRepo));
+    app.use('/api/proposals', createProposalsRouter(proposalRepo, new InMemoryTransactionRunner(), appointmentRepo, auditRepo));
     return app;
   }
 

@@ -115,6 +115,22 @@ export const gatewayFailoverTotal = new Counter({
   registers: [metricsRegistry],
 });
 
+/**
+ * LLM calls that started while a tenant transaction held a pooled connection
+ * (the /api request transaction, or an explicit unit of work spanning the
+ * call). Each one pins that connection, and under PgBouncer a server backend,
+ * for the whole call. The gateway logs an error with the call site and lets
+ * the call proceed; any non-zero rate is a route that belongs on
+ * LLM_LONG_CALL_ROUTES (middleware/tenant-context.ts). Under NODE_ENV=test the
+ * gateway throws LlmCallInTransactionError instead.
+ */
+export const gatewayLlmCallInTransactionTotal = new Counter({
+  name: 'gateway_llm_call_in_transaction_total',
+  help: 'LLM gateway calls started while a tenant transaction held a pooled connection',
+  labelNames: ['task_type'],
+  registers: [metricsRegistry],
+});
+
 export const gatewayDeadlineExceededTotal = new Counter({
   name: 'gateway_deadline_exceeded_total',
   help: 'Requests aborted because the deadline elapsed',
@@ -451,6 +467,21 @@ export const sloAlertsSentTotal = new Counter({
 export const demoCallBudgetRefusalsTotal = new Counter({
   name: 'demo_call_budget_refusals_total',
   help: 'Demo-call budget reservations refused because the UTC day is at its call or cost cap',
+  registers: [metricsRegistry],
+});
+
+/**
+ * Knowledge-chunk inserts refused because another tenant already holds the
+ * same (scope, source_type, source_id, source_version) on 062's tenant-blind
+ * dedupe index, which 351 keeps until its contract migration drops it. The
+ * chunk is not written; the other tenant's row is untouched. `source_type` is
+ * the bounded KnowledgeChunkSourceType whitelist. Source ids are server UUIDs,
+ * so any count here is unexpected; remove with the contract migration.
+ */
+export const knowledgeChunkDedupeCollisionsTotal = new Counter({
+  name: 'knowledge_chunk_dedupe_collisions_total',
+  help: "Knowledge-chunk inserts refused on the tenant-blind dedupe index because another tenant holds the source tuple",
+  labelNames: ['source_type'],
   registers: [metricsRegistry],
 });
 

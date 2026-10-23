@@ -1,80 +1,96 @@
 import { describe, it, expect } from 'vitest';
 import {
-  requiresAiDisclosure,
   buildAiDisclosureText,
-  resolveAiDisclosure,
-  DEFAULT_AI_DISCLOSURE_TEMPLATE_EN,
+  discloseAiIdentity,
 } from '../../../src/ai/skills/disclose-ai-identity';
-
-describe('requiresAiDisclosure', () => {
-  it('true for AI-disclosure states (CA/FL), case/space-insensitive', () => {
-    expect(requiresAiDisclosure('CA')).toBe(true);
-    expect(requiresAiDisclosure(' ca ')).toBe(true);
-    expect(requiresAiDisclosure('FL')).toBe(true);
-  });
-
-  it('false for non-listed states and unknown/null', () => {
-    expect(requiresAiDisclosure('TX')).toBe(false);
-    expect(requiresAiDisclosure(null)).toBe(false);
-    expect(requiresAiDisclosure(undefined)).toBe(false);
-  });
-});
+import { InMemoryAuditRepository, type AuditEvent, type AuditRepository } from '../../../src/audit/audit';
 
 describe('buildAiDisclosureText', () => {
-  it('default EN copy with business-name substitution', () => {
+  it('default EN copy says virtual assistant in plain words, never "AI"', () => {
     const out = buildAiDisclosureText({ businessName: "Bob's Plumbing" });
-    expect(out).toBe("Just so you know, you're speaking with Bob's Plumbing's AI virtual assistant.");
+    expect(out).toBe("Just so you know, I'm a virtual assistant, not a live person.");
+    expect(out).not.toMatch(/\bAI\b/);
   });
 
   it('default ES copy when language is es', () => {
     const out = buildAiDisclosureText({ businessName: 'Ace', language: 'es' });
-    expect(out).toContain('asistente virtual de inteligencia artificial de Ace');
+    expect(out).toBe('Para que lo sepa, soy un asistente virtual, no una persona real.');
+    expect(out).not.toMatch(/inteligencia artificial/);
   });
 
-  it('custom tenant text overrides the default (with {business_name})', () => {
-    const out = buildAiDisclosureText({ businessName: 'Ace', customText: 'Heads up — {business_name} uses an AI assistant.' });
-    expect(out).toBe('Heads up — Ace uses an AI assistant.');
+  it('per-tenant wording overrides the default (with {business_name})', () => {
+    const out = buildAiDisclosureText({
+      businessName: 'Ace',
+      customText: 'Heads up — {business_name} uses an automated helper.',
+    });
+    expect(out).toBe('Heads up — Ace uses an automated helper.');
   });
 
-  it('blank business name falls back to "our team"', () => {
-    expect(buildAiDisclosureText({ businessName: '   ' })).toBe(
-      DEFAULT_AI_DISCLOSURE_TEMPLATE_EN.replace('{business_name}', 'our team'),
+  it('a blank business name in custom wording falls back to "our team"', () => {
+    expect(buildAiDisclosureText({ businessName: '   ', customText: 'You reached {business_name}’s helper.' })).toBe(
+      'You reached our team’s helper.',
+    );
+  });
+
+  it('blank custom wording falls back to the default', () => {
+    expect(buildAiDisclosureText({ businessName: 'Ace', customText: '   ' })).toBe(
+      "Just so you know, I'm a virtual assistant, not a live person.",
     );
   });
 });
 
-describe('resolveAiDisclosure', () => {
-  it('in-app callers get no spoken disclosure', () => {
-    expect(resolveAiDisclosure({ channel: 'inapp', businessName: 'Ace', callerState: 'CA' })).toEqual({
-      shouldDisclose: false,
-      text: '',
-      reason: 'none',
+describe('discloseAiIdentity', () => {
+  const base = {
+    tenantId: 't-1',
+    businessName: 'Ace',
+    voiceSessionId: 'vs-1',
+    actorId: 'system:inbound-call',
+  };
+
+  it('returns the notice and writes NOTHING until the transport commits', async () => {
+    const auditRepo = new InMemoryAuditRepository();
+    const r = discloseAiIdentity({ ...base, auditRepo });
+    expect(r.disclosureText).toBe("Just so you know, I'm a virtual assistant, not a live person.");
+    expect(await auditRepo.findByEntity('t-1', 'voice_session', 'vs-1')).toHaveLength(0);
+  });
+
+  it('commit appends exactly one ledger row, once, however often it is called', async () => {
+    const auditRepo = new InMemoryAuditRepository();
+    const r = discloseAiIdentity({ ...base, auditRepo, channel: 'telephony', customText: 'Hi from {business_name}’s helper.' });
+    await r.commitDisclosureLedger();
+    await r.commitDisclosureLedger();
+    const rows = await auditRepo.findByEntity('t-1', 'voice_session', 'vs-1');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]).toMatchObject({
+      tenantId: 't-1',
+      actorId: 'system:inbound-call',
+      actorRole: 'system',
+      eventType: 'virtual_assistant_notice.played',
+      entityType: 'voice_session',
+      entityId: 'vs-1',
+      correlationId: 'vs-1',
+      metadata: {
+        text: 'Hi from Ace’s helper.',
+        wording: 'tenant',
+        language: 'en',
+        channel: 'telephony',
+      },
     });
   });
 
-  it('telephony in a required state discloses (state_required), regardless of opt-in', () => {
-    const r = resolveAiDisclosure({ channel: 'telephony', businessName: 'Ace', callerState: 'CA', tenantEnabled: false });
-    expect(r.shouldDisclose).toBe(true);
-    expect(r.reason).toBe('state_required');
-    expect(r.text).toContain('AI virtual assistant');
+  it('a failing ledger never rejects (the call must go on)', async () => {
+    const failing = {
+      create: async (_e: AuditEvent) => {
+        throw new Error('db down');
+      },
+    } as unknown as AuditRepository;
+    const r = discloseAiIdentity({ ...base, auditRepo: failing });
+    await expect(r.commitDisclosureLedger()).resolves.toBeUndefined();
   });
 
-  it('telephony in a non-required state discloses only when the tenant opts in (tenant_enabled)', () => {
-    expect(
-      resolveAiDisclosure({ channel: 'telephony', businessName: 'Ace', callerState: 'TX', tenantEnabled: true }).reason,
-    ).toBe('tenant_enabled');
-    expect(
-      resolveAiDisclosure({ channel: 'telephony', businessName: 'Ace', callerState: 'TX', tenantEnabled: false }),
-    ).toEqual({ shouldDisclose: false, text: '', reason: 'none' });
-  });
-
-  it('honors a tenant custom text when disclosing', () => {
-    const r = resolveAiDisclosure({
-      channel: 'telephony',
-      businessName: 'Ace',
-      callerState: 'CA',
-      customText: '{business_name} AI here.',
-    });
-    expect(r.text).toBe('Ace AI here.');
+  it('with no ledger wired the commit is a no-op and the notice still plays', async () => {
+    const r = discloseAiIdentity(base);
+    expect(r.disclosureText).not.toBe('');
+    await expect(r.commitDisclosureLedger()).resolves.toBeUndefined();
   });
 });

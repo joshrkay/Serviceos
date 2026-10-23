@@ -35,6 +35,7 @@ import type {
   ReplyUnackedReason,
 } from '../../../voice/call-transcript-turn';
 import { voiceReplyStampLostTotal } from '../../../monitoring/metrics';
+import type { ResolvedApprover } from '../../../proposals/approver-identity';
 import type {
   EscalationStartedEvent,
   EscalationSummaryBuiltEvent,
@@ -386,6 +387,46 @@ export interface VoiceSession {
    */
   actorUserId?: string;
   /**
+   * B1 — who this owner line approves AS (`resolveApproverRole`): the owner
+   * for the owner phone, the backup supervisor as their own role and user.
+   * Stamped by the telephony establishment core
+   * (`TwilioGatherAdapter.establishInboundSession`, both transports) together
+   * with `ownerSession`, from the caller-ID — never from utterance content.
+   * B1 follow-up — it marks the line as caller-ID-established: the turn
+   * processor re-resolves the approver from that caller-ID at every voice
+   * approve / reject / edit (`currentApprovalLine`), so a backup demoted,
+   * deactivated or replaced mid-call acts as who they are now — and (B3-1)
+   * at the start of every turn, so a line that no longer resolves keeps no
+   * owner-line privilege that turn (`refreshOwnerLine`). Absent on a
+   * session whose owner authority came from an authenticated owner (in-app)
+   * or a harness fixture: that is the owner. B4-2 — `userRowId` (a backup's
+   * users row; none for the owner phone) is who the line was picked up as,
+   * and what that re-check compares: a backup who links a login mid-call
+   * changes `userId`, not who they are.
+   */
+  ownerLineApprover?: Pick<ResolvedApprover, 'role' | 'userId' | 'userRowId'>;
+  /**
+   * B3-1 — what the caller-ID-established owner line was granted at pick-up
+   * besides `ownerSession`: the extended owner lookups and the phone actor
+   * (`actorUserId`, the subject every owner lookup is authorised by). The
+   * turn processor's per-turn re-check (`refreshOwnerLine`) records it the
+   * first time it runs, drops all of it for a turn whose re-check no longer
+   * resolves the line (or resolves it to someone other than the person
+   * `ownerLineApprover.userRowId` names), and restores it on a later turn
+   * that resolves it to that same person again. Absent on a session that
+   * carries no `ownerLineApprover`.
+   */
+  ownerLineGrant?: { extendedIntents: boolean; actorUserId?: string };
+  /**
+   * B4-4 — what this turn's owner-line re-check (`refreshOwnerLine`, run first
+   * by every turn: `speechTurn`, the Gather loop, the silence turn) resolved,
+   * so the turn's approve / reject / edit step reuses it instead of a second
+   * settings + users read. That step takes (clears) it; a step that finds
+   * none re-checks itself. `approver: null` — the line did not resolve this
+   * turn (a lookup error included), so the step refuses: fail closed.
+   */
+  ownerLineThisTurn?: { approver: ResolvedApprover | null };
+  /**
    * True once the recording disclosure has actually been emitted to the caller
    * on this call (set by `bootstrapCallEstablishment`, which is the only
    * caller of `discloseRecording`). Any path that resumes or re-arms audio
@@ -396,6 +437,22 @@ export interface VoiceSession {
    * exists but has heard nothing.
    */
   recordingDisclosed?: boolean;
+  /**
+   * PRIV-4 — true once this call has evidence the caller HEARD the
+   * virtual-assistant notice (the greeting reached its point of evidence:
+   * Gather's TwiML was built, or the stream's greeting turn played to
+   * completion), or a fallback document spoke it. Unlike `recordingDisclosed`
+   * (latched when the greeting is merely queued), a realtime→Gather degrade
+   * mid-greeting leaves this false, so the fallback speaks the notice itself.
+   */
+  assistantNoticeHeard?: boolean;
+  /**
+   * PRIV-4 — the full greeting (virtual-assistant notice and recording notice
+   * included) `bootstrapCallEstablishment` rendered for this call. A /voice
+   * webhook retry replays it: Twilio discarded the first response, so the
+   * retry's document is the only greeting the caller hears.
+   */
+  greetingText?: string;
   /**
    * Set when the caller objected to being recorded. The Twilio recording is
    * paused via the REST API, but that only covers `<Start><Record>` — the

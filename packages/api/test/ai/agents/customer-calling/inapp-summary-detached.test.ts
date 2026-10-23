@@ -80,3 +80,46 @@ describe('InAppVoiceAdapter — the background summary runs outside the request 
     expect(summaryContexts[0]).toBeUndefined();
   });
 });
+
+describe('InAppVoiceAdapter — the end-of-call summary is persisted through deps.callSummaryRepo (A2)', () => {
+  it('endSession writes the summary row through the repository, and a failed write never fails the teardown', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    try {
+      const create = vi.fn().mockRejectedValueOnce(new Error('insert failed')).mockResolvedValue({ id: 'cs-1' });
+      const complete = vi.fn(async (req: LLMRequest) => ({
+        content:
+          req.taskType === 'summarize_conversation' ? JSON.stringify({ summary: 'Operator checked the day.' }) : UNKNOWN,
+        model: 'mock',
+        provider: 'mock',
+        tokenUsage: { input: 1, output: 1, total: 2 },
+        latencyMs: 1,
+      }));
+      const adapter = new InAppVoiceAdapter({
+        store,
+        gateway: { complete } as unknown as LLMGateway,
+        proposalRepo: new InMemoryProposalRepository(),
+        auditRepo: new InMemoryAuditRepository(),
+        onCallRepo: new InMemoryOnCallRepository(new Map()),
+        callSummaryRepo: { create },
+      });
+
+      // The first session's write fails: endSession still resolves.
+      const first = await adapter.startSession(TENANT, 'user-1');
+      await adapter.endSession(first.sessionId);
+      await vi.waitFor(() => expect(create).toHaveBeenCalledTimes(1));
+
+      const second = await adapter.startSession(TENANT, 'user-1');
+      await adapter.endSession(second.sessionId);
+      await vi.waitFor(() => expect(create).toHaveBeenCalledTimes(2));
+      expect(create).toHaveBeenLastCalledWith(TENANT, {
+        callId: null,
+        summary: 'Operator checked the day.',
+        detectedIntent: null,
+        proposalIds: [],
+        qualityScore: null,
+      });
+    } finally {
+      store.dispose();
+    }
+  });
+});

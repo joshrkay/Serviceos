@@ -246,7 +246,7 @@ export function createDripEngine(deps: DripEngineDeps): DripEngine {
       return;
     }
 
-    // Exit conditions, in precedence order: booked, replied, opted out.
+    // Exit conditions, in precedence order: booked, renewed, replied, opted out.
     const booking = await deps.signals.findBookingSince(tenantId, customer.id, enrollment.enrolledAt);
     if (booking) {
       await deps.repo.recordBooking(tenantId, enrollment.id, booking);
@@ -255,6 +255,13 @@ export function createDripEngine(deps: DripEngineDeps): DripEngine {
         attribution: 'in_sequence',
       });
       await finish(enrollment, 'booked', now);
+      return;
+    }
+    if (
+      enrollment.sourceEntityType === 'service_agreement' &&
+      (await deps.signals.hasRenewedMembership(tenantId, enrollment.id))
+    ) {
+      await finish(enrollment, 'renewed', now);
       return;
     }
     if (await deps.signals.hasRepliedSince(tenantId, customer.id, enrollment.enrolledAt)) {
@@ -408,6 +415,7 @@ export function createDripEngine(deps: DripEngineDeps): DripEngine {
         days,
         now,
         DRIP_MAX_ENROLL_PER_RUN,
+        sequence.id,
       );
       const enrolled = await deps.repo.enroll(tenantId, sequence.id, targets, firstRunAt(sequence.steps, now));
       await deps.auditRepo.create(

@@ -14,6 +14,8 @@ import { payloadWithSupervisorMarker } from '../../src/proposals/supervisor/mark
 import { QueueMessage } from '../../src/queues/queue';
 import { createMockLLMGateway } from '../../src/ai/gateway/factory';
 import { chainMetaFor } from '../../src/proposals/chain';
+import { verifyOneTapApproveToken, createInMemoryNonceStore } from '../../src/proposals/auto-approve';
+import type { ApprovalSmsRecipient, ResolvedApprover } from '../../src/proposals/approver-identity';
 import type { Logger } from '../../src/logging/logger';
 
 function silentLogger(): Logger {
@@ -264,6 +266,10 @@ describe('voice-action-router — RV-221 chain SMS routing', () => {
     sendSms: ReturnType<typeof vi.fn>,
     recordSmsEvent: ReturnType<typeof vi.fn>,
     gateway: Parameters<typeof createVoiceActionRouterWorker>[0]['gateway'],
+    resolveLinkApprover?: NonNullable<
+      Parameters<typeof createVoiceActionRouterWorker>[0]['unsupervisedRouting']
+    >['resolveLinkApprover'],
+    smsRecipient?: ApprovalSmsRecipient,
   ) {
     return createVoiceActionRouterWorker({
       gateway,
@@ -274,8 +280,16 @@ describe('voice-action-router — RV-221 chain SMS routing', () => {
         sendSms: sendSms as unknown as (to: string, body: string) => Promise<void>,
         secret: 'test-secret',
         buildApproveUrl: (token) => `https://api.example.com/approve?token=${token}`,
-        resolveOwnerPhone: async () => '+15125550100',
+        // B3-2 — a test that passes a link approver is texting the backup
+        // supervisor's mobile (looked up); otherwise the owner phone (not).
+        // A test can name the recipient outright.
+        resolveSmsRecipient: async () =>
+          smsRecipient ?? {
+            phone: '+15125550100',
+            via: resolveLinkApprover ? ('backup_supervisor' as const) : ('owner_phone' as const),
+          },
         resolveRouting: async () => 'queue_and_sms',
+        ...(resolveLinkApprover ? { resolveLinkApprover } : {}),
         recordSmsEvent: recordSmsEvent as unknown as (args: {
           tenantId: string;
           proposalId: string;
@@ -435,6 +449,64 @@ describe('voice-action-router — RV-221 chain SMS routing', () => {
     });
   });
 
+  // B1 follow-up — a legacy technician backup (no owner phone, so the chain
+  // SMS goes to the backup) gets no link, and their texted Y / N / EDIT are
+  // all refused: the chain body must not ask them for any of those replies.
+  const technicianBackup = async () =>
+    ({ role: 'technician', userId: 'clerk-tech', via: 'backup_supervisor' }) as const;
+
+  it('a technician backup gets the for-your-info chain form: no Reply Y, no N, no link', async () => {
+    setSupervisorPresenceLoader(async () => false);
+    const { gateway, provider } = createMockLLMGateway();
+    vi.spyOn(provider, 'complete').mockImplementation(chainProviderImpl() as never);
+
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const sendSms = vi.fn(async () => {});
+    const recordSmsEvent = vi.fn(async () => {});
+    const worker = makeRoutedWorker(repo, auditRepo, sendSms, recordSmsEvent, gateway, technicianBackup);
+
+    await worker.handle(
+      makeMessage('create a customer named Jane Doe and open a job for her'),
+      silentLogger(),
+    );
+
+    const head = (await repo.findByTenant('tenant-1')).find((p) => p.proposalType === 'create_customer')!;
+    expect(sendSms).toHaveBeenCalledTimes(1);
+    const [, body] = sendSms.mock.calls[0] as unknown as [string, string];
+    expect(body).toContain('2 linked actions:');
+    expect(body).toContain('For your info — the owner needs to review this in the app.');
+    expect(body).not.toMatch(/Reply Y/i);
+    expect(body).not.toMatch(/reply N/i);
+    expect(body).not.toContain('token=');
+    expect(recordSmsEvent.mock.calls[0][0]).toMatchObject({ proposalId: head.id, kind: 'review_required_rendered' });
+    const routed = auditRepo.getAll().filter((e) => e.eventType === 'unsupervised_proposal_routed');
+    expect(routed[0].metadata).toMatchObject({ approveLinkSuppressed: true, suppressReason: 'recipient_cannot_approve' });
+  });
+
+  it('a technician backup on an already-review-only chain (low confidence) is not told to reply N either', async () => {
+    setSupervisorPresenceLoader(async () => false);
+    const { gateway, provider } = createMockLLMGateway();
+    vi.spyOn(provider, 'complete').mockImplementation(chainProviderImpl({ lowConfidenceJob: true }) as never);
+
+    const repo = new InMemoryProposalRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const sendSms = vi.fn(async () => {});
+    const recordSmsEvent = vi.fn(async () => {});
+    const worker = makeRoutedWorker(repo, auditRepo, sendSms, recordSmsEvent, gateway, technicianBackup);
+
+    await worker.handle(
+      makeMessage('create a customer named Jane Doe and draft her an estimate'),
+      silentLogger(),
+    );
+
+    const [, body] = sendSms.mock.calls[0] as unknown as [string, string];
+    expect(body).toContain('For your info — the owner needs to review this in the app.');
+    expect(body).not.toMatch(/reply N/i);
+    const routed = auditRepo.getAll().filter((e) => e.eventType === 'unsupervised_proposal_routed');
+    expect(routed[0].metadata).toMatchObject({ suppressReason: 'low_confidence+recipient_cannot_approve' });
+  });
+
   it('supervised: no chain SMS is sent', async () => {
     setSupervisorPresenceLoader(async () => true);
     const { gateway, provider } = createMockLLMGateway();
@@ -532,6 +604,82 @@ describe('voice-action-router — RV-221 chain SMS routing', () => {
     expect(routed[0].metadata).toMatchObject({
       approveLinkSuppressed: true,
       suppressReason: 'low_confidence',
+    });
+  });
+  // B3-2 — the chain texts the phone the recipient resolver picked, then asks
+  // who that phone approves as. A lookup that failed there used to read as
+  // "cannot approve", so the OWNER was sent the for-your-info chain text with
+  // no link. The owner phone is the owner by definition and is not looked up;
+  // a backup whose lookup fails still gets no link.
+  describe('a link lookup that fails after the phone was picked', () => {
+    const failingLookup = () =>
+      vi.fn(async (_tenantId: string, _phone: string): Promise<ResolvedApprover | null> => {
+        throw new Error('settings read timed out');
+      });
+
+    async function routeChain(
+      lookup: ReturnType<typeof failingLookup>,
+      smsRecipient: ApprovalSmsRecipient,
+    ) {
+      setSupervisorPresenceLoader(async () => false);
+      const { gateway, provider } = createMockLLMGateway();
+      vi.spyOn(provider, 'complete').mockImplementation(chainProviderImpl() as never);
+      const repo = new InMemoryProposalRepository();
+      const auditRepo = new InMemoryAuditRepository();
+      const sendSms = vi.fn(async () => {});
+      const recordSmsEvent = vi.fn(async () => {});
+      const worker = makeRoutedWorker(repo, auditRepo, sendSms, recordSmsEvent, gateway, lookup, smsRecipient);
+      await worker.handle(
+        makeMessage('create a customer named Jane Doe and open a job for her'),
+        silentLogger(),
+      );
+      const head = (await repo.findByTenant('tenant-1')).find((p) => p.proposalType === 'create_customer')!;
+      const routed = auditRepo.getAll().filter((e) => e.eventType === 'unsupervised_proposal_routed');
+      return { sendSms, recordSmsEvent, head, routed };
+    }
+
+    it('the owner phone still gets the Reply Y chain form and the owner link', async () => {
+      const lookup = failingLookup();
+      const { sendSms, recordSmsEvent, head, routed } = await routeChain(lookup, {
+        phone: '+15125550100',
+        via: 'owner_phone',
+      });
+
+      expect(sendSms).toHaveBeenCalledTimes(1);
+      const [to, body] = sendSms.mock.calls[0] as unknown as [string, string];
+      expect(to).toBe('+15125550100');
+      expect(body).toContain('2 linked actions:');
+      expect(body).toContain('Reply Y to approve the setup steps; starred items follow separately.');
+      expect(body).not.toContain('For your info');
+      const token = body.match(/token=([A-Za-z0-9._-]+)/)![1];
+      const verified = await verifyOneTapApproveToken({
+        token,
+        secret: 'test-secret',
+        consumeNonce: createInMemoryNonceStore(),
+      });
+      expect(verified).toMatchObject({ ok: true, proposalId: head.id });
+      expect(verified).not.toHaveProperty('approver');
+      expect(lookup).not.toHaveBeenCalled();
+      expect(recordSmsEvent.mock.calls[0][0]).toMatchObject({ proposalId: head.id, kind: 'proposal_rendered' });
+      expect(routed).toHaveLength(1);
+      expect(routed[0].metadata).not.toHaveProperty('suppressReason');
+    });
+
+    it("the backup's mobile fails closed: the for-your-info chain form, no link", async () => {
+      const lookup = failingLookup();
+      const { sendSms, recordSmsEvent, head, routed } = await routeChain(lookup, {
+        phone: '+15125550111',
+        via: 'backup_supervisor',
+      });
+
+      expect(lookup).toHaveBeenCalledWith('tenant-1', '+15125550111');
+      expect(sendSms).toHaveBeenCalledTimes(1);
+      const [to, body] = sendSms.mock.calls[0] as unknown as [string, string];
+      expect(to).toBe('+15125550111');
+      expect(body).toContain('For your info — the owner needs to review this in the app.');
+      expect(body).not.toMatch(/Reply Y|reply N|token=/i);
+      expect(recordSmsEvent.mock.calls[0][0]).toMatchObject({ proposalId: head.id, kind: 'review_required_rendered' });
+      expect(routed[0].metadata).toMatchObject({ approveLinkSuppressed: true, suppressReason: 'recipient_cannot_approve' });
     });
   });
 });

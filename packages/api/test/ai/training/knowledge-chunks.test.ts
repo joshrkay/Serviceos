@@ -1,11 +1,15 @@
 import { describe, it, expect } from 'vitest';
+import type { Pool } from 'pg';
 import {
   InMemoryKnowledgeChunkRepository,
+  KnowledgeChunkDedupeCollisionError,
+  PgKnowledgeChunkRepository,
   EMBEDDING_DIMENSIONS,
   EMBEDDING_MODEL,
   cosineSimilarity,
   type KnowledgeChunkInput,
 } from '../../../src/ai/training/knowledge-chunks';
+import { knowledgeChunkDedupeCollisionsTotal } from '../../../src/monitoring/metrics';
 
 const TENANT_A = '11111111-1111-1111-1111-111111111111';
 const TENANT_B = '22222222-2222-2222-2222-222222222222';
@@ -109,7 +113,7 @@ describe('InMemoryKnowledgeChunkRepository', () => {
   });
 
   describe('idempotency', () => {
-    it('upserts on (scope, sourceType, sourceId, sourceVersion) collision', async () => {
+    it('upserts on (tenantId, scope, sourceType, sourceId, sourceVersion) collision', async () => {
       const repo = new InMemoryKnowledgeChunkRepository();
       const v1 = unitVec(EMBEDDING_DIMENSIONS, () => 1);
       const first = await repo.insert(
@@ -121,6 +125,31 @@ describe('InMemoryKnowledgeChunkRepository', () => {
       expect(second.id).toBe(first.id);
       expect(second.content).toBe('second');
       expect(second.updatedAt.getTime()).toBeGreaterThanOrEqual(first.updatedAt.getTime());
+    });
+
+    it("keeps another tenant's colliding source tuple as its own row", async () => {
+      const repo = new InMemoryKnowledgeChunkRepository();
+      const v1 = unitVec(EMBEDDING_DIMENSIONS, () => 1);
+      const a = await repo.insert(
+        tenantInput(TENANT_A, 'shared', v1, { content: 'tenant A', contentScrubbed: 'tenant A' }),
+      );
+      const b = await repo.insert(
+        tenantInput(TENANT_B, 'shared', v1, { content: 'tenant B', contentScrubbed: 'tenant B' }),
+      );
+      expect(b.id).not.toBe(a.id);
+      const seenByA = await repo.search({ tenantId: TENANT_A, queryEmbedding: v1, minSimilarity: 0 });
+      expect(seenByA.map((h) => h.chunk.content)).toEqual(['tenant A']);
+      const seenByB = await repo.search({ tenantId: TENANT_B, queryEmbedding: v1, minSimilarity: 0 });
+      expect(seenByB.map((h) => h.chunk.content)).toEqual(['tenant B']);
+    });
+
+    it('upserts a re-ingested global tuple in place (null tenant ids collide)', async () => {
+      const repo = new InMemoryKnowledgeChunkRepository();
+      const v1 = unitVec(EMBEDDING_DIMENSIONS, () => 1);
+      const first = await repo.insert(globalInput('g', v1, { content: 'first', contentScrubbed: 'first' }));
+      const second = await repo.insert(globalInput('g', v1, { content: 'second', contentScrubbed: 'second' }));
+      expect(second.id).toBe(first.id);
+      expect(second.content).toBe('second');
     });
 
     it('treats different sourceVersions as distinct rows', async () => {
@@ -250,6 +279,69 @@ describe('InMemoryKnowledgeChunkRepository', () => {
         repo.search({ tenantId: TENANT_A, queryEmbedding: [1, 2, 3] }),
       ).rejects.toThrow(/embedding length/);
     });
+  });
+});
+
+/**
+ * A Pool whose INSERT INTO knowledge_chunks fails with `insertError`; every
+ * other statement (BEGIN, tenant context, ROLLBACK, RESET) succeeds. The real
+ * index behaviour is pinned in knowledge-chunks-dedupe-expand-contract.test.ts;
+ * this pins only how the repository classifies what Postgres raised.
+ */
+function poolFailingInsertWith(insertError: Error): Pool {
+  const client = {
+    query: async (sql: string) => {
+      if (sql.includes('INSERT INTO knowledge_chunks')) throw insertError;
+      return { rows: [] };
+    },
+    release: () => undefined,
+  };
+  return { connect: async () => client } as unknown as Pool;
+}
+
+function pgError(message: string, fields: { code: string; constraint?: string }): Error {
+  return Object.assign(new Error(message), fields);
+}
+
+async function collisionsCounted(sourceType: string): Promise<number> {
+  const metric = await knowledgeChunkDedupeCollisionsTotal.get();
+  return metric.values.find((v) => v.labels.source_type === sourceType)?.value ?? 0;
+}
+
+describe("PgKnowledgeChunkRepository.insert — 062's tenant-blind key (until 351's contract migration)", () => {
+  const embedding = unitVec(EMBEDDING_DIMENSIONS, () => 1);
+
+  it('refuses a tuple another tenant holds on idx_knowledge_chunks_dedupe as a counted KnowledgeChunkDedupeCollisionError', async () => {
+    const repo = new PgKnowledgeChunkRepository(
+      poolFailingInsertWith(
+        pgError('duplicate key value violates unique constraint "idx_knowledge_chunks_dedupe"', {
+          code: '23505',
+          constraint: 'idx_knowledge_chunks_dedupe',
+        }),
+      ),
+    );
+    const before = await collisionsCounted('call_summary');
+
+    const outcome = await repo.insert(tenantInput(TENANT_B, 'held-by-a', embedding)).then(
+      () => 'written',
+      (err: unknown) => err,
+    );
+
+    expect(outcome).toBeInstanceOf(KnowledgeChunkDedupeCollisionError);
+    expect(outcome).toMatchObject({ sourceType: 'call_summary', sourceId: 'held-by-a', sourceVersion: 1 });
+    expect(await collisionsCounted('call_summary')).toBe(before + 1);
+  });
+
+  it.each([
+    ['a unique violation on any other index', pgError('dup', { code: '23505', constraint: 'knowledge_chunks_pkey' })],
+    ['a missing ON CONFLICT arbiter', pgError('no unique constraint', { code: '42P10' })],
+    ['an RLS policy refusal', pgError('row-level security', { code: '42501' })],
+  ])('passes %s through unchanged and uncounted', async (_label, insertError) => {
+    const repo = new PgKnowledgeChunkRepository(poolFailingInsertWith(insertError));
+    const before = await collisionsCounted('call_summary');
+
+    await expect(repo.insert(tenantInput(TENANT_A, 'any', embedding))).rejects.toBe(insertError);
+    expect(await collisionsCounted('call_summary')).toBe(before);
   });
 });
 

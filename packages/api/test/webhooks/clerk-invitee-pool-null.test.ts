@@ -15,6 +15,7 @@ import { createWebhookRouter } from '../../src/webhooks/routes';
 import type { AppConfig } from '../../src/config';
 import { TenantRepository, Tenant } from '../../src/auth/clerk';
 import { PendingInvitation, PendingInvitationRepository } from '../../src/users/pending-invitation';
+import { clerkUserCreatedEvent } from '../support/clerk-user-created';
 
 const WEBHOOK_SECRET = 'whsec_dGVzdC1zZWNyZXQ=';
 
@@ -82,10 +83,11 @@ describe('Clerk user.created — invitee join with pool not wired (PR 319 P2)', 
   });
 
   it('fails the webhook for Clerk retry without consuming the invitation or bootstrapping', async () => {
-    const payload = {
-      type: 'user.created',
-      data: { id: 'user_new', email_addresses: [{ email_address: 'invitee@example.com' }] },
-    };
+    // A verified address — an unverified one never reaches the join.
+    const payload = clerkUserCreatedEvent({
+      userId: 'user_new',
+      emails: [{ address: 'invitee@example.com', status: 'verified' }],
+    });
     const svixId = 'evt_pool_null';
     const svixTimestamp = String(Math.floor(Date.now() / 1000));
     const { signature } = signSvixPayload(payload, svixId, svixTimestamp);

@@ -52,6 +52,25 @@ Railway CLI:
 railway run --service api --environment <env> -- node packages/api/dist/src/db/migrate.js
 ```
 
+### Expand, then contract
+
+The previous release keeps running against the migrated schema. The old web
+replica serves through `overlapSeconds`, and the worker service deploys after
+web. So a migration must not remove anything the previous release's code
+still uses: a column, a table, or the unique index an `ON CONFLICT` names.
+
+- **Expand** in release N: add the new object beside the old one, and switch
+  the code to the new one.
+- **Contract** in a later release: drop the old object. Ship it only after
+  release N has fully rolled out on **every** service that runs app code:
+  web, worker, and voice if it is deployed (voice deploys rarely, so check
+  it). After the
+  contract, a rollback to a release before N needs the old object back.
+
+The runner replays every migration on every deploy, so an early migration
+that builds the dropped object must stop building it (the 154/268 and
+062/351 precedents, pinned by `migration-replay-populated-db.test.ts`).
+
 ## Guardrail for future changes
 
 If deployment flow changes in the future, keep these invariants:
