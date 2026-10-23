@@ -9,6 +9,8 @@ import {
   EMBEDDING_DIMENSIONS,
   EMBEDDING_MODEL,
   InMemoryKnowledgeChunkRepository,
+  KnowledgeChunkDedupeCollisionError,
+  type KnowledgeChunkRepository,
 } from '../../src/ai/training/knowledge-chunks';
 import { InMemoryRetrievalEvalRunRepository } from '../../src/ai/training/retrieval-eval-run';
 import type {
@@ -245,6 +247,52 @@ describe('proposal-correction-worker', () => {
     await expect(
       worker.handle(buildMessage({ tenantId: TENANT_A, proposalId: proposal.id }), logger),
     ).resolves.toBeUndefined();
+  });
+
+  it("a correction chunk another tenant holds on 062's tenant-blind key is skipped with its own warning", async () => {
+    const proposalRepo = new InMemoryProposalRepository();
+    const proposalExecutionRepo = new InMemoryProposalExecutionRepository();
+    // PgKnowledgeChunkRepository raises this while 351's contract migration is pending.
+    const knowledgeChunkRepo: KnowledgeChunkRepository = {
+      insert: async (input) => {
+        throw new KnowledgeChunkDedupeCollisionError(input.sourceType, input.sourceId, 1);
+      },
+      search: async () => [],
+    };
+
+    const proposal = createProposal({
+      tenantId: TENANT_A,
+      proposalType: 'create_customer',
+      payload: { name: 'AI Draft' },
+      summary: 'AI draft',
+      createdBy: 'user-1',
+    });
+    await proposalRepo.create(proposal);
+    const execution = await proposalExecutionRepo.recordExecution({
+      tenantId: TENANT_A,
+      proposalId: proposal.id,
+      executedPayload: { name: 'Dispatcher Edit' },
+      executedBy: 'dispatcher-1',
+      status: 'succeeded',
+    });
+    const workerLogger = createLogger({ service: 'test', environment: 'test', level: 'error' });
+    const warn = vi.spyOn(workerLogger, 'warn');
+
+    const worker = createProposalCorrectionWorker({
+      proposalRepo,
+      proposalExecutionRepo,
+      knowledgeChunkRepo,
+      embeddings: stubEmbedder(),
+    });
+    await expect(
+      worker.handle(buildMessage({ tenantId: TENANT_A, proposalId: proposal.id }), workerLogger),
+    ).resolves.toBeUndefined();
+
+    expect(warn).toHaveBeenCalledWith(
+      'knowledge_chunks insert (correction) skipped: another tenant holds this source tuple',
+      { proposalId: proposal.id, executionId: execution.id },
+    );
+    expect(warn.mock.calls.map(([message]) => message)).not.toContain('knowledge_chunks insert (correction) failed');
   });
 
   it('proposal not found: soft-skip', async () => {
