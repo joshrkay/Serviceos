@@ -26,4 +26,19 @@ describe('config — SHADOW_COMPARISON_RETENTION_DAYS', () => {
       /SHADOW_COMPARISON_RETENTION_DAYS/,
     );
   });
+
+  it('accepts up to 36500 days (100 years)', () => {
+    expect(
+      loadConfig({ NODE_ENV: 'dev', SHADOW_COMPARISON_RETENTION_DAYS: '36500' }).SHADOW_COMPARISON_RETENTION_DAYS,
+    ).toBe(36500);
+  });
+
+  it.each(['36501', '1e9'])(
+    'refuses %j at boot: a window past 100 years is "keep forever" by another name (and 1e9 days puts the horizon outside Postgres\'s timestamp range, failing every sweep)',
+    (raw) => {
+      expect(() => loadConfig({ NODE_ENV: 'dev', SHADOW_COMPARISON_RETENTION_DAYS: raw })).toThrow(
+        /SHADOW_COMPARISON_RETENTION_DAYS/,
+      );
+    },
+  );
 });

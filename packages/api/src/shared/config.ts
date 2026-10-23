@@ -261,7 +261,10 @@ const configSchema = z.object({
   // tenant_settings.recording_retention_days, the horizon past which the
   // recording-retention sweep purges ai_runs prompt and reply content (PRIV-1).
   // A non-positive or fractional value fails boot: there is no "keep forever".
-  SHADOW_COMPARISON_RETENTION_DAYS: z.coerce.number().int().positive().default(365),
+  // Nor is there one by another name: more than 36500 days (100 years) fails
+  // boot too (a window of 1e9 days would put the sweep's horizon outside
+  // Postgres's timestamp range and fail every sweep).
+  SHADOW_COMPARISON_RETENTION_DAYS: z.coerce.number().int().positive().max(36500).default(365),
   // QUALITY-2026-07-12 WS5 — Microsoft Presidio PII redaction backend for
   // training-asset ingestion. Two separate REST services (matching Presidio's
   // standard deployment): the Analyzer detects PII spans, the Anonymizer
