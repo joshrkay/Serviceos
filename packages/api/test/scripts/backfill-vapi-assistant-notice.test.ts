@@ -34,7 +34,15 @@ const quiet = () => undefined;
 describe('backfill-vapi-assistant-notice (PRIV-4)', () => {
   it('parses --apply and --tenant-id; dry run by default', () => {
     expect(parseVapiNoticeArgs([])).toEqual({ apply: false });
-    expect(parseVapiNoticeArgs(['--apply', '--tenant-id', 't1'])).toEqual({ apply: true, tenantId: 't1' });
+    const tenant = '0b6c1f9e-4a8f-4c7e-9a51-6f1d2b3c4d5e';
+    expect(parseVapiNoticeArgs(['--apply', '--tenant-id', tenant])).toEqual({ apply: true, tenantId: tenant });
+  });
+
+  it('refuses a missing tenant id or an unknown flag instead of falling back to every tenant', () => {
+    expect(() => parseVapiNoticeArgs(['--apply', '--tenant-id'])).toThrow(/tenant uuid/);
+    expect(() => parseVapiNoticeArgs(['--tenant-id', '--apply'])).toThrow(/tenant uuid/);
+    expect(() => parseVapiNoticeArgs(['--apply', '--tenant', 'x'])).toThrow(/unknown argument: --tenant/);
+    expect(() => parseVapiNoticeArgs(['--aply'])).toThrow(/unknown argument/);
   });
 
   it('builds the first message like provisioning: stored greeting, else the auto greeting, then the notice', () => {

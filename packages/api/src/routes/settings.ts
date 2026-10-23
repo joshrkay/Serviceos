@@ -17,7 +17,8 @@ import { z } from 'zod';
 import type { Pool } from 'pg';
 import type { VapiClient } from '../integrations/vapi/client';
 import { refreshVapiFirstMessage } from '../voice/voice-config';
-import { currentTenantContext } from '../middleware/tenant-context';
+import { runAfterCommit } from '../middleware/tenant-context';
+import { tenantQuery } from '../workers/tenant-query';
 import { createLogger } from '../logging/logger';
 import {
   getSettings,
@@ -455,21 +456,29 @@ export function createSettingsRouter(
 
         // PRIV-4 — a Vapi-routed caller hears the notice from the assistant's
         // first message, built in `default_language`; re-push it so a switch
-        // to Spanish is heard in Spanish. The setting is already saved, so a
-        // Vapi failure is logged and audited, not thrown; the next voice save
-        // or the backfill script re-pushes.
-        let vapiFirstMessage: string | undefined;
-        if (patch.defaultLanguage !== undefined && vapiDeps?.vapiClient) {
-          vapiFirstMessage = await refreshVapiFirstMessage(
-            {
-              pool: currentTenantContext()?.client ?? vapiDeps.pool,
-              vapiClient: vapiDeps.vapiClient,
-            },
-            tenantId,
-          );
-          if (vapiFirstMessage === 'failed') {
-            settingsLogger.warn('settings.language: Vapi first-message refresh failed', { tenantId });
-          }
+        // to Spanish is heard in Spanish. After COMMIT, on its own tenant-scoped
+        // connection, so a slow Vapi never holds the request transaction (or
+        // reads the language before it is durable). The setting is already
+        // saved, so a failure is logged, not thrown; the next voice save or the
+        // backfill script re-pushes.
+        const vapiClient = vapiDeps?.vapiClient;
+        if (patch.defaultLanguage !== undefined && vapiDeps && vapiClient) {
+          const { pool } = vapiDeps;
+          runAfterCommit(res, () => {
+            void refreshVapiFirstMessage(
+              {
+                pool: { query: (sql: string, params?: unknown[]) => tenantQuery(pool, tenantId, sql, params) } as never,
+                vapiClient,
+              },
+              tenantId,
+            )
+              .catch(() => 'failed' as const)
+              .then((outcome) => {
+                if (outcome === 'failed') {
+                  settingsLogger.warn('settings.language: Vapi first-message refresh failed', { tenantId });
+                }
+              });
+          });
         }
 
         // D2-1c — audit-log the language settings change.
@@ -482,7 +491,7 @@ export function createSettingsRouter(
               eventType: 'settings.language.updated',
               entityType: 'tenant_settings',
               entityId: updated?.id ?? tenantId,
-              metadata: { changedKeys, ...(vapiFirstMessage ? { vapiFirstMessage } : {}) },
+              metadata: { changedKeys },
             }),
           );
         }

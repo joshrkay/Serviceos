@@ -1,9 +1,9 @@
 /**
  * PRIV-4 — `PATCH /api/settings/language` re-pushes the Vapi assistant's first
  * message when `defaultLanguage` changes, because that message carries the
- * virtual-assistant notice in the tenant's default language. A Vapi failure
- * never fails the save; it is recorded on the `settings.language.updated`
- * audit instead.
+ * virtual-assistant notice in the tenant's default language. The push runs
+ * after COMMIT on its own tenant-scoped connection (never inside the request
+ * transaction), and a Vapi failure never fails the save.
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import crypto from 'crypto';
@@ -22,19 +22,27 @@ describe('PATCH /api/settings/language — Vapi first-message refresh (PRIV-4)',
   let defaultLanguage: string;
 
   function appWith(vapi: boolean): express.Express {
-    const pool = {
-      query: vi.fn(async () => ({
-        rows: [
-          {
-            vapi_assistant_id: 'asst_1',
-            business_name: 'Acme HVAC',
-            voice_greeting: 'Thanks for calling Acme.',
-            services_offered: [],
-            default_language: defaultLanguage,
-          },
-        ],
-      })),
+    // tenantQuery checks out a client, scopes it to the tenant and runs the
+    // SELECT; every other statement (BEGIN, set_config, COMMIT, RESET) is a no-op.
+    const client = {
+      query: vi.fn(async (sql: string) =>
+        /FROM tenant_settings/.test(sql)
+          ? {
+              rows: [
+                {
+                  vapi_assistant_id: 'asst_1',
+                  business_name: 'Acme HVAC',
+                  voice_greeting: 'Thanks for calling Acme.',
+                  services_offered: [],
+                  default_language: defaultLanguage,
+                },
+              ],
+            }
+          : { rows: [] },
+      ),
+      release: vi.fn(),
     };
+    const pool = { connect: vi.fn(async () => client) };
     const app = express();
     app.use(express.json());
     app.use((req: Request, _res: Response, next: NextFunction) => {
@@ -72,18 +80,21 @@ describe('PATCH /api/settings/language — Vapi first-message refresh (PRIV-4)',
     const res = await request(appWith(true)).patch('/api/settings/language').send({ defaultLanguage: 'es' });
     expect(res.status).toBe(200);
     expect(res.body.defaultLanguage).toBe('es');
-    expect(updateAssistant).toHaveBeenCalledWith('asst_1', {
-      firstMessage: 'Thanks for calling Acme. Para que lo sepa, soy un asistente virtual, no una persona real.',
-    });
-    expect(languageAudits()).toEqual([{ changedKeys: ['defaultLanguage'], vapiFirstMessage: 'updated' }]);
+    await vi.waitFor(() =>
+      expect(updateAssistant).toHaveBeenCalledWith('asst_1', {
+        firstMessage: 'Thanks for calling Acme. Para que lo sepa, soy un asistente virtual, no una persona real.',
+      }),
+    );
+    expect(languageAudits()).toEqual([{ changedKeys: ['defaultLanguage'] }]);
   });
 
-  it('a Vapi failure still saves the language and is recorded as failed', async () => {
+  it('a Vapi failure still saves the language', async () => {
     updateAssistant.mockRejectedValueOnce(new Error('vapi 503'));
     const res = await request(appWith(true)).patch('/api/settings/language').send({ defaultLanguage: 'es' });
     expect(res.status).toBe(200);
+    await vi.waitFor(() => expect(updateAssistant).toHaveBeenCalledTimes(1));
     expect((await settingsRepo.findByTenant(tenantId))?.defaultLanguage).toBe('es');
-    expect(languageAudits()).toEqual([{ changedKeys: ['defaultLanguage'], vapiFirstMessage: 'failed' }]);
+    expect(languageAudits()).toEqual([{ changedKeys: ['defaultLanguage'] }]);
   });
 
   it('a change that leaves defaultLanguage alone, or no Vapi client, pushes nothing', async () => {

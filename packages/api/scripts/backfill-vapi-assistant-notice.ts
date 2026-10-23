@@ -60,16 +60,27 @@ export interface VapiNoticeArgs {
   tenantId?: string;
 }
 
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Throws on anything it does not recognise. A dropped `--tenant-id` value or
+ * a mistyped flag must never fall through to "every tenant" on an `--apply`.
+ */
 export function parseVapiNoticeArgs(argv: string[]): VapiNoticeArgs {
   const out: VapiNoticeArgs = { apply: false };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    const next = argv[i + 1];
     if (arg === '--apply') {
       out.apply = true;
-    } else if (arg === '--tenant-id' && next) {
+    } else if (arg === '--tenant-id') {
+      const next = argv[i + 1];
+      if (!next || !UUID_RE.test(next)) {
+        throw new Error('--tenant-id needs a tenant uuid');
+      }
       out.tenantId = next;
       i++;
+    } else {
+      throw new Error(`unknown argument: ${arg}`);
     }
   }
   return out;
@@ -183,7 +194,12 @@ function fail(msg: string): never {
 }
 
 async function main(): Promise<void> {
-  const args = parseVapiNoticeArgs(process.argv.slice(2));
+  let args: VapiNoticeArgs;
+  try {
+    args = parseVapiNoticeArgs(process.argv.slice(2));
+  } catch (err) {
+    fail(err instanceof Error ? err.message : String(err));
+  }
   if (!process.env.DATABASE_URL) fail('DATABASE_URL must be set');
   const vapi = getVapiClient();
   if (!vapi) fail('VAPI_API_KEY must be set');
