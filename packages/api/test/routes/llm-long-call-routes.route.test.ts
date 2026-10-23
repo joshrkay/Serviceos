@@ -289,4 +289,37 @@ describe('TI-02 — in-request LLM routes bypass the request transaction', () =>
     expect(v.auditStores).toHaveLength(4);
     expect(v.auditStores.every((s) => s === undefined)).toBe(true);
   });
+
+  it('POST /voice/transcribe: the upload and the transcription hold no request transaction, and a failure is still audited', async () => {
+    const h = harness(() => '');
+    let fail = false;
+    const transcribeAudio = vi.fn(async () => {
+      h.probes.push({ store: currentTenantContext(), connects: h.connect.mock.calls.length });
+      if (fail) throw new Error('whisper upstream 503');
+      return { transcript: 'Invoice Acme for the water heater', metadata: { provider: 'fake' } };
+    });
+    const v = voiceApp(h, { transcribeAudio });
+
+    const done = await request(h.app)
+      .post('/api/voice/transcribe')
+      .set('Content-Type', 'audio/webm')
+      .send(Buffer.from('fake-webm-bytes'));
+    expect(done.status).toBe(200);
+    expect(done.body.transcript).toBe('Invoice Acme for the water heater');
+
+    fail = true;
+    const failed = await request(h.app)
+      .post('/api/voice/transcribe')
+      .set('Content-Type', 'audio/webm')
+      .send(Buffer.from('fake-webm-bytes'));
+    expect(failed.status).toBe(500);
+    expect(failed.body.error).toBe('TRANSCRIPTION_FAILED');
+
+    h.expectNoRequestTransaction();
+    expect(await v.audited('voice.transcription.completed')).toHaveLength(1);
+    // Inside the request transaction this row was written and then rolled
+    // back by the 500; standalone, it persists.
+    expect(await v.audited('voice.transcription.failed')).toHaveLength(1);
+    expect(v.auditStores).toEqual([undefined, undefined]);
+  });
 });

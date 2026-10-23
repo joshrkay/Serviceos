@@ -274,6 +274,13 @@ const LLM_LONG_CALL_ROUTES: readonly { method: string; re: RegExp }[] = [
   // cache only and keeps the request transaction.
   { method: 'POST', re: /^(?:\/api)?\/voice\/tts\/?$/i },
   { method: 'POST', re: /^(?:\/api)?\/voice\/tts\/batch\/?$/i },
+  // Speech-to-text for a memo: the handler reads the whole upload (up to
+  // 25MB) and then awaits the Whisper call (60s timeout), which together can
+  // pass the idle-in-transaction timeout and turn a finished transcript into
+  // a 500. Its only DB touch is one audit row (completed or failed), written
+  // with an explicit tenantId — and standalone, the failure row is no longer
+  // rolled back with the 415/500 that follows it.
+  { method: 'POST', re: /^(?:\/api)?\/voice\/transcribe\/?$/i },
 ];
 
 function isLlmLongCallRoute(req: { method: string; path: string }): boolean {

@@ -594,6 +594,8 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       // Speech synthesis: each clip awaits the TTS provider (30s timeout each).
       ['post', '/api/voice/tts'],
       ['post', '/api/voice/tts/batch'],
+      // Speech-to-text: the upload, then the Whisper call (60s timeout).
+      ['post', '/api/voice/transcribe'],
     ] as const)('%s %s holds no request transaction', async (method, path) => {
       const seen = await probe(method, path);
       expect(seen).toEqual({ connects: 0, began: false, storeAtHandler: undefined });
@@ -635,6 +637,9 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       ['post', '/api/voice/tts/batch/extra'],
       ['post', '/api/voice/recordings'],
       ['post', '/api/admin/voice/tts'],
+      ['get', '/api/voice/transcribe'],
+      ['post', '/api/voice/transcribe/extra'],
+      ['post', '/api/admin/voice/transcribe'],
     ] as const)('%s %s still opens the transaction', async (method, path) => {
       const seen = await probe(method, path);
       expect(seen.connects).toBe(1);
@@ -663,6 +668,7 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       ['post', '/api/Tenant-Site/About/Draft'],
       ['post', '/api/voice/tts/'],
       ['post', '/api/Voice/TTS/Batch/'],
+      ['post', '/api/voice/Transcribe/'],
     ] as const)('%s %s (trailing slash / letter case) holds no request transaction', async (method, path) => {
       const seen = await probe(method, path);
       expect(seen).toEqual({ connects: 0, began: false, storeAtHandler: undefined });
@@ -694,6 +700,7 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       ['post', '/api/admin/tenant-site/about/draft/'],
       ['post', '/api/voice/tts//'],
       ['post', '/api/voice/tts/batch/extra/'],
+      ['post', '/api/voice/transcribe//'],
     ] as const)('%s %s still opens the transaction', async (method, path) => {
       const seen = await probe(method, path);
       expect(seen.connects).toBe(1);

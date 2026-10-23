@@ -593,6 +593,11 @@ export function createVoiceRouter(
   /**
    * POST /transcribe — Synchronous transcription.
    * Accepts multipart form with 'audio' field, returns { transcript, metadata } immediately.
+   *
+   * Runs outside the request transaction (LLM_LONG_CALL_ROUTES): reading the
+   * upload and the Whisper call (60s timeout) must not pin a pooled
+   * connection. Its one DB touch, the completed/failed audit row, names the
+   * tenant explicitly and commits on its own.
    */
   router.post(
     '/transcribe',

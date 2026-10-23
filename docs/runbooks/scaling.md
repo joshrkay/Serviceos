@@ -116,6 +116,9 @@ PgBouncer config: `pool_mode = transaction`, `max_client_conn` high (e.g. 1000),
   > provider (30s timeout per clip, up to four clips in sequence per batch).
   > Their only DB touches are the voice-setting read and one audit row per
   > billed clip, each a repo call with an explicit tenantId.
+  > `POST /voice/transcribe` reads the upload (up to 25MB) and then awaits
+  > Whisper (60s timeout); its one audit row (completed or failed) is
+  > standalone, so a failure row is no longer rolled back with the 500.
   >
   > Each entry is anchored at both ends and matches the way Express routes:
   > one optional trailing slash and any letter case (A-R4). Without that,
