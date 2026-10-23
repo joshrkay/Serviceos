@@ -3,26 +3,28 @@ import { PgBaseRepository } from '../../db/pg-base';
 
 /**
  * Repository for `knowledge_chunks` — the unified per-tenant + global
- * RAG corpus introduced in migration `059_create_knowledge_chunks`.
+ * RAG corpus introduced in migration `062_create_knowledge_chunks`.
  *
- * Phase 1 surface: insert + similarity search. Ingestion workers
- * (transcript / proposal-correction / tenant-knowledge-seed) and the
- * retrieval skill in `ai/skills/retrieve-context.ts` consume this
- * interface. No caller in main reads or writes today; wiring lands in
- * Phases 3b and 4a.
+ * Phase 1 surface: insert + similarity search. The transcript and
+ * proposal-correction ingestion workers write through it
+ * (`workers/transcript-ingestion-worker.ts`,
+ * `workers/proposal-correction-worker.ts`), and the retrieval skill
+ * (`ai/skills/retrieve-context.ts`) reads through it.
  *
- * Tenant scoping: the RLS policy on `knowledge_chunks` allows a row to
- * be visible iff `tenant_id IS NULL` (global tier) OR `tenant_id`
- * matches the request's `app.current_tenant_id` GUC. Search runs
- * inside `withTenant(tenantId, ...)` so the policy yields both tiers
- * in a single query without an explicit UNION.
+ * Tenant scoping: a row is visible iff `tenant_id IS NULL` (global tier)
+ * OR `tenant_id` is the asking tenant. Search states that predicate in
+ * its own WHERE, so both tiers come back in a single query without a
+ * UNION, and it also runs inside `withTenant(tenantId, ...)` so the RLS
+ * policy of the same shape enforces it again under the runtime role.
  *
- * Idempotency: every insert uses `ON CONFLICT (scope, source_type,
- * source_id, source_version) DO UPDATE` so the seed workers can
- * safely re-fire on the same source row (e.g., catalog item edited
- * thrice in 60s — the coalescer in Phase 3b leaves at most one queue
- * job, but defense in depth here makes the worker idempotent
- * regardless).
+ * Idempotency: every insert uses `ON CONFLICT (tenant_id, scope,
+ * source_type, source_id, source_version) DO UPDATE`, so an ingestion
+ * worker that re-runs on the same source row (a retried queue job, a
+ * re-delivered transcript) updates the chunk it already wrote instead of
+ * adding a second one. `tenant_id` is part of the key (migration 351) so each
+ * tenant has its own key space: a colliding tuple from another tenant
+ * gets its own row instead of updating this tenant's. The index is
+ * NULLS NOT DISTINCT, so global rows still dedupe among themselves.
  */
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -238,7 +240,7 @@ export class PgKnowledgeChunkRepository extends PgBaseRepository implements Know
          ) VALUES (
            $1, $2, $3, $4, $5, $6, $7, $8::vector, $9, $10, $11
          )
-         ON CONFLICT (scope, source_type, source_id, source_version) DO UPDATE SET
+         ON CONFLICT (tenant_id, scope, source_type, source_id, source_version) DO UPDATE SET
            content              = EXCLUDED.content,
            content_scrubbed     = EXCLUDED.content_scrubbed,
            embedding            = EXCLUDED.embedding,
@@ -290,7 +292,11 @@ export class PgKnowledgeChunkRepository extends PgBaseRepository implements Know
     const sourceTypes = opts.sourceTypes;
 
     return this.withTenant(opts.tenantId, async (client) => {
-      const params: unknown[] = [queryLiteral, maxDistance, k];
+      // $4 is the tenant backstop: the WHERE itself bounds retrieval to the
+      // asking tenant plus the global tier, so it holds even where the RLS
+      // policy is inert (RLS_RUNTIME_ROLE unset — the client is then still
+      // the privileged principal).
+      const params: unknown[] = [queryLiteral, maxDistance, k, opts.tenantId];
       let sourceFilter = '';
       if (sourceTypes && sourceTypes.length > 0) {
         sourceFilter = `AND source_type = ANY($${params.length + 1}::text[])`;
@@ -301,6 +307,7 @@ export class PgKnowledgeChunkRepository extends PgBaseRepository implements Know
                 (embedding <=> $1::vector) AS distance
            FROM knowledge_chunks
           WHERE (embedding <=> $1::vector) <= $2
+            AND (tenant_id IS NULL OR tenant_id = $4::uuid)
                 ${sourceFilter}
           ORDER BY embedding <=> $1::vector ASC
           LIMIT $3`,
@@ -327,11 +334,13 @@ export class InMemoryKnowledgeChunkRepository implements KnowledgeChunkRepositor
     validateInput(input);
     const sourceVersion = input.sourceVersion ?? 1;
 
-    // Honour the (scope, source_type, source_id, source_version)
-    // unique constraint by overwriting on conflict, mirroring the Pg
-    // ON CONFLICT DO UPDATE behaviour.
+    // Honour the (tenant_id, scope, source_type, source_id, source_version)
+    // unique index by overwriting on conflict, mirroring the Pg ON CONFLICT
+    // DO UPDATE behaviour. A null tenantId matches null (global rows), as the
+    // index's NULLS NOT DISTINCT does.
     const existingIdx = this.rows.findIndex(
       (r) =>
+        r.tenantId === input.tenantId &&
         r.scope === input.scope &&
         r.sourceType === input.sourceType &&
         r.sourceId === input.sourceId &&

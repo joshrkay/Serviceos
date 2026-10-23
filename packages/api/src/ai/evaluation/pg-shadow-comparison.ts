@@ -17,6 +17,7 @@
 
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../../db/pg-base';
+import { isValidTenantId } from '../../db/schema';
 import { scrubPii } from '../training/scrub';
 import type {
   ShadowComparisonResult,
@@ -24,7 +25,7 @@ import type {
   ShadowComparisonListOptions,
   ShadowComparisonPage,
 } from './shadow-comparison';
-import type { LLMResponse } from '../gateway/gateway';
+import { SYSTEM_TENANT_ID, type LLMResponse } from '../gateway/gateway';
 
 // ─── Row mapping ─────────────────────────────────────────────────────────────
 
@@ -92,6 +93,29 @@ function mapRow(row: Record<string, unknown>): ShadowComparisonResult {
   };
 }
 
+// ─── Tenant mapping ──────────────────────────────────────────────────────────
+
+/**
+ * The tenant a comparison is stored and read under. Not every LLM call has a
+ * tenant UUID: platform calls (the readiness probe, the call-quality judges)
+ * run as SYSTEM_TENANT_ID = 'system', and in-process dev flows may set none.
+ * `withTenant` refuses anything that is not a UUID, so those comparisons are
+ * filed under one all-zero placeholder tenant instead, so a sample never
+ * fails on its tenant id. Reads are stricter: only SYSTEM_TENANT_ID maps to
+ * the placeholder, so `listForTenant('system')` reads back what a 'system'
+ * call stored, and any other non-UUID is refused rather than opening the
+ * bucket that holds cross-tenant platform calls.
+ */
+const PLACEHOLDER_TENANT_ID = '00000000-0000-0000-0000-000000000000';
+
+function storageTenantId(tenantId: string | undefined): string {
+  return tenantId && isValidTenantId(tenantId) ? tenantId : PLACEHOLDER_TENANT_ID;
+}
+
+function readTenantId(tenantId: string): string {
+  return tenantId === SYSTEM_TENANT_ID ? PLACEHOLDER_TENANT_ID : tenantId;
+}
+
 // ─── Redaction helper ────────────────────────────────────────────────────────
 
 function redactText(text: string | undefined | null): string | null {
@@ -115,9 +139,7 @@ export class PgShadowComparisonStore extends PgBaseRepository implements ShadowC
   }
 
   async save(result: ShadowComparisonResult): Promise<ShadowComparisonResult> {
-    // Determine tenantId — fall back to a system sentinel when not set
-    // (in-process dev flows without tenant context).
-    const tenantId = result.tenantId ?? '00000000-0000-0000-0000-000000000000';
+    const tenantId = storageTenantId(result.tenantId);
 
     // PII redaction before storage.
     const primaryText = redactText(result.primaryResponse.content);
@@ -169,57 +191,15 @@ export class PgShadowComparisonStore extends PgBaseRepository implements ShadowC
     });
   }
 
-  /**
-   * @internal TEST / MAINTENANCE USE ONLY — do NOT call from production code paths.
-   *
-   * Uses `withClient` without tenant context, so RLS is enforced by FORCE ROW LEVEL SECURITY
-   * (which will error at the DB level when `app.current_tenant_id` is unset) rather than
-   * silently scoping to the right tenant. In production, use `listForTenant` instead.
-   */
-  async findByGroup(groupId: string): Promise<ShadowComparisonResult[]> {
-    console.warn(
-      '[PgShadowComparisonStore] findByGroup() called without tenant context — ' +
-        'this method is test/maintenance-only. Use listForTenant() in production.'
-    );
-    return this.withClient(async (client) => {
-      const result = await client.query(
-        `SELECT * FROM shadow_comparisons
-         WHERE comparison_group_id = $1
-         ORDER BY created_at DESC`,
-        [groupId]
-      );
-      return result.rows.map(mapRow);
-    });
-  }
-
-  /**
-   * @internal TEST / MAINTENANCE USE ONLY — do NOT call from production code paths.
-   *
-   * Uses `withClient` without tenant context. With FORCE ROW LEVEL SECURITY enabled,
-   * this will throw at the DB level when `app.current_tenant_id` is unset, rather than
-   * silently leaking cross-tenant data. In production, use `listForTenant` instead.
-   */
-  async getAll(): Promise<ShadowComparisonResult[]> {
-    console.warn(
-      '[PgShadowComparisonStore] getAll() called without tenant context — ' +
-        'this method is test/maintenance-only. Use listForTenant() in production.'
-    );
-    return this.withClient(async (client) => {
-      const result = await client.query(
-        `SELECT * FROM shadow_comparisons ORDER BY created_at DESC LIMIT 1000`
-      );
-      return result.rows.map(mapRow);
-    });
-  }
-
   async listForTenant(
     tenantId: string,
     opts: ShadowComparisonListOptions = {}
   ): Promise<ShadowComparisonPage> {
     const limit = Math.min(opts.limit ?? 50, 200);
+    const storedUnder = readTenantId(tenantId);
 
-    return this.withTenant(tenantId, async (client) => {
-      const params: unknown[] = [tenantId];
+    return this.withTenant(storedUnder, async (client) => {
+      const params: unknown[] = [storedUnder];
       const conditions: string[] = ['tenant_id = $1'];
 
       if (opts.taskType) {

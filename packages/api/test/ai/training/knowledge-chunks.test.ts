@@ -109,7 +109,7 @@ describe('InMemoryKnowledgeChunkRepository', () => {
   });
 
   describe('idempotency', () => {
-    it('upserts on (scope, sourceType, sourceId, sourceVersion) collision', async () => {
+    it('upserts on (tenantId, scope, sourceType, sourceId, sourceVersion) collision', async () => {
       const repo = new InMemoryKnowledgeChunkRepository();
       const v1 = unitVec(EMBEDDING_DIMENSIONS, () => 1);
       const first = await repo.insert(
@@ -121,6 +121,31 @@ describe('InMemoryKnowledgeChunkRepository', () => {
       expect(second.id).toBe(first.id);
       expect(second.content).toBe('second');
       expect(second.updatedAt.getTime()).toBeGreaterThanOrEqual(first.updatedAt.getTime());
+    });
+
+    it("keeps another tenant's colliding source tuple as its own row", async () => {
+      const repo = new InMemoryKnowledgeChunkRepository();
+      const v1 = unitVec(EMBEDDING_DIMENSIONS, () => 1);
+      const a = await repo.insert(
+        tenantInput(TENANT_A, 'shared', v1, { content: 'tenant A', contentScrubbed: 'tenant A' }),
+      );
+      const b = await repo.insert(
+        tenantInput(TENANT_B, 'shared', v1, { content: 'tenant B', contentScrubbed: 'tenant B' }),
+      );
+      expect(b.id).not.toBe(a.id);
+      const seenByA = await repo.search({ tenantId: TENANT_A, queryEmbedding: v1, minSimilarity: 0 });
+      expect(seenByA.map((h) => h.chunk.content)).toEqual(['tenant A']);
+      const seenByB = await repo.search({ tenantId: TENANT_B, queryEmbedding: v1, minSimilarity: 0 });
+      expect(seenByB.map((h) => h.chunk.content)).toEqual(['tenant B']);
+    });
+
+    it('upserts a re-ingested global tuple in place (null tenant ids collide)', async () => {
+      const repo = new InMemoryKnowledgeChunkRepository();
+      const v1 = unitVec(EMBEDDING_DIMENSIONS, () => 1);
+      const first = await repo.insert(globalInput('g', v1, { content: 'first', contentScrubbed: 'first' }));
+      const second = await repo.insert(globalInput('g', v1, { content: 'second', contentScrubbed: 'second' }));
+      expect(second.id).toBe(first.id);
+      expect(second.content).toBe('second');
     });
 
     it('treats different sourceVersions as distinct rows', async () => {

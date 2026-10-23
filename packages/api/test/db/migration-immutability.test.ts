@@ -119,7 +119,14 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['059_lead_attribution', 'aceb4349cb3e8bfd076c89fb1df2febd6e868ad136700cd710a5cb2bc359e8bf'],
   ['060_capture_schema', 'a38ff66341f8e24c68432c2a6a442d3181e1ee8e630d72357c9298b0815ae690'],
   ['061_create_lookup_events', '224eb9dea34c7bfcd92e5cfcdf63c8af3b60cdc693ec1036392ae4d146a00ae7'],
-  ['062_create_knowledge_chunks', '047b45413e633e21dacadbb400c6830b556377829b761107d24da6bf080bd13d'],
+  // Replay-safety edit (351): 062 no longer builds the tenant-blind unique
+  // idx_knowledge_chunks_dedupe (scope, source_type, source_id, source_version).
+  // The runner replays every migration on every deploy (no ledger), so the old
+  // body would re-build it over live data before 351 dropped it again, and the
+  // first source tuple two tenants share would fail that build (23505) and block
+  // every later deploy — the 154/268 shape. 351 alone yields the final state;
+  // pinned by migration-replay-populated-db.test.ts.
+  ['062_create_knowledge_chunks', '0a66e5f0bd8ffc29ac643c29f56c965f393333613312b466050393644e89e468'],
   ['063_language_detection', '918c4cd778821e6b38a381c6dfceb3e3446c9e390245fcb6eca0e486067b576f'],
   ['064_create_job_photos', '3ad6f895d04b29e6ef6f1d2d5b74757b6417fe9e73cfe61e61ebe31b15dfd2a7'],
   ['065_create_portal_sessions', '6b939dc150298e5af212577fda04ec07aec8338f026a6107c7ad09491f1ded10'],
@@ -658,6 +665,10 @@ const SNAPSHOT: ReadonlyArray<readonly [string, string]> = [
   ['349_assignment_overlap_accepted_with', '9ce17e738283dccfdb696047dec16aba693948ccdd5c6309942ed5eb6a65b51a'],
   // #1735 membership renewals drip target — deliberate snapshot update for a new migration.
   ['350_drip_membership_renewals', '536ef8dff6092437cfed38d2ad2b1db3436232b65347acabec26ac0b2107a85d'],
+  // knowledge_chunks dedupe key gains tenant_id (NULLS NOT DISTINCT) — new migration.
+  ['351_knowledge_chunks_tenant_dedupe', 'e70fec7cec3c9abfb58bb4a88bec25ea2e8c98211628350273aa0d53d72d2181'],
+  // P2-030 shadow_comparisons table (lost with the branch's 101) — new migration.
+  ['352_create_shadow_comparisons', '54735dd7ffef5d55b5cc454f15973499e4eb8aa2147b9d247015577f176ae09a'],
 ];
 
 function hashMigration(value: string): string {
