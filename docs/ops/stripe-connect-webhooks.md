@@ -44,6 +44,7 @@ Customer charges may be **Connect direct charges** (`Stripe-Account`). Those obj
 - Stripe MCP (Cursor Desktop, Test mode) can help inspect accounts/prices; webhook destination listing may still require the Dashboard.
 - Do not rely on `stripe listen` alone for production Connect coverage.
 - SaaS Billing Checkout stays on the **platform** account; Connected-accounts destination must not break those events (platform destination still required).
+- `customer.subscription.*` is platform billing only. The handler refuses (403, `stripe_subscription_not_platform`) any subscription event that arrives with a top-level `account`, so it never mirrors a connected account's subscription onto a tenant.
 
 ## Terminal (field collect)
 
