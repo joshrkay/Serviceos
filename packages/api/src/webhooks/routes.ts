@@ -69,6 +69,7 @@ import type { PaymentLinkProvider } from '../payments/payment-link-provider';
 import type { ConnectAccountResolver } from '../invoices/public-invoice-service';
 import { dispatchInboundSms } from '../sms/inbound-dispatch';
 import { routeParam } from '../shared/route-params';
+import { clerkPrimaryEmail } from './clerk-primary-email';
 
 const logger = createLogger({ service: 'webhooks', environment: process.env.NODE_ENV || 'dev' });
 
@@ -755,8 +756,8 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       if (eventType === 'user.created') {
         const userData = payload.data as Record<string, unknown>;
         const userId = userData.id as string;
-        const emailAddresses = userData.email_addresses as Array<{ email_address: string }>;
-        const primaryEmail = emailAddresses?.[0]?.email_address;
+        const primary = clerkPrimaryEmail(userData);
+        const primaryEmail = primary?.address;
 
         logger.info('user.created webhook received', { userId, email: primaryEmail });
 
@@ -776,7 +777,18 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         //      meant to resolve (PR 319 review P1). Refusing the
         //      stale/forged id falls through to the bootstrap path,
         //      which is the safe outcome.
-        if (deps.pendingInvitationRepo && primaryEmail) {
+        //
+        // Both lookups match on the address, so a join requires the
+        // PRIMARY address to be one Clerk reports as verified
+        // (clerkPrimaryEmail). An unverified address proves nothing about
+        // who holds the inbox: it skips the join and falls through to the
+        // bootstrap path, like a refused id.
+        if (deps.pendingInvitationRepo && primary && !primary.verified) {
+          logger.warn('user.created primary email is not verified — invitation join skipped', {
+            userId,
+          });
+        }
+        if (deps.pendingInvitationRepo && primary?.verified && primaryEmail) {
           const publicMeta = userData.public_metadata as Record<string, unknown> | undefined;
           const invitationId = publicMeta?.invitation_id as string | undefined;
           let pending = null;
