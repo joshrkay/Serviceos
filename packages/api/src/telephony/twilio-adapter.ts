@@ -850,6 +850,15 @@ export class TwilioGatherAdapter {
   private readonly pendingConsentCommit = new Map<string, () => Promise<void>>();
 
   /**
+   * PRIV-4 — the virtual-assistant notice's half of the parked greeting
+   * commit, on its own so a cached-greeting replay can ledger the notice it
+   * spoke without also claiming recording consent (a replay arms no
+   * `<Start><Record>`). Same lifetime and sweep as {@link pendingConsentCommit};
+   * the `assistantNoticeHeard` latch keeps the two from writing twice.
+   */
+  private readonly pendingAssistantNoticeCommit = new Map<string, () => Promise<void>>();
+
+  /**
    * Drop parked consent thunks for sessions the store has already reaped.
    * Runs on each park, so the map stays bounded by concurrent live sessions —
    * the same lifetime the store itself enforces — without needing a hook on
@@ -860,6 +869,11 @@ export class TwilioGatherAdapter {
     for (const sessionId of this.pendingConsentCommit.keys()) {
       if (!this.deps.store.get(sessionId)) {
         this.pendingConsentCommit.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.pendingAssistantNoticeCommit.keys()) {
+      if (!this.deps.store.get(sessionId)) {
+        this.pendingAssistantNoticeCommit.delete(sessionId);
       }
     }
   }
@@ -1417,6 +1431,11 @@ export class TwilioGatherAdapter {
       await disclosure.commitConsentLedger();
       if (!noticeAlreadyLedgered) await assistantNotice.commitDisclosureLedger();
     });
+    this.pendingAssistantNoticeCommit.set(session.id, async () => {
+      if (session.assistantNoticeHeard) return;
+      session.assistantNoticeHeard = true;
+      await assistantNotice.commitDisclosureLedger();
+    });
     // #1223 — an approver caller-ID that was not A-attested runs as a caller;
     // say so, so a genuine owner on a partially-attested route knows why owner
     // actions are unavailable and where to take them.
@@ -1556,6 +1575,7 @@ export class TwilioGatherAdapter {
     const commit = this.pendingConsentCommit.get(session.id);
     if (!commit) return;
     this.pendingConsentCommit.delete(session.id);
+    this.pendingAssistantNoticeCommit.delete(session.id);
     await commit();
 
     // Row 2.2 — the GRANT of implicit recording consent is a mutation
@@ -2268,13 +2288,16 @@ export class TwilioGatherAdapter {
             ...(replayHints ? { hints: replayHints } : {}),
           },
         );
-        // This document carries both notices, so it is a point of evidence
-        // too: commit the parked ledger thunk if the first attempt has not
-        // (it may be the stalled request Twilio gave up on). A no-op once
-        // the first attempt committed — the map entry is taken once.
-        void this.commitRecordingConsent({ callSid: opts.callSid }).catch(() => {
-          /* swallow — the thunk already swallows; this guards the lookup */
-        });
+        // The caller hears the virtual-assistant notice from this document,
+        // so ledger it here if the first attempt has not (it may be the
+        // stalled request Twilio gave up on). Recording consent stays with
+        // the first attempt: this replay arms no `<Start><Record>`, so it is
+        // no evidence of consent to a recording.
+        const noticeCommit = this.pendingAssistantNoticeCommit.get(session.id);
+        if (noticeCommit) {
+          this.pendingAssistantNoticeCommit.delete(session.id);
+          void noticeCommit();
+        }
         return replayTwiml;
       }
       // Establishment has not pinned the language yet: resolve the tenant's
@@ -2365,6 +2388,7 @@ export class TwilioGatherAdapter {
       // implicit consent here would assert a notice that was never rendered.
       // Discard the parked thunk rather than leaving it for the sweep.
       this.pendingConsentCommit.delete(session.id);
+      this.pendingAssistantNoticeCommit.delete(session.id);
     } else {
       void this.commitRecordingConsent({ callSid: opts.callSid }).catch(() => {
         /* swallow — the thunk already swallows; this guards the lookup */

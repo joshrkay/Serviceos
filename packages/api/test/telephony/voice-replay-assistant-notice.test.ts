@@ -15,6 +15,7 @@ import { TwilioGatherAdapter } from '../../src/telephony/twilio-adapter';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { VoicePersona } from '../../src/settings/voice-persona-resolver';
+import { InMemoryConsentEventRepository } from '../../src/compliance/consent-events';
 
 const NOTICE = "Just so you know, I'm a virtual assistant, not a live person.";
 const RECORDING_NOTICE =
@@ -147,12 +148,14 @@ describe('PRIV-4 — a /voice retry still carries the virtual-assistant notice',
     expect(noticeRows()).toHaveLength(1);
   });
 
-  it('a retry after the greeting was rendered but before the first attempt committed ledgers the notice once', async () => {
+  it('a retry after the greeting was rendered but before the first attempt committed ledgers the notice once, and no recording consent', async () => {
     // Codex review on 9db67fa0: the cached-greeting replay spoke both notices
     // but left the parked ledger thunk for the first attempt, which may be
-    // the stalled request Twilio gave up on.
+    // the stalled request Twilio gave up on. Codex review on 60c1fa0e: the
+    // replay arms no recording, so it must not claim recording consent.
     const store = new VoiceSessionStore({ startInterval: false });
     const auditRepo = { create: vi.fn(async () => undefined) };
+    const consentEvents = new InMemoryConsentEventRepository();
     // Hold the first attempt's STT-hints lookup, which runs after bootstrap
     // rendered the greeting and before the first attempt commits.
     let releaseHints!: () => void;
@@ -166,6 +169,7 @@ describe('PRIV-4 — a /voice retry still carries the virtual-assistant notice',
       businessName: 'Acme Plumbing',
       publicBaseUrl: 'https://example.com',
       auditRepo: auditRepo as never,
+      consentEvents,
       sttHintsResolver: async () => {
         hintCalls += 1;
         if (hintCalls === 1) await hintsGate;
@@ -189,6 +193,12 @@ describe('PRIV-4 — a /voice retry still carries the virtual-assistant notice',
     const replay = await adapter.handleInbound(call);
     expect(says(replay)[0]).toContain(NOTICE);
     await vi.waitFor(() => expect(noticeRows()).toHaveLength(1));
+    const consentGrants = () =>
+      auditRepo.create.mock.calls.filter(
+        (c: unknown[]) => (c[0] as { eventType: string }).eventType === 'recording_consent.granted',
+      );
+    expect(consentEvents.rows).toHaveLength(0);
+    expect(consentGrants()).toHaveLength(0);
 
     releaseHints();
     await firstPending;
