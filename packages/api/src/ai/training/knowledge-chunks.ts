@@ -17,12 +17,15 @@ import { PgBaseRepository } from '../../db/pg-base';
  * UNION, and it also runs inside `withTenant(tenantId, ...)` so the RLS
  * policy of the same shape enforces it again under the runtime role.
  *
- * Idempotency: every insert uses `ON CONFLICT (scope, source_type,
- * source_id, source_version) DO UPDATE` so the seed workers can
- * safely re-fire on the same source row (e.g., catalog item edited
+ * Idempotency: every insert uses `ON CONFLICT (tenant_id, scope,
+ * source_type, source_id, source_version) DO UPDATE` so the seed workers
+ * can safely re-fire on the same source row (e.g., catalog item edited
  * thrice in 60s — the coalescer in Phase 3b leaves at most one queue
  * job, but defense in depth here makes the worker idempotent
- * regardless).
+ * regardless). `tenant_id` is part of the key (migration 351) so each
+ * tenant has its own key space: a colliding tuple from another tenant
+ * gets its own row instead of updating this tenant's. The index is
+ * NULLS NOT DISTINCT, so global rows still dedupe among themselves.
  */
 
 // ─── Types ───────────────────────────────────────────────────────────────────
@@ -238,7 +241,7 @@ export class PgKnowledgeChunkRepository extends PgBaseRepository implements Know
          ) VALUES (
            $1, $2, $3, $4, $5, $6, $7, $8::vector, $9, $10, $11
          )
-         ON CONFLICT (scope, source_type, source_id, source_version) DO UPDATE SET
+         ON CONFLICT (tenant_id, scope, source_type, source_id, source_version) DO UPDATE SET
            content              = EXCLUDED.content,
            content_scrubbed     = EXCLUDED.content_scrubbed,
            embedding            = EXCLUDED.embedding,
@@ -332,11 +335,13 @@ export class InMemoryKnowledgeChunkRepository implements KnowledgeChunkRepositor
     validateInput(input);
     const sourceVersion = input.sourceVersion ?? 1;
 
-    // Honour the (scope, source_type, source_id, source_version)
-    // unique constraint by overwriting on conflict, mirroring the Pg
-    // ON CONFLICT DO UPDATE behaviour.
+    // Honour the (tenant_id, scope, source_type, source_id, source_version)
+    // unique index by overwriting on conflict, mirroring the Pg ON CONFLICT
+    // DO UPDATE behaviour. A null tenantId matches null (global rows), as the
+    // index's NULLS NOT DISTINCT does.
     const existingIdx = this.rows.findIndex(
       (r) =>
+        r.tenantId === input.tenantId &&
         r.scope === input.scope &&
         r.sourceType === input.sourceType &&
         r.sourceId === input.sourceId &&

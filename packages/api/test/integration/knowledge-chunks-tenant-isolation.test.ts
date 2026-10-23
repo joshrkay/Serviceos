@@ -9,10 +9,16 @@
  * into `rls_app_runtime`. Anywhere the flag is unset (dev, a misconfigured
  * non-prod deploy) tenant B's turn retrieved tenant A's chunks.
  *
- * Both flag states are pinned: ON proves the policy and the WHERE agree, OFF
- * proves the WHERE alone bounds the read (the defense-in-depth backstop).
- * A mocked Pool can prove neither — the vector operator, the policy and the
- * runtime role only exist in real Postgres.
+ * The same holds for ingestion. `insert` upserts on its dedupe key, and that
+ * key used to be `(scope, source_type, source_id, source_version)` with no
+ * `tenant_id`: a second tenant writing a colliding source tuple either
+ * overwrote the first tenant's content and embedding (policy inert) or failed
+ * the RLS check (policy on). The key is now tenant-aware (migration 351).
+ *
+ * Both flag states are pinned: ON proves the policy and the SQL agree, OFF
+ * proves the SQL alone bounds the read and the write (the defense-in-depth
+ * backstop). A mocked Pool can prove neither — the vector operator, the
+ * unique index, the policy and the runtime role only exist in real Postgres.
  */
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool } from 'pg';
@@ -21,6 +27,7 @@ import {
   EMBEDDING_DIMENSIONS,
   EMBEDDING_MODEL,
   PgKnowledgeChunkRepository,
+  type KnowledgeChunkInput,
 } from '../../src/ai/training/knowledge-chunks';
 
 const ORIGINAL_FLAG = process.env.RLS_RUNTIME_ROLE;
@@ -125,6 +132,89 @@ describe('PgKnowledgeChunkRepository.search — tenant-bounded retrieval (real P
       expect(seenByA).toContain(chunkA);
       expect(seenByA).toContain(chunkGlobal);
       expect(seenByA).not.toContain(chunkB);
+    });
+  }
+});
+
+function chunkInput(tenantId: string | null, sourceId: string, content: string): KnowledgeChunkInput {
+  return {
+    tenantId,
+    scope: tenantId ? 'tenant' : 'global',
+    sourceType: SOURCE_TYPE,
+    sourceId,
+    content,
+    contentScrubbed: content,
+    embedding: VECTOR,
+  };
+}
+
+async function rowsForSource(sourceId: string): Promise<Array<{ id: string; tenant_id: string | null; content: string }>> {
+  const { rows } = await pool.query<{ id: string; tenant_id: string | null; content: string }>(
+    'SELECT id, tenant_id, content FROM knowledge_chunks WHERE source_id = $1 ORDER BY created_at',
+    [sourceId],
+  );
+  return rows;
+}
+
+describe('PgKnowledgeChunkRepository.insert — tenant-aware dedupe key (real Postgres)', () => {
+  for (const flag of ['true', undefined] as const) {
+    const label = flag ? 'RLS_RUNTIME_ROLE=true' : 'RLS_RUNTIME_ROLE unset (policy inert)';
+
+    it(`${label}: a colliding source tuple from another tenant gets its own row and never touches the first tenant's`, async () => {
+      if (flag) process.env.RLS_RUNTIME_ROLE = flag;
+      else delete process.env.RLS_RUNTIME_ROLE;
+
+      const tenantA = await seedTenant();
+      const tenantB = await seedTenant();
+      const sourceId = `kc-dedupe-${crypto.randomUUID()}`;
+      createdSourceIds.push(sourceId);
+
+      const a = await repo.insert(chunkInput(tenantA, sourceId, 'tenant A content'));
+      const b = await repo.insert(chunkInput(tenantB, sourceId, 'tenant B content'));
+
+      expect(b.id).not.toBe(a.id);
+      expect(b.tenantId).toBe(tenantB);
+      const rows = await rowsForSource(sourceId);
+      expect(rows.map((r) => [r.tenant_id, r.content])).toEqual([
+        [tenantA, 'tenant A content'],
+        [tenantB, 'tenant B content'],
+      ]);
+
+      // Each tenant retrieves its own copy only.
+      const seenByA = await repo.search({ tenantId: tenantA, queryEmbedding: VECTOR, sourceTypes: [SOURCE_TYPE], k: 50, minSimilarity: 0 });
+      expect(seenByA.filter((h) => h.chunk.sourceId === sourceId).map((h) => h.chunk.content)).toEqual(['tenant A content']);
+      const seenByB = await repo.search({ tenantId: tenantB, queryEmbedding: VECTOR, sourceTypes: [SOURCE_TYPE], k: 50, minSimilarity: 0 });
+      expect(seenByB.filter((h) => h.chunk.sourceId === sourceId).map((h) => h.chunk.content)).toEqual(['tenant B content']);
+    });
+
+    it(`${label}: re-ingesting the same tuple for the same tenant still upserts in place`, async () => {
+      if (flag) process.env.RLS_RUNTIME_ROLE = flag;
+      else delete process.env.RLS_RUNTIME_ROLE;
+
+      const tenantA = await seedTenant();
+      const sourceId = `kc-reingest-${crypto.randomUUID()}`;
+      createdSourceIds.push(sourceId);
+
+      const first = await repo.insert(chunkInput(tenantA, sourceId, 'first'));
+      const second = await repo.insert(chunkInput(tenantA, sourceId, 'second'));
+
+      expect(second.id).toBe(first.id);
+      expect((await rowsForSource(sourceId)).map((r) => r.content)).toEqual(['second']);
+    });
+
+    it(`${label}: re-ingesting the same global tuple still upserts in place (NULL tenant ids collide)`, async () => {
+      if (flag) process.env.RLS_RUNTIME_ROLE = flag;
+      else delete process.env.RLS_RUNTIME_ROLE;
+
+      const sourceId = `kc-global-${crypto.randomUUID()}`;
+      createdSourceIds.push(sourceId);
+
+      const first = await repo.insert(chunkInput(null, sourceId, 'global first'));
+      const second = await repo.insert(chunkInput(null, sourceId, 'global second'));
+
+      expect(second.id).toBe(first.id);
+      const rows = await rowsForSource(sourceId);
+      expect(rows.map((r) => [r.tenant_id, r.content])).toEqual([[null, 'global second']]);
     });
   }
 });

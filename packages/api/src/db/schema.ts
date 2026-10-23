@@ -1682,10 +1682,10 @@ export const MIGRATIONS = {
     CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_tenant_source
       ON knowledge_chunks (tenant_id, source_type, source_id);
 
-    -- Idempotent ingestion: same (scope, source_type, source_id, version)
-    -- collides cleanly so re-ingestion with ON CONFLICT works.
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_chunks_dedupe
-      ON knowledge_chunks (scope, source_type, source_id, source_version);
+    -- Idempotent-ingestion dedupe key: see 351_knowledge_chunks_tenant_dedupe.
+    -- The tenant-blind idx_knowledge_chunks_dedupe this body used to build is
+    -- no longer created here (replay-every-boot runner; see the comment above
+    -- 351).
 
     ALTER TABLE knowledge_chunks ENABLE ROW LEVEL SECURITY;
     ALTER TABLE knowledge_chunks FORCE ROW LEVEL SECURITY;
@@ -8875,6 +8875,30 @@ export const MIGRATIONS = {
     -- The membership's end date when it was targeted: any later extension,
     -- even one still inside the campaign window, reads as renewed.
     ALTER TABLE drip_enrollments ADD COLUMN IF NOT EXISTS source_due_on DATE;
+  `,
+
+  // knowledge_chunks' ingestion dedupe key gains tenant_id. 062 keyed it on
+  // (scope, source_type, source_id, source_version) alone, so two tenants
+  // ingesting the same source tuple shared ONE row: with the RLS policy inert
+  // the second tenant's ON CONFLICT DO UPDATE overwrote the first tenant's
+  // content and embedding; under the runtime role it failed the policy check.
+  // Each tenant now has its own key space. NULLS NOT DISTINCT (PG15+;
+  // production is PG16) keeps the global tier (tenant_id IS NULL) deduped as
+  // before — a plain index would treat every NULL as distinct and let global
+  // re-ingestion duplicate rows. Existing data cannot violate the new index:
+  // it only ever adds a column to a key that was already unique.
+  //
+  // 062's body no longer builds the old index. The runner replays the whole
+  // corpus on every deploy (no ledger), so a surviving 062 copy would re-build
+  // the tenant-blind index over live data before this migration dropped it
+  // again — and the first source tuple two tenants share fails that build
+  // (23505), rolling back the corpus and blocking every later deploy (the
+  // 154/268 precedent). Pinned by migration-replay-populated-db.test.ts.
+  '351_knowledge_chunks_tenant_dedupe': `
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_knowledge_chunks_tenant_dedupe
+      ON knowledge_chunks (tenant_id, scope, source_type, source_id, source_version)
+      NULLS NOT DISTINCT;
+    DROP INDEX IF EXISTS idx_knowledge_chunks_dedupe;
   `,
 };
 
