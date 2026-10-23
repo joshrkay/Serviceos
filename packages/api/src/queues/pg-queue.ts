@@ -155,16 +155,22 @@ export class PgQueue extends PgBaseRepository implements Queue {
         // LOCKED means concurrent ticks/replicas each grab a DISJOINT set — no
         // message is processed twice.
         //
+        // The locking pick is a MATERIALIZED CTE so it runs exactly once. As
+        // `WHERE id IN (SELECT … LIMIT $3)` the planner may rescan it as the
+        // inner side of a nested loop, and every rescan skips the rows this
+        // UPDATE already claimed and locks the NEXT $3 — receiveBatch(3) then
+        // claimed every due row (pg-queue-claim-rescan.test.ts). A CTE scan
+        // rescans its stored result instead; MATERIALIZED states that
+        // requirement rather than leaving it to the planner's CTE-inlining
+        // rules.
+        //
         // visible_at scales with the (pre-increment) attempt count:
         // base * 2^attempts, capped. This gives failed messages exponential
         // retry backoff instead of hammering a struggling downstream every
         // `visibilityTimeout` seconds, and gives later attempts of slow jobs
         // a longer processing window before another replica re-claims them.
         const result = await client.query(
-          `UPDATE _queue_messages
-           SET attempts = attempts + 1,
-               visible_at = NOW() + (LEAST($1::float * POWER(2, attempts), $2)::int || ' seconds')::interval
-           WHERE id IN (
+          `WITH picked AS MATERIALIZED (
              SELECT id FROM _queue_messages
              WHERE visible_at <= NOW()
                AND attempts < max_attempts
@@ -172,7 +178,12 @@ export class PgQueue extends PgBaseRepository implements Queue {
              FOR UPDATE SKIP LOCKED
              LIMIT $3
            )
-           RETURNING *`,
+           UPDATE _queue_messages q
+           SET attempts = attempts + 1,
+               visible_at = NOW() + (LEAST($1::float * POWER(2, attempts), $2)::int || ' seconds')::interval
+           FROM picked
+           WHERE q.id = picked.id
+           RETURNING q.*`,
           [String(this.config.visibilityTimeout), String(MAX_VISIBILITY_SECONDS), max]
         );
 
@@ -182,10 +193,11 @@ export class PgQueue extends PgBaseRepository implements Queue {
         // and it never reaches the DLQ — a silently stuck message. Move any
         // such expired rows to the DLQ (same redaction as moveToDeadLetter),
         // bounded per tick; SKIP LOCKED + ON CONFLICT keep concurrent
-        // replicas idempotent.
+        // replicas idempotent. The bound holds only because the locking pick
+        // is a MATERIALIZED CTE, for the same reason as the claim above: as an
+        // IN-subquery a rescan would lock and delete the next 10.
         const orphans = await client.query(
-          `DELETE FROM _queue_messages
-           WHERE id IN (
+          `WITH orphaned AS MATERIALIZED (
              SELECT id FROM _queue_messages
              WHERE visible_at <= NOW()
                AND attempts >= max_attempts
@@ -193,7 +205,10 @@ export class PgQueue extends PgBaseRepository implements Queue {
              FOR UPDATE SKIP LOCKED
              LIMIT 10
            )
-           RETURNING *`
+           DELETE FROM _queue_messages q
+           USING orphaned
+           WHERE q.id = orphaned.id
+           RETURNING q.*`
         );
         for (const row of orphans.rows) {
           const orphan: QueueMessage = {
