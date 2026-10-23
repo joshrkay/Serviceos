@@ -22,6 +22,7 @@ import { Router, Request, Response, urlencoded } from 'express';
 import {
   createOneTapApproveToken,
   verifyOneTapApproveToken,
+  type OneTapApprover,
 } from '../proposals/auto-approve';
 import {
   approveChainSet,
@@ -85,9 +86,10 @@ export interface OneTapApproveRouterDeps {
   /**
    * B1 — who the tenant's backup supervisor is RIGHT NOW
    * (`resolveBackupSupervisorApprover`). A link minted for the backup carries
-   * their id and role from when the text went out; the tap re-checks it here,
-   * so a backup who was replaced or deactivated since approves nothing and a
-   * re-roled one acts with the role they hold now. Absent → the token's
+   * their id, users row id and role from when the text went out; the tap
+   * re-checks it here, so a backup who was replaced or deactivated since
+   * approves nothing, a re-roled one acts with the role they hold now, and
+   * one who linked a login since acts as that login. Absent → the token's
    * claims are used as minted (unit fixtures).
    */
   resolveBackupApprover?: (tenantId: string) => Promise<ResolvedApprover | null>;
@@ -130,6 +132,21 @@ const LINKED_STEP_PAGES: Readonly<Record<LinkedStepHoldReason, { title: string; 
     body: 'The earlier step this one depends on didn’t run, so there’s nothing for it to act on. It’s still in your review queue.',
   },
 };
+
+/**
+ * B4-2 parity — whether the backup a link was minted for is the backup now.
+ * The subject (`userId`) changes when the backup links a login (users row id
+ * → login id); the users row id does not, so it decides when both sides carry
+ * it, as the voice owner line's per-turn re-check does. A link minted before
+ * the row id rode in the token compares subjects.
+ */
+function isSameBackup(
+  link: OneTapApprover,
+  current: Pick<ResolvedApprover, 'userId' | 'userRowId'>,
+): boolean {
+  if (link.userRowId && current.userRowId) return link.userRowId === current.userRowId;
+  return current.userId === link.userId;
+}
 
 /** Minimal HTML-attribute/text escaping for values echoed into pages. */
 function escapeHtml(value: string): string {
@@ -418,11 +435,13 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
     // B1 — an owner link approves as the owner; a link minted for the backup
     // supervisor approves as who the backup is NOW. Replaced, deactivated, or
     // unknown because the lookup failed → nothing is approved (fail closed;
-    // the nonce is spent either way).
+    // the nonce is spent either way). B4-2 parity — the same backup is the
+    // same users row; a login linked since keeps the link and approves as
+    // that login.
     let actorId = ONE_TAP_ACTOR_ID;
     let actorRole: Role = ONE_TAP_ACTOR_ROLE;
     if (verified.approver) {
-      let current: Pick<ResolvedApprover, 'role' | 'userId'> | null = verified.approver;
+      let current: Pick<ResolvedApprover, 'role' | 'userId' | 'userRowId'> | null = verified.approver;
       if (deps.resolveBackupApprover) {
         try {
           current = await deps.resolveBackupApprover(verified.tenantId);
@@ -434,7 +453,7 @@ export function createOneTapApproveRouter(deps: OneTapApproveRouterDeps): Router
           current = null;
         }
       }
-      if (!current?.userId || current.userId !== verified.approver.userId) {
+      if (!current?.userId || !isSameBackup(verified.approver, current)) {
         await deps.auditRepo.create(
           createAuditEvent({
             tenantId: verified.tenantId,
