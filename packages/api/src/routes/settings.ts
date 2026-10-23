@@ -546,7 +546,13 @@ export function createSettingsRouter(
           // one-tap links already treat such a backup as nobody, and refusing
           // it blocked every save of the section.
           const stored = await getSettings(req.auth!.tenantId, settingsRepo);
-          if (stored?.backupSupervisorUserId !== parsed.backupSupervisorUserId) {
+          if (stored?.backupSupervisorUserId === parsed.backupSupervisorUserId) {
+            // Codex P2 on #1810 — and it is left out of the write. This read
+            // and the write are separate statements: a save that changed the
+            // backup in between would otherwise be reverted to this unchecked
+            // value. Leaving it out also keeps it out of the audit's changedKeys.
+            delete parsed.backupSupervisorUserId;
+          } else {
             const backup = await requireActiveTenantMember(
               memberDeps.userRepo,
               req.auth!.tenantId,

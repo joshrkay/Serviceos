@@ -8,13 +8,14 @@
  * phone that can never approve anything. PUT /api/settings refuses it with a
  * plain 400 (owner-facing copy) and accepts a dispatcher.
  */
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, vi } from 'vitest';
 import express, { Request, Response, NextFunction } from 'express';
 import request from 'supertest';
 import { createSettingsRouter } from '../../src/routes/settings';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 import { InMemorySettingsRepository, createSettings, getSettings } from '../../src/settings/settings';
 import { InMemoryUserRepository } from '../../src/users/user';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 
 const TENANT = 'tenant-backup-role';
 
@@ -22,6 +23,7 @@ describe('PUT /api/settings — backupSupervisorUserId must be able to approve (
   let app: express.Express;
   let settingsRepo: InMemorySettingsRepository;
   let users: InMemoryUserRepository;
+  let audit: InMemoryAuditRepository;
 
   async function member(role: 'owner' | 'dispatcher' | 'technician'): Promise<string> {
     const user = await users.create!({
@@ -49,10 +51,11 @@ describe('PUT /api/settings — backupSupervisorUserId must be able to approve (
     });
     settingsRepo = new InMemorySettingsRepository();
     users = new InMemoryUserRepository();
+    audit = new InMemoryAuditRepository();
     await createSettings({ tenantId: TENANT, businessName: 'Backup Co' }, settingsRepo);
     app.use(
       '/api/settings',
-      createSettingsRouter(settingsRepo, undefined, undefined, undefined, undefined, { userRepo: users }),
+      createSettingsRouter(settingsRepo, undefined, audit, undefined, undefined, { userRepo: users }),
     );
   });
 
@@ -167,6 +170,59 @@ describe('PUT /api/settings — backupSupervisorUserId must be able to approve (
       expect(res.status).toBe(400);
       expect(res.body.details.field).toBe('backupSupervisorUserId');
       expect((await getSettings(TENANT, settingsRepo))?.backupSupervisorUserId).toBe(deactivated);
+    });
+  });
+
+  // Codex P2 on #1810 — the unchanged check reads the stored backup in one
+  // statement and the save writes in another. The save still WROTE the value
+  // it was sent, so a request that re-sent backup A with a routing change, and
+  // was overtaken by a save that made B the backup, put A back, unchecked: a
+  // deactivated or non-approving member could become the backup again. An
+  // unchanged value is now left out of the write; the request saves only what
+  // it changes.
+  describe('an unchanged backup is left out of the write', () => {
+    it('saves the routing change without writing or recording the backup', async () => {
+      const backup = await member('dispatcher');
+      await settingsRepo.update(TENANT, { backupSupervisorUserId: backup });
+      const write = vi.spyOn(settingsRepo, 'update');
+
+      const res = await request(app)
+        .put('/api/settings')
+        .send({ backupSupervisorUserId: backup, unsupervisedProposalRouting: 'queue_only' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.backupSupervisorUserId).toBe(backup);
+      expect(write).toHaveBeenCalledTimes(1);
+      expect(write.mock.calls[0][1]).not.toHaveProperty('backupSupervisorUserId');
+      expect(write.mock.calls[0][1]).toMatchObject({ unsupervisedProposalRouting: 'queue_only' });
+      const stored = await getSettings(TENANT, settingsRepo);
+      expect(stored).toMatchObject({ backupSupervisorUserId: backup, unsupervisedProposalRouting: 'queue_only' });
+      const events = await audit.findByEntity(TENANT, 'tenant_settings', stored!.id);
+      expect(events.map((e) => e.metadata)).toEqual([{ changedKeys: ['unsupervisedProposalRouting'] }]);
+    });
+
+    it('a backup changed while the request was in flight is not put back', async () => {
+      const first = await member('dispatcher');
+      const second = await member('dispatcher');
+      await settingsRepo.update(TENANT, { backupSupervisorUserId: first });
+      await users.deactivateMember(TENANT, first);
+      // Another save makes `second` the backup after this request read
+      // `first` as the stored value and before it writes.
+      const write = settingsRepo.update.bind(settingsRepo);
+      vi.spyOn(settingsRepo, 'update').mockImplementationOnce(async (...args) => {
+        await write(TENANT, { backupSupervisorUserId: second });
+        return write(...args);
+      });
+
+      const res = await request(app)
+        .put('/api/settings')
+        .send({ backupSupervisorUserId: first, unsupervisedProposalRouting: 'queue_only' });
+
+      expect(res.status).toBe(200);
+      expect(await getSettings(TENANT, settingsRepo)).toMatchObject({
+        backupSupervisorUserId: second,
+        unsupervisedProposalRouting: 'queue_only',
+      });
     });
   });
 });
