@@ -714,8 +714,8 @@ flowchart LR
   - **LCR-04**
     - Provision `VoiceFallbackUrl` (POST) at purchase. Point it at a static, DB-free voicemail TwiML
       route.
-    - **That route must work on a cold process with the DB down, so it can't sit behind DB-backed
-      signature verification.** The router puts `requireTwilioSignature` on every route
+    - **That route must work with the DB down, so it can't sit behind DB-backed signature
+      verification.** The router puts `requireTwilioSignature` on every route
       (`routes/telephony.ts:425-430`), and the credential resolver fails closed when its DB lookup
       throws (`telephony/twilio-webhook-credential.ts:196-208`). A cache of credentials that was
       never filled can't help a cold process.
@@ -736,9 +736,25 @@ flowchart LR
         to a callback, and that callback is signature-verified, including its query.
       - A test pins the route against all of these: no DB access, no mutation, no signature
         dependency.
-      - Optional, for an outage of the whole API rather than only the DB: point `VoiceFallbackUrl`
-        at a Twilio-hosted target instead (a Serverless Function provisioned per subaccount). That
-        is an owner choice, because it adds a Twilio deployment surface.
+      - **The app-hosted route doesn't cover a cold start with the DB down.** It covers failures
+        inside a running process: the DB lost after boot, a handler that throws, a provider
+        outage. With `RLS_RUNTIME_ROLE=true`, startup calls `verifyRlsRuntimeRole(pool)` and exits
+        the process when its DB connection is refused (`app.ts:997-1001`), so no instance is up to
+        serve it. Serving tenant traffic with that check skipped is not acceptable. A restricted
+        fallback-only serving mode was considered and rejected: it is a second boot path that runs
+        with RLS enforcement unverified, and a Twilio-hosted target does the job without it.
+      - **A Twilio-hosted fallback is mandatory in production.** Each number's `VoiceFallbackUrl`
+        is a static, tenant-neutral TwiML target that Twilio itself serves (for example a
+        Serverless Function or a TwiML Bin in the subaccount): a short apology and a `<Record>`
+        to Twilio-side storage. The recording is then picked up by the reconciliation sweep
+        below, which lists each subaccount's recordings. The app-hosted route stays the
+        `VoiceFallbackUrl` in non-production, where no Twilio-hosted target is set.
+        - Purchase provisioning sets it for new numbers. The backfill (owner decision 5) sets it
+          for existing ones.
+        - `validateFeatureRequiredConfig` refuses a production boot with voice enabled and no
+          Twilio-hosted fallback target configured. The backfill's dry run lists every number
+          whose fallback isn't the Twilio-hosted one, and the go-live check in
+          `docs/runbooks/voice-capacity.md` flags the same.
     - Keep an in-memory TTL cache of verified webhook credentials, used only when the DB lookup
       throws. It helps a warm process ride out a short brownout on `/voice` and `/gather`. It is not
       the outage path; the exempt fallback route is.
@@ -820,8 +836,13 @@ flowchart LR
   - Shutdown → live calls redirected.
   - Unknown session → a fresh disclosed session.
   - The config guard.
-  - The fallback route returns static TwiML with no DB and no warm credential cache. It answers on a
-    cold process with the DB down.
+  - The app-hosted fallback route returns static TwiML with no DB read and no warm credential cache,
+    including when the DB is lost after boot.
+  - Provisioning a number in production sets `VoiceFallbackUrl` to the Twilio-hosted target, and the
+    backfill's dry run and the go-live check report a number whose fallback is anything else.
+  - **Manual drill** (recorded in `docs/runbooks/voice-capacity.md`): stop the DB, cold-start the app,
+    place a call. The Twilio-hosted fallback answers, and its recording is ingested by the sweep once
+    the DB is back.
   - A recording callback that fails while the DB is down → after recovery, the reconciliation sweep
     ingests that recording exactly once.
   - The DB is down before `/voicemail-status` runs → after recovery, the sweep creates exactly one
@@ -830,7 +851,7 @@ flowchart LR
     delivery or sweep creates exactly one lead.
   - The sweep is down for longer than any rolling window. On restart it resumes from the watermark,
     misses no recording, and creates no duplicates in the overlap.
-  - A fallback voicemail whose callback arrives after the DB recovers creates its lead and recording
+  - An app-hosted fallback voicemail whose callback arrives after the DB recovers creates its lead and recording
     straight from the callback, using the `From`/`To` in its query, without waiting for the sweep.
   - The upload and insert succeed, then the hand-off fails before the success receipt. The sweep resumes
     from the stored S3 object and hands the voicemail to transcription exactly once, with no Twilio
@@ -972,7 +993,7 @@ flowchart LR
    Advanced input down to 0.50. If you want a floor, change the UI and the schema together.
 4. **AI-disclosure wording and placement** (PRIV-4). Counsel to confirm.
 5. **Run the VoiceFallbackUrl backfill** for existing numbers (U5 ships the script with a dry-run
-   default).
+   default). It points them at the Twilio-hosted fallback, which production requires.
 6. **Make the live AI eval a required check** (U6):
    - Mark it required in branch protection.
    - Disable Railway's GitHub auto-deploy, so the `deploy.yml` gates apply.

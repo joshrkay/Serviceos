@@ -1669,12 +1669,38 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
             and writes the tombstone without A. Rows keyed only by A, such as
             `technician_location_pings` (`schema.ts:989-993`, GPS at the customer's address) and
             `delay_notice_state` (`schema.ts:5345-5348`), then pass the trigger for good. So:
-            - Phase 1 repeats collect-then-lock. Each round takes its new stripes in ascending
-              order. It stops when a collection, run while phase 1 holds the stripe of every key
-              found so far, finds no key whose stripe it does not hold.
+            - Phase 1 repeats collect-then-lock. It stops when a collection, run while phase 1
+              holds the stripe of every key found so far, finds no key whose stripe it does not
+              hold.
             - That last collection's keys are the ones phase 1 writes into the tombstone.
             - All rounds share the one deadline. The loop always ends, because each round adds at
               least one stripe and a tenant has a fixed number of them.
+            - **Every round keeps one total order across concurrent erases.** Sorting only a
+              round's new stripes doesn't. Erase A can hold stripe 10 and then discover stripe 5
+              while erase B holds 5 and discovers 10, and each waits on the other until the
+              deadline, so the endpoint returns `409` with capacity to spare. So:
+              - A round whose new stripes are all higher than every stripe phase 1 holds takes
+                them in ascending order and goes on.
+              - A round that discovers any stripe lower than the highest one held rolls the
+                phase-1 transaction back, which releases everything. It restarts with the union of
+                all stripes found so far, taken in ascending order from the start, and collects
+                again.
+              - The set only grows and a tenant has a fixed number of stripes, so restarts are
+                bounded. After a small fixed number of restarts, phase 1 takes the tenant's
+                complete stripe set in ascending order instead. That blocks every writer in the
+                tenant for the length of phase 1, which is why it is the last resort.
+              - Each restart is counted and logged. It is a new transaction, so its deadline is
+                fixed at its own first grant, and it does not count toward the `409` retry limit
+                below.
+              - So every phase 1, and `withErasureFence`, which takes all its stripes at once,
+                acquire in one ascending order. The `BEFORE` triggers take stripes row by row in
+                write order, so they aren't in that order, and the deadline and the `40P01`
+                retry below cover them.
+            - Tests, Docker-gated: two concurrent erases in one tenant whose discoveries cross (A
+              holds stripe 10 and then finds 5, B holds 5 and then finds 10) both complete, with no
+              `40P01` and no `409`. A restart is counted and logged. With the restart limit
+              exceeded, phase 1 takes the tenant's complete stripe set, and a spy on the lock
+              calls sees every acquisition in ascending order.
           - **Why the deadline is below `deadlock_timeout`.** A writer can hold one shared stripe
             while it waits for another that phase 1 holds, because the trigger takes stripes row by
             row, in the order the writes happen. If phase 1 then waits for the writer's stripe, the
