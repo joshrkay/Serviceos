@@ -19,6 +19,16 @@
  * workers/shadow-comparison-retention-worker.ts, for every tenant and the
  * placeholder bucket below. Scrubbed reply text is still caller-derived, so it
  * is not kept indefinitely.
+ *
+ * `ai_run_id` is always NULL today. ShadowComparisonGateway reads it from
+ * `request.metadata.aiRunId`, and no caller sets that: the ai_runs id exists
+ * only inside LLMGateway.complete, which hands the request to the provider
+ * stack (quota → failover → retry/breaker → shadow) without it. Linking it
+ * means threading a per-call id through every LLM request, and the shadow
+ * save runs on its own connection: a run row written on a still-open tenant
+ * transaction (the in-transaction guard only logs outside tests) is not
+ * visible there, so the INSERT would fail the FK and the sample would be
+ * dropped. It is not wired; the column stays NULL until a reader needs it.
  */
 
 import { Pool } from 'pg';

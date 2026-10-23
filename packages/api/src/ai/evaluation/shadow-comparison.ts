@@ -135,7 +135,8 @@ export class ShadowComparisonGateway implements LLMProvider {
         shadowError = err instanceof Error ? err.message : String(err);
       }
 
-      // Extract aiRunId from request metadata if present (set by gateway.ts P2-027).
+      // Stored when a caller passes `metadata.aiRunId`. None does today, so the
+      // column stays NULL — see the header of pg-shadow-comparison.ts.
       const aiRunId = request.metadata?.aiRunId as string | undefined;
 
       const result: ShadowComparisonResult = {
