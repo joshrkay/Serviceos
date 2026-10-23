@@ -52,6 +52,25 @@ Railway CLI:
 railway run --service api --environment <env> -- node packages/api/dist/src/db/migrate.js
 ```
 
+### Expand, then contract
+
+The previous release keeps running against the migrated schema. The old web
+replica serves through `overlapSeconds`, and the worker service deploys after
+web. So a migration must not remove anything the previous release's code
+still uses: a column, a table, or the unique index an `ON CONFLICT` names.
+
+- **Expand** in release N: add the new object beside the old one, and switch
+  the code to the new one.
+- **Contract** in a later release: drop the old object. Ship it only after
+  release N has fully rolled out on **every** service that runs app code:
+  web, worker, and voice if it is deployed (voice deploys rarely, so check
+  it). After the
+  contract, a rollback to a release before N needs the old object back.
+
+The runner replays every migration on every deploy, so an early migration
+that builds the dropped object must stop building it (the 154/268 and
+062/351 precedents, pinned by `migration-replay-populated-db.test.ts`).
+
 ## Guardrail for future changes
 
 If deployment flow changes in the future, keep these invariants:
@@ -218,6 +237,38 @@ The dispatch board's feasibility composer (overlap + travel-time + skill checks)
 | `GOOGLE_MAPS_API_KEY` | unset | Enables the Google Distance Matrix provider for traffic-aware drive-time estimates. When unset, the API falls back to a haversine great-circle estimator (~30 mph). |
 | `TRAVEL_TIME_CACHE_TTL_SECONDS` | `300` | TTL for Google Distance Matrix responses cached in-process. |
 | `TRAVEL_TIME_CACHE_MAX_ENTRIES` | `1000` | Hard cap on the in-process LRU cache; prevents unbounded memory growth on multi-tenant deploys. |
+
+## Hosted tenant sites (D-044)
+
+"Get found online" can host a one-page site per business at `<slug>.<TENANT_SITE_BASE_DOMAIN>`.
+The feature is **off until `TENANT_SITE_BASE_DOMAIN` is set** (a bare hostname such as
+`sites.example.com`; boot fails if it is malformed or contains `WEB_URL`/`PUBLIC_API_URL`).
+To switch it on, ops must:
+
+1. Buy a domain that is separate from the app's (a flagged tenant page must not touch the app's
+   login or mail reputation).
+2. Point a wildcard DNS record (`*.sites.example.com`) at the deploy, with a wildcard TLS
+   certificate on the Railway custom domain.
+3. Set `TENANT_SITE_BASE_DOMAIN` on the `web` (and `voice`) service and redeploy.
+
+The Express app answers those hosts ahead of the SPA; every other host, the app domain included,
+is untouched. Until then the owner's Settings → Website card only offers "I have a website".
+
+### Connecting an owner's own domain (D-046, #1770)
+
+Optional, and **off until configured**: an owner who already owns a domain can point it at their
+site with one CNAME to `<slug>.<TENANT_SITE_BASE_DOMAIN>`. HTTPS comes from Railway's custom-domain
+API. To switch it on, set these on **both** the `web` and `worker` services (the web service takes
+the owner's requests, the worker runs the verification sweep):
+
+| Variable | Purpose |
+|---|---|
+| `RAILWAY_API_TOKEN` | A Railway project token able to manage custom domains |
+| `TENANT_SITE_RAILWAY_SERVICE_ID` | The id of the public `web` service that will serve the domains (not the worker's) |
+
+`RAILWAY_PROJECT_ID` and `RAILWAY_ENVIRONMENT_ID` are injected by Railway. Railway limits the number
+of custom domains per service by plan: check the limit for your plan before inviting owners to use this
+(see the caveats in D-046). Connected domains are listed in the Railway service's Settings → Networking.
 
 ## Observability sink validation (post-deploy)
 

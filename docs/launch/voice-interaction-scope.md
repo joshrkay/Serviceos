@@ -20,6 +20,19 @@ The owner assistant now supports **streaming conversational voice** in-app
 
 The PTT record→poll path remains as the fallback input.
 
+## Voice bar (global mic)
+
+The voice bar in the app shell streams live words through the same Deepgram
+path (`useDeepgramDictation`) and falls back to record→upload→poll only when
+live transcription is not available (unsupported browser, 503 from
+`/api/voice/stream-token`, or a socket refused before it opens). It navigates
+only on a bare command ("open invoices", "new customer"); anything that says
+more goes to the assistant (`useVoiceCommands.ts`, every pattern anchored).
+The hand-off carries `inputMode: 'voice'` and, from a detail page, the record
+on screen (`?ctx=job:<id>` → `pageContext` on `/api/assistant/chat`), which the
+server re-reads tenant-scoped and uses only when the words don't name another
+record (`ai/resolution/page-context.ts`).
+
 **Voice approval is still deferred** — see below. A voice-mode chat turn that
 classifies as approve/reject/edit gets a deterministic refusal ("Tap the card
 to approve…") and an `assistant.voice_approval_refused` audit event; it is

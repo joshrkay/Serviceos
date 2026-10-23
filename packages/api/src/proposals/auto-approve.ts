@@ -101,6 +101,24 @@ export const DEFAULT_AUTO_APPROVE_THRESHOLDS: Record<Mode, number> = {
  */
 export const LEGACY_AUTO_APPROVE_THRESHOLD = 0.9;
 
+/**
+ * The mode whose effective threshold (the tenant's override for it, else the
+ * built-in default) is highest — the strictest rule the tenant could apply to
+ * any member. For a caller that tried to read a member's mode and could not
+ * (the voice-memo creator whose users row is missing or whose lookup failed):
+ * resolving with this mode fails closed, where an undefined mode would fall
+ * back to the legacy 0.9, below the built-in 'tech' default of 0.95.
+ */
+export function strictestMode(tenantOverride?: Partial<Record<Mode, number>>): Mode {
+  const effective = (mode: Mode): number => {
+    const override = tenantOverride?.[mode];
+    return typeof override === 'number' ? override : DEFAULT_AUTO_APPROVE_THRESHOLDS[mode];
+  };
+  return (Object.keys(DEFAULT_AUTO_APPROVE_THRESHOLDS) as Mode[]).reduce((strictest, mode) =>
+    effective(mode) > effective(strictest) ? mode : strictest,
+  );
+}
+
 export interface ResolveThresholdInput {
   /**
    * The current_mode of the user-on-record for the originating session.
@@ -290,6 +308,8 @@ import { createAuditEvent } from '../audit/audit';
 import type { UnsupervisedProposalRouting } from '../settings/settings';
 import type { OutboundAnchorKind } from './sms/sms-event';
 import { notifyOwner } from '../notifications/owner-notifications-instance';
+import { hasPermission, isValidRole, type Role } from '../auth/rbac';
+import type { ApprovalSmsRecipient, ResolvedApprover } from './approver-identity';
 import { voidsCustomerAcceptance } from './acceptance-void';
 
 /** Hard ceiling on one-tap link lifetime (risk note: TTL ≤ 30 minutes). */
@@ -327,6 +347,29 @@ interface OneTapPayload {
    * may be approved over one-tap only when its token carries this flag.
    */
   c?: true;
+  /**
+   * B1 — the recipient's user id (subject) and role, present (both) ONLY on
+   * a link sent to someone other than the owner (the backup supervisor, when
+   * the tenant has no owner phone). The route approves as them. OMITTED for
+   * an owner link so its shape (and byte-identity) is unchanged.
+   */
+  u?: string;
+  r?: Role;
+  /**
+   * B4-2 parity — the recipient's users row id, beside `u` on a link minted
+   * for the backup. `u` is their subject, which changes when they link a
+   * login; this does not, so the tap compares it. A link minted before it
+   * rode in the token has none (subjects are compared).
+   */
+  i?: string;
+}
+
+/** B1 — who a one-tap link approves as when its recipient is not the owner. */
+export interface OneTapApprover {
+  userId: string;
+  role: Role;
+  /** B4-2 parity — their users row id (`ResolvedApprover.userRowId`). */
+  userRowId?: string;
 }
 
 function sign(payloadB64: string, secret: string): string {
@@ -347,6 +390,11 @@ export interface CreateOneTapApproveTokenInput {
    * default token can only approve a capture-class proposal at redeem time.
    */
   confirm?: boolean;
+  /**
+   * B1 — the recipient, when the link goes to someone other than the owner
+   * (approve tokens only). Absent → an owner link, byte-identical to before.
+   */
+  approver?: OneTapApprover;
   tenantId: string;
   /** HMAC secret (server-side, e.g. config.appSecret). */
   secret: string;
@@ -392,6 +440,14 @@ export function createOneTapApproveToken(
     // Track-E — confirm flag rides only on sanctioned non-capture approve
     // tokens; omitted otherwise so the legacy approve shape stays byte-identical.
     ...(action === 'approve' && input.confirm ? { c: true as const } : {}),
+    // B1 — a non-owner recipient's identity; omitted for an owner link.
+    ...(action === 'approve' && input.approver
+      ? {
+          u: input.approver.userId,
+          r: input.approver.role,
+          ...(input.approver.userRowId ? { i: input.approver.userRowId } : {}),
+        }
+      : {}),
   };
   const payloadB64 = Buffer.from(JSON.stringify(payload)).toString('base64url');
   const token = `${payloadB64}.${sign(payloadB64, input.secret)}`;
@@ -420,7 +476,15 @@ export interface VerifyOneTapApproveTokenInput {
 }
 
 export type OneTapVerifyResult =
-  | { ok: true; action: 'approve'; proposalId: string; tenantId: string; confirm?: true }
+  | {
+      ok: true;
+      action: 'approve';
+      proposalId: string;
+      tenantId: string;
+      confirm?: true;
+      /** B1 — present only on a link sent to a non-owner recipient. */
+      approver?: OneTapApprover;
+    }
   | { ok: true; action: 'mint_draft_invoice'; jobId: string; tenantId: string }
   | { ok: false; reason: OneTapVerifyFailure };
 
@@ -453,7 +517,17 @@ export async function verifyOneTapApproveToken(
     // RV-065: `a` is either absent (legacy approve) or the mint literal.
     (payload.a !== undefined && payload.a !== 'mint_draft_invoice') ||
     // Track-E: `c` is either absent or the boolean literal true.
-    (payload.c !== undefined && payload.c !== true)
+    (payload.c !== undefined && payload.c !== true) ||
+    // B1: the recipient is both a non-empty user id and a real role, or absent.
+    (payload.u === undefined) !== (payload.r === undefined) ||
+    (payload.u !== undefined &&
+      (typeof payload.u !== 'string' ||
+        payload.u.length === 0 ||
+        typeof payload.r !== 'string' ||
+        !isValidRole(payload.r))) ||
+    // B4-2 parity: the users row id rides only with a recipient, non-empty.
+    (payload.i !== undefined &&
+      (payload.u === undefined || typeof payload.i !== 'string' || payload.i.length === 0))
   ) {
     return { ok: false, reason: 'malformed' };
   }
@@ -478,6 +552,16 @@ export async function verifyOneTapApproveToken(
     // Track-E — surface the confirm flag (present only when set) so the redeem
     // route can let a sanctioned non-capture approval through its class gate.
     ...(payload.c === true ? { confirm: true as const } : {}),
+    // B1 — the non-owner recipient the route approves as.
+    ...(payload.u !== undefined && payload.r !== undefined
+      ? {
+          approver: {
+            userId: payload.u,
+            role: payload.r,
+            ...(payload.i !== undefined ? { userRowId: payload.i } : {}),
+          },
+        }
+      : {}),
   };
 }
 
@@ -535,6 +619,17 @@ export interface RouteUnsupervisedProposalDeps {
   /** HMAC secret for the one-tap token. Required for queue_and_sms SMS. */
   secret?: string;
   /**
+   * B1 — who the link's recipient approves as (`resolveApproverRole` for the
+   * phone the SMS goes to). The owner phone mints the plain owner link; the
+   * backup supervisor's mobile mints a link that carries their user id and
+   * role, so the tap approves as them; an unrecognised recipient (null), one
+   * whose role cannot approve, or a failed lookup gets no link at all — the
+   * review form only. Production wires it at every routing site (app.ts);
+   * absent → the legacy owner link. B3-2 — not asked when the input says
+   * the phone is the owner phone (`recipientVia`).
+   */
+  resolveLinkApprover?: (tenantId: string, phone: string) => Promise<ResolvedApprover | null>;
+  /**
    * P2-034 — invoked after the owner SMS goes out so the caller can record
    * the outbound `proposal_sms_events` row that anchors the reply transport
    * (the inbound Y/N/EDIT handler resolves "which proposal?" from it).
@@ -563,14 +658,26 @@ export interface RouteUnsupervisedProposalInput {
   channel: 'voice_inbound' | 'inapp' | 'sms' | 'other';
   /** Owner's E.164 mobile for the one-tap SMS. Null/undefined skips the SMS. */
   ownerPhone?: string | null;
+  /**
+   * B3-2 — whose phone `ownerPhone` is, as the recipient resolver found it
+   * (`resolveApprovalSmsRecipient`). `owner_phone` is the owner by
+   * definition: no `resolveLinkApprover` lookup, the normal copy and link
+   * rules. Anything else (the backup's mobile, or not said) is looked up and
+   * fails closed when the lookup fails.
+   */
+  recipientVia?: ApprovalSmsRecipient['via'];
   /** Short human label for the SMS body, e.g. "New booking for Jane D." */
   summaryText?: string;
   /**
    * P2-034 — full SMS body builder (proposal summary + key facts + reply
    * tokens + the one-tap link). When absent the legacy link-only body is
    * sent, so existing callers keep their exact behavior.
+   *
+   * B1 follow-up — `form` says who the body is for: when the recipient cannot
+   * approve, the renderer must drop every reply prompt (Y, N and EDIT from
+   * that phone are all refused), not only the link the router withheld.
    */
-  renderSmsBody?: (approveUrl: string) => string;
+  renderSmsBody?: (approveUrl: string, form: UnsupervisedSmsForm) => string;
   /**
    * RV-074 (F-4) — proposal payload used to check _meta.overallConfidence.
    * When present and confidence is low/very_low, the one-tap Y-able link is
@@ -592,6 +699,10 @@ export interface RouteUnsupervisedProposalInput {
    *   'action_class'              — caller-asserted suppressApproveLink only
    *   'acceptance_void'           — OVAS-01: the payload carries the RV-042
    *                                 acceptance-void marker
+   *   'recipient_cannot_approve'  — B1: the phone the SMS goes to is not a
+   *                                 recognised approver, holds a role without
+   *                                 proposals:approve, or could not be looked
+   *                                 up (resolveLinkApprover)
    *   'low_confidence+action_class' — both of the first two fired
    */
   suppressApproveLink?: boolean;
@@ -604,6 +715,19 @@ export interface RouteUnsupervisedProposalInput {
    */
   confirmNonCapture?: boolean;
   nowMs?: number;
+}
+
+/** B1 follow-up — what `renderSmsBody` must know about the send beyond the link. */
+export interface UnsupervisedSmsForm {
+  /**
+   * The phone the SMS goes to cannot approve: a backup whose role lacks
+   * proposals:approve (a legacy technician backup), a recipient who is not a
+   * recognised approver, or one whose lookup failed (`resolveLinkApprover`).
+   * The reply handler refuses their Y, N and EDIT alike, so the body is for
+   * their information only (renderProposalSms / renderChainSms
+   * `recipientCannotApprove`).
+   */
+  recipientCannotApprove: boolean;
 }
 
 export interface RouteUnsupervisedProposalResult {
@@ -665,8 +789,35 @@ export async function routeUnsupervisedProposal(
       // signed acceptance; a single tap must never do that. No token; the
       // renderer prints the warning on the review form.
       const voidsAcceptance = voidsCustomerAcceptance(input.payload);
-      const reviewRequired =
-        isLowConfidence || input.suppressApproveLink === true || voidsAcceptance;
+      const reviewFormAnyway = isLowConfidence || input.suppressApproveLink === true || voidsAcceptance;
+      // B1 — who the SMS is for, asked whenever one will go out (the review
+      // form, or a link to mint). A recipient who is not a recognised
+      // approver, or whose role cannot approve (a technician backup), gets no
+      // link — and so does a failed lookup: fail closed to the review form.
+      // B1 follow-up — asked for the review form too: their N and EDIT are
+      // refused as well, so even that form must not ask them for a reply.
+      const smsWillGoOut = reviewFormAnyway || Boolean(deps.secret);
+      let recipient: ResolvedApprover | null | undefined;
+      if (input.recipientVia === 'owner_phone') {
+        // B3-2 — the owner phone is the owner by definition; a lookup here
+        // could only fail and cost the owner their approval link.
+        recipient = { role: 'owner', via: 'owner_phone' };
+      } else if (smsWillGoOut && deps.resolveLinkApprover) {
+        try {
+          recipient = await deps.resolveLinkApprover(input.tenantId, input.ownerPhone);
+        } catch (err) {
+          autoApproveLogger.warn('one-tap recipient lookup failed — sending the review form, no link', {
+            tenantId: input.tenantId,
+            proposalId: input.proposalId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          recipient = null;
+        }
+      }
+      const recipientCannotApprove =
+        recipient === null ||
+        (recipient !== undefined && !hasPermission(recipient.role, 'proposals:approve'));
+      const reviewRequired = reviewFormAnyway || recipientCannotApprove;
 
       let body: string;
       let expiresAt: Date | undefined;
@@ -678,6 +829,16 @@ export async function routeUnsupervisedProposal(
           tenantId: input.tenantId,
           secret: deps.secret,
           ...(input.confirmNonCapture ? { confirm: true } : {}),
+          // B1 — a link to anyone but the owner approves as them.
+          ...(recipient && recipient.via !== 'owner_phone' && recipient.userId
+            ? {
+                approver: {
+                  userId: recipient.userId,
+                  role: recipient.role,
+                  ...(recipient.userRowId ? { userRowId: recipient.userRowId } : {}),
+                },
+              }
+            : {}),
           ...(input.nowMs !== undefined ? { nowMs: input.nowMs } : {}),
         });
         expiresAt = exp;
@@ -686,23 +847,25 @@ export async function routeUnsupervisedProposal(
           : `/p/approve?token=${encodeURIComponent(token)}`;
         const summary = input.summaryText ?? 'A proposal needs your approval';
         body = input.renderSmsBody
-          ? input.renderSmsBody(url)
+          ? input.renderSmsBody(url, { recipientCannotApprove: false })
           : `${summary}. Tap to approve (link expires in 30 min): ${url}`;
         approveLinkExpiresAt = expiresAt;
       } else if (reviewRequired) {
         // Low/very_low confidence OR caller-asserted suppression: no token,
         // no Y-able link. The renderer (renderProposalSms / renderChainSms)
-        // emits the review-in-app form; pass an empty string so the
+        // emits the review-in-app form — or, for a recipient who cannot
+        // approve, the for-your-info form; pass an empty string so the
         // renderSmsBody callback signature is satisfied.
         const summary = input.summaryText ?? 'A proposal needs your approval';
         body = input.renderSmsBody
-          ? input.renderSmsBody('')
+          ? input.renderSmsBody('', { recipientCannotApprove })
           : `${summary}. Review in app.`;
         approveLinkSuppressed = true;
         suppressReason = [
           ...(isLowConfidence ? ['low_confidence'] : []),
           ...(input.suppressApproveLink === true ? ['action_class'] : []),
           ...(voidsAcceptance ? ['acceptance_void'] : []),
+          ...(recipientCannotApprove ? ['recipient_cannot_approve'] : []),
         ].join('+');
       } else {
         // No secret and not low confidence: preserve original behavior —

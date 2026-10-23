@@ -45,8 +45,12 @@ export interface PortalSessionRepository {
    */
   findByTokenHash(tokenHash: string): Promise<PortalSession | null>;
   findById(tenantId: string, id: string): Promise<PortalSession | null>;
-  /** Sets `last_accessed_at = now()`. Best-effort; never throws to caller. */
-  touchLastAccessed(id: string, at: Date): Promise<void>;
+  /**
+   * Sets `last_accessed_at` on the tenant's own session. Tenant-scoped like
+   * `findById`/`revoke`: the caller has the tenant id from the token lookup by
+   * then, so there is no reason to write as the connection principal.
+   */
+  touchLastAccessed(tenantId: string, id: string, at: Date): Promise<void>;
   /** Sets `revoked_at = now()`. Tenant-scoped. */
   revoke(tenantId: string, id: string, at: Date): Promise<PortalSession | null>;
 }
@@ -72,9 +76,9 @@ export class InMemoryPortalSessionRepository implements PortalSessionRepository 
     return { ...r };
   }
 
-  async touchLastAccessed(id: string, at: Date): Promise<void> {
+  async touchLastAccessed(tenantId: string, id: string, at: Date): Promise<void> {
     const r = this.rows.get(id);
-    if (r) r.lastAccessedAt = at;
+    if (r && r.tenantId === tenantId) r.lastAccessedAt = at;
   }
 
   async revoke(tenantId: string, id: string, at: Date): Promise<PortalSession | null> {

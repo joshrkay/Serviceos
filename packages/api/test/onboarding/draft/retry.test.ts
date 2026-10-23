@@ -13,6 +13,7 @@ import { InMemoryAuditRepository } from '../../../src/audit/audit';
 import { assembleTypicalShop } from '../../../src/onboarding/choices/assemble';
 import { InMemoryRegionalPriceTierRepository } from '../../../src/onboarding/choices/price-tiers';
 import { ConflictError, NotFoundError } from '../../../src/shared/errors';
+import { forceStatus } from '../../helpers/proposal-status';
 
 const TENANT = '00000000-0000-0000-0000-00000000e0a1';
 const CLE = { standard: { tripFeeCents: 8900, hourlyRateCents: 15000 }, premium: { tripFeeCents: 12900, hourlyRateCents: 18500 } };
@@ -47,8 +48,7 @@ describe('retryFailedDraftProposals', () => {
 
   /** Force a proposal into a status the way the worker / sweeper would have left it. */
   async function force(id: string, status: ProposalStatus, extra: Partial<Proposal> = {}): Promise<void> {
-    await proposalRepo.update(TENANT, id, {
-      status,
+    forceStatus(proposalRepo, TENANT, id, status, {
       ...(status === 'execution_failed'
         ? {
             approvedAt: new Date(Date.now() - 3_600_000),
@@ -208,9 +208,9 @@ describe('retryFailedDraftProposals', () => {
       expect(message).toContain('DRAFT_RETRY_UNSAFE');
       // Owner-safe wording: says what is wrong in plain words and the way out.
       expect(message).toContain(phrase);
-      // Points only at what exists today (the inbox and Settings), never at a reset.
-      expect(message).toMatch(/Check your inbox, or finish it from Settings\./);
-      expect(message).not.toMatch(/reset/i);
+      // Names the two ways out the shell offers: Start over (POST /draft/reset, S4-5) or Settings.
+      expect(message).toMatch(/Start over to set it up again, or finish it from Settings\.$/);
+      expect(message).not.toMatch(/inbox/i);
       // Owner vocabulary: no internal terms, no vendor names, no AI jargon.
       expect(message).not.toMatch(/proposal|lifecycle|execution_failed|ready_for_review/i);
       expect(message).not.toMatch(/\b(ai|agents?|dashboard|verify|verification|provisioning|stripe|twilio)\b/i);
@@ -249,7 +249,8 @@ describe('retryFailedDraftProposals', () => {
       await force(ids[0], 'execution_failed');
       const snapshot = await proposalRepo.findById(TENANT, ids[0]);
       const find = proposalRepo.findById.bind(proposalRepo);
-      vi.spyOn(proposalRepo, 'findById').mockImplementation(async (t, id) => (id === ids[1] ? null : find(t, id)));
+      const lockedRead = proposalRepo.findByIdsForUpdate.bind(proposalRepo);
+      vi.spyOn(proposalRepo, 'findByIdsForUpdate').mockImplementation(async (t, wanted) => (await lockedRead(t, wanted)).filter((p) => p.id !== ids[1]));
       const reset = vi.spyOn(proposalRepo, 'resetFailedForRetry');
 
       const err = await retry().catch((e: unknown) => e);
@@ -337,22 +338,151 @@ describe('retryFailedDraftProposals', () => {
     expect(await proposalRepo.findByTenant(TENANT)).toHaveLength(2);
   });
 
-  it('locks the draft row before it reads any proposal', async () => {
+  it('locks the draft row, then reads the whole set through the ordered locking read before it writes anything', async () => {
     await force(ids[0], 'execution_failed');
     const order: string[] = [];
     const lock = vi.spyOn(draftRepo, 'getForTenantForUpdate').mockImplementation(async (t) => {
       order.push('lock');
       return InMemoryOnboardingDraftRepository.prototype.getForTenantForUpdate.call(draftRepo, t);
     });
+    const lockedRead = proposalRepo.findByIdsForUpdate.bind(proposalRepo);
+    vi.spyOn(proposalRepo, 'findByIdsForUpdate').mockImplementation(async (t, wanted) => {
+      order.push(`set:${wanted.join(',')}`);
+      return lockedRead(t, wanted);
+    });
     const find = proposalRepo.findById.bind(proposalRepo);
     vi.spyOn(proposalRepo, 'findById').mockImplementation(async (t, id) => {
-      order.push('proposal');
+      order.push('findById');
       return find(t, id);
+    });
+    const reset = proposalRepo.resetFailedForRetry.bind(proposalRepo);
+    vi.spyOn(proposalRepo, 'resetFailedForRetry').mockImplementation(async (t, id) => {
+      order.push('reset');
+      return reset(t, id);
     });
     await retry();
     expect(lock).toHaveBeenCalledTimes(1);
-    expect(order[0]).toBe('lock');
-    expect(order).toContain('proposal');
+    expect(order.slice(0, 3)).toEqual(['lock', `set:${ids.join(',')}`, 'reset']);
+    // The safety check no longer reads row by row: findById only re-reads after the writes.
+    expect(order.indexOf('findById')).toBeGreaterThan(order.indexOf('reset'));
+  });
+
+  // Without a pool getForTenantForUpdate and the set's findByIdsForUpdate
+  // lock nothing, so two retries can read the same set. Each write is already
+  // conditional (resetFailedForRetry only moves a row still execution_failed;
+  // markRetried compares the version read first), so the second retry is
+  // refused before it writes anything.
+  it('two retries that read the same set: one re-queues, the other is NOTHING_FAILED and writes nothing', async () => {
+    await force(ids[0], 'execution_failed');
+    const realRead = proposalRepo.findByIdsForUpdate.bind(proposalRepo);
+    let reads = 0;
+    let allRead!: () => void;
+    const together = new Promise<void>((resolve) => {
+      allRead = resolve;
+    });
+    proposalRepo.findByIdsForUpdate = async (...args: Parameters<typeof realRead>) => {
+      const rows = await realRead(...args);
+      reads += 1;
+      if (reads === 2) allRead();
+      await together;
+      return rows;
+    };
+
+    const results = await Promise.allSettled([retry(), retry()]);
+
+    expect(results.map((r) => r.status)).toEqual(['fulfilled', 'rejected']);
+    expect(((results[1] as PromiseRejectedResult).reason as ConflictError).message).toContain('DRAFT_RETRY_NOTHING_FAILED');
+    expect((results[0] as PromiseFulfilledResult<{ retriedProposalIds: string[] }>).value.retriedProposalIds).toEqual([ids[0]]);
+    expect((await draftRepo.getForTenant(TENANT))!.version).toBe(preApprovalVersion + 2);
+    expect(await events('onboarding.draft_retry')).toHaveLength(1);
+    expect(await events('proposal.retried')).toHaveLength(1);
+    expect((await proposalRepo.findById(TENANT, ids[0]))!.status).toBe('approved');
+  });
+
+  describe('S4: expectedVersion', () => {
+    const retryAt = (expectedVersion: number) => retryFailedDraftProposals(deps(), TENANT, OWNER, { expectedVersion });
+
+    it('the failed screen\'s version re-queues and moves the version by one', async () => {
+      await force(ids[0], 'execution_failed');
+      const v = (await draftRepo.getForTenant(TENANT))!.version;
+      const result = await retryAt(v);
+      expect(result.retriedProposalIds).toEqual([ids[0]]);
+      expect(result.draft.version).toBe(v + 1);
+    });
+
+    it('a stale or ahead version is a VERSION_CONFLICT naming both, checked after the approved check and before the set is read; nothing written', async () => {
+      await force(ids[0], 'execution_failed');
+      const draftBefore = (await draftRepo.getForTenant(TENANT))!;
+      const before = await Promise.all(ids.map((id) => proposalRepo.findById(TENANT, id)));
+      const auditBefore = (await auditRepo.findRecentByTenant(TENANT, { limit: 100 })).length;
+      const setRead = vi.spyOn(proposalRepo, 'findByIdsForUpdate');
+      const byId = vi.spyOn(proposalRepo, 'findById');
+
+      for (const stale of [draftBefore.version - 1, draftBefore.version + 1]) {
+        const err = await retryAt(stale).catch((e: unknown) => e);
+        expect(err).toBeInstanceOf(DraftVersionConflictError);
+        expect(err).toMatchObject({ expected: stale, actual: draftBefore.version });
+      }
+      expect(setRead).not.toHaveBeenCalled();
+      expect(byId).not.toHaveBeenCalled();
+      vi.restoreAllMocks();
+      expect(await draftRepo.getForTenant(TENANT)).toEqual(draftBefore);
+      expect(await Promise.all(ids.map((id) => proposalRepo.findById(TENANT, id)))).toEqual(before);
+      expect((await auditRepo.findRecentByTenant(TENANT, { limit: 100 })).length).toBe(auditBefore);
+    });
+
+    it('guard order: not approved beats a stale version; a stale version beats an unsafe set', async () => {
+      // Unsafe set (failed + undone) AND a stale version: the version answers.
+      await force(ids[0], 'execution_failed');
+      await force(ids[1], 'undone');
+      const v = (await draftRepo.getForTenant(TENANT))!.version;
+      await expect(retryAt(v - 1)).rejects.toBeInstanceOf(DraftVersionConflictError);
+      // The current version on the same set: unsafe.
+      await expect(retryAt(v)).rejects.toThrow(/^DRAFT_RETRY_UNSAFE/);
+
+      // A draft that is not approved with a version that does not match: not approved.
+      draftRepo = new InMemoryOnboardingDraftRepository();
+      await createDraft();
+      await expect(retryAt(99)).rejects.toThrow(/^DRAFT_NOT_APPROVED/);
+    });
+  });
+
+  describe('S4: undoable on the response, over the post-retry set', () => {
+    /** Fixed clock: the original approval was long ago; the retry happens at NOW. */
+    const NOW = Date.now();
+    const retryNow = () => retryFailedDraftProposals({ ...deps(), now: () => new Date(NOW) }, TENANT, OWNER);
+
+    it.each([
+      ['approved', { approvedAt: new Date(NOW - 6000) }],
+      ['executing', { claimedBy: 'worker-1', claimedAt: new Date(NOW - 1000) }],
+      ['executed', { executedAt: new Date(NOW - 1000) }],
+    ] as const)('a partial retry beside a sibling %s is undoable: false, and the sibling row is unchanged', async (status, extra) => {
+      await force(ids[0], 'execution_failed');
+      await force(ids[1], status, extra);
+      const siblingBefore = await proposalRepo.findById(TENANT, ids[1]);
+      const v = (await draftRepo.getForTenant(TENANT))!.version;
+
+      const result = await retryNow();
+
+      expect(result.retriedProposalIds).toEqual([ids[0]]);
+      expect(result.undoable).toBe(false);
+      expect(result.draft.version).toBe(v + 1);
+      expect(await proposalRepo.findById(TENANT, ids[1])).toEqual(siblingBefore);
+    });
+
+    it('a full-set retry is undoable: true (both members in a fresh window)', async () => {
+      for (const id of ids) await force(id, 'execution_failed');
+      const result = await retryNow();
+      expect([...result.retriedProposalIds].sort()).toEqual(ids);
+      expect(result.undoable).toBe(true);
+    });
+
+    it('agrees with the status hint: the same set read four seconds after the retry is no longer undoable', async () => {
+      for (const id of ids) await force(id, 'execution_failed');
+      const late = await retryFailedDraftProposals({ ...deps(), now: () => new Date(Date.now() + 4000) }, TENANT, OWNER);
+      // Evaluated one second ahead, like the status: 4 s + 1 s margin reaches the 5 s window.
+      expect(late.undoable).toBe(false);
+    });
   });
 });
 
@@ -371,6 +501,20 @@ describe('InMemoryOnboardingDraftRepository.markRetried (compare-and-swap)', () 
     const retried = await repo.markRetried(TENANT, approved.version);
     expect(retried).toEqual({ ...approved, version: approved.version + 1, updatedAt: retried.updatedAt });
     expect(await repo.getForTenant(TENANT)).toEqual(retried);
+  });
+
+  // Without a pool nothing locks the row between a retry's read and this
+  // write: two retries of the same attempt that write at once must not both
+  // move the version from it (one version would then name two attempts).
+  it('two writes from the same version that overlap: one moves the version, the other is refused', async () => {
+    const { repo, draft } = await approvedRepo();
+    const approved = await repo.markApproved(TENANT, ['p1', 'p2'], draft.version);
+
+    const results = await Promise.allSettled([repo.markRetried(TENANT, approved.version), repo.markRetried(TENANT, approved.version)]);
+
+    expect(results.map((r) => r.status)).toEqual(['fulfilled', 'rejected']);
+    expect((results[1] as PromiseRejectedResult).reason).toMatchObject({ expected: approved.version, actual: approved.version + 1 });
+    expect((await repo.getForTenant(TENANT))!.version).toBe(approved.version + 1);
   });
 
   it('refuses a stale version, a draft that was never approved, and no draft, and writes nothing', async () => {

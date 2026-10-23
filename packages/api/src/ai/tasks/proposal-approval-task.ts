@@ -53,7 +53,7 @@
  *      `hasUnappliedEditRequest` (same guard as SMS reply and one-tap).
  */
 import type { Proposal, ProposalRepository } from '../../proposals/proposal';
-import type { ApprovalReferenceCheck } from '../../proposals/approval-reference-checks';
+import { isReferenceCheckHold, type ApprovalReferenceCheck } from '../../proposals/approval-reference-checks';
 import { actionClassForProposalType } from '../../proposals/proposal';
 import { formatUsdCentsFixed } from '@ai-service-os/shared';
 import {
@@ -61,10 +61,14 @@ import {
   type ApproveChainSetResult,
   editProposal,
   formatChainSetApprovalMessage,
+  type LinkedStepHoldReason,
   rejectProposal,
   summarizeChainSetResult,
 } from '../../proposals/actions';
-import { routeUnsupervisedProposal } from '../../proposals/auto-approve';
+import {
+  routeUnsupervisedProposal,
+  type RouteUnsupervisedProposalDeps,
+} from '../../proposals/auto-approve';
 import { renderProposalSms, renderReapprovalSms } from '../../proposals/sms/render';
 import { payloadHeadlineCents } from '../../proposals/payload-money';
 import {
@@ -94,7 +98,9 @@ import {
   voiceApprovalPinMatches,
   weakPinReason,
 } from '../../settings/voice-approval-pin';
-import { ValidationError } from '../../shared/errors';
+import { ForbiddenError, ValidationError } from '../../shared/errors';
+import { hasPermission, type Role } from '../../auth/rbac';
+import type { ApprovalSmsRecipient, ResolvedApprover } from '../../proposals/approver-identity';
 import {
   attemptWithinBudget,
   decideTenantPinLock,
@@ -255,8 +261,17 @@ export interface OneTapFallbackDeps {
   secret?: string;
   /** Builds the public approve URL from the signed token. */
   buildApproveUrl?: (token: string) => string;
-  /** Owner/backup mobile resolver (same as unsupervised routing). */
-  resolveOwnerPhone?: (tenantId: string) => Promise<string | null | undefined>;
+  /**
+   * Owner/backup mobile resolver (same as unsupervised routing). B3-2 — it
+   * says whose phone it is, so the owner phone's link needs no lookup.
+   */
+  resolveSmsRecipient?: (tenantId: string) => Promise<ApprovalSmsRecipient | null | undefined>;
+  /**
+   * B1 — who that phone's link approves as (same as unsupervised routing):
+   * the owner link for the owner phone, the backup's own role and id for
+   * theirs, no link for an unrecognised recipient.
+   */
+  resolveLinkApprover?: RouteUnsupervisedProposalDeps['resolveLinkApprover'];
   /** Records the outbound render so SMS Y/N replies anchor to it (P2-034). */
   recordSmsEvent?: (args: {
     tenantId: string;
@@ -315,8 +330,36 @@ export interface VoiceApprovalSessionRef {
   sessionId: string;
   /** RV-070 — MUST be true; re-checked here as defense in depth. */
   ownerSession: boolean;
+  /**
+   * B1 — who this line approves AS, resolved from the caller-ID
+   * (`resolveApproverRole`) — at establishment, and again by the turn
+   * processor before every approval turn (B1 follow-up): the owner
+   * phone is the owner, the backup supervisor's mobile is their own role and
+   * user. Every approve / reject / edit acts with it, so a backup dispatcher
+   * cannot clear the owner-only settings:update gate or attribute their
+   * edits to the owner, and a role without proposals:approve is turned away.
+   * Absent on an owner session that no caller-ID established (the in-app
+   * surface, where only an authenticated owner gets `ownerSession`) — that is
+   * the owner, as before.
+   */
+  approver?: Pick<ResolvedApprover, 'role' | 'userId'>;
   /** Session-level state (challenge lockout etc.) carried from previous turns. */
   sessionState?: VoiceApprovalSessionState;
+}
+
+/**
+ * B1 — the actor and role an approval on this line acts with. The owner keeps
+ * the synthetic voice actor; a backup supervisor acts as themselves.
+ */
+function lineActor(ref: VoiceApprovalSessionRef): { actorId: string; role: Role } {
+  return ref.approver
+    ? { actorId: ref.approver.userId ?? VOICE_APPROVAL_ACTOR_ID, role: ref.approver.role }
+    : { actorId: VOICE_APPROVAL_ACTOR_ID, role: 'owner' };
+}
+
+/** An owner line whose approver can approve at all (B1: not a technician backup). */
+function lineMayApprove(ref: VoiceApprovalSessionRef): boolean {
+  return ref.ownerSession && hasPermission(lineActor(ref).role, 'proposals:approve');
 }
 
 // ─── Readback (payload-derived, never utterance-derived) ────────────────────
@@ -801,7 +844,7 @@ async function alertOwnerOfTenantPinLock(
   let smsSent = false;
   try {
     const sendSms = deps.oneTapFallback?.sendSms;
-    const ownerPhone = await deps.oneTapFallback?.resolveOwnerPhone?.(ref.tenantId);
+    const ownerPhone = (await deps.oneTapFallback?.resolveSmsRecipient?.(ref.tenantId))?.phone;
     if (!sendSms || !ownerPhone) {
       logger.warn('voice approval tenant PIN lock engaged — no owner SMS route for the alert', context);
     } else {
@@ -985,6 +1028,39 @@ const KEEP_FOR_LATER_LINE =
   "No problem — I'll keep it in your review queue for later.";
 
 /**
+ * B3-6 / B4-3 (the SMS reply's twins) — a schedule card whose 48-hour window
+ * passed. A yes is told so, the same words whether this yes found it expiring
+ * (executeApprove) or it already read expired by the time the owner answered
+ * (the hourly sweep flipped it after the readback); it can only be redone.
+ * Any other answer on it changes nothing. Nobody handled it.
+ */
+const EXPIRED_APPROVE_LINE = "Can't approve that one — it expired. You can redo it in the app.";
+const EXPIRED_NO_CHANGE_LINE = 'That one expired — nothing changed.';
+
+/**
+ * B4-3 — a linked step held for its earlier step (approveProposal's
+ * linked-step gate, `details.linkedStepReason`): what to do about that step,
+ * not "it's missing required info" (the gate's `missingFields: ['linkedStep']`
+ * names nothing the owner can fill in). The one-tap page's spoken twin.
+ */
+const LINKED_STEP_LINES: Readonly<Record<LinkedStepHoldReason, string>> = {
+  approve_parent_first:
+    "Can't approve that yet — it depends on an earlier step. Approve that one first; this one unlocks once it has run.",
+  issue_invoice_first:
+    "Can't approve that yet — the invoice this sends has to be issued first. Issue it in the app, then approve this one.",
+  parent_did_not_run:
+    "Can't approve that one — the earlier step it depends on didn't run, so there's nothing for it to act on.",
+};
+
+/** The linked-step gate's hold reason on an approval refusal, when it is one we have a line for. */
+function linkedStepHoldReason(details: Record<string, unknown> | undefined): LinkedStepHoldReason | undefined {
+  const reason = details?.linkedStepReason;
+  return typeof reason === 'string' && Object.hasOwn(LINKED_STEP_LINES, reason)
+    ? (reason as LinkedStepHoldReason)
+    : undefined;
+}
+
+/**
  * `totalCount` is the PRE-cap candidate count so the spoken line is
  * truthful when more matched than we read out ("I found 8 — here are
  * the first 5"), instead of misreporting the capped list length.
@@ -1021,13 +1097,14 @@ async function sendOneTapFallback(
     return false;
   }
   try {
-    const ownerPhone = await fallback.resolveOwnerPhone?.(ref.tenantId);
+    const recipient = await fallback.resolveSmsRecipient?.(ref.tenantId);
     const result = await routeUnsupervisedProposal(
       {
         auditRepo: deps.auditRepo,
         ...(fallback.sendSms ? { sendSms: fallback.sendSms } : {}),
         ...(fallback.secret ? { secret: fallback.secret } : {}),
         ...(fallback.buildApproveUrl ? { buildApproveUrl: fallback.buildApproveUrl } : {}),
+        ...(fallback.resolveLinkApprover ? { resolveLinkApprover: fallback.resolveLinkApprover } : {}),
         ...(fallback.recordSmsEvent
           ? {
               onSmsSent: async ({
@@ -1058,16 +1135,18 @@ async function sendOneTapFallback(
         // requested, so the minted one-tap link is flagged to clear the
         // redeem-side class gate. An ordinary digest/queue link is not.
         confirmNonCapture: true,
-        ...(ownerPhone ? { ownerPhone } : {}),
+        // B3-2 — and whose phone it is (the owner phone needs no lookup).
+        ...(recipient ? { ownerPhone: recipient.phone, recipientVia: recipient.via } : {}),
         summaryText: proposal.summary,
-        renderSmsBody: (approveUrl: string) =>
+        renderSmsBody: (approveUrl: string, { recipientCannotApprove }) =>
           renderProposalSms(
             {
               proposalType: proposal.proposalType,
               summary: proposal.summary,
               payload: proposal.payload,
             },
-            { approveUrl: approveUrl || undefined },
+            // B1 follow-up — a recipient who cannot approve is asked for no reply.
+            { approveUrl: approveUrl || undefined, recipientCannotApprove },
           ),
         // RV-074 (F-4) — pass payload so the routing site can guard
         // low/very_low proposals against one-tap Y-able links.
@@ -1204,15 +1283,17 @@ async function prepareResolvedTarget(
   };
 }
 
+function isReviewable(proposal: Proposal): boolean {
+  return proposal.status === 'draft' || proposal.status === 'ready_for_review';
+}
+
 async function fetchReviewable(
   deps: VoiceApprovalDeps,
   tenantId: string,
   proposalId: string,
 ): Promise<Proposal | null> {
   const proposal = await deps.proposalRepo.findById(tenantId, proposalId);
-  if (!proposal) return null;
-  if (proposal.status !== 'draft' && proposal.status !== 'ready_for_review') return null;
-  return proposal;
+  return proposal && isReviewable(proposal) ? proposal : null;
 }
 
 async function executeApprove(
@@ -1246,13 +1327,14 @@ async function executeApprove(
   let approvedCount = 0;
   let skippedCount = 0;
   let skipped: ApproveChainSetResult['skipped'] = [];
+  const actor = lineActor(ref);
   try {
     const result = await approveChainSet(
       deps.proposalRepo,
       ref.tenantId,
       proposalId,
-      VOICE_APPROVAL_ACTOR_ID,
-      'owner',
+      actor.actorId,
+      actor.role,
       deps.auditRepo,
       'voice', // RV-073 — voice approval channel
       deps.smsEventRepo
@@ -1267,12 +1349,50 @@ async function executeApprove(
     skipped = summary.skipped;
   } catch (err) {
     if (err instanceof ValidationError) {
+      // B3-5 — the same reading as the SMS Y reply: a card with no unfilled
+      // field was held by the approval-time reference checks (its job belongs
+      // to another customer, an id names nothing): nothing is missing,
+      // something on it needs fixing in the app.
+      // B3-6 (the SMS reply's twin) — a schedule card whose 48-hour window
+      // passed before the hourly sweep: approveProposal marks it expired and
+      // refuses naming no fields. Nothing is missing; it can only be redone.
+      // B4-3 — a linked step held for its earlier step: say what to do about
+      // that step (its `missingFields: ['linkedStep']` names nothing to fill).
+      const linkedStepReason = linkedStepHoldReason(err.details);
+      const card = linkedStepReason
+        ? null
+        : await deps.proposalRepo.findById(ref.tenantId, proposalId).catch(() => null);
+      const heldBy = linkedStepReason
+        ? 'linked_step'
+        : card !== null && isReferenceCheckHold(err.details, card)
+          ? 'reference_check'
+          : card?.status === 'expired'
+            ? 'expired'
+            : undefined;
       await audit(deps, ref, 'proposal.voice_approve_blocked', proposalId, {
         error: err.message,
+        ...(heldBy ? { heldBy } : {}),
+        ...(linkedStepReason ? { linkedStepReason } : {}),
       });
       return {
-        speak:
-          "Can't approve that yet — it's missing required info. Finish it in your review queue.",
+        speak: linkedStepReason
+          ? LINKED_STEP_LINES[linkedStepReason]
+          : heldBy === 'reference_check'
+            ? "Can't approve that yet — something on it needs fixing first. Fix it in the app."
+            : heldBy === 'expired'
+              ? EXPIRED_APPROVE_LINE
+              : "Can't approve that yet — it's missing required info. Finish it in your review queue.",
+        pending: null,
+        outcome: 'approve_failed',
+        proposalId,
+      };
+    }
+    if (err instanceof ForbiddenError) {
+      // B1 — this line's approver (a backup dispatcher) does not reach this
+      // card (a settings change). Truthful, and nothing was approved.
+      await audit(deps, ref, 'proposal.voice_approve_forbidden', proposalId, { role: actor.role });
+      return {
+        speak: 'You can’t approve that one — the owner needs to. It’s still in the review queue.',
         pending: null,
         outcome: 'approve_failed',
         proposalId,
@@ -1311,13 +1431,14 @@ async function executeReject(
   proposalId: string,
 ): Promise<VoiceApprovalTurnResult> {
   let rejected: Proposal;
+  const actor = lineActor(ref);
   try {
     rejected = await rejectProposal(
       deps.proposalRepo,
       ref.tenantId,
       proposalId,
-      VOICE_APPROVAL_ACTOR_ID,
-      'owner',
+      actor.actorId,
+      actor.role,
       'Rejected by voice approval',
       undefined,
       deps.appointmentRepo,
@@ -1363,9 +1484,11 @@ export async function startVoiceApproval(
   input: StartVoiceApprovalInput,
 ): Promise<VoiceApprovalTurnResult> {
   // Defense in depth — routing already gates on ownerSession (RV-070).
-  if (!input.ownerSession) {
+  // B1 — and the line's approver must be able to approve at all.
+  if (!lineMayApprove(input)) {
     await audit(deps, input, 'proposal.voice_approval_denied_not_owner', '', {
       action: input.action,
+      ...(input.ownerSession ? { role: lineActor(input).role } : {}),
     });
     return {
       speak: 'I can’t take approvals on this line. How else can I help?',
@@ -1536,9 +1659,9 @@ async function deliverVoiceEditReapproval(
 ): Promise<void> {
   const fallback = deps.oneTapFallback;
   let ownerPhone: string | null | undefined;
-  if (fallback?.sendSms && fallback.resolveOwnerPhone) {
+  if (fallback?.sendSms && fallback.resolveSmsRecipient) {
     try {
-      ownerPhone = await fallback.resolveOwnerPhone(ref.tenantId);
+      ownerPhone = (await fallback.resolveSmsRecipient(ref.tenantId))?.phone;
     } catch {
       ownerPhone = undefined;
     }
@@ -1579,6 +1702,26 @@ export interface StartVoiceEditInput extends VoiceApprovalSessionRef {
 }
 
 /**
+ * The owner's instruction, stamped on sourceContext for the review queue.
+ * R2-2 — added to the row as it stands (mergeSourceContext), never written
+ * back from `proposal`: that copy was read before the interpreter's LLM
+ * call, so a pick that landed in between had its picker put back and its
+ * resolution dropped.
+ */
+async function stampVoiceEditNote(
+  deps: VoiceApprovalDeps,
+  input: StartVoiceEditInput,
+  proposalId: string,
+): Promise<void> {
+  await deps.proposalRepo.mergeSourceContext(input.tenantId, proposalId, {
+    pendingVoiceEditRequest: {
+      instruction: input.instruction,
+      receivedAt: new Date().toISOString(),
+    },
+  });
+}
+
+/**
  * RV-225 — "change the second line to $200" on a verified owner line.
  *
  *   1. Owner gate (defense in depth — routing already gates).
@@ -1597,7 +1740,7 @@ export async function startVoiceEdit(
   deps: VoiceApprovalDeps,
   input: StartVoiceEditInput,
 ): Promise<VoiceApprovalTurnResult> {
-  if (!input.ownerSession) {
+  if (!lineMayApprove(input)) {
     await audit(deps, input, 'proposal.voice_edit_denied_not_owner', '');
     return {
       speak: 'I can’t take changes to pending work on this line. How else can I help?',
@@ -1682,15 +1825,7 @@ export async function startVoiceEdit(
           // to change — parity with the edit_recorded path and the SMS handler.
           // The edit_request was already recorded above (record-first parity),
           // so approval is blocked on every channel until the queue resolves it.
-          await deps.proposalRepo.update(input.tenantId, proposal.id, {
-            sourceContext: {
-              ...(proposal.sourceContext ?? {}),
-              pendingVoiceEditRequest: {
-                instruction: input.instruction,
-                receivedAt: new Date().toISOString(),
-              },
-            },
-          });
+          await stampVoiceEditNote(deps, input, proposal.id);
           return {
             speak:
               'That one’s waiting on an earlier step — approval by text is paused until then. Edit it after that step runs.',
@@ -1705,8 +1840,8 @@ export async function startVoiceEdit(
           deps.proposalRepo,
           input.tenantId,
           proposal.id,
-          VOICE_APPROVAL_ACTOR_ID,
-          'owner',
+          lineActor(input).actorId,
+          lineActor(input).role,
           delta,
           deps.auditRepo,
         );
@@ -1733,15 +1868,7 @@ export async function startVoiceEdit(
   // stays recorded (edit_request — approval is blocked on every channel)
   // and the instruction is stamped on sourceContext so the review queue
   // shows WHAT the owner asked to change. Never a silent guess.
-  await deps.proposalRepo.update(input.tenantId, proposal.id, {
-    sourceContext: {
-      ...(proposal.sourceContext ?? {}),
-      pendingVoiceEditRequest: {
-        instruction: input.instruction,
-        receivedAt: new Date().toISOString(),
-      },
-    },
-  });
+  await stampVoiceEditNote(deps, input, proposal.id);
   await audit(deps, input, 'proposal.voice_edit_requested', proposal.id);
   return {
     speak: EDIT_RECORDED_LINE,
@@ -1780,12 +1907,23 @@ function strictConfirmDecision(
   return classifyStrictConfirm(utterance);
 }
 
+/**
+ * B4-3 — is this answer a yes to approving? At the readback (confirm) it is a
+ * strict affirmative on an approve; at the code prompt (challenge) the yes was
+ * already given. Decides which expiry line an answer on an expired card hears.
+ */
+function saysYesToApprove(pending: PendingVoiceApproval, utterance: string): boolean {
+  if (pending.action !== 'approve') return false;
+  return pending.stage === 'challenge' || strictConfirmDecision('approve', utterance) === 'approve';
+}
+
 export async function continueVoiceApproval(
   deps: VoiceApprovalDeps,
   input: ContinueVoiceApprovalInput,
 ): Promise<VoiceApprovalTurnResult> {
-  if (!input.ownerSession) {
-    // The session flag cannot change mid-call, but fail closed anyway.
+  if (!lineMayApprove(input)) {
+    // B1 follow-up — the line is re-checked every turn: a backup demoted,
+    // deactivated or replaced since the readback is refused here.
     return {
       speak: 'I can’t take approvals on this line. How else can I help?',
       pending: null,
@@ -1826,11 +1964,26 @@ export async function continueVoiceApproval(
 
   // The target is re-fetched every turn — a meanwhile-handled proposal
   // (dashboard approval, SMS Y) fails closed with a truthful line.
-  const proposal = await fetchReviewable(deps, input.tenantId, pending.proposalId);
+  const card = await deps.proposalRepo.findById(input.tenantId, pending.proposalId);
+  const proposal = card && isReviewable(card) ? card : null;
   if (!proposal) {
-    await audit(deps, input, 'proposal.voice_approval_stale_target', pending.proposalId);
+    await audit(
+      deps,
+      input,
+      'proposal.voice_approval_stale_target',
+      pending.proposalId,
+      card ? { proposalStatus: card.status } : {},
+    );
     return {
-      speak: 'That one was already handled — nothing changed.',
+      // B4-3 — nobody handled an expired card (the hourly sweep flipped it
+      // after the readback); it ran out of time. A yes to approve hears the
+      // same words as a yes that finds it expiring.
+      speak:
+        card?.status === 'expired'
+          ? saysYesToApprove(pending, input.utterance)
+            ? EXPIRED_APPROVE_LINE
+            : EXPIRED_NO_CHANGE_LINE
+          : 'That one was already handled — nothing changed.',
       pending: null,
       outcome: 'not_found',
       proposalId: pending.proposalId,
@@ -2367,7 +2520,7 @@ export async function startVoiceBatchApproval(
   deps: VoiceApprovalDeps,
   input: StartVoiceBatchApprovalInput,
 ): Promise<VoiceApprovalTurnResult> {
-  if (!input.ownerSession) {
+  if (!lineMayApprove(input)) {
     await audit(deps, input, 'proposal.voice_approval_denied_not_owner', '', {
       action: 'approve',
       batch: true,
@@ -2414,7 +2567,7 @@ export async function continueVoiceBatchApproval(
   deps: VoiceApprovalDeps,
   input: ContinueVoiceApprovalInput,
 ): Promise<VoiceApprovalTurnResult> {
-  if (!input.ownerSession) {
+  if (!lineMayApprove(input)) {
     return {
       speak: 'I can’t take approvals on this line. How else can I help?',
       pending: null,
@@ -2457,6 +2610,7 @@ export async function continueVoiceBatchApproval(
         tenantId: input.tenantId,
         sessionId: input.sessionId,
         ownerSession: input.ownerSession,
+        ...(input.approver ? { approver: input.approver } : {}),
         sessionState: state,
         reference: referenceForProposal(proposal),
         instruction: utterance,

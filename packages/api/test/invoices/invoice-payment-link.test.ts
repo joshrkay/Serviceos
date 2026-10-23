@@ -573,7 +573,7 @@ describe('P0-9 mint leg — link persist is guarded against concurrent invoice m
     const provider = {
       generateLink: async () => {
         // The competing mint persists its link first (same balance).
-        await invoiceRepo.setPaymentLinkIfPayable(
+        await invoiceRepo.attachPaymentLink(
           TENANT,
           invoiceId,
           { linkId: 'plink_winner', linkUrl: 'https://pay.stripe.com/winner' },
@@ -682,7 +682,7 @@ describe('Codex P1 — void deactivation uses the POST-transition snapshot', () 
         if (prop === 'update' && !mintInjected) {
           return async (tenantId: string, id: string, updates: unknown) => {
             mintInjected = true;
-            await inner.setPaymentLinkIfPayable(
+            await inner.attachPaymentLink(
               tenantId,
               id,
               { linkId: 'plink_mid_transition', linkUrl: 'https://pay.stripe.com/mid' },
@@ -713,5 +713,246 @@ describe('Codex P1 — void deactivation uses the POST-transition snapshot', () 
     expect(deactivated).toEqual(['plink_mid_transition']);
     const reloaded = await inner.findById('tenant-1', invoice.id);
     expect(reloaded!.stripePaymentLinkId).toBeUndefined();
+  });
+});
+
+describe('S5a-3 — mode-change deactivations: reasons, inactive message, cleanup claim', () => {
+  const TENANT = '00000000-0000-4000-8000-0000000005a3';
+  const MESSAGE = 'Acme HVAC collects payment in person. Please settle up with Dana when the work is done.';
+
+  async function seedLinked(
+    repo: InMemoryInvoiceRepository,
+    id: string,
+    overrides: Partial<import('../../src/invoices/invoice').Invoice> = {},
+  ) {
+    const items = [{ description: 'Labor', quantity: 1, unitPriceCents: 7000, taxable: true }];
+    return repo.create({
+      id,
+      tenantId: TENANT,
+      jobId: 'job-s5a3',
+      invoiceNumber: `INV-${id.slice(-4)}`,
+      status: 'open',
+      lineItems: items as never,
+      totals: calculateDocumentTotals(items as never),
+      amountPaidCents: 0,
+      amountDueCents: 7000,
+      createdBy: 'user-1',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      stripePaymentLinkId: `plink_${id.slice(-4)}`,
+      stripePaymentLinkUrl: `https://pay.stripe.com/${id.slice(-4)}`,
+      ...overrides,
+    });
+  }
+
+  it.each(['payment_mode_changed', 'payment_mode_changed_during_checkout'] as const)(
+    'reason %s lands in the deactivation audit metadata, the message reaches the provider, link and claim are cleared',
+    async (reason) => {
+      const { deactivateInvoicePaymentLink } = await import('../../src/invoices/invoice-payment-link');
+      const { InMemoryAuditRepository } = await import('../../src/audit/audit');
+      const repo = new InMemoryInvoiceRepository();
+      const auditRepo = new InMemoryAuditRepository();
+      const invoice = await seedLinked(repo, '00000000-0000-4000-8000-00000000a301', {
+        cleanupClaimedAt: new Date(),
+      });
+      const provider = new MockPaymentLinkProvider();
+
+      const result = await deactivateInvoicePaymentLink({
+        tenantId: TENANT,
+        invoice,
+        reason,
+        invoiceRepo: repo,
+        provider,
+        auditRepo,
+        inactiveMessage: MESSAGE,
+        claimed: true,
+      });
+
+      expect(result).toEqual({ deactivated: true });
+      expect(provider.deactivations).toEqual([
+        { linkId: invoice.stripePaymentLinkId, stripeAccountId: undefined, inactiveMessage: MESSAGE },
+      ]);
+      const fresh = await repo.findById(TENANT, invoice.id);
+      expect(fresh!.stripePaymentLinkId).toBeUndefined();
+      expect(fresh!.cleanupClaimedAt).toBeUndefined();
+      const events = auditRepo.getAll();
+      expect(events.map((e) => e.eventType)).toEqual(['invoice.payment_link_deactivated']);
+      expect(events[0].metadata).toMatchObject({ reason, stripePaymentLinkId: invoice.stripePaymentLinkId });
+    },
+  );
+
+  it('a failed provider call on a claimed invoice releases the claim and keeps the link columns', async () => {
+    const { deactivateInvoicePaymentLink } = await import('../../src/invoices/invoice-payment-link');
+    const { InMemoryAuditRepository } = await import('../../src/audit/audit');
+    const repo = new InMemoryInvoiceRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const invoice = await seedLinked(repo, '00000000-0000-4000-8000-00000000a302', {
+      cleanupClaimedAt: new Date(),
+    });
+    const provider = {
+      generateLink: async () => { throw new Error('not used'); },
+      deactivateLink: async () => { throw new Error('stripe down'); },
+    };
+
+    const result = await deactivateInvoicePaymentLink({
+      tenantId: TENANT,
+      invoice,
+      reason: 'payment_mode_changed',
+      invoiceRepo: repo,
+      provider,
+      auditRepo,
+      claimed: true,
+    });
+
+    expect(result).toEqual({ deactivated: false });
+    const fresh = await repo.findById(TENANT, invoice.id);
+    expect(fresh!.stripePaymentLinkId).toBe(invoice.stripePaymentLinkId);
+    expect(fresh!.cleanupClaimedAt).toBeUndefined();
+    const [event] = auditRepo.getAll();
+    expect(event.eventType).toBe('invoice.payment_link_deactivation_failed');
+    expect(event.metadata).toMatchObject({ reason: 'payment_mode_changed', error: 'stripe down' });
+  });
+
+  it('a failed provider call WITHOUT claimed leaves any marker alone (existing callers unchanged)', async () => {
+    const { deactivateInvoicePaymentLink } = await import('../../src/invoices/invoice-payment-link');
+    const repo = new InMemoryInvoiceRepository();
+    const claimedAt = new Date('2026-10-19T03:00:00Z');
+    const invoice = await seedLinked(repo, '00000000-0000-4000-8000-00000000a303', { cleanupClaimedAt: claimedAt });
+    const released: unknown[] = [];
+    const spy = new Proxy(repo, {
+      get(target, prop, receiver) {
+        if (prop === 'releaseCleanupClaim') {
+          return async (...args: unknown[]) => { released.push(args); return true; };
+        }
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    await deactivateInvoicePaymentLink({
+      tenantId: TENANT,
+      invoice,
+      reason: 'voided',
+      invoiceRepo: spy,
+      provider: {
+        generateLink: async () => { throw new Error('not used'); },
+        deactivateLink: async () => { throw new Error('stripe down'); },
+      },
+    });
+    expect(released).toEqual([]);
+    expect((await repo.findById(TENANT, invoice.id))!.cleanupClaimedAt).toEqual(claimedAt);
+  });
+
+  it('a release that throws is recorded on the failure event, never thrown', async () => {
+    const { deactivateInvoicePaymentLink } = await import('../../src/invoices/invoice-payment-link');
+    const { InMemoryAuditRepository } = await import('../../src/audit/audit');
+    const repo = new InMemoryInvoiceRepository();
+    const auditRepo = new InMemoryAuditRepository();
+    const invoice = await seedLinked(repo, '00000000-0000-4000-8000-00000000a304', { cleanupClaimedAt: new Date() });
+    const failingRelease = new Proxy(repo, {
+      get(target, prop, receiver) {
+        if (prop === 'releaseCleanupClaim') return async () => { throw new Error('db down'); };
+        return Reflect.get(target, prop, receiver);
+      },
+    });
+    const result = await deactivateInvoicePaymentLink({
+      tenantId: TENANT,
+      invoice,
+      reason: 'payment_mode_changed',
+      invoiceRepo: failingRelease,
+      provider: {
+        generateLink: async () => { throw new Error('not used'); },
+        deactivateLink: async () => { throw new Error('stripe down'); },
+      },
+      auditRepo,
+      claimed: true,
+    });
+    expect(result).toEqual({ deactivated: false });
+    const [event] = auditRepo.getAll();
+    expect(event.eventType).toBe('invoice.payment_link_deactivation_failed');
+    expect(event.metadata).toMatchObject({ error: 'stripe down', claimReleaseError: 'db down' });
+  });
+});
+
+describe('S5a-3 — InMemoryInvoiceRepository cleanup primitives mirror Pg', () => {
+  const TENANT = '00000000-0000-4000-8000-0000000005a4';
+  const OTHER = '00000000-0000-4000-8000-0000000005a5';
+
+  function invoiceRow(
+    id: string,
+    tenantId: string,
+    status: import('../../src/invoices/invoice').InvoiceStatus,
+    linkId?: string,
+    cleanupClaimedAt?: Date,
+  ): import('../../src/invoices/invoice').Invoice {
+    const items = [{ description: 'Labor', quantity: 1, unitPriceCents: 1000, taxable: true }];
+    return {
+      id,
+      tenantId,
+      jobId: 'job-1',
+      invoiceNumber: `INV-${id.slice(-2)}`,
+      status,
+      lineItems: items as never,
+      totals: calculateDocumentTotals(items as never),
+      amountPaidCents: 0,
+      amountDueCents: 1000,
+      createdBy: 'u',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      stripePaymentLinkId: linkId,
+      stripePaymentLinkUrl: linkId ? `https://pay.stripe.com/${linkId}` : undefined,
+      cleanupClaimedAt,
+    };
+  }
+
+  it('findOpenWithPaymentLink: only open/partially_paid rows holding a link, this tenant, ordered by id, paged', async () => {
+    const repo = new InMemoryInvoiceRepository();
+    const id = (n: number) => `00000000-0000-4000-8000-0000000000${String(n).padStart(2, '0')}`;
+    await repo.create(invoiceRow(id(5), TENANT, 'open', 'plink_5'));
+    await repo.create(invoiceRow(id(1), TENANT, 'partially_paid', 'plink_1'));
+    await repo.create(invoiceRow(id(3), TENANT, 'open', 'plink_3'));
+    await repo.create(invoiceRow(id(2), TENANT, 'open')); // no link
+    await repo.create(invoiceRow(id(4), TENANT, 'paid', 'plink_4'));
+    await repo.create(invoiceRow(id(6), TENANT, 'void', 'plink_6'));
+    await repo.create(invoiceRow(id(7), TENANT, 'draft', 'plink_7'));
+    await repo.create(invoiceRow(id(8), OTHER, 'open', 'plink_8'));
+
+    const first = await repo.findOpenWithPaymentLink(TENANT, null, 2);
+    expect(first.map((i) => i.id)).toEqual([id(1), id(3)]);
+    const second = await repo.findOpenWithPaymentLink(TENANT, id(3), 2);
+    expect(second.map((i) => i.id)).toEqual([id(5)]);
+    expect(await repo.findOpenWithPaymentLink(TENANT, id(5), 2)).toEqual([]);
+    expect((await repo.findOpenWithPaymentLink(OTHER, null, 10)).map((i) => i.id)).toEqual([id(8)]);
+  });
+
+  it('releaseCleanupClaim clears the marker only while the row still holds that link', async () => {
+    const repo = new InMemoryInvoiceRepository();
+    const id = '00000000-0000-4000-8000-0000000000a1';
+    const claimedAt = new Date();
+    await repo.create(invoiceRow(id, TENANT, 'open', 'plink_A', claimedAt));
+    expect(await repo.releaseCleanupClaim(TENANT, id, 'plink_B')).toBe(false);
+    expect((await repo.findById(TENANT, id))!.cleanupClaimedAt).toEqual(claimedAt);
+    expect(await repo.releaseCleanupClaim(OTHER, id, 'plink_A')).toBe(false);
+    expect(await repo.releaseCleanupClaim(TENANT, id, 'plink_A')).toBe(true);
+    const fresh = await repo.findById(TENANT, id);
+    expect(fresh!.cleanupClaimedAt).toBeUndefined();
+    expect(fresh!.stripePaymentLinkId).toBe('plink_A');
+  });
+
+  it('every write of the link columns drops the marker: CAS clear, guarded attach, plain update', async () => {
+    const repo = new InMemoryInvoiceRepository();
+    const a = '00000000-0000-4000-8000-0000000000b1';
+    const b = '00000000-0000-4000-8000-0000000000b2';
+    const c = '00000000-0000-4000-8000-0000000000b3';
+    await repo.create(invoiceRow(a, TENANT, 'open', 'plink_a', new Date()));
+    await repo.create(invoiceRow(b, TENANT, 'open', undefined, new Date()));
+    await repo.create(invoiceRow(c, TENANT, 'open', 'plink_c', new Date()));
+
+    expect(await repo.clearPaymentLinkIfMatches(TENANT, a, 'plink_a')).toBe(true);
+    expect((await repo.findById(TENANT, a))!.cleanupClaimedAt).toBeUndefined();
+
+    await repo.attachPaymentLink(TENANT, b, { linkId: 'plink_b', linkUrl: 'https://x/b' }, 1000, new Date());
+    expect((await repo.findById(TENANT, b))!.cleanupClaimedAt).toBeUndefined();
+
+    await repo.update(TENANT, c, { stripePaymentLinkId: 'plink_c2', stripePaymentLinkUrl: 'https://x/c2', updatedAt: new Date() });
+    expect((await repo.findById(TENANT, c))!.cleanupClaimedAt).toBeUndefined();
   });
 });

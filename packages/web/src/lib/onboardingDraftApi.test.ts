@@ -1,14 +1,16 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { OnboardingDraftSchema } from '@ai-service-os/shared';
+import { ONBOARDING_DRAFT_REFUSALS, OnboardingDraftSchema } from '@ai-service-os/shared';
 import draftJson from '../components/onboarding/v3/__fixtures__/draft.plumbing-cle.json';
 import {
   OnboardingDraftApiError,
   approveDraft,
   createDraft,
   getDraft,
+  resetDraft,
   retryDraft,
   setMetro,
   stageChoice,
+  undoDraft,
 } from './onboardingDraftApi';
 import columbusJson from '../components/onboarding/v3/__fixtures__/draft.plumbing-cmh.json';
 
@@ -79,9 +81,9 @@ describe('onboardingDraftApi', () => {
 
   it('setMetro carries DRAFT_METRO_LOCKED and VERSION_CONFLICT apart', async () => {
     apiFetch.mockResolvedValueOnce(json(409, { error: 'CONFLICT', message: 'DRAFT_METRO_LOCKED: a choice is already staged, so the city can no longer change here' }));
-    await expect(setMetro(apiFetch, 'CMH', 1)).rejects.toMatchObject({ status: 409, versionConflict: false, metroLocked: true });
+    await expect(setMetro(apiFetch, 'CMH', 1)).rejects.toMatchObject({ status: 409, versionConflict: false, refusal: 'DRAFT_METRO_LOCKED' });
     apiFetch.mockResolvedValueOnce(json(409, { error: 'CONFLICT', message: 'VERSION_CONFLICT: expected 1, found 2; re-read the draft' }));
-    await expect(setMetro(apiFetch, 'CMH', 1)).rejects.toMatchObject({ status: 409, versionConflict: true, metroLocked: false });
+    await expect(setMetro(apiFetch, 'CMH', 1)).rejects.toMatchObject({ status: 409, versionConflict: true, refusal: 'VERSION_CONFLICT' });
   });
 
   it('approveDraft POSTs /approve and returns both proposal ids', async () => {
@@ -106,21 +108,70 @@ describe('onboardingDraftApi', () => {
     expect(err).toMatchObject({ status: 409, versionConflict: true });
   });
 
-  it('retryDraft POSTs /retry with no body and returns the re-queued ids', async () => {
-    const approved = { ...draftJson, status: 'approved', version: 2, proposalIds: ['p1', 'p2'], approvedAt: '2026-10-18T10:05:00.000Z' };
-    apiFetch.mockResolvedValueOnce(json(200, { draft: approved, retriedProposalIds: ['p2'] }));
-    const res = await retryDraft(apiFetch);
+  const approvedJson = { ...draftJson, status: 'approved', version: 2, proposalIds: ['p1', 'p2'], approvedAt: '2026-10-18T10:05:00.000Z' };
+  const editableJson = { ...draftJson, version: 3 };
+
+  it('retryDraft POSTs /retry with the version the failed screen holds and returns the re-queued ids and whether Undo can still run', async () => {
+    apiFetch.mockResolvedValueOnce(json(200, { draft: { ...approvedJson, version: 3 }, retriedProposalIds: ['p2'], undoable: false }));
+    const res = await retryDraft(apiFetch, 2);
     expect(res.retriedProposalIds).toEqual(['p2']);
-    expect(res.draft.status).toBe('approved');
-    expect(apiFetch).toHaveBeenCalledWith('/api/onboarding/draft/retry', { method: 'POST' });
+    expect(res.draft.version).toBe(3);
+    expect(res.undoable).toBe(false);
+    expect(apiFetch).toHaveBeenCalledWith('/api/onboarding/draft/retry', { method: 'POST', body: JSON.stringify({ expectedVersion: 2 }) });
   });
 
   it('retryDraft throws the API error for a 409 and for a body that does not match the contract', async () => {
     apiFetch.mockResolvedValueOnce(json(409, { error: 'CONFLICT', message: 'DRAFT_RETRY_NOTHING_FAILED: no proposal is in execution_failed' }));
-    await expect(retryDraft(apiFetch)).rejects.toMatchObject({ status: 409, code: 'CONFLICT', versionConflict: false });
+    await expect(retryDraft(apiFetch, 2)).rejects.toMatchObject({ status: 409, code: 'CONFLICT', versionConflict: false, refusal: 'DRAFT_RETRY_NOTHING_FAILED' });
 
     apiFetch.mockResolvedValueOnce(json(200, { draft: draftJson }));
-    await expect(retryDraft(apiFetch)).rejects.toMatchObject({ code: 'UNEXPECTED_RESPONSE' });
+    await expect(retryDraft(apiFetch, 2)).rejects.toMatchObject({ code: 'UNEXPECTED_RESPONSE' });
+  });
+
+  it('undoDraft POSTs /undo with the version the saving screen holds and returns the draft, editable again', async () => {
+    apiFetch.mockResolvedValueOnce(json(200, { draft: editableJson }));
+    const res = await undoDraft(apiFetch, 2);
+    expect(res.draft).toEqual(OnboardingDraftSchema.parse(editableJson));
+    expect(apiFetch).toHaveBeenCalledWith('/api/onboarding/draft/undo', { method: 'POST', body: JSON.stringify({ expectedVersion: 2 }) });
+
+    apiFetch.mockResolvedValueOnce(json(200, { draft: editableJson, extra: true }));
+    await expect(undoDraft(apiFetch, 2)).rejects.toMatchObject({ code: 'UNEXPECTED_RESPONSE' });
+  });
+
+  it('resetDraft POSTs /reset with the version the stopped screen holds and returns the draft with its answers', async () => {
+    const answered = { ...editableJson, choices: { greeting: { option: 'b' } } };
+    apiFetch.mockResolvedValueOnce(json(200, { draft: answered }));
+    const res = await resetDraft(apiFetch, 4);
+    expect(res.draft.choices).toEqual({ greeting: { option: 'b' } });
+    expect(apiFetch).toHaveBeenCalledWith('/api/onboarding/draft/reset', { method: 'POST', body: JSON.stringify({ expectedVersion: 4 }) });
+  });
+
+  it('names the refusal from the message prefix for every 409 the draft routes answer, and the reason a reset was refused', async () => {
+    for (const code of ONBOARDING_DRAFT_REFUSALS) {
+      apiFetch.mockResolvedValueOnce(json(409, { error: 'CONFLICT', message: `${code}: in plain words` }));
+      const err = (await undoDraft(apiFetch, 2).catch((e: unknown) => e)) as OnboardingDraftApiError;
+      expect(err.refusal, code).toBe(code);
+      expect(err.resetReason, code).toBeNull();
+    }
+    for (const reason of ['applied', 'executing'] as const) {
+      apiFetch.mockResolvedValueOnce(
+        json(409, { error: 'CONFLICT', message: 'DRAFT_RESET_REFUSED: Part of your setup is already saved.', details: { reason, statuses: [] } }),
+      );
+      const err = (await resetDraft(apiFetch, 2).catch((e: unknown) => e)) as OnboardingDraftApiError;
+      expect(err).toMatchObject({ refusal: 'DRAFT_RESET_REFUSED', resetReason: reason });
+    }
+    // Not a refusal: a code the routes never send, a 409 with no prefix, a prefix on another status.
+    for (const [status, message] of [
+      [409, 'SOMETHING_ELSE: no'],
+      [409, 'HTTP 409'],
+      [400, 'VERSION_CONFLICT: not on a 400'],
+      [500, 'boom'],
+    ] as const) {
+      apiFetch.mockResolvedValueOnce(json(status, { error: 'X', message, details: { reason: 'applied' } }));
+      const err = (await resetDraft(apiFetch, 2).catch((e: unknown) => e)) as OnboardingDraftApiError;
+      expect(err.refusal, message).toBeNull();
+      expect(err.resetReason, message).toBeNull();
+    }
   });
 
   it('rejects a response that does not match the shared schema', async () => {

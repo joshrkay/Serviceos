@@ -97,3 +97,39 @@ describe('malformed :id never reaches Postgres as a raw uuid comparison (#882)',
     expect(res.body.error).toBe('NOT_FOUND');
   });
 });
+
+describe('PUT /api/notes/:id — content must be a non-empty string (hardening sweep 2026-10)', () => {
+  let app: Express;
+
+  beforeEach(() => {
+    app = buildPgLikeApp();
+  });
+
+  it.each([
+    ['object content', { content: { $set: 'x' } }],
+    ['numeric content', { content: 42 }],
+    ['empty content', { content: '' }],
+    ['missing content', {}],
+    ['unknown key', { content: 'ok', isPinned: true }],
+  ])('%s is a 400 VALIDATION_ERROR', async (_label, body) => {
+    const res = await request(app)
+      .put('/api/notes/11111111-1111-1111-1111-111111111111')
+      .send(body);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+  });
+
+  it('a 20,001-character body is a 400 on PUT and on POST alike (one cap, so a created note stays editable)', async () => {
+    const content = 'x'.repeat(20_001);
+    const put = await request(app)
+      .put('/api/notes/11111111-1111-1111-1111-111111111111')
+      .send({ content });
+    expect(put.status).toBe(400);
+    expect(put.body.error).toBe('VALIDATION_ERROR');
+    const post = await request(app)
+      .post('/api/notes')
+      .send({ entityType: 'job', entityId: '22222222-2222-2222-2222-222222222222', content });
+    expect(post.status).toBe(400);
+    expect(post.body.error).toBe('VALIDATION_ERROR');
+  });
+});

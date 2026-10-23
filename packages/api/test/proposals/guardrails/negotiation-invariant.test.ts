@@ -96,7 +96,7 @@ const NON_CONCESSION_TYPES: readonly string[] = [
   'send_payment_reminder', 'create_standing_instruction', 'update_catalog_item',
   'adopt_entity_alias', 'update_brand_voice', 'send_customer_message',
   'create_change_order', 'create_service_agreement', 'add_material',
-  'add_catalog_item',
+  'add_catalog_item', 'update_tenant_site_about', 'update_google_listing_website',
 ];
 
 /**

@@ -98,7 +98,11 @@ export class AddCrewMemberExecutionHandler implements ExecutionHandler {
         technicianRole: 'technician',
         isPrimary: false,
         assignedBy: context.executedBy,
-      }, this.assignmentRepo, { appointmentRepo: this.appointmentRepo, auditRepo: this.auditRepo });
+      }, this.assignmentRepo, {
+        appointmentRepo: this.appointmentRepo,
+        auditRepo: this.auditRepo,
+        skillMatcher: this.feasibilityDeps?.skillMatcher,
+      });
 
       if (this.analyticsRepo) {
         await captureDispatchEvent(this.analyticsRepo, context.tenantId, 'crew_added', {

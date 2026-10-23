@@ -148,7 +148,7 @@ describe('#1485 — voice-action-router: drafts that cannot execute are held and
         sendSms,
         secret: 'test-secret',
         buildApproveUrl: (token) => `https://api.example.com/approve?token=${token}`,
-        resolveOwnerPhone: async () => '+15125550100',
+        resolveSmsRecipient: async () => ({ phone: '+15125550100', via: 'owner_phone' as const }),
         resolveRouting: async () => 'queue_and_sms',
       },
     });

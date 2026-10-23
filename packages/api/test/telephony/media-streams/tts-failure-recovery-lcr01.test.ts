@@ -31,6 +31,7 @@ import { VoiceSessionStore } from '../../../src/ai/agents/customer-calling/voice
 import { TwilioGatherAdapter } from '../../../src/telephony/twilio-adapter';
 import { createTelephonyRouter } from '../../../src/routes/telephony';
 import { t } from '../../../src/ai/i18n/i18n';
+import { buildAiDisclosureText } from '../../../src/ai/skills/disclose-ai-identity';
 import type {
   StreamingSession,
   StreamingTranscriptionProvider,
@@ -254,12 +255,14 @@ describe('LCR-01 — the greeting turn (recording notice)', () => {
     const session = store.findByCallSid('CA-greet-dead')!;
     expect(session.recordingDisclosed).toBe(false);
 
-    // Twilio re-requests TwiML for the same call: the notice is spoken in its
-    // own <Say> before <Gather> starts listening.
+    // Twilio re-requests TwiML for the same call: the notices are spoken in
+    // their own <Say> before <Gather> starts listening. PRIV-4 — the caller
+    // never heard the greeting, so the virtual-assistant notice leads it.
     const res = await gatherFallback('CA-greet-dead');
     expect(res.status).toBe(200);
+    const assistantNotice = buildAiDisclosureText({ businessName: 'x' }).replace(/'/g, '&apos;');
     const notice = t('disclose.two_party', 'en');
-    const noticeAt = res.text.indexOf(`<Say>${notice}</Say>`);
+    const noticeAt = res.text.indexOf(`<Say>${assistantNotice} ${notice}</Say>`);
     expect(noticeAt).toBeGreaterThanOrEqual(0);
     expect(noticeAt).toBeLessThan(res.text.indexOf('<Gather'));
     expect(res.text).not.toContain('<Stream');

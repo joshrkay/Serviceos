@@ -23,7 +23,6 @@ import { Proposal, ProposalRepository, ProposalType, missingFieldsFor } from '..
 // Proposal.chainId column this helper sets — the column findByChain and
 // the web Inbox's groupIntoFeed both key on.
 import { applyChainMetadata, payloadPathFor, type ChainEntityKind, type ChainRef } from '../proposals/chain';
-import { validateProposalPayload } from '../proposals/contracts';
 import { clearSatisfiedMissingFields } from '../proposals/missing-fields';
 import {
   askForExecutabilityGaps,
@@ -95,7 +94,11 @@ import {
 } from '../ai/orchestration/assistant-honesty-guard';
 import { chatBulkMoneyRefusal, chatLifeSafetyReply } from '../ai/orchestration/chat-safety-guards';
 import type { TaskHandler } from '../ai/tasks/task-handlers';
-import { withClassifierRun } from '../ai/tasks/task-handlers';
+import {
+  JOB_EDIT_FIELDS,
+  draftProposal,
+  stampVerifiedIds,
+} from '../ai/drafting/draft-proposal';
 // Money/edit/send handlers are no longer constructed inline here — both
 // dispatch maps resolve them from the shared handler-registry below.
 // B5 — the scheduling-family / create_job / invoice-follow-up intents this
@@ -144,6 +147,18 @@ import {
 // loop, and the answer turn's re-resolve fallback — asks the question and
 // matches the answer with the address on it, with no per-call-site change.
 import { withCustomerAddressHints } from '../ai/resolution/customer-address-hint';
+import {
+  pageContextSchema,
+  loadPageContext,
+  pointsAtPageRecord,
+  pageUnavailableReply,
+  pageNoteTargetKind,
+  mergePageContextIds,
+  pageLookupIds,
+  pageContextNote,
+  type PageContext,
+  type LoadedPageContext,
+} from '../ai/resolution/page-context';
 // Phase 12 supervisor gate (commit 1 of the followup-autoapprove-default
 // fix) — mirrors workers/voice-action-router.ts's use of the SAME function:
 // resolve tenant-wide supervisor presence once per turn and thread it onto
@@ -406,6 +421,14 @@ const assistantChatRequestSchema = z.object({
   // resolved tenant-scoped (files/chat-image-attachments.ts) and handed to
   // the draft_estimate handler as image parts.
   attachments: z.array(z.object({ fileId: z.string() })).optional(),
+  // The detail page the turn started on, so "this job" / "her" resolve to it.
+  // Re-read tenant-scoped before use — see ai/resolution/page-context.ts. A
+  // malformed one is dropped, never a reason to refuse the operator's turn.
+  pageContext: pageContextSchema.optional().catch(undefined),
+  // The technician job screen sets status with its own buttons (and its
+  // confirm card's tick box). A turn from there never drafts a job edit, so
+  // an unticked "mark it complete" stays unticked.
+  jobStatusHandled: z.boolean().optional().catch(undefined),
 });
 
 /**
@@ -1061,182 +1084,27 @@ function gateOnLastName(proposal: Proposal): void {
   proposal.sourceContext = ctx;
 }
 
-
 /**
- * `updateCustomerPayloadSchema`'s "changed nothing" set and
- * `updateJobPayloadSchema`'s "at least one field to change" set — the two
- * whole-object conditions `contractGateMissingFields` below can name.
- * Mirrors `proposals/voice-payload.ts`'s private `UPDATE_CUSTOMER_FIELD_ALIASES`
- * / `JOB_EDIT_FIELDS`.
+ * The technician job screen sets status with its own buttons
+ * (`jobStatusHandled`), so a job edit drafted from that screen must not
+ * re-apply a status the tech left unticked. Strips `status` from an
+ * `update_job` draft, in place, and keeps every other edit (priority, title,
+ * description). Returns true when nothing is left to change, so the caller
+ * drops the draft instead of persisting an empty edit.
  */
-const CHAT_JOB_EDIT_FIELDS = ['status', 'priority', 'title', 'description'] as const;
-const CHAT_UPDATE_CUSTOMER_FIELDS = ['name', 'email', 'phone', 'address'] as const;
-
-/**
- * Whole-object contract refines, named as a payload key an operator can fill.
- *
- * Zod reports a `.refine()` on the whole object with `path: []`, so the error
- * string carries NOTHING to gate on. A caller that persists such a payload
- * ungated has minted an approve-to-fail card: the review screen offers
- * Approve, the execution handler then throws, and the operator is told the
- * work is done when nothing was written.
- *
- * KNOWN DUPLICATION — this is the chat twin of `namedContractGap` in
- * `proposals/voice-payload.ts` (which is private to that module). The two
- * MUST agree: a booking drafted by voice and the same booking typed into chat
- * have to gate on the same field or the two surfaces drift on what is
- * approvable. Hoist both into one shared module the moment
- * `voice-payload.ts` is free to change.
- */
-export function namedChatContractGap(
-  proposalType: string,
-  payload: Record<string, unknown>,
-): string[] {
-  switch (proposalType) {
-    // `createAppointmentPayloadSchema`'s SCH-02 refine: "requires jobId (or
-    // linkedJobId), or a customerId the executor can open a job for".
-    case 'create_appointment':
-      return !payload.jobId && !payload.linkedJobId && !payload.customerId ? ['customerId'] : [];
-    case 'update_job':
-      return CHAT_JOB_EDIT_FIELDS.some((f) => payload[f] !== undefined) ? [] : ['status'];
-    case 'send_estimate_nudge':
-      return !payload.estimateId && !payload.estimateReference ? ['estimateId'] : [];
-    // NOT a refine: `updateCustomerPayloadSchema` needs only `customerId`, so
-    // an edit that changes nothing is contract-VALID and then executes as a
-    // silent no-op. `updatedField` is a sentinel, not a payload key — see the
-    // voice twin's note on why it is deliberately unliftable by an edit.
-    case 'update_customer':
-      return CHAT_UPDATE_CUSTOMER_FIELDS.some((f) => payload[f] !== undefined) ||
-        (typeof payload.notes === 'string' && payload.notes.trim().length > 0)
-        ? []
-        : ['updatedField'];
-    default:
-      return [];
-  }
+export function dropHandledJobStatus(proposal: Proposal): boolean {
+  if (proposal.proposalType !== 'update_job') return false;
+  delete proposal.payload.status;
+  return !JOB_EDIT_FIELDS.some((f) => proposal.payload[f] !== undefined);
 }
 
-/**
- * THE CHAT CHOKEPOINT'S CONTRACT GATE — the twin of what
- * `buildVoiceProposalPayload` does for every voice-originated proposal
- * ("§5 The contract gate", proposals/voice-payload.ts).
- *
- * Voice validates the payload it just built and, when it fails, hands the
- * caller `missingFieldPaths` so the draft is persisted GATED. Chat had no
- * equivalent: whatever the drafting handler returned was persisted verbatim,
- * so every chat-drafted proposal whose payload failed its own contract
- * WITHOUT the handler happening to gate it was an approve-to-fail card. The
- * in-app 50-case register found four families of it at once —
- * `create_appointment` (no customerId/jobId — the model cannot invent a uuid
- * and nothing else threaded one), `update_estimate` / `update_invoice`
- * (`editActions` empty) and `update_job` ("at least one field to change") —
- * i.e. every booking and every edit typed into the assistant.
- *
- * Returns the field names to gate on: the first path segment of each Zod
- * error (the flat key an operator edits, which is what
- * `clearSatisfiedMissingFields` matches on) plus the named whole-object gaps
- * above. An empty result means the payload is approvable as drafted.
- */
-export function contractGateMissingFields(
-  proposalType: string,
-  payload: Record<string, unknown>,
-  /**
-   * True when the draft is ALREADY gated on a reference id
-   * (`isGatedReferenceField`) that the operator will answer through the
-   * which-one / gated-reference loop. Every other contract error is then
-   * downstream of that reference — `update_catalog_item`'s
-   * `currentUnitPriceCents` is copied from the catalog row the moment
-   * `catalogItemId` resolves (UpdateCatalogItemTaskHandler), and gating it now
-   * would leave a card the loop can never clear. Only the NAMED gaps apply
-   * while a reference is pending; the contract-derived pass runs once the
-   * reference question is settled. Pinned by the #909 integration test
-   * `chat-entity-resolution` (duplicate-named catalog → `['catalogItemId']`).
-   */
-  pendingReference = false,
-): string[] {
-  const gaps = new Set<string>(namedChatContractGap(proposalType, payload));
-  if (pendingReference) return [...gaps];
-  const result = validateProposalPayload(proposalType, payload);
-  for (const error of result.valid ? [] : result.errors ?? []) {
-    const path = error.slice(0, error.indexOf(':'));
-    if (!path) continue;
-    const head = path.split('.')[0]?.replace(/\[\d+\]$/, '');
-    if (head) gaps.add(head);
-  }
-  return [...gaps];
+/** `dropHandledJobStatus` as a drafting rule: an edit left with nothing to change is refused. */
+function jobStatusHandledGate(proposal: Proposal): string | undefined {
+  return dropHandledJobStatus(proposal)
+    ? "Your status buttons set the job's status, so I left it as it is."
+    : undefined;
 }
 
-/**
- * Apply the gate to a freshly drafted proposal, in place.
- *
- * Two effects, both load-bearing:
- *   1. the named fields are merged into `sourceContext.missingFields`, which
- *      is what blocks Approve AND what the post-draft gated-reference loop
- *      (`resolveGatedReferencesForChat`) reads to know which references to go
- *      and resolve — so gating a booking on `customerId` is also what lets
- *      the resolver fill it from the customer name in the same turn;
- *   2. a proposal that had already been decided `approved` is pulled back to
- *      `draft`. An auto-approving type whose payload cannot execute must
- *      never reach the worker; the operator's tap is the only thing that
- *      should move it, and only once the gate is closed.
- *
- * Returns the fields it added (empty when the payload was already fine).
- */
-export function applyContractGate(proposal: Proposal): string[] {
-  const existing = new Set(missingFieldsFor(proposal));
-  const pendingReference = [...existing].some((field) => isGatedReferenceField(field));
-  const gaps = contractGateMissingFields(proposal.proposalType, proposal.payload, pendingReference);
-  if (gaps.length === 0) return [];
-  const added = gaps.filter((field) => !existing.has(field));
-  if (added.length === 0) return [];
-  proposal.sourceContext = {
-    ...(proposal.sourceContext ?? {}),
-    missingFields: [...existing, ...added],
-  };
-  if (proposal.status === 'approved') proposal.status = 'draft';
-  return added;
-}
-
-/**
- * QA-2026-06-05: the assistant accepts FREE TEXT — entity ids in LLM-built
- * payloads must literally appear in the operator's message (or classifier
- * entities); the model may not invent them (live: hallucinated textbook
- * UUIDs sent executions into doomed lookups).
- *
- * B4 — extended with a `sourceContext.verifiedIds` allowlist: an id a task
- * handler resolved via a REPO LOOKUP (not LLM text) — e.g.
- * IssueInvoiceTaskHandler's conversation-context resolution of "the one we
- * just drafted" — is verifiable by construction even though it never
- * literally appears in the operator's words. `verifiedIds` must be stamped
- * ONLY by such repo-lookup code paths (see the doc comment on
- * IssueInvoiceTaskHandler in ai/orchestration/task-router.ts); this function
- * trusts whatever is there, so a handler that ever copied LLM/classifier
- * output into `verifiedIds` would reopen the exact hallucinated-id hole this
- * scrub exists to close. A key present in `payload` but ABSENT from
- * `verifiedIds` (or not exactly matching the verified value) still gets the
- * ordinary haystack check — a hallucinated id is stripped regardless of
- * whether some other key happened to get verified.
- */
-// Exported for a direct unit pin on the verifiedIds allowlist semantics
-// (test/routes/assistant.route.test.ts) — this is B4's main review surface.
-export function dropUnverifiedIds(
-  payload: Record<string, unknown>,
-  operatorText: string,
-  entities: Record<string, unknown>,
-  sourceContext?: Record<string, unknown>
-): void {
-  const haystack = (operatorText + ' ' + JSON.stringify(entities)).toLowerCase();
-  const verifiedIds =
-    sourceContext?.verifiedIds && typeof sourceContext.verifiedIds === 'object'
-      ? (sourceContext.verifiedIds as Record<string, unknown>)
-      : undefined;
-  for (const key of ['jobId', 'customerId', 'estimateId', 'invoiceId', 'appointmentId']) {
-    const v = payload[key];
-    if (typeof v !== 'string' || v.length < 32) continue;
-    if (haystack.includes(v.toLowerCase())) continue;
-    if (verifiedIds && verifiedIds[key] === v) continue;
-    delete payload[key];
-  }
-}
 
 /**
  * U1 — pre-draft entity resolution for the chat surface, mirroring the voice
@@ -1271,6 +1139,10 @@ interface PreDraftResolution {
    * loop that already knows how to ask ONE question and match the answer.
    */
   ambiguousRefKeys: string[];
+  /** The keys the operator's open page filled (`mergePageContextIds`). */
+  pageFilledKeys?: string[];
+  /** Entities the open page implies, e.g. a note's target kind (`pageNoteTargetKind`). */
+  pageEntities?: Record<string, string>;
 }
 
 const NO_PRE_DRAFT_RESOLUTION: PreDraftResolution = { ids: {}, ambiguousRefKeys: [] };
@@ -1514,7 +1386,7 @@ const SEND_IT_CLAUSE_RE = /^(send|text|email)\s+(?:it|that|this|them|her|him|the
 /**
  * The channel the operator NAMED for "send it": text → sms, email → email.
  * #1524 — a bare "send" names none (undefined): the send_invoice drafter then
- * writes 'auto' (the customer's email, else a text), never an invented
+ * writes 'auto' (a text when the customer can be texted, else their email), never an invented
  * 'email' a phone-only customer can't receive.
  */
 function sendChannelFor(verb: string, clause: string): 'email' | 'sms' | undefined {
@@ -1769,6 +1641,34 @@ async function resolvePreDraftIds(
   registryKey: string | undefined,
   entities: Record<string, unknown> | undefined,
   operatorText: string,
+  page?: LoadedPageContext,
+): Promise<PreDraftResolution> {
+  const fromWords = await resolvePreDraftIdsFromWords(deps, tenantId, intent, registryKey, entities, operatorText);
+  if (!page) return fromWords;
+  const merged = mergePageContextIds({
+    intent,
+    entities,
+    text: operatorText,
+    resolvedIds: fromWords.ids,
+    ambiguousRefKeys: fromWords.ambiguousRefKeys,
+    page,
+  });
+  const noteTargetKind = pageNoteTargetKind({ intent, entities, text: operatorText, page, filledKeys: merged.filledKeys });
+  return {
+    ids: merged.ids,
+    ambiguousRefKeys: merged.ambiguousRefKeys,
+    pageFilledKeys: merged.filledKeys,
+    ...(noteTargetKind ? { pageEntities: { noteTargetKind } } : {}),
+  };
+}
+
+async function resolvePreDraftIdsFromWords(
+  deps: Pick<AssistantRouterDeps, 'entityResolver' | 'jobRepo' | 'invoiceRepo'>,
+  tenantId: string,
+  intent: string,
+  registryKey: string | undefined,
+  entities: Record<string, unknown> | undefined,
+  operatorText: string,
 ): Promise<PreDraftResolution> {
   const byName = await resolveVerifiedIdsForDraft(deps.entityResolver, tenantId, intent, entities);
   if (registryKey && LITERAL_INVOICE_ID_TYPES.has(registryKey) && !byName.ids.invoiceId) {
@@ -1948,94 +1848,6 @@ function revertUnaskedAmbiguityGate(
   };
 }
 
-/**
- * U1 — record route-resolved ids on `sourceContext.verifiedIds` so
- * `dropUnverifiedIds` preserves them (pattern: IssueInvoiceTaskHandler's
- * rung-2 conversation-context resolution, ai/orchestration/task-router.ts).
- * SECURITY: callers must only pass ids from `resolveVerifiedIdsForDraft`
- * (a DB lookup) — never classifier/LLM output. A task handler's own
- * repo-verified `verifiedIds` (e.g. send_estimate_nudge's liftGate) win on
- * key collision; both sources are DB-verified so either value is safe.
- */
-function stampVerifiedIds(
-  proposal: { sourceContext?: Record<string, unknown> },
-  verifiedIds: Record<string, string>,
-): void {
-  if (Object.keys(verifiedIds).length === 0) return;
-  const existing =
-    proposal.sourceContext?.verifiedIds && typeof proposal.sourceContext.verifiedIds === 'object'
-      ? (proposal.sourceContext.verifiedIds as Record<string, unknown>)
-      : {};
-  proposal.sourceContext = {
-    ...(proposal.sourceContext ?? {}),
-    verifiedIds: { ...verifiedIds, ...existing },
-  };
-}
-
-/**
- * Put the PIPELINE's own resolved ids where the executor looks for them.
- *
- * `resolveVerifiedIdsForDraft` already resolved the operator's free-text
- * references to real tenant ids before drafting, and `existingEntities` carried
- * them into the task handler — but a handler only copies an id onto the payload
- * if its own drafting model happened to echo it back. `create-appointment-task.ts`
- * says exactly why that is not resolution: "A drafting leg that depends on a
- * model repeating a UUID is not resolution." Live evidence agreed — the model
- * echoed a job TITLE into `jobId` — and the in-app 50-case register showed the
- * quieter half of the same defect: "Book Garcia for Tuesday at 2 pm" drafted an
- * appointment with NO customerId at all, "Prepare an estimate for Johnson's
- * water heater job" drafted an estimate attached to no job, and "Hand Garcia's
- * Tuesday visit to Carlos" drafted a reassignment naming no technician.
- *
- * So the route writes them itself. Safety, in order:
- *   - only the gated-id vocabulary (`isGatedReferenceField`) — the same keys
- *     the post-draft resolution loop is allowed to fill, never an arbitrary key;
- *   - only ids from `resolveVerifiedIdsForDraft`, which are repo lookups by
- *     construction — never classifier or model output (the `dropUnverifiedIds`
- *     security rule);
- *   - never OVERWRITE a value the handler already resolved for itself;
- *   - and reverted if writing it would make a previously valid payload invalid,
- *     so this can only ever move a proposal toward approvable.
- *
- * Returns the keys it wrote.
- */
-export function applyVerifiedIdsToPayload(
-  proposal: Pick<Proposal, 'proposalType' | 'payload' | 'sourceContext'>,
-  verifiedIds: Record<string, string>,
-): string[] {
-  const wasValid = validateProposalPayload(proposal.proposalType, proposal.payload).valid;
-  const written: string[] = [];
-  for (const [key, id] of Object.entries(verifiedIds)) {
-    if (!isGatedReferenceField(key)) continue;
-    const current = proposal.payload[key];
-    if (typeof current === 'string' && current.trim().length > 0) continue;
-    proposal.payload[key] = id;
-    written.push(key);
-  }
-  if (
-    written.length > 0 &&
-    wasValid &&
-    !validateProposalPayload(proposal.proposalType, proposal.payload).valid
-  ) {
-    for (const key of written) delete proposal.payload[key];
-    return [];
-  }
-  // Clear-on-fill, through the SAME shared helper `applyGatedReferences` uses.
-  // Writing the id without lifting the gate would be strictly worse than doing
-  // nothing: the card would carry a resolved appointmentId AND still refuse to
-  // approve, and the resolution loop skips a field that is already filled, so
-  // nothing downstream would ever lift it.
-  if (written.length > 0) {
-    const missing = missingFieldsFor(proposal as Proposal);
-    if (missing.length > 0) {
-      proposal.sourceContext = {
-        ...(proposal.sourceContext ?? {}),
-        missingFields: clearSatisfiedMissingFields(missing, written, proposal.payload),
-      };
-    }
-  }
-  return written;
-}
 
 /**
  * ONE REQUEST, ONE CARD.
@@ -3236,6 +3048,8 @@ async function generateAssistantReply(
   // #1173 — the turn's photo attachments (`assistantChatRequestSchema
   // .attachments`, #1144), resolved tenant-scoped below.
   attachments?: ReadonlyArray<{ fileId: string }>,
+  pageContext?: PageContext,
+  jobStatusHandled?: boolean,
 ) {
   const lastUser = [...messages].reverse().find((m) => m.role === 'user');
   // #1201 — an API caller can send a photo with BLANK text (the web client
@@ -3341,6 +3155,31 @@ async function generateAssistantReply(
       }
       const timezoneContext = tenantTimezone ? { timezone: tenantTimezone } : {};
 
+      // The page the operator spoke from, re-read tenant-scoped. The drafting
+      // paths consult it in resolvePreDraftIds and the lookup path through
+      // pageLookupIds; undefined when the client sent none or the record is
+      // not this tenant's.
+      const openPage = pageContext ? await loadPageContext(deps, tenantId, pageContext) : undefined;
+      if (pageContext && !openPage) {
+        logger.warn('assistant/chat: the page record could not be loaded', {
+          tenantId,
+          entityType: pageContext.entityType,
+          entityId: pageContext.entityId,
+        });
+        if (pointsAtPageRecord(pageContext.entityType, lastUserText)) {
+          return {
+            taskType: 'assistant.page_context.unavailable',
+            model: 'page-context',
+            usage: { input: 0, output: 0, total: 0 },
+            message: {
+              role: 'assistant' as const,
+              content: pageUnavailableReply(pageContext.entityType),
+              reasoning: 'The words point at the record on screen, which could not be read; asking instead of guessing.',
+            },
+          };
+        }
+      }
+
       // Phase 12 supervisor gate — mirrors workers/voice-action-router.ts's
       // identical call, but LAZY (minor fix, post-C1 review): read-only
       // paths below (the deterministic unpaid-invoices query, `lookup_*`
@@ -3379,7 +3218,17 @@ async function generateAssistantReply(
       // QA-2026-06-05 (AST-05): deterministic read-only query — answer from
       // data, never propose. Runs before classification so phrasing variance
       // in the classifier can't turn a question into a mutation proposal.
-      if (deps.invoiceRepo && UNPAID_QUERY_RE.test(lastUserText)) {
+      //
+      // "Which invoices for this customer are unpaid?" on a customer page is
+      // about that customer, and this tenant-wide answer cannot scope to one.
+      // A question pointing at the record on screen goes on to the classifier
+      // and the lookup path, which reads the page (pageLookupIds).
+      const pointsAtPage =
+        !!openPage &&
+        Object.keys(
+          pageLookupIds({ intent: 'lookup_invoices', entities: {}, text: lastUserText, page: openPage }),
+        ).length > 0;
+      if (deps.invoiceRepo && UNPAID_QUERY_RE.test(lastUserText) && !pointsAtPage) {
         const content = await answerUnpaidInvoicesQuery(deps.invoiceRepo, tenantId, lastUserText);
         return {
           taskType: 'assistant.query.unpaid_invoices',
@@ -3557,6 +3406,16 @@ async function generateAssistantReply(
             message: lastUserText,
             ...(classification.extractedEntities
               ? { extractedEntities: classification.extractedEntities as Record<string, unknown> }
+              : {}),
+            ...(openPage
+              ? {
+                  page: pageLookupIds({
+                    intent: classification.intentType,
+                    entities: classification.extractedEntities as Record<string, unknown> | undefined,
+                    text: lastUserText,
+                    page: openPage,
+                  }),
+                }
               : {}),
           },
           deps.lookups,
@@ -3808,6 +3667,8 @@ async function generateAssistantReply(
         // format, so switching it is safe.
         const chainId = uuidv4();
         const chainCards: AssistantProposal[] = [];
+        // Set when the open page filled an id on any step, for the reply note.
+        let chainUsedPage = false;
         // #1499 — every step the operator asked for that produced no card.
         // The reply names each one; a silent drop reads as "done".
         const undraftedSegments: string[] = [];
@@ -3911,83 +3772,89 @@ async function generateAssistantReply(
           // literal job UUID in THIS segment names that job and its customer
           // (#1276B). Keyed on the segment's own text, not the whole turn: a
           // UUID in the other half of "X, then Y" is not this step's job.
+          const segPreDraft = await resolvePreDraftIds(
+            deps,
+            tenantId,
+            segClass.intentType,
+            registryKey,
+            segEntities,
+            segment,
+            openPage,
+          );
           const segVerifiedIds = {
             ...(segCreateAndSend?.job ?? {}),
-            ...(await resolvePreDraftIds(
-              deps,
-              tenantId,
-              segClass.intentType,
-              registryKey,
-              segEntities,
-              segment,
-            )).ids,
+            ...segPreDraft.ids,
           };
           // I3 — resolved once (memoized) and reused across every segment.
           const segTenantThresholdOverride = await getTenantThresholdOverride();
-          const { proposal } = await factory().handle({
-            tenantId,
-            userId,
-            message: segment,
-            conversationId,
-            // Task 15 (2026-08-07 tradesperson plan), Task 11 parity — the
-            // raw classified intent, for handlers that alias multiple
-            // intents onto the same taskType (log_mileage vs log_expense
-            // both drive LogExpenseTaskHandler; see TaskContext.intent's doc
-            // comment, ai/tasks/task-handlers.ts). The memo worker has
-            // always threaded this; this chat path never did, so
-            // log_mileage would have silently drafted a plain, wrong-
-            // category log_expense once dispatched.
-            intent: segClass.intentType,
-            existingEntities: { ...segEntities, ...segVerifiedIds },
-            // Task 15 quality-review fix (C1/C2) — `context.customerId` is
-            // threaded ONLY for the CHAT_CONTEXT_CUSTOMER_ID_INTENTS
-            // allowlist (see that constant's doc comment for why this is
-            // deliberately narrow, not a blanket "mirror the memo worker's
-            // precedence" thread: several already-shipped intents read this
-            // same field as an exclusive, unrelated side channel — a
-            // held-slot calendar write, an unsupervised appointment
-            // auto-pick — that a dispatch-wiring task must not silently
-            // activate).
-            ...(CHAT_CONTEXT_CUSTOMER_ID_INTENTS.has(segClass.intentType) && segVerifiedIds.customerId
-              ? { customerId: segVerifiedIds.customerId }
-              : {}),
-            // Tenant zone for the scheduling handlers in this chain.
-            ...timezoneContext,
-            ...(segStandingInstructions
-              ? { standingInstructions: segStandingInstructions }
-              : {}),
-            // Phase 12 supervisor gate (commit 1) — see the isSupervisorPresent
-            // import comment above. Threaded unconditionally: harmless for
-            // every handler that never sets sourceTrustTier (the vast
-            // majority), load-bearing for the six that do. Lazy (minor fix,
-            // post-C1 review) — only resolved now that we're genuinely
-            // about to dispatch a proposal-creating handler.
-            supervisorPresent: await getSupervisorPresent(),
-            ...(supervisorMode ? { supervisorMode } : {}),
-            // I3 — Settings UI per-tenant threshold override.
-            ...(segTenantThresholdOverride
-              ? { tenantThresholdOverride: segTenantThresholdOverride }
-              : {}),
-            // #1201 — the turn's photos reach the chain's estimate step too
-            // (same rule as the single-intent path: only draft_estimate
-            // consumes them). Before this a "quote this, then schedule it"
-            // turn drafted the estimate from text alone.
-            ...(registryKey === 'draft_estimate' && chatImages.length > 0
-              ? { images: chatImages }
-              : {}),
+          const drafted = await draftProposal({
+            handler: factory(),
+            context: {
+              tenantId,
+              userId,
+              message: segment,
+              conversationId,
+              // Task 15 (2026-08-07 tradesperson plan), Task 11 parity — the
+              // raw classified intent, for handlers that alias multiple
+              // intents onto the same taskType (log_mileage vs log_expense
+              // both drive LogExpenseTaskHandler; see TaskContext.intent's doc
+              // comment, ai/tasks/task-handlers.ts). The memo worker has
+              // always threaded this; this chat path never did, so
+              // log_mileage would have silently drafted a plain, wrong-
+              // category log_expense once dispatched.
+              intent: segClass.intentType,
+              existingEntities: { ...segEntities, ...segPreDraft.pageEntities, ...segVerifiedIds },
+              // Task 15 quality-review fix (C1/C2) — `context.customerId` is
+              // threaded ONLY for the CHAT_CONTEXT_CUSTOMER_ID_INTENTS
+              // allowlist (see that constant's doc comment for why this is
+              // deliberately narrow, not a blanket "mirror the memo worker's
+              // precedence" thread: several already-shipped intents read this
+              // same field as an exclusive, unrelated side channel — a
+              // held-slot calendar write, an unsupervised appointment
+              // auto-pick — that a dispatch-wiring task must not silently
+              // activate).
+              ...(CHAT_CONTEXT_CUSTOMER_ID_INTENTS.has(segClass.intentType) && segVerifiedIds.customerId
+                ? { customerId: segVerifiedIds.customerId }
+                : {}),
+              // Tenant zone for the scheduling handlers in this chain.
+              ...timezoneContext,
+              ...(segStandingInstructions
+                ? { standingInstructions: segStandingInstructions }
+                : {}),
+              // Phase 12 supervisor gate (commit 1) — see the isSupervisorPresent
+              // import comment above. Threaded unconditionally: harmless for
+              // every handler that never sets sourceTrustTier (the vast
+              // majority), load-bearing for the six that do. Lazy (minor fix,
+              // post-C1 review) — only resolved now that we're genuinely
+              // about to dispatch a proposal-creating handler.
+              supervisorPresent: await getSupervisorPresent(),
+              ...(supervisorMode ? { supervisorMode } : {}),
+              // I3 — Settings UI per-tenant threshold override.
+              ...(segTenantThresholdOverride
+                ? { tenantThresholdOverride: segTenantThresholdOverride }
+                : {}),
+              // #1201 — the turn's photos reach the chain's estimate step too
+              // (same rule as the single-intent path: only draft_estimate
+              // consumes them). Before this a "quote this, then schedule it"
+              // turn drafted the estimate from text alone.
+              ...(registryKey === 'draft_estimate' && chatImages.length > 0
+                ? { images: chatImages }
+                : {}),
+            },
+            operatorText: segment,
+            entities: segEntities,
+            verifiedIds: segVerifiedIds,
+            // OBS-2 — the classifier run that routed this segment.
+            classifierAiRunId: segClass.aiRunId,
+            // Same rule as the single-intent path: the job screen owns status.
+            ...(jobStatusHandled ? { beforeGate: jobStatusHandledGate } : {}),
           });
-          if (!proposal) {
-            undraftedSegments.push(segment);
+          if (drafted.kind === 'refusal') {
+            if (drafted.code === 'not_drafted') undraftedSegments.push(segment);
             continue;
           }
-          // OBS-2 — the classifier run that routed this segment.
-          Object.assign(proposal, withClassifierRun(proposal, segClass.aiRunId));
-          stampVerifiedIds(proposal, segVerifiedIds);
-          applyVerifiedIdsToPayload(proposal, segVerifiedIds);
-          dropUnverifiedIds(proposal.payload, segment, segEntities, proposal.sourceContext);
-          // Same contract gate the single-intent path applies — a chained
-          // step is no more approvable than a standalone one.
-          applyContractGate(proposal);
+          // A chained step gets the same drafting checks as a standalone one.
+          const { proposal } = drafted;
           // PR-0a (#967, #962) — stamp the TOP-LEVEL chainId (the same
           // helper + column the voice/memo path uses) so
           // ProposalRepository.findByChain and the web Inbox's
@@ -4016,7 +3883,13 @@ async function generateAssistantReply(
           proposal.sourceContext = {
             ...(proposal.sourceContext ?? {}),
             chainStep: chainCards.length + 1,
+            // Same provenance the single-intent path records: which ids this
+            // step took from the page the operator spoke on.
+            ...(openPage && segPreDraft.pageFilledKeys?.length
+              ? { pageContext: { ...openPage.context, filledKeys: segPreDraft.pageFilledKeys } }
+              : {}),
           };
+          if (segPreDraft.pageFilledKeys?.length) chainUsedPage = true;
           // #909 — the same post-draft resolution the single-intent path
           // runs, so a chained "reschedule the Miller job, then text them"
           // gets its ids resolved too and the two halves of THIS route can't
@@ -4092,6 +3965,7 @@ async function generateAssistantReply(
           chainTypes.push(proposal.proposalType);
           chainVerifiedCustomers.push(verifiedCustomerOf(proposal));
         }
+        const chainPageNote = chainUsedPage && openPage ? `\n\n${pageContextNote(openPage)}` : '';
         if (chainCards.length === 1) {
           // Only one segment produced a proposal — return it directly so the
           // single-intent path doesn't mint a duplicate.
@@ -4103,7 +3977,8 @@ async function generateAssistantReply(
               role: 'assistant' as const,
               content:
                 `${chainCards[0].title}. ${proposalReplySuffix(chainCards[0].status)}` +
-                undraftedStepsNote(undraftedSegments),
+                undraftedStepsNote(undraftedSegments) +
+                chainPageNote,
               proposal: chainCards[0],
             },
           };
@@ -4120,7 +3995,8 @@ async function generateAssistantReply(
                 chainCards.map((c, i) => `${i + 1}) ${c.title}`).join('; ') +
                 '. Capture steps run after approval windows; money steps wait for your approval.' +
                 (chainTypes.includes('send_invoice') ? LINKED_SEND_UNLOCK_NOTE : '') +
-                undraftedStepsNote(undraftedSegments),
+                undraftedStepsNote(undraftedSegments) +
+                chainPageNote,
               proposal: chainCards[0],
             },
           };
@@ -4182,7 +4058,12 @@ async function generateAssistantReply(
           registryKey,
           extractedEntities,
           lastUserText,
+          openPage,
         );
+        // Said out loud whenever the open page filled a reference, so a wrong
+        // pick is visible on the card's own turn.
+        const usedPage = openPage && preDraft.pageFilledKeys?.length ? openPage : undefined;
+        const pageNote = usedPage ? `\n\n${pageContextNote(usedPage)}` : '';
         // #1499 — a create-and-send reroute that named its job by NUMBER
         // bills that job; a name the resolver verified still wins.
         const verifiedIds = { ...(createAndSend?.job ?? {}), ...preDraft.ids };
@@ -4210,57 +4091,80 @@ async function generateAssistantReply(
         }
         // I3 — resolved once (memoized).
         const singleIntentTenantThresholdOverride = await getTenantThresholdOverride();
-        const { proposal } = await handler.handle({
-          tenantId,
-          userId,
-          message: lastUserText,
-          conversationId,
-          // Task 15 (2026-08-07 tradesperson plan) / Task 11 parity — see the
-          // identical comment on the chain-segment `.handle()` call above.
-          intent: classification.intentType,
-          existingEntities: { ...extractedEntities, ...verifiedIds },
-          // Task 15 quality-review fix (C1/C2) — see the identical comment +
-          // CHAT_CONTEXT_CUSTOMER_ID_INTENTS doc comment on the
-          // chain-segment `.handle()` call above: this is an explicit
-          // allowlist, not a blanket thread.
-          ...(CHAT_CONTEXT_CUSTOMER_ID_INTENTS.has(classification.intentType) && verifiedIds.customerId
-            ? { customerId: verifiedIds.customerId }
-            : {}),
-          // Tenant zone — `create_appointment` resolves the spoken time
-          // against it. Absent ⇒ the handler gates instead of guessing.
-          ...timezoneContext,
-          ...(standingInstructions ? { standingInstructions } : {}),
-          // Phase 12 supervisor gate (commit 1) — see the isSupervisorPresent
-          // import comment above. Lazy (minor fix, post-C1 review).
-          supervisorPresent: await getSupervisorPresent(),
-          ...(supervisorMode ? { supervisorMode } : {}),
-          // I3 — Settings UI per-tenant threshold override.
-          ...(singleIntentTenantThresholdOverride
-            ? { tenantThresholdOverride: singleIntentTenantThresholdOverride }
-            : {}),
-          // #1173 — the turn's photos, as image parts on the draft's model
-          // request. Only the estimate draft consumes them today.
-          ...(registryKey === 'draft_estimate' && chatImages.length > 0
-            ? { images: chatImages }
-            : {}),
+        const drafted = await draftProposal({
+          handler,
+          context: {
+            tenantId,
+            userId,
+            message: lastUserText,
+            conversationId,
+            // Task 15 (2026-08-07 tradesperson plan) / Task 11 parity — see the
+            // identical comment on the chain-segment `.handle()` call above.
+            intent: classification.intentType,
+            existingEntities: { ...extractedEntities, ...preDraft.pageEntities, ...verifiedIds },
+            // Task 15 quality-review fix (C1/C2) — see the identical comment +
+            // CHAT_CONTEXT_CUSTOMER_ID_INTENTS doc comment on the
+            // chain-segment `.handle()` call above: this is an explicit
+            // allowlist, not a blanket thread.
+            ...(CHAT_CONTEXT_CUSTOMER_ID_INTENTS.has(classification.intentType) && verifiedIds.customerId
+              ? { customerId: verifiedIds.customerId }
+              : {}),
+            // Tenant zone — `create_appointment` resolves the spoken time
+            // against it. Absent ⇒ the handler gates instead of guessing.
+            ...timezoneContext,
+            ...(standingInstructions ? { standingInstructions } : {}),
+            // Phase 12 supervisor gate (commit 1) — see the isSupervisorPresent
+            // import comment above. Lazy (minor fix, post-C1 review).
+            supervisorPresent: await getSupervisorPresent(),
+            ...(supervisorMode ? { supervisorMode } : {}),
+            // I3 — Settings UI per-tenant threshold override.
+            ...(singleIntentTenantThresholdOverride
+              ? { tenantThresholdOverride: singleIntentTenantThresholdOverride }
+              : {}),
+            // #1173 — the turn's photos, as image parts on the draft's model
+            // request. Only the estimate draft consumes them today.
+            ...(registryKey === 'draft_estimate' && chatImages.length > 0
+              ? { images: chatImages }
+              : {}),
+          },
+          operatorText: lastUserText,
+          entities: extractedEntities,
+          verifiedIds,
+          // OBS-2 — the classifier run that routed this turn (aiRunId is the
+          // drafting run's).
+          classifierAiRunId: classification.aiRunId,
+          ...(jobStatusHandled ? { beforeGate: jobStatusHandledGate } : {}),
         });
-        // OBS-2 — the classifier run that routed this turn (aiRunId is the
-        // drafting run's).
-        Object.assign(proposal, withClassifierRun(proposal, classification.aiRunId));
-        stampVerifiedIds(proposal, verifiedIds);
-        applyVerifiedIdsToPayload(proposal, verifiedIds);
-        dropUnverifiedIds(
-          proposal.payload,
-          lastUserText,
-          extractedEntities,
-          proposal.sourceContext,
-        );
-        // The contract gate, BEFORE the resolution loop below on purpose: the
-        // gate is what tells that loop which references to go and resolve, so
-        // gating a booking on `customerId` here is exactly what lets the
-        // resolver fill it from the customer name in the same turn. Running it
-        // after would leave the card gated on something already resolvable.
-        applyContractGate(proposal);
+        // The draft is gated (drafting runs the contract gate) BEFORE the
+        // resolution loop below on purpose: the gate is what tells that loop
+        // which references to go and resolve, so gating a booking on
+        // `customerId` is exactly what lets the resolver fill it from the
+        // customer name in the same turn.
+        if (drafted.kind === 'refusal') {
+          return {
+            taskType:
+              drafted.code === 'nothing_left'
+                ? 'assistant.update_job.status_handled'
+                : `assistant.${registryKey}.not_drafted`,
+            model: 'intent-classifier',
+            usage: classifierUsage,
+            message: {
+              role: 'assistant' as const,
+              content: drafted.reason,
+              reasoning:
+                drafted.code === 'nothing_left'
+                  ? 'The technician job screen sets status itself; nothing else on the job was asked to change.'
+                  : 'The drafting step returned no proposal.',
+            },
+          };
+        }
+        const { proposal } = drafted;
+        if (usedPage) {
+          proposal.sourceContext = {
+            ...(proposal.sourceContext ?? {}),
+            pageContext: { ...usedPage.context, filledKeys: preDraft.pageFilledKeys },
+          };
+        }
         // …and the ambiguity gate right behind it, for the references the
         // PRE-draft pass could not choose between. Only on THIS path: it is
         // the one that actually asks the question (the chain path below passes
@@ -4363,21 +4267,33 @@ async function generateAssistantReply(
         // already pointing at it still resolves), keeps its created-by/at, and
         // — because only a still-reviewable, non-chain draft of the SAME type
         // is eligible — this can never edit a decided record or shred a chain.
-        // D-004 is untouched: the rewrite carries the fresh draft's status, so
-        // a correction can only ever leave the card waiting for the same tap.
+        // D-004 is untouched: the generic update never moves status (status
+        // changes go only through updateStatus), so the rewritten card keeps
+        // its reviewable status and waits for the same tap — even when the
+        // fresh draft's status decision would have auto-approved it.
         const corrected = isDraftCorrection(lastUserText)
           ? await findReplaceableDraft(deps, tenantId, conversationId, proposal.proposalType)
           : undefined;
         if (corrected) {
-          const rewritten = await deps.proposalRepo.update(tenantId, corrected.id, {
+          let rewritten = await deps.proposalRepo.update(tenantId, corrected.id, {
             payload: proposal.payload,
             sourceContext: proposal.sourceContext,
             summary: proposal.summary,
             ...(proposal.confidenceScore !== undefined
               ? { confidenceScore: proposal.confidenceScore }
               : {}),
-            status: proposal.status === 'draft' ? 'ready_for_review' : proposal.status,
+            // B3 — the payload is now the correction run's output: link THAT
+            // run (none when it persisted no ai_runs row — never the first
+            // draft's) and its confidence factors and explanation.
+            aiRunId: proposal.aiRunId,
+            confidenceFactors: proposal.confidenceFactors,
+            explanation: proposal.explanation,
           });
+          // Status never rides the generic update (the pg repo has no status
+          // column in it); a draft is surfaced for review like a fresh card.
+          if (rewritten?.status === 'draft') {
+            rewritten = (await deps.proposalRepo.updateStatus(tenantId, corrected.id, 'ready_for_review')) ?? rewritten;
+          }
           const card = proposalToUI(rewritten ?? { ...corrected, ...proposal, id: corrected.id }, lastUserText);
           return {
             taskType: `assistant.${handler.taskType}`,
@@ -4385,9 +4301,10 @@ async function generateAssistantReply(
             usage: { input: 0, output: 0, total: 0 },
             message: {
               role: 'assistant' as const,
-              content: clarification
-                ? `Updated — ${card.title}.\n\n${clarification}`
-                : `Updated — ${card.title}. ${proposalReplySuffix(card.status)}`,
+              content:
+                (clarification
+                  ? `Updated — ${card.title}.\n\n${clarification}`
+                  : `Updated — ${card.title}. ${proposalReplySuffix(card.status)}`) + pageNote,
               reasoning:
                 'Correction of the draft still awaiting review on this thread — rewrote it in place rather than leaving two approvable cards for one job.',
               proposal: card,
@@ -4427,7 +4344,8 @@ async function generateAssistantReply(
                 undraftedCompoundSteps(lastUserText, [proposal.proposalType], {
                   skipFamilies: createAndSend ? ['send'] : [],
                 }),
-              ),
+              ) +
+              pageNote,
             reasoning: classification.reasoning,
             proposal: uiProposal,
           },
@@ -4911,6 +4829,8 @@ export function createAssistantRouter(rawDeps: AssistantRouterDeps): Router {
           (req.auth as { mode?: Mode } | undefined)?.mode,
           // #1173 — the turn's photo references, resolved tenant-scoped inside.
           parsed.attachments,
+          parsed.pageContext,
+          parsed.jobStatusHandled,
         );
 
         // Story 3.11 — persist the turn so the conversation survives reload and

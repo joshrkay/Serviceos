@@ -125,6 +125,12 @@ export interface Job {
    * rows don't trigger a backlog of review requests.
    */
   reviewRequestSentAt?: Date;
+  /**
+   * Dispatch FR-2 phase 2 (migration 328) — canonical skill tags
+   * (@ai-service-os/shared skill-tags) a technician must hold to be assigned. Empty means
+   * no skill constraint (feasibility reports `none_configured`).
+   */
+  requiredSkills?: string[];
   createdBy: string;
   createdAt: Date;
   updatedAt: Date;
@@ -164,6 +170,8 @@ export interface UpdateJobInput {
    * governed transition endpoint.
    */
   status?: JobStatus;
+  /** Canonical tags only — PUT /api/jobs/:id normalizes through `skillTagsSchema`. */
+  requiredSkills?: string[];
 }
 
 export interface JobListOptions {

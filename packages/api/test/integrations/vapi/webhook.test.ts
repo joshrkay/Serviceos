@@ -280,4 +280,26 @@ describe('handleVapiCallEvent', () => {
     expect(thirdRes.body).toEqual({ duplicate: true });
     expect(recordFunnelEventMock).not.toHaveBeenCalled();
   });
+
+  it('records the session with tenant context AND the RLS runtime role set before any voice_sessions statement', async () => {
+    const original = process.env.RLS_RUNTIME_ROLE;
+    process.env.RLS_RUNTIME_ROLE = 'true';
+    try {
+      const { deps, txnClient } = makeDeps({ ownerPhone: '+15125550000' });
+      const body = endedBody('call_ctx', '+15125550000');
+      await handleVapiCallEvent(deps, { tenantId: TENANT, ...signed(body) });
+
+      const sqls = txnClient.query.mock.calls.map((call) => String(call[0]).trim());
+      const firstSessionStatement = sqls.findIndex((sql) => /voice_sessions/.test(sql));
+      expect(sqls[0]).toBe('BEGIN');
+      expect(sqls.slice(1, firstSessionStatement)).toEqual([
+        "SELECT set_config('app.current_tenant_id', $1, true)",
+        'SET LOCAL ROLE rls_app_runtime',
+      ]);
+      expect(sqls[sqls.length - 1]).toBe('COMMIT');
+    } finally {
+      if (original === undefined) delete process.env.RLS_RUNTIME_ROLE;
+      else process.env.RLS_RUNTIME_ROLE = original;
+    }
+  });
 });

@@ -69,6 +69,7 @@ import type { PaymentLinkProvider } from '../payments/payment-link-provider';
 import type { ConnectAccountResolver } from '../invoices/public-invoice-service';
 import { dispatchInboundSms } from '../sms/inbound-dispatch';
 import { routeParam } from '../shared/route-params';
+import { clerkPrimaryEmail } from './clerk-primary-email';
 
 const logger = createLogger({ service: 'webhooks', environment: process.env.NODE_ENV || 'dev' });
 
@@ -454,7 +455,20 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
    * of the named tenant's own customers (a neighbour's, or none at all).
    */
   const STRIPE_CUSTOMER_TENANT_MISMATCH = 'stripe_customer_tenant_mismatch';
-  type StripeRefusalReason = typeof STRIPE_ACCOUNT_MISMATCH | typeof STRIPE_CUSTOMER_TENANT_MISMATCH;
+  /**
+   * A `customer.subscription.*` event delivered from a connected account.
+   * Rivet's own subscriptions are created on the platform account, so such an
+   * event is never Rivet billing and must not mirror onto any tenant.
+   */
+  const STRIPE_SUBSCRIPTION_NOT_PLATFORM = 'stripe_subscription_not_platform';
+  type StripeRefusalReason =
+    | typeof STRIPE_ACCOUNT_MISMATCH
+    | typeof STRIPE_CUSTOMER_TENANT_MISMATCH
+    | typeof STRIPE_SUBSCRIPTION_NOT_PLATFORM;
+
+  /** The connected account a delivery came from; '' for a platform-origin delivery. */
+  const eventAccountOf = (event: { account?: unknown }): string =>
+    typeof event.account === 'string' ? event.account.trim() : '';
 
   type EventAccountBinding =
     | { ok: true }
@@ -525,7 +539,7 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     event: { id: string; type: string; account?: string },
     tenantId: string,
   ): Promise<EventAccountBinding> => {
-    const eventAccount = typeof event.account === 'string' ? event.account.trim() : '';
+    const eventAccount = eventAccountOf(event);
     if (!eventAccount) return { ok: true };
     const tenantConnectAccountId = await resolveTenantConnectAccountId(tenantId);
     if (tenantConnectAccountId && tenantConnectAccountId === eventAccount) return { ok: true };
@@ -542,8 +556,10 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
    * stays null and no reader can mistake a refusal for a settlement.
    *
    * #1177 — the same path refuses a saved card whose metadata customer is not
-   * the named tenant's (`reason: STRIPE_CUSTOMER_TENANT_MISMATCH`); every other
-   * caller keeps the default account-mismatch reason and its exact output.
+   * the named tenant's (`reason: STRIPE_CUSTOMER_TENANT_MISMATCH`), and a
+   * connected-account subscription event (`STRIPE_SUBSCRIPTION_NOT_PLATFORM`);
+   * every other caller keeps the default account-mismatch reason and its exact
+   * output.
    */
   const refuseUnboundStripeEvent = async (
     res: Response,
@@ -569,7 +585,9 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     logger.warn(
       reason === STRIPE_CUSTOMER_TENANT_MISMATCH
         ? 'Stripe event refused — the metadata customer is not the tenant\'s customer'
-        : 'Stripe event refused — event.account is not the tenant\'s connected account',
+        : reason === STRIPE_SUBSCRIPTION_NOT_PLATFORM
+          ? 'Stripe event refused — a subscription event from a connected account is not platform billing'
+          : 'Stripe event refused — event.account is not the tenant\'s connected account',
       {
         eventId: ctx.eventId,
         type: ctx.eventType,
@@ -622,7 +640,10 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       'failed',
       reason === STRIPE_CUSTOMER_TENANT_MISMATCH
         ? `${reason}: customer '${ctx.customerId}' is not one of tenant ${ctx.tenantId}'s customers`
-        : `${reason}: event.account '${ctx.eventAccount}' is not tenant ` +
+        : reason === STRIPE_SUBSCRIPTION_NOT_PLATFORM
+          ? `${reason}: subscription event from connected account '${ctx.eventAccount}' ` +
+            `(metadata tenant ${ctx.tenantId || 'none'})`
+          : `${reason}: event.account '${ctx.eventAccount}' is not tenant ` +
             `${ctx.tenantId}'s connected account (${ctx.tenantConnectAccountId ?? 'none'})`,
     );
     return res.status(403).json({ error: 'Forbidden', reason });
@@ -755,8 +776,8 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
       if (eventType === 'user.created') {
         const userData = payload.data as Record<string, unknown>;
         const userId = userData.id as string;
-        const emailAddresses = userData.email_addresses as Array<{ email_address: string }>;
-        const primaryEmail = emailAddresses?.[0]?.email_address;
+        const primary = clerkPrimaryEmail(userData);
+        const primaryEmail = primary?.address;
 
         logger.info('user.created webhook received', { userId, email: primaryEmail });
 
@@ -776,9 +797,33 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
         //      meant to resolve (PR 319 review P1). Refusing the
         //      stale/forged id falls through to the bootstrap path,
         //      which is the safe outcome.
-        if (deps.pendingInvitationRepo && primaryEmail) {
-          const publicMeta = userData.public_metadata as Record<string, unknown> | undefined;
-          const invitationId = publicMeta?.invitation_id as string | undefined;
+        //
+        // Both lookups match on the address, so a join requires the
+        // PRIMARY address to be one Clerk reports as verified
+        // (clerkPrimaryEmail). An unverified address proves nothing about
+        // who holds the inbox: it skips the join and falls through to the
+        // bootstrap path, like a refused id.
+        const publicMeta = userData.public_metadata as Record<string, unknown> | undefined;
+        const invitationId = publicMeta?.invitation_id as string | undefined;
+        if (deps.pendingInvitationRepo && primary && !primary.verified) {
+          // Warn only when the skipped join was an invitation's: the
+          // sign-up carries an invitation id, or a pending invitation
+          // exists for the address. Most unverified sign-ups are ordinary
+          // owners who bootstrap, and a warn on each would bury this case.
+          // The lookup only decides the log line; it grants nothing.
+          const invited =
+            Boolean(invitationId) ||
+            Boolean(
+              await deps.pendingInvitationRepo.findPendingByEmail(primary.address).catch(() => null),
+            );
+          if (invited) {
+            logger.warn('user.created primary email is not verified — invitation join skipped', {
+              userId,
+              ...(invitationId ? { invitationId } : {}),
+            });
+          }
+        }
+        if (deps.pendingInvitationRepo && primary?.verified && primaryEmail) {
           let pending = null;
           if (invitationId) {
             if (deps.pendingInvitationRepo.findById) {
@@ -825,18 +870,22 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                 });
                 throw new Error('pool not configured for invitee join');
               }
-              // Insert the users row directly. RLS requires the
-              // tenant GUC to be set; SET LOCAL only persists inside
-              // a transaction (PR 319 review P1), so the BEGIN /
-              // COMMIT block is mandatory — without it the SET LOCAL
-              // is a no-op and the INSERT fails the RLS policy.
+              // Insert the users row directly. The tenant GUC is set
+              // with set_config(..., true), which only lasts inside a
+              // transaction (PR 319 review P1), hence the BEGIN /
+              // COMMIT block. This raw pool client never switches to
+              // rls_app_runtime, so it keeps the pool's privileged
+              // principal (db/rls-runtime-role.ts) and the users policy
+              // does not scope this INSERT: the tenant comes from the
+              // invitation row (pending.tenantId), never the payload.
               //
               // The tenantId is also asserted to look like a UUID
-              // before being interpolated into the SET LOCAL string
-              // (parameterized binding doesn't work for SET names).
-              // The id comes from the DB row (FK-backed), so this is
-              // belt + suspenders, but explicit prevents a future
-              // change from accidentally widening the column.
+              // before it is used. set_config and the INSERT both bind
+              // it as a parameter, so this is a shape check, not an
+              // injection guard. The id comes from the DB row
+              // (FK-backed), so this is belt + suspenders, but explicit
+              // prevents a future change from accidentally widening the
+              // column.
               const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
               if (!UUID_RE.test(pending.tenantId)) {
                 throw new Error(`Invalid tenantId on pending invitation: ${pending.tenantId}`);
@@ -2404,6 +2453,29 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             }>;
           };
         };
+        // SECURITY — Rivet's own subscriptions (trial checkout, billing
+        // portal) are created on the PLATFORM account, so a genuine event
+        // for one never carries `event.account`. One that does came from a
+        // connected account: its metadata.tenant_id and customer are
+        // whatever that account wrote, and mirroring it below would claim
+        // `sub.customer` for, and set the status and plan of, the tenant it
+        // names. Refuse it (the #1102 refusal: 403, audit on the named
+        // tenant, webhook row 'failed') before any read, write or job —
+        // including when the account is the named tenant's own, because a
+        // tenant's own subscription is not its Rivet subscription.
+        const subscriptionEventAccount = eventAccountOf(event as { account?: unknown });
+        if (subscriptionEventAccount) {
+          const namedTenantId =
+            typeof sub.metadata?.tenant_id === 'string' ? sub.metadata.tenant_id.trim() : '';
+          return refuseUnboundStripeEvent(res, webhookEvent.id, {
+            tenantId: namedTenantId,
+            eventId: event.id,
+            eventType: event.type,
+            eventAccount: subscriptionEventAccount,
+            reason: STRIPE_SUBSCRIPTION_NOT_PLATFORM,
+            ...(sub.customer ? { customerId: sub.customer } : {}),
+          });
+        }
         if (sub.id && sub.customer && sub.status) {
           // The subscription's price is the source of truth for the plan: a
           // portal upgrade changes it without touching checkout metadata.

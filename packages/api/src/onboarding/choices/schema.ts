@@ -135,6 +135,10 @@ export const ChoiceEntrySchema = z
     question: z.string().min(1).max(140),
     /** One sentence of why, or what Rivet does regardless. Template. */
     supportLine: z.string().max(220).optional(),
+    /** What Rivet says to "what does that mean?": what this setting decides, in plain words. Template. */
+    explain: z.string().min(1).max(260),
+    /** What Rivet says to "give me an example": one real call, and what each option does with it. Template. */
+    example: z.string().min(1).max(260),
     options: z.tuple([ChoiceOptionSchema, ChoiceOptionSchema]),
     /** The option most shops pick; marked on the card and used when the owner skips. */
     mostShops: OptionKeySchema,

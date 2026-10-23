@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router';
 import { useAuth, useUser } from '@clerk/clerk-react';
-import type { CreateOnboardingDraftBody, OnboardingCoreChoiceKey, OnboardingMetroCode, StagedOnboardingChoice } from '@ai-service-os/shared';
+import { narrateTurn, type CreateOnboardingDraftBody, type OnboardingCoreChoiceKey, type OnboardingMetroCode, type StagedOnboardingChoice } from '@ai-service-os/shared';
 import { useOnboardingDraft } from '../../../hooks/useOnboardingDraft';
 import { useOnboardingStatus } from '../../../hooks/useOnboardingStatus';
 import { RivetVoiceContext, useRivetVoice } from '../../../hooks/useRivetVoice';
@@ -23,7 +23,6 @@ import {
   landingTarget,
   makeItMineTarget,
   nextUnanswered,
-  spokenLines,
   type CoreTurn,
   type TurnTarget,
 } from './turns';
@@ -61,7 +60,9 @@ const placeFor = (target: TurnTarget): Place => (target.screen === 'turn' ? { sc
  * same frame (AfterApproval). Only an explicit re-run of setup opens the
  * sidebar shell. Rivet speaks each screen's line in the tenant's voice
  * (useRivetVoice): the taps that start the conversation unlock the audio, and
- * the next turn's lines are fetched while the current one plays.
+ * the next turn's lines are fetched while the current one plays. Rivet listens
+ * too: "Make it mine" asks for the microphone once for the pass, and a spoken
+ * "first" or "second" saves through the same stage call as a tap.
  */
 export function ConversationShell() {
   const [params] = useSearchParams();
@@ -78,17 +79,21 @@ function Conversation() {
   // What the owner last sent from the form. The form opens on it again whenever they come back to it
   // (the API refused the cell, or they chose to change their answers), so nothing typed is ever lost.
   const [answers, setAnswers] = useState<AnswerAsInput | null>(null);
-  const { draft, loading, error, cellProblem, notice, approving, stage, changeMetro, approve, reload } = useOnboardingDraft(createInput);
+  const { draft, loading, error, cellProblem, notice, approving, stage, changeMetro, approve, undo, retry, reset, recovering, reload } =
+    useOnboardingDraft(createInput);
   // The owner's own navigation; null until they move, then the draft decides where a returning owner opens.
   const [nav, setNav] = useState<Place | null>(null);
   // What the owner last tried to save: the turn they answered, the city on Ready, or "That's right". The hook's
   // one error and notice belong to that screen only, so a failed answer never shows up later on the read-back,
   // or the reverse. A refused city change re-reads the draft, which may land on a turn instead of Ready: its
-  // notice goes wherever the owner lands, until they move on.
-  const [attempt, setAttempt] = useState<OnboardingCoreChoiceKey | 'approve' | 'metro' | null>(null);
+  // notice goes wherever the owner lands, until they move on. 'after' is an undo, retry or start over: its
+  // notice ("changed in another window") shows on the screen after approval, or on the read-back it re-read.
+  const [attempt, setAttempt] = useState<OnboardingCoreChoiceKey | 'approve' | 'metro' | 'after' | null>(null);
   const [staging, setStaging] = useState(false);
   const [changingMetro, setChangingMetro] = useState(false);
-  const [saving, setSaving] = useState(false);
+  // When the undo window opened (an approval, or a retry of the whole set); null once it has closed.
+  const [savingSince, setSavingSince] = useState<number | null>(null);
+  const saving = savingSince !== null;
 
   const tenantId = status.data?.tenantId ?? draft?.tenantId ?? null;
   const isComplete = status.data?.isComplete === true;
@@ -102,10 +107,10 @@ function Conversation() {
   }, [isComplete, savedShop, navigate]);
 
   useEffect(() => {
-    if (!saving) return;
-    const timer = setTimeout(() => setSaving(false), UNDO_WINDOW_MS);
+    if (savingSince === null) return;
+    const timer = setTimeout(() => setSavingSince(null), UNDO_WINDOW_MS);
     return () => clearTimeout(timer);
-  }, [saving]);
+  }, [savingSince]);
 
   const turns = draft ? coreTurns(draft) : [];
   const landing = draft ? landingTarget(draft) : null;
@@ -149,7 +154,7 @@ function Conversation() {
           ? nextUnanswered(draft, turnKey)
           : null;
   const aheadTurn = aheadKey ? turns.find((t) => t.settingKey === aheadKey) : undefined;
-  const aheadLines = aheadTurn ? spokenLines(aheadTurn).join('\n') : '';
+  const aheadLines = aheadTurn ? narrateTurn(aheadTurn).join('\n') : '';
   const { prefetch } = voice;
   useEffect(() => {
     if (aheadLines) prefetch(aheadLines.split('\n'));
@@ -173,6 +178,8 @@ function Conversation() {
   const makeItMine = () => {
     // Inside the tap, before anything is awaited: iOS lets the element play later only if it played here.
     voice.unlock('make_it_mine');
+    // Then the microphone, once for the whole pass (one permission prompt), still inside the tap.
+    voice.openMic();
     if (draft) goTo(placeFor(makeItMineTarget(draft)));
   };
 
@@ -192,8 +199,11 @@ function Conversation() {
     goTo({ screen: 'turn', key, editing: true });
   };
 
-  /** Stage the owner's answer; move on only when it is saved. A failure stays here and the turn shows why. */
-  const answer = async (turn: CoreTurn, choice: StagedOnboardingChoice) => {
+  /**
+   * Stage the owner's answer; move on only when it is saved. A failure stays here and the turn shows why.
+   * A spoken "first"/"second" comes through here too, as the same option a tap would stage.
+   */
+  const answer = async (turn: CoreTurn, choice: StagedOnboardingChoice, via?: 'voice') => {
     if (!draft || staging) return;
     setStaging(true);
     setAttempt(turn.settingKey);
@@ -202,7 +212,7 @@ function Conversation() {
     const tapped = 'option' in choice;
     trackFunnel('v3_choice_made', funnelContext, {
       choice_key: turn.settingKey,
-      answer_mode: tapped ? 'tap' : 'type',
+      answer_mode: via === 'voice' && tapped ? 'voice' : tapped ? 'tap' : 'type',
       option: tapped ? choice.option : 'override',
       is_most_shops: tapped && choice.option === turn.mostShops,
     });
@@ -230,7 +240,51 @@ function Conversation() {
       return;
     }
     trackFunnel('v3_approved', { tenantId, userId }, { proposal_count: res.proposalIds.length, trade: res.draft.trade });
-    setSaving(true);
+    setSavingSince(Date.now());
+  };
+
+  /**
+   * Undo, Try again and Start over, from the screens after approval. A success that returns the draft to
+   * editable (undo, start over) opens the read-back with the answers kept; a retry of the whole set opens a
+   * fresh undo window. "Changed in another window" re-read the draft: if it is editable now, the read-back
+   * says so. Funnel events fire on a success only.
+   */
+  const undoApproval = async (seenVersion: number) => {
+    setAttempt('after');
+    const outcome = await undo(seenVersion);
+    if (outcome.kind === 'done') {
+      setSavingSince(null);
+      goTo({ screen: 'readback' });
+      trackFunnel('v3_undo', funnelContext, { proposal_count: draft?.proposalIds.length ?? 0 });
+    } else if (outcome.kind === 'moved') {
+      setNav({ screen: 'readback' });
+    }
+    return outcome;
+  };
+
+  const retrySave = async (seenVersion: number) => {
+    setAttempt('after');
+    const outcome = await retry(seenVersion);
+    if (outcome.kind === 'done') {
+      const { retriedProposalIds, undoable } = outcome.response;
+      if (undoable === true) setSavingSince(Date.now());
+      trackFunnel('v3_retry', funnelContext, { retried_count: retriedProposalIds.length, undoable: undoable === true });
+    } else if (outcome.kind === 'moved') {
+      setNav({ screen: 'readback' });
+    }
+    return outcome;
+  };
+
+  const startOver = async (seenVersion: number) => {
+    setAttempt('after');
+    const outcome = await reset(seenVersion);
+    if (outcome.kind === 'done') {
+      goTo({ screen: 'readback' });
+      trackFunnel('v3_reset', funnelContext, {});
+    } else if (outcome.kind === 'moved') {
+      setNav({ screen: 'readback' });
+    }
+    return outcome;
   };
 
   // A deactivated teammate is sent here by the route guard: say why, not "check your connection".
@@ -246,6 +300,12 @@ function Conversation() {
           status={status}
           saving={saving}
           changeCount={draft?.proposalIds.length ?? 0}
+          draftVersion={draft?.version ?? 0}
+          onUndo={undoApproval}
+          onRetry={retrySave}
+          onReset={startOver}
+          recovering={recovering}
+          notice={attempt === 'after' ? notice : null}
           packId={draft?.packId ?? null}
           userId={userId}
         />
@@ -294,11 +354,10 @@ function Conversation() {
       )}
       {screen === 'answer_as' && <AnswerAsScreen onSubmit={startDraft} initial={answers ?? undefined} cellProblem={cellProblem} />}
       {screen === 'ready' && draft && (
-        <ReadyScreen draft={draft} onMakeItMine={makeItMine} onKeepAsIs={keepAsIs} />
         <ReadyScreen
           draft={draft}
           onMakeItMine={makeItMine}
-          onKeepAsIs={() => goTo({ screen: 'readback' })}
+          onKeepAsIs={keepAsIs}
           onChangeMetro={(metro) => void changeCity(metro)}
           changingMetro={changingMetro}
           error={attempt === 'metro' ? error : null}
@@ -315,7 +374,7 @@ function Conversation() {
           error={attempt === currentTurn.settingKey ? error : null}
           notice={attempt === currentTurn.settingKey || attempt === 'metro' ? notice : null}
           editing={editing}
-          onPick={(option) => void answer(currentTurn, { option })}
+          onPick={(option, via) => void answer(currentTurn, { option }, via)}
           onTypeInstead={typedKind(currentTurn.settingKey) ? (override) => void answer(currentTurn, { override }) : undefined}
         />
       )}
@@ -324,7 +383,7 @@ function Conversation() {
           draft={draft}
           approving={approving}
           error={attempt === 'approve' ? error : null}
-          notice={attempt === 'approve' ? notice : null}
+          notice={attempt === 'approve' || attempt === 'after' ? notice : null}
           onApprove={() => void approveReadback()}
           onEdit={editFromReadback}
         />

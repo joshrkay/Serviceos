@@ -12,6 +12,7 @@
  * P11-002 — copy is localized via the notifications catalog (`tn`). Each
  * context carries an optional `language`; omitted → 'en' (back-compat).
  */
+import { CALL_PLAN_USAGE, OVERAGE_CENTS_PER_MINUTE } from '../billing/call-usage-pricing';
 import { TRIAL_MINUTE_LIMITS } from '../voice/trial-limits';
 import { tn } from './i18n';
 import type { Language } from '../ai/i18n/i18n';
@@ -139,6 +140,19 @@ export function renderEstimateEmail(ctx: EstimateMessageContext): RenderedEmail 
   return { subject, text, html };
 }
 
+/**
+ * The "we collect payment in person" line an invoice text ends with when its
+ * payment policy has no pay link; none otherwise. Shared with the owner's own
+ * invoice wording (notifications/customer-text-wording.ts), which can't know.
+ */
+export function smsInvoiceCollectOnSiteLine(
+  ctx: Pick<InvoiceMessageContext, 'businessName' | 'language' | 'paymentCollectionMode'>,
+): string[] {
+  return rendersPayCta(ctx.paymentCollectionMode)
+    ? []
+    : [tn('sms.invoice.collect_on_site', ctx.language ?? 'en', { business: ctx.businessName })];
+}
+
 export function renderInvoiceSms(ctx: InvoiceMessageContext): RenderedSms {
   const lang = ctx.language ?? 'en';
   const lines = [
@@ -151,9 +165,7 @@ export function renderInvoiceSms(ctx: InvoiceMessageContext): RenderedSms {
     rendersPayCta(ctx.paymentCollectionMode)
       ? tn('sms.invoice.cta', lang, { url: ctx.viewUrl })
       : tn('sms.invoice.cta_view', lang, { url: ctx.viewUrl }),
-    rendersPayCta(ctx.paymentCollectionMode)
-      ? null
-      : tn('sms.invoice.collect_on_site', lang, { business: ctx.businessName }),
+    ...smsInvoiceCollectOnSiteLine(ctx),
   ].filter((line): line is string => line !== null);
   if (ctx.customMessage && ctx.customMessage.trim().length > 0) {
     lines.splice(2, 0, ctx.customMessage.trim());
@@ -594,7 +606,8 @@ export function renderTrialEndingEmail(ctx: TrialEndingEmailContext): RenderedEm
     `Your 14-day Rivet trial ends ${when}. To keep your AI dispatcher answering ` +
     'calls and chasing invoices without interruption, no action is needed — your ' +
     'selected plan starts automatically when the trial ends. Plans include ' +
-    '20 AI answering minutes a month on Starter (60 on Growth), then $1.25 a minute.';
+    `${CALL_PLAN_USAGE.starter.includedMinutes} AI answering minutes a month on Starter ` +
+    `(${CALL_PLAN_USAGE.growth.includedMinutes} on Growth), then ${formatUsdCentsPlain(OVERAGE_CENTS_PER_MINUTE)} a minute.`;
   const reassure =
     'Not ready? You can cancel anytime before then and you won’t be charged. ' +
     'Either way, your data stays yours.';

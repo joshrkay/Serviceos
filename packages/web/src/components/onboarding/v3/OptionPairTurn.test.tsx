@@ -1,8 +1,9 @@
-import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
-import type { AssembledOnboardingChoice, OnboardingCoreChoiceKey, StagedOnboardingChoice } from '@ai-service-os/shared';
+import { narrateTurn, type AssembledOnboardingChoice, type OnboardingCoreChoiceKey, type StagedOnboardingChoice } from '@ai-service-os/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { ReactNode } from 'react';
+import { useState, type ReactNode } from 'react';
+import { expectAllTapTargets, expectTapTarget } from '../../../test-utils/tap-target';
 import { RivetVoiceContext, useRivetVoice } from '../../../hooks/useRivetVoice';
 import { plumbingCleDraft } from './__fixtures__';
 import { OptionPairTurn, type OptionPairTurnProps } from './OptionPairTurn';
@@ -401,15 +402,28 @@ describe('OptionPairTurn', () => {
       return <RivetVoiceContext.Provider value={voice}>{children}</RivetVoiceContext.Provider>;
     }
     let batches: string[][];
+    let singles: string[];
     let played: string[];
+    let element: HTMLMediaElement | null;
+    /** The clip playing now reaches its end, as the audio element reports it. */
+    const finish = () => act(() => void element?.dispatchEvent(new Event('ended')));
     const src = (text: string) => `data:audio/mpeg;base64,${btoa(encodeURIComponent(text))}`;
 
     beforeEach(() => {
       batches = [];
+      singles = [];
       played = [];
+      element = null;
       vi.stubGlobal(
         'fetch',
         vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+          const json = (body: unknown) =>
+            Promise.resolve(new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+          if (String(input) === '/api/voice/tts') {
+            const { text } = JSON.parse(String(init?.body)) as { text: string };
+            singles.push(text);
+            return json({ clipHash: 'f'.repeat(64), audio: btoa(encodeURIComponent(text)), contentType: 'audio/mpeg' });
+          }
           const { items } = JSON.parse(String(init?.body)) as { items: string[] };
           if (String(input) !== '/api/voice/tts/batch') throw new Error(`unexpected request ${String(input)}`);
           batches.push(items);
@@ -424,6 +438,7 @@ describe('OptionPairTurn', () => {
         }),
       );
       vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(function (this: HTMLMediaElement) {
+        element = this;
         played.push(this.src);
         return Promise.resolve();
       });
@@ -435,34 +450,447 @@ describe('OptionPairTurn', () => {
       vi.unstubAllGlobals();
     });
 
-    it("says the question when the turn opens, and a tapped card selects it and plays that option's line", async () => {
+    it('narrates the turn when it opens: the question, each option with its reason and what callers hear, then which most shops pick', async () => {
       const choice = choiceFor('booking_posture');
+      const lines = narrateTurn(choice);
       render(
         <Voice>
           <OptionPairTurn choice={choice} busy={false} error={null} notice={null} editing={false} onPick={vi.fn()} />
         </Voice>,
       );
-      await waitFor(() => expect(played).toEqual([src(choice.question)]));
-      expect(batches).toEqual([[choice.question, choice.options[0].rivetLine, choice.options[1].rivetLine]]);
+      await waitFor(() => expect(played).toEqual([src(lines[0])]));
+      // The whole narration is one request.
+      expect(batches).toEqual([lines]);
+      expect(lines).toEqual([
+        'When someone wants a repair, do I book it or hold it for you?',
+        expect.stringMatching(/^First: Book it on the call\. The caller leaves with a time\..* Callers hear: “I have Tuesday at 2/),
+        expect.stringMatching(/^Second: Hold it for me\. I take the details.* Callers hear: “I've got everything I need\./),
+        'Most shops pick the first. Which one?',
+      ]);
+      for (let i = 1; i < lines.length; i += 1) {
+        finish();
+        await waitFor(() => expect(played.at(-1)).toBe(src(lines[i])));
+      }
+      expect(singles).toEqual([]);
+    });
+
+    it("a tapped card selects it, cuts the narration short, and plays that option's caller line", async () => {
+      const choice = choiceFor('booking_posture');
+      const lines = narrateTurn(choice);
+      render(
+        <Voice>
+          <OptionPairTurn choice={choice} busy={false} error={null} notice={null} editing={false} onPick={vi.fn()} />
+        </Voice>,
+      );
+      await waitFor(() => expect(played).toEqual([src(lines[0])]));
 
       await userEvent.click(screen.getByRole('radio', { name: 'Hold it for me' }));
       expect(screen.getByRole('radio', { name: 'Hold it for me' })).toHaveAttribute('aria-checked', 'true');
       await waitFor(() => expect(played.at(-1)).toBe(src(choice.options[1].rivetLine)));
-      // Played from the turn already fetched: still the one request.
-      expect(batches).toHaveLength(1);
+      expect(singles).toEqual([choice.options[1].rivetLine]);
+      finish();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      // The rest of the narration never plays after the tap.
+      expect(played).toEqual([src(lines[0]), src(choice.options[1].rivetLine)]);
       expect(next()).toBeEnabled();
     });
 
-    it('tells the owner on the greeting that tapping one plays it, and never yet to say first or second', () => {
+    it('outside the shell nothing listens, so the greeting keeps only the hearing half of its line', () => {
       setup('greeting');
       expect(screen.getByText('Tap one to hear it.')).toBeInTheDocument();
       expect(screen.queryByText(/say .?first|say .?second/i)).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Answer out loud' })).not.toBeInTheDocument();
     });
 
     it('stays silent outside the shell: no voice, no request', () => {
       setup('booking_posture', { onTypeInstead: undefined });
       expect(batches).toEqual([]);
       expect(played).toEqual([]);
+    });
+  });
+
+  describe('Rivet listens (inside the shell, S3-5)', () => {
+    // The microphone and Deepgram's socket are the browser/vendor boundary (faked as in
+    // useDeepgramDictation.test.ts); the voice hook, the matcher and the turn are real, and
+    // the API is stubbed at fetch.
+    class FakeWebSocket {
+      static OPEN = 1;
+      static instances: FakeWebSocket[] = [];
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onmessage: ((e: { data: string }) => void) | null = null;
+      onerror: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor(readonly url: string) {
+        FakeWebSocket.instances.push(this);
+      }
+      send() {}
+      close() {
+        this.readyState = 3;
+      }
+    }
+    class FakeMediaRecorder {
+      state = 'inactive';
+      ondataavailable: unknown = null;
+      start() {
+        this.state = 'recording';
+      }
+      stop() {
+        this.state = 'inactive';
+      }
+    }
+    let micAnswer: 'granted' | 'denied';
+    let tokenStatus: number;
+    const socket = () => FakeWebSocket.instances.at(-1)!;
+    const open = () => act(() => {
+      socket().readyState = 1;
+      socket().onopen?.();
+    });
+    const hear = (transcript: string) =>
+      act(() => {
+        socket().onmessage?.({ data: JSON.stringify({ is_final: true, speech_final: true, channel: { alternatives: [{ transcript }] } }) });
+      });
+    const interim = (transcript: string) =>
+      act(() => {
+        socket().onmessage?.({ data: JSON.stringify({ is_final: false, channel: { alternatives: [{ transcript }] } }) });
+      });
+    const flush = () =>
+      act(async () => {
+        for (let i = 0; i < 10; i += 1) await Promise.resolve();
+      });
+
+    beforeEach(() => {
+      FakeWebSocket.instances = [];
+      micAnswer = 'granted';
+      tokenStatus = 200;
+      vi.stubGlobal('WebSocket', FakeWebSocket as unknown as typeof WebSocket);
+      vi.stubGlobal('MediaRecorder', FakeMediaRecorder as unknown as typeof MediaRecorder);
+      vi.stubGlobal('navigator', {
+        ...navigator,
+        mediaDevices: {
+          getUserMedia: vi.fn(async () => {
+            if (micAnswer === 'denied') throw new DOMException('Permission denied', 'NotAllowedError');
+            return { getTracks: () => [{ stop: vi.fn() }] };
+          }),
+        },
+      });
+      vi.stubGlobal(
+        'fetch',
+        vi.fn((input: RequestInfo | URL) => {
+          const path = String(input);
+          const reply = (status: number, body: unknown) =>
+            Promise.resolve(new Response(JSON.stringify(body), { status, headers: { 'Content-Type': 'application/json' } }));
+          if (path.startsWith('/api/voice/stream-token')) {
+            return tokenStatus === 200
+              ? reply(200, { token: 'dg-temp', expiresIn: 30, model: 'nova-3' })
+              : reply(tokenStatus, { error: 'NOT_CONFIGURED', message: 'Live transcription is not configured' });
+          }
+          if (path.startsWith('/api/voice/tts')) return reply(501, { error: 'NOT_CONFIGURED', message: 'Speech synthesis is not configured' });
+          throw new Error(`unexpected request ${path}`);
+        }),
+      );
+      vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(() => Promise.resolve());
+      vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+    });
+    afterEach(() => {
+      cleanup();
+      vi.useRealTimers();
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    });
+
+    /** The shell's voice: "Make it mine" unlocks the audio and asks for the microphone, then the turn opens. */
+    function Shell({ children }: { children: ReactNode }) {
+      const voice = useRivetVoice({ funnel: { tenantId: 't', userId: 'u' } });
+      const [started, setStarted] = useState(false);
+      return (
+        <RivetVoiceContext.Provider value={voice}>
+          {started ? (
+            children
+          ) : (
+            <button
+              type="button"
+              onClick={() => {
+                voice.unlock('make_it_mine');
+                voice.openMic();
+                setStarted(true);
+              }}
+            >
+              Make it mine
+            </button>
+          )}
+        </RivetVoiceContext.Provider>
+      );
+    }
+
+    async function openTurn(key: OnboardingCoreChoiceKey, props: Partial<OptionPairTurnProps> = {}) {
+      const onPick = vi.fn();
+      const utils = render(
+        <Shell>
+          <OptionPairTurn choice={choiceFor(key)} busy={false} error={null} notice={null} editing={false} onPick={onPick} {...props} />
+        </Shell>,
+      );
+      fireEvent.click(screen.getByRole('button', { name: 'Make it mine' }));
+      await flush();
+      return { onPick, ...utils };
+    }
+    const mic = () => screen.queryByRole('button', { name: 'Answer out loud' });
+    const transcript = () => screen.getByTestId('rivet-transcript');
+
+    it('puts the mic on the turn only when Rivet can listen', async () => {
+      await openTurn('booking_posture');
+      expect(mic()).toBeInTheDocument();
+      open();
+      expect(mic()).toHaveAttribute('aria-pressed', 'true');
+      expect(screen.getByText('Listening')).toBeInTheDocument();
+      cleanup();
+
+      micAnswer = 'denied';
+      await openTurn('booking_posture');
+      expect(mic()).not.toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(screen.getAllByRole('radio')).toHaveLength(2);
+      cleanup();
+
+      tokenStatus = 503;
+      await openTurn('booking_posture');
+      expect(mic()).not.toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+    });
+
+    it('says the whole greeting line when it can listen, and drops the listening half when it cannot', async () => {
+      await openTurn('greeting');
+      expect(screen.getByText('Tap one to hear it. Say "first" or "second" to pick.')).toBeInTheDocument();
+      cleanup();
+      micAnswer = 'denied';
+      await openTurn('greeting');
+      expect(screen.getByText('Tap one to hear it.')).toBeInTheDocument();
+      expect(screen.queryByText(/say .?first/i)).not.toBeInTheDocument();
+    });
+
+    it('a spoken answer selects the card, shows what was heard under it, and answers at once', async () => {
+      const { onPick } = await openTurn('booking_posture');
+      open();
+      interim('hold');
+      expect(transcript()).toHaveTextContent('hold');
+      hear('hold it');
+      const hold = screen.getByRole('radio', { name: 'Hold it for me' });
+      expect(hold).toHaveAttribute('aria-checked', 'true');
+      expect(within(hold).getByText('Heard: “hold it”')).toBeInTheDocument();
+      expect(onPick).toHaveBeenCalledTimes(1);
+      expect(onPick).toHaveBeenCalledWith('b', 'voice');
+    });
+
+    it('the same answer heard twice in one moment answers once', async () => {
+      const { onPick } = await openTurn('booking_posture');
+      open();
+      const final = JSON.stringify({ is_final: true, speech_final: true, channel: { alternatives: [{ transcript: 'first' }] } });
+      act(() => {
+        socket().onmessage?.({ data: final });
+        socket().onmessage?.({ data: final });
+      });
+      expect(onPick).toHaveBeenCalledTimes(1);
+      expect(onPick).toHaveBeenCalledWith('a', 'voice');
+    });
+
+    it('a miss says what it heard and how to answer; the second miss adds an example; nothing is picked', async () => {
+      const { onPick } = await openTurn('booking_posture');
+      open();
+      hear('banana');
+      expect(transcript()).toHaveTextContent('I heard “banana”. Tap one, or say first or second.');
+      expect(transcript()).not.toHaveTextContent('For example');
+      hear('something else');
+      expect(transcript()).toHaveTextContent('I heard “something else”. Tap one, or say first or second. For example, say “first”, or ask “what does that mean?”');
+      expect(onPick).not.toHaveBeenCalled();
+      expect(screen.getAllByRole('radio').every((r) => r.getAttribute('aria-checked') === 'false')).toBe(true);
+      expect(transcript()).toHaveAttribute('role', 'status');
+      expect(transcript()).toHaveAttribute('aria-live', 'polite');
+    });
+
+    describe('help, out loud', () => {
+      const booking = () => choiceFor('booking_posture');
+      // Rivet's voice works here, so what he says can be read off the batch requests.
+      let batches: string[][];
+      beforeEach(() => {
+        batches = [];
+        const listening = vi.mocked(fetch).getMockImplementation()!;
+        vi.stubGlobal(
+          'fetch',
+          vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+            if (String(input) !== '/api/voice/tts/batch') return listening(input, init);
+            const { items } = JSON.parse(String(init?.body)) as { items: string[] };
+            batches.push(items);
+            const clips = items.map((text, i) => ({
+              text,
+              clipHash: String(i).padStart(64, '0'),
+              audio: btoa(encodeURIComponent(text)),
+              contentType: 'audio/mpeg',
+              cached: false,
+            }));
+            return Promise.resolve(new Response(JSON.stringify({ clips }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+          }),
+        );
+      });
+      const ttsBodies = () => batches.map((items) => items.join('\n'));
+
+      it('"what does that mean?" is answered in plain words, then asked again, and the turn keeps listening', async () => {
+        const { onPick } = await openTurn('booking_posture');
+        open();
+        hear('what does that mean');
+        expect(transcript()).toHaveTextContent(`${booking().explain} Which one?`);
+        expect(onPick).not.toHaveBeenCalled();
+        expect(screen.getAllByRole('radio').every((r) => r.getAttribute('aria-checked') === 'false')).toBe(true);
+        await flush();
+        expect(ttsBodies().some((b) => b.includes(booking().explain!))).toBe(true);
+        // Still listening: the next answer picks.
+        hear('the second one');
+        expect(onPick).toHaveBeenCalledWith('b', 'voice');
+      });
+
+      it('"give me an example" tells one real call', async () => {
+        await openTurn('booking_posture');
+        open();
+        hear('can you give me an example');
+        expect(transcript()).toHaveTextContent(`${booking().example} Which one?`);
+      });
+
+      it('"what do most shops do?" names the usual pick and why', async () => {
+        await openTurn('booking_posture');
+        open();
+        hear('what do most shops do');
+        expect(transcript()).toHaveTextContent(
+          'Most shops pick the first: Book it on the call. The caller leaves with a time. You get a text and one tap to undo. Nothing gets booked on top of another job. Which one?',
+        );
+      });
+
+      it('"say that again" says the turn again', async () => {
+        const played: string[] = [];
+        vi.spyOn(HTMLMediaElement.prototype, 'play').mockImplementation(function (this: HTMLMediaElement) {
+          played.push(decodeURIComponent(atob(this.src.split(',')[1] ?? '')));
+          return Promise.resolve();
+        });
+        await openTurn('booking_posture');
+        open();
+        await flush();
+        played.length = 0;
+        hear('sorry, say that again');
+        expect(transcript()).toHaveTextContent('Saying it again.');
+        await flush();
+        // The question first, from the clips already fetched for the turn: no second request.
+        expect(played[0]).toBe(narrateTurn(booking())[0]);
+        expect(batches).toHaveLength(1);
+      });
+
+      it('"what does the first one mean" is a question, not a pick', async () => {
+        const { onPick } = await openTurn('booking_posture');
+        open();
+        hear('what does the first one mean');
+        expect(onPick).not.toHaveBeenCalled();
+        expect(transcript()).toHaveTextContent(booking().explain!);
+      });
+
+      it('a miss after a question replaces the answer, and the second miss offers the question', async () => {
+        await openTurn('booking_posture');
+        open();
+        hear('what does that mean');
+        hear('banana');
+        expect(transcript()).toHaveTextContent('I heard “banana”. Tap one, or say first or second.');
+        hear('purple');
+        expect(transcript()).toHaveTextContent('For example, say “first”, or ask “what does that mean?”');
+      });
+
+      it('a tapped card clears the answer', async () => {
+        await openTurn('booking_posture');
+        open();
+        hear('give me an example');
+        fireEvent.click(screen.getByRole('radio', { name: 'Hold it for me' }));
+        expect(transcript()).not.toHaveTextContent(booking().example!);
+      });
+
+      it('a draft from before the explanations still answers, from the cards', async () => {
+        const { explain: _e, example: _x, ...old } = booking();
+        render(
+          <Shell>
+            <OptionPairTurn choice={old} busy={false} error={null} notice={null} editing={false} onPick={vi.fn()} />
+          </Shell>,
+        );
+        fireEvent.click(screen.getByRole('button', { name: 'Make it mine' }));
+        await flush();
+        open();
+        hear('give me an example');
+        expect(transcript()).toHaveTextContent('With the first, callers hear: “I have Tuesday at 2 or Wednesday at 9. Which works for you?”');
+      });
+    });
+
+    it('after 6 s of quiet says "Take your time" once, stops listening, and never says it twice', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      await openTurn('booking_posture');
+      open();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_900);
+      });
+      expect(screen.queryByText("Take your time. Tap the mic when you're ready.")).not.toBeInTheDocument();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200);
+      });
+      expect(screen.getByText("Take your time. Tap the mic when you're ready.")).toBeInTheDocument();
+      expect(mic()).toHaveAttribute('aria-pressed', 'false');
+
+      // The mic tap listens again; another quiet spell stops it without saying the line again.
+      fireEvent.click(mic()!);
+      await flush();
+      open();
+      expect(mic()).toHaveAttribute('aria-pressed', 'true');
+      expect(screen.queryByText("Take your time. Tap the mic when you're ready.")).not.toBeInTheDocument();
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(6_100);
+      });
+      expect(mic()).toHaveAttribute('aria-pressed', 'false');
+      expect(screen.queryAllByText("Take your time. Tap the mic when you're ready.")).toHaveLength(0);
+    });
+
+    it('stops listening while the owner types, and while an answer is being saved', async () => {
+      const onTypeInstead = vi.fn();
+      await openTurn('greeting', { onTypeInstead });
+      open();
+      const first = socket();
+      fireEvent.click(screen.getByRole('button', { name: 'Type instead' }));
+      expect(first.readyState).toBe(3);
+      expect(mic()).not.toBeInTheDocument();
+      cleanup();
+
+      const onPick = vi.fn();
+      const turnWith = (busy: boolean) => (
+        <Shell>
+          <OptionPairTurn choice={choiceFor('booking_posture')} busy={busy} error={null} notice={null} editing={false} onPick={onPick} />
+        </Shell>
+      );
+      const { rerender } = render(turnWith(false));
+      fireEvent.click(screen.getByRole('button', { name: 'Make it mine' }));
+      await flush();
+      open();
+      const second = socket();
+      rerender(turnWith(true));
+      expect(second.readyState).toBe(3);
+      expect(mic()).toBeDisabled();
+    });
+
+    it('class contract at 320px: the mic is a 44px-plus target, every control is, and nothing is wider than the screen', async () => {
+      const { container } = await openTurn('greeting', { onTypeInstead: vi.fn() });
+      open();
+      hear('banana');
+      expectTapTarget(mic()!, 'the mic');
+      expect(mic()!.className).toMatch(/(^|\s)min-h-11(\s|$)/);
+      expectAllTapTargets(container, 'a listening turn');
+      const widths: number[] = [];
+      for (const el of Array.from(container.querySelectorAll('*'))) {
+        for (const m of (el.getAttribute('class') ?? '').matchAll(/(?:^|\s)(?:min-|max-)?w-\[(\d+)px\]/g)) widths.push(Number(m[1]));
+      }
+      expect(widths.filter((w) => w > 320)).toEqual([]);
+      expect(transcript().className).toMatch(/break-words/);
+      // The halo pulses only for owners who have not asked for less motion.
+      const halo = mic()!.querySelector('[data-halo]');
+      expect(halo?.getAttribute('class')).toMatch(/motion-reduce:animate-none/);
     });
   });
 });

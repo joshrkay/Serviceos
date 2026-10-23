@@ -21,15 +21,15 @@ import type { Pool } from 'pg';
 import { z } from 'zod';
 import { asyncRoute } from '../middleware/async-route';
 import { LeadRepository } from '../leads/lead';
-import { createLead } from '../leads/lead-service';
+import { captureLead } from '../leads/lead-service';
+import type { NewLeadAutoReply } from '../leads/new-lead-auto-reply';
 import { AuditRepository } from '../audit/audit';
 import { TenantRepository } from '../auth/clerk';
 import { attributionSchema, LeadSource } from '../leads/enums';
 import { SettingsRepository } from '../settings/settings';
 import { VerticalPackRegistry } from '../shared/vertical-pack-registry';
 import { formatBusinessHoursSummary } from '../public-intake/format-business-hours';
-import { isValidVerticalType } from '../shared/vertical-types';
-import { isTwilioTestNumber } from '../telephony/phone-policy';
+import { resolvePublicBusinessPhone, resolvePublicServiceTypes } from '../public-intake/public-business-info';
 import { routeParam } from '../shared/route-params';
 
 const PUBLIC_INTAKE_SOURCE: LeadSource = 'web_form';
@@ -62,6 +62,9 @@ const intakeSchema = z.object({
   utmMedium: z.string().trim().max(200).optional(),
   utmCampaign: z.string().trim().max(200).optional(),
   attribution: attributionSchema.optional(),
+  // #1738 — the form's UNTICKED "text me about this request" box. Only an
+  // explicit true lets the instant reply text go out; absent means no.
+  smsConsent: z.boolean().optional(),
   // Honeypot — must be empty/absent. Real users never fill this; bots do.
   _company_url: z.string().max(500).optional(),
 }).refine(
@@ -135,6 +138,7 @@ export function createPublicIntakeRouter(
   settingsRepo: SettingsRepository,
   packRegistry: VerticalPackRegistry,
   pool?: Pool,
+  autoReplyToNewLead?: NewLeadAutoReply,
 ): Router {
   const router = Router();
 
@@ -163,7 +167,7 @@ export function createPublicIntakeRouter(
     }
 
     const addressFields = resolveIntakeAddress(parsed);
-    const lead = await createLead(
+    const { lead, outcome } = await captureLead(
       {
         tenantId,
         firstName: parsed.firstName,
@@ -184,6 +188,12 @@ export function createPublicIntakeRouter(
       leadRepo,
       auditRepo
     );
+
+    // #1738 — owner-opt-in instant reply. Never throws, so a texting problem
+    // can't fail the visitor's submission; every outcome is audited on the lead.
+    if (autoReplyToNewLead) {
+      await autoReplyToNewLead({ lead, outcome, smsConsent: parsed.smsConsent === true });
+    }
 
     // Don't echo the full lead back — public callers don't need ids.
     res.status(201).json({ ok: true, leadId: lead.id });
@@ -206,54 +216,8 @@ export function createPublicIntakeRouter(
 
     const settings = await settingsRepo.findByTenant(tenantId);
 
-    const serviceTypes: { verticalType: string; displayName: string }[] = [];
-    const seenVerticals = new Set<string>();
-    for (const packId of settings?.activeVerticalPacks ?? []) {
-      let pack = await packRegistry.getByPackId(packId);
-      if (!pack && isValidVerticalType(packId)) {
-        const candidates = await packRegistry.findByVertical(packId);
-        pack =
-          candidates
-            .filter((p) => p.status === 'active')
-            .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0] ?? null;
-      }
-      if (pack && !seenVerticals.has(pack.verticalType)) {
-        seenVerticals.add(pack.verticalType);
-        serviceTypes.push({
-          verticalType: pack.verticalType,
-          displayName: pack.displayName,
-        });
-      }
-    }
-
-    // #880 — never surface a Twilio test magic number publicly. The dev-stub
-    // provisioning path writes {phoneE164: '+15005550006', stub: true} so
-    // onboarding completes without Twilio creds; if such a row reaches a
-    // deployed DB (mis-set NODE_ENV at provisioning time, or a row predating
-    // the env gate), this fallback used to display the non-dialable magic
-    // number to customers. Suppress stub/magic values and return null — every
-    // web render site already guards on `businessPhone && …`, so the honest
-    // empty state falls out for free.
-    let businessPhone = settings?.businessPhone?.trim() || null;
-    if (businessPhone && isTwilioTestNumber(businessPhone)) {
-      businessPhone = null;
-    }
-    if (!businessPhone && pool) {
-      const twilioRow = await pool.query<{ phone: string | null; stub: string | null }>(
-        `SELECT provider_data->>'phoneE164' AS phone,
-                provider_data->>'stub' AS stub
-         FROM tenant_integrations
-         WHERE tenant_id = $1 AND provider = 'twilio'
-         LIMIT 1`,
-        [tenantId],
-      );
-      const fallbackPhone = twilioRow.rows[0]?.phone?.trim() || null;
-      const isStubRow = twilioRow.rows[0]?.stub === 'true';
-      businessPhone =
-        fallbackPhone && !isStubRow && !isTwilioTestNumber(fallbackPhone)
-          ? fallbackPhone
-          : null;
-    }
+    const serviceTypes = await resolvePublicServiceTypes(settings, packRegistry);
+    const businessPhone = await resolvePublicBusinessPhone(settings, tenantId, pool);
 
     let businessHours: unknown = null;
     if (pool) {

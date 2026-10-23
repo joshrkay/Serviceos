@@ -14,6 +14,11 @@ import {
   exchangeAuthorizationCode,
 } from '../integrations/google-calendar';
 import { CalendarSyncService } from '../integrations/calendar-sync';
+import {
+  clearOAuthStateCookie,
+  relayOrRefuseUnboundOAuthState,
+  setOAuthStateCookie,
+} from '../integrations/oauth-state-binding';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import {
   seedAvailabilityFromGoogle,
@@ -34,7 +39,9 @@ import type { Pool } from 'pg';
  * The callback route is unauthenticated by design — Google redirects
  * the user's browser there, no Clerk session is in flight. State
  * binds the callback back to the original (tenant, user) via the
- * one-time nonce stored in oauth_states.
+ * one-time nonce stored in oauth_states, and the connect route's
+ * HttpOnly cookie binds that nonce to the browser that started the
+ * flow (integrations/oauth-state-binding.ts).
  */
 export interface CalendarIntegrationsRouteDeps {
   integrationRepo: CalendarIntegrationRepository;
@@ -88,7 +95,8 @@ function isSafeRelativePath(value: string | undefined): value is string {
  * Returns just the unauthenticated OAuth callback route. Mounted
  * BEFORE the global /api Clerk-session middleware so the inbound
  * redirect from Google isn't rejected for lack of a session. The
- * state nonce stored in oauth_states does the auth binding instead.
+ * state nonce stored in oauth_states does the auth binding instead,
+ * accepted only from the browser whose cookie holds it.
  */
 export function createCalendarOAuthCallbackRouter(
   deps: CalendarIntegrationsRouteDeps,
@@ -112,11 +120,14 @@ export function createCalendarOAuthCallbackRouter(
       if (!deps.googleConfig) {
         throw new ValidationError('Google calendar integration is not configured');
       }
+      // Before consume: a refused browser must not spend the state.
+      if (relayOrRefuseUnboundOAuthState(req, res, 'google', state, deps.appBaseUrl)) return;
 
       const consumed = await deps.stateRepo.consume(state, 'google');
       if (!consumed) {
         throw new ValidationError('Invalid or expired OAuth state');
       }
+      clearOAuthStateCookie(res, 'google', deps.appBaseUrl);
 
       const tokens = await exchangeAuthorizationCode(
         deps.googleConfig,
@@ -260,6 +271,7 @@ export function createCalendarIntegrationsRouter(
           redirectAfter,
         });
         const url = buildGoogleAuthUrl(deps.googleConfig, stateId);
+        setOAuthStateCookie(res, 'google', stateId, deps.appBaseUrl);
 
         if (deps.auditRepo) {
           // D2-1d — operator opted into the OAuth flow. The actor is

@@ -9,16 +9,18 @@
  * - Quality score is computed in code (LLM does not pick the number).
  * - Escalated sessions → quality score = 0.3 regardless of proposals.
  * - No proposals AND not escalated → qualityScore omitted.
- * - DB write only happens when a pool is supplied.
+ * - DB write only happens when a call-summary repository is supplied, and
+ *   goes through it (A2: never a raw pool.query outside the tenant context).
+ * - DB write errors propagate (the callers swallow them at teardown).
  * - Gateway errors propagate (caller decides retry policy).
  */
 
 import { describe, it, expect, vi } from 'vitest';
-import type { Pool } from 'pg';
 import {
   summarizeSession,
   SummarizeSessionInput,
 } from '../../../src/ai/skills/summarize-session';
+import type { CallSummaryRepository } from '../../../src/ai/skills/pg-call-summary';
 import { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
 
 // ---------------------------------------------------------------------------
@@ -37,10 +39,14 @@ function mockGateway(summary = 'Caller scheduled an AC diagnostic for Friday.'):
   } as unknown as LLMGateway;
 }
 
-function mockPool(): Pool {
-  return {
-    query: vi.fn(async () => ({ rows: [], rowCount: 1 })),
-  } as unknown as Pool;
+function mockCallSummaryRepo(): CallSummaryRepository & { create: ReturnType<typeof vi.fn> } {
+  return { create: vi.fn(async () => ({ id: 'cs-1' })) };
+}
+
+/** The (tenantId, row) the skill handed the repository on its only write. */
+function written(repo: ReturnType<typeof mockCallSummaryRepo>) {
+  expect(repo.create).toHaveBeenCalledTimes(1);
+  return repo.create.mock.calls[0] as [string, Record<string, unknown>];
 }
 
 function baseInput(overrides: Partial<SummarizeSessionInput> = {}): SummarizeSessionInput {
@@ -66,13 +72,13 @@ function baseInput(overrides: Partial<SummarizeSessionInput> = {}): SummarizeSes
 // ---------------------------------------------------------------------------
 
 describe('summarizeSession — happy path', () => {
-  it('produces a summary, computes quality score, and inserts a row', async () => {
-    const pool = mockPool();
+  it('produces a summary, computes quality score, and writes a row through the repository', async () => {
+    const callSummaryRepo = mockCallSummaryRepo();
     // Pass an explicit recordingId so the call_id column gets populated;
     // otherwise the skill writes NULL (in-app sessions don't yet have a
     // voice_recordings row — that's wired in P8-014).
     const recordingId = '11111111-1111-1111-1111-111111111111';
-    const result = await summarizeSession(baseInput({ pool, recordingId }));
+    const result = await summarizeSession(baseInput({ callSummaryRepo, recordingId }));
 
     expect(result.summary).toBe('Caller scheduled an AC diagnostic for Friday.');
     expect(result.intentDetected).toBe('schedule_diagnostic');
@@ -80,16 +86,15 @@ describe('summarizeSession — happy path', () => {
     // hasProposals (0.5) + hasIntent (0.25) = 0.75
     expect(result.qualityScore).toBeCloseTo(0.75, 5);
 
-    expect(pool.query).toHaveBeenCalledTimes(1);
-    const callArgs = (pool.query as ReturnType<typeof vi.fn>).mock.calls[0];
-    expect(callArgs[0]).toContain('INSERT INTO call_summaries');
-    expect(callArgs[1]).toEqual([
+    expect(written(callSummaryRepo)).toEqual([
       'tenant-1',
-      recordingId,
-      'Caller scheduled an AC diagnostic for Friday.',
-      'schedule_diagnostic',
-      ['prop-1'],
-      0.75,
+      {
+        callId: recordingId,
+        summary: 'Caller scheduled an AC diagnostic for Friday.',
+        detectedIntent: 'schedule_diagnostic',
+        proposalIds: ['prop-1'],
+        qualityScore: 0.75,
+      },
     ]);
   });
 
@@ -187,13 +192,12 @@ describe('summarizeSession — happy path', () => {
   });
 
   it('writes NULL call_id when no recordingId is provided (in-app sessions)', async () => {
-    const pool = mockPool();
-    await summarizeSession(baseInput({ pool })); // no recordingId
+    const callSummaryRepo = mockCallSummaryRepo();
+    await summarizeSession(baseInput({ callSummaryRepo })); // no recordingId
 
-    const callArgs = (pool.query as ReturnType<typeof vi.fn>).mock.calls[0];
-    // Position 1 is call_id — must be NULL because no voice_recordings
-    // row exists for this session yet (P8-014 territory).
-    expect(callArgs[1][1]).toBeNull();
+    // call_id must be NULL because no voice_recordings row exists for this
+    // session yet (P8-014 territory).
+    expect(written(callSummaryRepo)[1].callId).toBeNull();
   });
 
   it('summary is at most 3 sentences (LLM contract)', async () => {
@@ -240,17 +244,30 @@ describe('summarizeSession — happy path', () => {
 });
 
 // ---------------------------------------------------------------------------
-// No pool → no DB write
+// No repository → no DB write
 // ---------------------------------------------------------------------------
 
-describe('summarizeSession — no pool provided', () => {
+describe('summarizeSession — no call-summary repository provided', () => {
   it('returns a result without writing to the DB', async () => {
-    const result = await summarizeSession(baseInput()); // pool omitted
+    const result = await summarizeSession(baseInput()); // callSummaryRepo omitted
 
     expect(result.summary).toBeDefined();
     expect(result.qualityScore).toBeCloseTo(0.75, 5);
-    // No way to assert "pool.query not called" when no pool exists; the
+    // No way to assert "create not called" when no repository exists; the
     // contract is that the function completes successfully and returns.
+  });
+});
+
+// ---------------------------------------------------------------------------
+// DB write error propagation
+// ---------------------------------------------------------------------------
+
+describe('summarizeSession — DB write error propagation', () => {
+  it('a failed write rejects (the callers catch it, so call teardown never fails on it)', async () => {
+    const callSummaryRepo = mockCallSummaryRepo();
+    callSummaryRepo.create.mockRejectedValueOnce(new Error('insert failed'));
+
+    await expect(summarizeSession(baseInput({ callSummaryRepo }))).rejects.toThrow('insert failed');
   });
 });
 
@@ -408,7 +425,7 @@ describe('summarizeSession — gateway error propagation', () => {
   });
 
   it('does not insert a row when the gateway throws', async () => {
-    const pool = mockPool();
+    const callSummaryRepo = mockCallSummaryRepo();
     const gateway = {
       complete: vi.fn(async () => {
         throw new Error('Provider unavailable');
@@ -416,9 +433,9 @@ describe('summarizeSession — gateway error propagation', () => {
     } as unknown as LLMGateway;
 
     await expect(
-      summarizeSession(baseInput({ gateway, pool }))
+      summarizeSession(baseInput({ gateway, callSummaryRepo }))
     ).rejects.toThrow('Provider unavailable');
-    expect(pool.query).not.toHaveBeenCalled();
+    expect(callSummaryRepo.create).not.toHaveBeenCalled();
   });
 });
 
@@ -428,38 +445,36 @@ describe('summarizeSession — gateway error propagation', () => {
 
 describe('summarizeSession — DB persistence shape', () => {
   it('passes proposalIds as a native array (proposal_ids is UUID[])', async () => {
-    const pool = mockPool();
+    const callSummaryRepo = mockCallSummaryRepo();
     await summarizeSession(baseInput({
-      pool,
+      callSummaryRepo,
       proposalIds: ['p1', 'p2', 'p3'],
     }));
 
-    const params = (pool.query as ReturnType<typeof vi.fn>).mock.calls[0][1];
-    expect(params[4]).toEqual(['p1', 'p2', 'p3']);
-    expect(Array.isArray(params[4])).toBe(true);
+    const { proposalIds } = written(callSummaryRepo)[1];
+    expect(proposalIds).toEqual(['p1', 'p2', 'p3']);
+    expect(Array.isArray(proposalIds)).toBe(true);
   });
 
   it('writes null detected_intent when intentDetected is omitted', async () => {
-    const pool = mockPool();
+    const callSummaryRepo = mockCallSummaryRepo();
     await summarizeSession(baseInput({
-      pool,
+      callSummaryRepo,
       intentDetected: undefined,
     }));
 
-    const params = (pool.query as ReturnType<typeof vi.fn>).mock.calls[0][1];
-    expect(params[3]).toBeNull();
+    expect(written(callSummaryRepo)[1].detectedIntent).toBeNull();
   });
 
   it('writes null quality_score when no proposals and not escalated', async () => {
-    const pool = mockPool();
+    const callSummaryRepo = mockCallSummaryRepo();
     await summarizeSession(baseInput({
-      pool,
+      callSummaryRepo,
       proposalIds: [],
       intentDetected: 'general_question',
       transcript: ['agent: Hi.', 'caller: Just a question.'],
     }));
 
-    const params = (pool.query as ReturnType<typeof vi.fn>).mock.calls[0][1];
-    expect(params[5]).toBeNull();
+    expect(written(callSummaryRepo)[1].qualityScore).toBeNull();
   });
 });

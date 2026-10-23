@@ -484,3 +484,128 @@ describe('assignTechnician — cross-midnight windows vs modeled hours (Codex P2
     ).rejects.toThrow(/spans multiple local days/i);
   });
 });
+
+describe('assignTechnician — required-skill precondition (Dispatch FR-2)', () => {
+  let assignmentRepo: InMemoryAssignmentRepository;
+  let appointmentRepo: InMemoryAppointmentRepository;
+
+  beforeEach(() => {
+    assignmentRepo = new InMemoryAssignmentRepository();
+    appointmentRepo = new InMemoryAppointmentRepository();
+  });
+
+  const makeAppt = () =>
+    createAppointment(
+      {
+        tenantId: 'tenant-1',
+        jobId: 'job-1',
+        scheduledStart: new Date('2026-06-15T17:00:00Z'),
+        scheduledEnd: new Date('2026-06-15T18:00:00Z'),
+        timezone: 'America/Los_Angeles',
+        createdBy: 'disp-1',
+      },
+      appointmentRepo,
+    );
+
+  const input = (appointmentId: string) => ({
+    tenantId: 'tenant-1',
+    appointmentId,
+    technicianId: 'tech-1',
+    technicianRole: 'technician',
+    assignedBy: 'disp-1',
+  });
+
+  const matcher = (required: string[], held: string[]) => ({
+    requiredSkillsForJob: async () => required,
+    skillsForTechnician: async () => held,
+  });
+
+  it('refuses (409) a technician missing a required skill, and writes nothing', async () => {
+    const appt = await makeAppt();
+    await expect(
+      assignTechnician(input(appt.id), assignmentRepo, {
+        appointmentRepo,
+        skillMatcher: matcher(['gas_certified', 'hvac'], ['hvac']),
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('gas_certified') });
+    expect(await assignmentRepo.findByAppointment('tenant-1', appt.id)).toHaveLength(0);
+  });
+
+  it('assigns a technician who holds every required skill', async () => {
+    const appt = await makeAppt();
+    const a = await assignTechnician(input(appt.id), assignmentRepo, {
+      appointmentRepo,
+      skillMatcher: matcher(['hvac'], ['hvac', 'electrical']),
+    });
+    expect(a.technicianId).toBe('tech-1');
+  });
+
+  it('assigns anyone when the job has no required skills', async () => {
+    const appt = await makeAppt();
+    const a = await assignTechnician(input(appt.id), assignmentRepo, {
+      appointmentRepo,
+      skillMatcher: matcher([], []),
+    });
+    expect(a.technicianId).toBe('tech-1');
+  });
+});
+
+describe('assignTechnician — dispatcher-accepted overlap (Dispatch FR-2 phase 3c)', () => {
+  let assignmentRepo: InMemoryAssignmentRepository;
+  let appointmentRepo: InMemoryAppointmentRepository;
+  let auditRepo: InMemoryAuditRepository;
+
+  beforeEach(() => {
+    assignmentRepo = new InMemoryAssignmentRepository();
+    appointmentRepo = new InMemoryAppointmentRepository();
+    auditRepo = new InMemoryAuditRepository();
+  });
+
+  const makeAppt = (start: string, end: string) =>
+    createAppointment(
+      { tenantId: 'tenant-1', jobId: 'job-1', scheduledStart: new Date(start), scheduledEnd: new Date(end), timezone: 'UTC', createdBy: 'disp-1' },
+      appointmentRepo,
+    );
+  const input = (appointmentId: string, extra: Record<string, unknown> = {}) => ({
+    tenantId: 'tenant-1', appointmentId, technicianId: 'tech-1', technicianRole: 'technician' as const, assignedBy: 'disp-1', ...extra,
+  });
+
+  it('books the overlapping visit when that visit was accepted, marks the row and the audit event', async () => {
+    const busy = await makeAppt('2026-06-01T17:00:00Z', '2026-06-01T19:00:00Z');
+    const clash = await makeAppt('2026-06-01T18:00:00Z', '2026-06-01T20:00:00Z');
+    await assignTechnician(input(busy.id), assignmentRepo, { appointmentRepo });
+
+    const created = await assignTechnician(input(clash.id, { acceptOverlapWith: [busy.id] }), assignmentRepo, { appointmentRepo, auditRepo });
+
+    expect(created.overlapAccepted).toBe(true);
+    expect(created.overlapAcceptedWith).toEqual([busy.id]);
+    const events = await auditRepo.findByEntity('tenant-1', 'appointment', clash.id);
+    expect(events.find((e) => e.eventType === 'appointment.technician_assigned')?.metadata)
+      .toMatchObject({ overlapAccepted: true, overlapAcceptedWith: [busy.id] });
+  });
+
+  it('does not mark a booking that did not actually overlap, even with an acceptance', async () => {
+    const free = await makeAppt('2026-06-01T17:00:00Z', '2026-06-01T18:00:00Z');
+    const created = await assignTechnician(input(free.id, { acceptOverlapWith: ['some-other-visit'] }), assignmentRepo, { appointmentRepo });
+    expect(created.overlapAccepted).toBeUndefined();
+  });
+
+  it('refuses (409) an overlap with a visit the user did not accept, even when another was', async () => {
+    const seen = await makeAppt('2026-06-01T17:00:00Z', '2026-06-01T19:00:00Z');
+    const unseen = await makeAppt('2026-06-01T19:30:00Z', '2026-06-01T20:30:00Z');
+    const clash = await makeAppt('2026-06-01T18:00:00Z', '2026-06-01T20:00:00Z');
+    await assignTechnician(input(seen.id), assignmentRepo, { appointmentRepo });
+    await assignTechnician(input(unseen.id), assignmentRepo, { appointmentRepo });
+    await expect(
+      assignTechnician(input(clash.id, { acceptOverlapWith: [seen.id] }), assignmentRepo, { appointmentRepo }),
+    ).rejects.toMatchObject({ statusCode: 409 });
+    expect(await getAssignments('tenant-1', clash.id, assignmentRepo)).toEqual([]);
+  });
+
+  it('still refuses the overlap (409) without the explicit flag', async () => {
+    const busy = await makeAppt('2026-06-01T17:00:00Z', '2026-06-01T19:00:00Z');
+    const clash = await makeAppt('2026-06-01T18:00:00Z', '2026-06-01T20:00:00Z');
+    await assignTechnician(input(busy.id), assignmentRepo, { appointmentRepo });
+    await expect(assignTechnician(input(clash.id), assignmentRepo, { appointmentRepo })).rejects.toMatchObject({ statusCode: 409 });
+  });
+});

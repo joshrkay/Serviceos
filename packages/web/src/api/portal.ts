@@ -102,6 +102,8 @@ export interface RequestServiceInput {
   companyName?: string;
   primaryPhone?: string;
   email?: string;
+  /** #1738 — the unticked "text me about this request" box. */
+  smsConsent?: boolean;
 }
 
 export interface PortalSlot {

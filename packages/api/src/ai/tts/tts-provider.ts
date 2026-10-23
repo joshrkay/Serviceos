@@ -1,6 +1,7 @@
 import { ElevenLabsStreamConnection } from './elevenlabs-stream';
 import { speakableText } from './speakable-text';
 import { classifyElevenLabsError, TtsProviderRejectedError } from './tts-errors';
+import { FixtureTtsProvider } from './fixture-tts-provider';
 
 /**
  * Text-to-speech provider interface for hands-free voice readback.
@@ -287,6 +288,8 @@ export class ElevenLabsTtsProvider implements TtsProvider {
 /**
  * Factory — selects provider based on environment:
  *   TTS_PROVIDER=elevenlabs → ElevenLabsTtsProvider (lower TTFA)
+ *   TTS_PROVIDER=fixture    → FixtureTtsProvider (S3-6: the e2e lane's silent
+ *                             clip; outside production only, throws there)
  *   default                 → OpenAiTtsProvider
  *
  * Returns undefined when no API key is configured so callers can
@@ -297,7 +300,14 @@ export function createTtsProvider(env: {
   ELEVENLABS_API_KEY?: string;
   ELEVENLABS_VOICE_ID?: string;
   AI_PROVIDER_API_KEY?: string;
+  NODE_ENV?: string;
 }): TtsProvider | undefined {
+  if (env.TTS_PROVIDER === 'fixture') {
+    if (env.NODE_ENV === 'production') {
+      throw new Error('TTS_PROVIDER=fixture speaks silence and is refused in production. Set elevenlabs or openai.');
+    }
+    return new FixtureTtsProvider();
+  }
   if (env.TTS_PROVIDER === 'elevenlabs') {
     if (!env.ELEVENLABS_API_KEY) return undefined;
     // UB-C2 — honor the same ELEVENLABS_VOICE_ID that scripts/render-fillers.ts

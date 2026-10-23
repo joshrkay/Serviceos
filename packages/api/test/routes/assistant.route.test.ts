@@ -14,9 +14,9 @@ import {
   proposalSignals,
   cardExplanation,
   editFieldsForMissing,
-  dropUnverifiedIds,
   VOICE_APPROVAL_REFUSAL,
 } from '../../src/routes/assistant';
+import { dropUnverifiedIds } from '../../src/ai/drafting/draft-proposal';
 import { InMemoryProposalRepository, createProposal } from '../../src/proposals/proposal';
 import { approveProposal } from '../../src/proposals/actions';
 import { ValidationError } from '../../src/shared/errors';

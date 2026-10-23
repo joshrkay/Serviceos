@@ -32,7 +32,7 @@ export interface VoicemailTwimlOptions {
    * owner-line gate (approver-identity match) or attach a phone to the
    * voicemail lead. The callback URL is part of what Twilio signs, so the
    * value rides back tamper-proof; trust level is carrier caller-ID, the
-   * same boundary as `resolveOwnerSession` / the SMS reply transport.
+   * same boundary as `resolveOwnerLineApprover` / the SMS reply transport.
    */
   callerPhone?: string;
   /**
@@ -48,6 +48,14 @@ export interface VoicemailTwimlOptions {
    * require full A-attestation (absent ⇒ fail closed, notify-only).
    */
   stirVerstat?: string;
+  /**
+   * LCR-02 — a line spoken in place of the "Thanks for calling …" greeting,
+   * for a voicemail offered mid-call (the silence ladder, or an escalation
+   * that could not dial anyone). Plain text; escaped here.
+   */
+  prompt?: string;
+  /** The `<Say>` voice (the call's language / tenant voice). Default Polly.Joanna. */
+  voice?: string;
 }
 
 /**
@@ -63,11 +71,15 @@ export function buildVoicemailTwiml(opts: VoicemailTwimlOptions): string {
     StirVerstat: opts.stirVerstat,
   });
   const callback = xmlEscape(callbackUrl);
+  const voice = xmlEscape(opts.voice ?? 'Polly.Joanna');
+  const say =
+    opts.prompt !== undefined
+      ? xmlEscape(opts.prompt)
+      : `Thanks for calling ${safeName}. We're not available right now. Please leave a message after the tone.`;
   return (
     `<?xml version="1.0" encoding="UTF-8"?>` +
     `<Response>` +
-    `<Say voice="Polly.Joanna">Thanks for calling ${safeName}. ` +
-    `We're not available right now. Please leave a message after the tone.</Say>` +
+    `<Say voice="${voice}">${say}</Say>` +
     `<Record maxLength="${maxLen}" playBeep="true" recordingStatusCallback="${callback}" ` +
     `recordingStatusCallbackMethod="POST"/>` +
     `<Hangup/>` +

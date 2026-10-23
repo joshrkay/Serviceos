@@ -21,6 +21,7 @@ import { InMemoryInvoiceRepository } from '../../src/invoices/invoice';
 import { User, UserRepository } from '../../src/users/user';
 import { buildLineItem } from '../../src/shared/billing-engine';
 import { createJobRouter } from '../../src/routes/jobs';
+import { RepoSkillMatcher } from '../../src/scheduling/skill-matcher';
 
 // Real UUIDs: the conversion path now validates tenant/estimate/technician ids.
 const TENANT = uuidv4();
@@ -113,6 +114,47 @@ describe('Feature 5 — Estimate → Job conversion', () => {
     expect(result.job.moneyState).toBe('estimate_accepted');
     // Conversion is audited.
     expect(auditRepo.getAll().some((e) => e.eventType === 'job.created_from_estimate')).toBe(true);
+  });
+
+  describe('required skills (Dispatch FR-2)', () => {
+    const GAS = { ...tech(TECH_2), skills: ['gas_certified'] };
+    function skillDeps(users: User[]) {
+      const userRepo = fakeUserRepo(users);
+      return { ...deps(users), userRepo, skillMatcher: new RepoSkillMatcher(jobRepo, userRepo) };
+    }
+    async function gasEstimate() {
+      const job = await jobRepo.create({ ...makeJob(), requiredSkills: ['gas_certified'] });
+      return { job, est: await seedSentEstimate(job.id) };
+    }
+
+    it('auto-picks the technician who holds the skill, skipping one who does not', async () => {
+      const { est } = await gasEstimate();
+      const result = await convertEstimateToScheduledJob(skillDeps([tech(TECH_1), GAS]), {
+        tenantId: TENANT, estimateId: est.id, actorId: 'owner-1', actorRole: 'owner', now: NOW,
+      });
+      expect(result.assignment.technicianId).toBe(TECH_2);
+    });
+
+    it('refuses an explicit unqualified technician BEFORE accepting the estimate', async () => {
+      const { est } = await gasEstimate();
+      await expect(
+        convertEstimateToScheduledJob(skillDeps([tech(TECH_1), GAS]), {
+          tenantId: TENANT, estimateId: est.id, actorId: 'owner-1', actorRole: 'owner', technicianId: TECH_1, now: NOW,
+        }),
+      ).rejects.toMatchObject({ statusCode: 409, message: expect.stringContaining('gas_certified') });
+      expect((await estimateRepo.findById(TENANT, est.id))!.status).toBe('sent');
+    });
+
+    it('refuses when no technician holds the skill, leaving the estimate sent', async () => {
+      const { est } = await gasEstimate();
+      await expect(
+        convertEstimateToScheduledJob(skillDeps([tech(TECH_1)]), {
+          tenantId: TENANT, estimateId: est.id, actorId: 'owner-1', actorRole: 'owner', now: NOW,
+        }),
+      ).rejects.toMatchObject({ statusCode: 409 });
+      expect((await estimateRepo.findById(TENANT, est.id))!.status).toBe('sent');
+      expect(await appointmentRepo.findByJob(TENANT, est.jobId)).toHaveLength(0);
+    });
   });
 
   it('honors an operator-specified technician and start time', async () => {

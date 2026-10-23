@@ -29,7 +29,13 @@ import type { RepairTemplate } from '../../../verticals/registry';
 import type { TurnTrace } from './turn-trace';
 import { SessionCostTracker, DEFAULT_INAPP_CAPS, DEFAULT_TELEPHONY_CAPS } from '../../skills/session-cost-tracker';
 import type { CallOutcome } from '../../../voice/voice-service';
-import type { CallTranscriptTurnRepository } from '../../../voice/call-transcript-turn';
+import type {
+  CallTranscriptTurnRepository,
+  CallTurnTransport,
+  ReplyUnackedReason,
+} from '../../../voice/call-transcript-turn';
+import { voiceReplyStampLostTotal } from '../../../monitoring/metrics';
+import type { ResolvedApprover } from '../../../proposals/approver-identity';
 import type {
   EscalationStartedEvent,
   EscalationSummaryBuiltEvent,
@@ -52,6 +58,24 @@ export const DEFAULT_IDLE_TTL_MS = 30 * 60 * 1000;
 
 /** How often the cleanup sweep runs. */
 const DEFAULT_SWEEP_INTERVAL_MS = 60 * 1000;
+
+/**
+ * U1 — how many of a session's most recent caller turns keep their reply
+ * timing anchors and retained persist promise. Back-to-back finals queue
+ * behind the per-session lock, so a handful covers every reply still in flight.
+ */
+const RETAINED_CALLER_TURNS = 4;
+
+/** Fold retained stamps into one, the first stamp for a field winning (as the repository's COALESCE does). */
+function mergeReplyStamps(stamps: ReplyAudioStampFields[]): ReplyAudioStampFields {
+  const merged: ReplyAudioStampFields = {};
+  for (const stamp of stamps) {
+    for (const [field, value] of Object.entries(stamp) as Array<[keyof ReplyAudioStampFields, never]>) {
+      if (value !== undefined && merged[field] === undefined) merged[field] = value;
+    }
+  }
+  return merged;
+}
 
 export type VoiceSessionEvent =
   /**
@@ -173,12 +197,70 @@ export interface TranscriptEntry {
   speaker: 'caller' | 'agent';
   text: string;
   ts?: number;
+  /**
+   * U1 — timing of the caller utterance this line records. Carried WITH the
+   * append (never queued separately) because caller finals do not append in
+   * arrival order: an explicit language-switch final can wait behind the
+   * session lock while a later final's turn appends first. Ignored on agent
+   * lines.
+   */
+  timing?: CallerTurnTiming;
+}
+
+/**
+ * U1 — timing the transport knows about the caller's utterance at the moment
+ * its text is appended: when the recogniser finalised it and, on the realtime
+ * path only, when the caller's last word ended (Deepgram word timing anchored
+ * to wall clock). Rides on the caller line's {@link TranscriptEntry} so each
+ * row is stamped with its own utterance's timing.
+ */
+export interface CallerTurnTiming {
+  transport: CallTurnTransport;
+  /**
+   * Unique per accepted final (the realtime adapter sets it). Kept with the
+   * row's reply anchor so a reply resolves ITS row by key: STT-final instants
+   * are millisecond-resolution and two finals can share one.
+   */
+  turnKey?: string;
+  sttFinalAt: Date;
+  lastWordAt?: Date;
+}
+
+/**
+ * U1 — what the adapter learned about a reply's audio. Every field is a
+ * stamp the repository COALESCEs onto the caller turn's row, so a repeated or
+ * later stamp never overwrites the first.
+ */
+export interface ReplyAudioStampFields {
+  firstAudibleAt?: Date;
+  firstAudioEnqueuedAt?: Date;
+  firstAudioAt?: Date;
+  replyGapMs?: number;
+  replyUnackedReason?: ReplyUnackedReason;
+}
+
+/**
+ * A stamp addressed by the caller turn's unique key (see
+ * {@link CallerTurnTiming.turnKey}), not by transcript index: the adapter can
+ * learn something about a reply before the caller row it answers is appended
+ * (a final queued behind an earlier turn), so the store resolves the row —
+ * immediately, or once it appears.
+ */
+export interface ReplyAudioStamp extends ReplyAudioStampFields {
+  turnKey: string;
 }
 
 export interface VoiceSession {
   id: string;
   tenantId: string;
   channel: CallingAgentChannel;
+  /**
+   * #1737 — the `voice_sessions.channel` value to persist when it is not the
+   * one `channel` implies. The web chat widget drives the caller-facing
+   * (`telephony`) FSM but must be stored, and kept out of phone-minute
+   * accounting, as `webchat`.
+   */
+  persistChannel?: 'webchat';
   /** Twilio CallSid for telephony sessions; undefined for in-app. */
   callSid?: string;
   /** Bound by the authenticated inbound webhook; never taken from a WS frame. */
@@ -305,6 +387,46 @@ export interface VoiceSession {
    */
   actorUserId?: string;
   /**
+   * B1 — who this owner line approves AS (`resolveApproverRole`): the owner
+   * for the owner phone, the backup supervisor as their own role and user.
+   * Stamped by the telephony establishment core
+   * (`TwilioGatherAdapter.establishInboundSession`, both transports) together
+   * with `ownerSession`, from the caller-ID — never from utterance content.
+   * B1 follow-up — it marks the line as caller-ID-established: the turn
+   * processor re-resolves the approver from that caller-ID at every voice
+   * approve / reject / edit (`currentApprovalLine`), so a backup demoted,
+   * deactivated or replaced mid-call acts as who they are now — and (B3-1)
+   * at the start of every turn, so a line that no longer resolves keeps no
+   * owner-line privilege that turn (`refreshOwnerLine`). Absent on a
+   * session whose owner authority came from an authenticated owner (in-app)
+   * or a harness fixture: that is the owner. B4-2 — `userRowId` (a backup's
+   * users row; none for the owner phone) is who the line was picked up as,
+   * and what that re-check compares: a backup who links a login mid-call
+   * changes `userId`, not who they are.
+   */
+  ownerLineApprover?: Pick<ResolvedApprover, 'role' | 'userId' | 'userRowId'>;
+  /**
+   * B3-1 — what the caller-ID-established owner line was granted at pick-up
+   * besides `ownerSession`: the extended owner lookups and the phone actor
+   * (`actorUserId`, the subject every owner lookup is authorised by). The
+   * turn processor's per-turn re-check (`refreshOwnerLine`) records it the
+   * first time it runs, drops all of it for a turn whose re-check no longer
+   * resolves the line (or resolves it to someone other than the person
+   * `ownerLineApprover.userRowId` names), and restores it on a later turn
+   * that resolves it to that same person again. Absent on a session that
+   * carries no `ownerLineApprover`.
+   */
+  ownerLineGrant?: { extendedIntents: boolean; actorUserId?: string };
+  /**
+   * B4-4 — what this turn's owner-line re-check (`refreshOwnerLine`, run first
+   * by every turn: `speechTurn`, the Gather loop, the silence turn) resolved,
+   * so the turn's approve / reject / edit step reuses it instead of a second
+   * settings + users read. That step takes (clears) it; a step that finds
+   * none re-checks itself. `approver: null` — the line did not resolve this
+   * turn (a lookup error included), so the step refuses: fail closed.
+   */
+  ownerLineThisTurn?: { approver: ResolvedApprover | null };
+  /**
    * True once the recording disclosure has actually been emitted to the caller
    * on this call (set by `bootstrapCallEstablishment`, which is the only
    * caller of `discloseRecording`). Any path that resumes or re-arms audio
@@ -315,6 +437,22 @@ export interface VoiceSession {
    * exists but has heard nothing.
    */
   recordingDisclosed?: boolean;
+  /**
+   * PRIV-4 — true once this call has evidence the caller HEARD the
+   * virtual-assistant notice (the greeting reached its point of evidence:
+   * Gather's TwiML was built, or the stream's greeting turn played to
+   * completion), or a fallback document spoke it. Unlike `recordingDisclosed`
+   * (latched when the greeting is merely queued), a realtime→Gather degrade
+   * mid-greeting leaves this false, so the fallback speaks the notice itself.
+   */
+  assistantNoticeHeard?: boolean;
+  /**
+   * PRIV-4 — the full greeting (virtual-assistant notice and recording notice
+   * included) `bootstrapCallEstablishment` rendered for this call. A /voice
+   * webhook retry replays it: Twilio discarded the first response, so the
+   * retry's document is the only greeting the caller hears.
+   */
+  greetingText?: string;
   /**
    * Set when the caller objected to being recorded. The Twilio recording is
    * paused via the REST API, but that only covers `<Start><Record>` — the
@@ -349,6 +487,35 @@ export interface VoiceSession {
    * keep auto-detecting Spanish.
    */
   supportedLanguages?: ('en' | 'es')[];
+  /**
+   * U1 — the timing anchors of the last few persisted caller turns (oldest
+   * first, bounded to {@link RETAINED_CALLER_TURNS}), so the reply to each can
+   * be measured against ITS OWN row even when a newer turn has already been
+   * persisted: transcript index plus the last-word / STT-final instants stored
+   * with it.
+   */
+  replyTimings: Array<{ turnIndex: number; turnKey?: string; lastWordAt?: Date; sttFinalAt: Date }>;
+  /**
+   * U1 — the `recordTurn` promise of the latest caller turns, keyed by
+   * transcript index and RETAINED after it settles so a reply stamp can chain
+   * behind the INSERT whether the insert is still pending or long resolved.
+   * Resolves to the row's primary key (undefined when the insert failed), which
+   * is the stable identity for the reply stamp: `attachRecording` renumbers
+   * `turn_index` at end of call, so the index alone can miss a late stamp.
+   * Never rejects. Holds the last {@link RETAINED_CALLER_TURNS} entries (older
+   * ones are dropped as newer caller turns are persisted) and is cleared with
+   * the session.
+   */
+  pendingTurnPersist: Map<number, Promise<string | undefined>>;
+  /**
+   * U1 — reply stamps that arrived before their caller row was appended (a
+   * final queued behind an earlier turn can have its filler acked first),
+   * keyed by the turn's unique key and flushed, in order, when `persistTurn`
+   * records the row carrying that key. Holds at most the last
+   * {@link RETAINED_CALLER_TURNS} keys (older ones are dropped with a warning)
+   * and is cleared with the session.
+   */
+  pendingReplyStamps: Map<string, ReplyAudioStampFields[]>;
   /**
    * P11-002 — resolved per-tenant TTS voice override for the session
    * language (settings.ttsVoiceEn/Es). When set, the `<Say voice>` uses
@@ -519,8 +686,11 @@ export interface VoiceSessionStoreOptions {
    * call_transcript_turns keyed by call SID + session id (fire-and-forget).
    * Omitted ⇒ in-memory only (tests, in-app-only deployments).
    */
-  callTranscriptTurnRepo?: Pick<CallTranscriptTurnRepository, 'recordTurn'>;
+  callTranscriptTurnRepo?: CallTranscriptTurnRepoPort;
 }
+
+/** The slice of the repository the store writes through. */
+type CallTranscriptTurnRepoPort = Pick<CallTranscriptTurnRepository, 'recordTurn' | 'markReplyAudio'>;
 
 export class VoiceSessionStore {
   private readonly sessions = new Map<string, VoiceSession>();
@@ -555,7 +725,7 @@ export class VoiceSessionStore {
   private readonly transport?: VoiceEventTransport;
   private readonly replicaId: string;
   private readonly sweepHandle: ReturnType<typeof setInterval> | null;
-  private readonly callTranscriptTurnRepo?: Pick<CallTranscriptTurnRepository, 'recordTurn'>;
+  private readonly callTranscriptTurnRepo?: CallTranscriptTurnRepoPort;
 
   constructor(options: VoiceSessionStoreOptions = {}) {
     this.idleTtlMs = options.idleTtlMs ?? DEFAULT_IDLE_TTL_MS;
@@ -683,6 +853,9 @@ export class VoiceSessionStore {
       sttAudioBytes: 0,
       ttsCharacters: 0,
       mediaStreamsUsed: false,
+      pendingTurnPersist: new Map(),
+      pendingReplyStamps: new Map(),
+      replyTimings: [],
       transcript: [],
       proposalIds: [],
       ended: false,
@@ -840,13 +1013,18 @@ export class VoiceSessionStore {
   }
 
   private persistTurn(session: VoiceSession, turnIndex: number, entry: TranscriptEntry): void {
+    const timing = entry.speaker === 'caller' ? entry.timing : undefined;
     const repo = this.callTranscriptTurnRepo;
     if (!repo || !session.callSid) return; // in-app sessions have no CallSid: nothing to key on
     const text = entry.text.trim();
-    if (text.length === 0) return; // an empty utterance still consumed its index above
+    if (text.length === 0) return; // an empty utterance still took its transcript index
     const { callSid } = session;
+    const endpointDelayMs =
+      timing?.lastWordAt !== undefined
+        ? Math.max(0, timing.sttFinalAt.getTime() - timing.lastWordAt.getTime())
+        : undefined;
     // Promise.resolve().then(...) also contains a synchronous throw from the repo.
-    void Promise.resolve()
+    const persisted = Promise.resolve()
       .then(() =>
         repo.recordTurn({
           tenantId: session.tenantId,
@@ -855,11 +1033,138 @@ export class VoiceSessionStore {
           turnIndex,
           speaker: entry.speaker,
           text,
+          ...(timing
+            ? {
+                transport: timing.transport,
+                sttFinalAt: timing.sttFinalAt,
+                ...(timing.lastWordAt ? { lastWordAt: timing.lastWordAt } : {}),
+                ...(endpointDelayMs !== undefined ? { endpointDelayMs } : {}),
+              }
+            : {}),
         }),
       )
+      .then(
+        (row): string | undefined => row?.id,
+        (err: unknown): string | undefined => {
+          // eslint-disable-next-line no-console
+          console.error('voice-session-store: mid-call transcript persist failed', {
+            sessionId: session.id,
+            callSid,
+            turnIndex,
+            error: err instanceof Error ? err.message : String(err),
+          });
+          return undefined;
+        },
+      );
+    if (entry.speaker === 'caller') {
+      // A caller turn's reply can still be in flight when the next caller line
+      // lands (back-to-back finals), so the last few are retained and older
+      // ones dropped: both stay O(1).
+      session.pendingTurnPersist.set(turnIndex, persisted);
+      if (session.pendingTurnPersist.size > RETAINED_CALLER_TURNS) {
+        session.pendingTurnPersist.delete(session.pendingTurnPersist.keys().next().value as number);
+      }
+      if (timing) {
+        session.replyTimings.push({
+          turnIndex,
+          turnKey: timing.turnKey,
+          sttFinalAt: timing.sttFinalAt,
+          lastWordAt: timing.lastWordAt,
+        });
+        if (session.replyTimings.length > RETAINED_CALLER_TURNS) session.replyTimings.shift();
+        const early = timing.turnKey !== undefined ? session.pendingReplyStamps.get(timing.turnKey) : undefined;
+        if (timing.turnKey !== undefined && early) {
+          session.pendingReplyStamps.delete(timing.turnKey);
+          void this.writeReplyStamp(session, turnIndex, mergeReplyStamps(early));
+        }
+      }
+    }
+  }
+
+  /**
+   * U1 — stamp what the adapter learned about a reply's audio onto the caller
+   * turn it answers, addressed by the turn's unique key. When that turn's row
+   * has been appended the repository UPDATE is chained behind its
+   * `recordTurn` (pending or long settled) so it never races the INSERT. When
+   * it has not (the final is still queued behind an earlier turn), the stamp
+   * is retained and written the moment `persistTurn` records the row; a key
+   * that never gets one is dropped once four newer keys are waiting. An
+   * unknown or in-app session, a store with no repository, or a rejected write
+   * is a silent no-op for the call; an UPDATE that touches zero rows (the row
+   * was deleted underneath it) is counted and logged. The returned promise
+   * never rejects — callers may ignore it, tests await it.
+   */
+  markReplyAudio(sessionId: string, stamp: ReplyAudioStamp): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session || !session.callSid || !this.callTranscriptTurnRepo) return Promise.resolve();
+    const { turnKey, ...fields } = stamp;
+    const row = session.replyTimings.find((t) => t.turnKey === turnKey);
+    if (!row) {
+      this.retainReplyStamp(session, turnKey, fields);
+      return Promise.resolve();
+    }
+    return this.writeReplyStamp(session, row.turnIndex, fields);
+  }
+
+  /** Hold a stamp for a caller row that is not appended yet; evict beyond the last few keys. */
+  private retainReplyStamp(session: VoiceSession, turnKey: string, fields: ReplyAudioStampFields): void {
+    const held = session.pendingReplyStamps.get(turnKey);
+    if (held) {
+      held.push(fields);
+      return;
+    }
+    session.pendingReplyStamps.set(turnKey, [fields]);
+    if (session.pendingReplyStamps.size > RETAINED_CALLER_TURNS) {
+      const oldest = session.pendingReplyStamps.keys().next().value as string;
+      session.pendingReplyStamps.delete(oldest);
+      // eslint-disable-next-line no-console
+      console.warn('voice-session-store: dropped reply-audio stamps for a turn that never got a row', {
+        tenantId: session.tenantId,
+        callSid: session.callSid,
+        sessionId: session.id,
+        turnKey: oldest,
+      });
+    }
+  }
+
+  /** Chain the repository UPDATE for one caller row behind its INSERT. Never rejects. */
+  private writeReplyStamp(
+    session: VoiceSession,
+    turnIndex: number,
+    fields: ReplyAudioStampFields,
+  ): Promise<void> {
+    const repo = this.callTranscriptTurnRepo;
+    const { callSid } = session;
+    if (!repo || !callSid) return Promise.resolve();
+    const insert = session.pendingTurnPersist.get(turnIndex) ?? Promise.resolve(undefined);
+    return insert
+      .then((id) =>
+        // By primary key when the insert resolved one (stable across
+        // attachRecording's renumbering); the mid-call key only when it never did.
+        repo.markReplyAudio({
+          tenantId: session.tenantId,
+          callSid,
+          sessionId: session.id,
+          turnIndex,
+          ...(id ? { id } : {}),
+          ...fields,
+        }),
+      )
+      .then((rows) => {
+        if (rows === 0) {
+          voiceReplyStampLostTotal.inc();
+          // eslint-disable-next-line no-console
+          console.warn('voice-session-store: reply-audio stamp matched no row', {
+            tenantId: session.tenantId,
+            callSid,
+            sessionId: session.id,
+            turnIndex,
+          });
+        }
+      })
       .catch((err: unknown) => {
         // eslint-disable-next-line no-console
-        console.error('voice-session-store: mid-call transcript persist failed', {
+        console.error('voice-session-store: reply-audio stamp failed', {
           sessionId: session.id,
           callSid,
           turnIndex,
@@ -908,6 +1213,8 @@ export class VoiceSessionStore {
     session.events.removeAllListeners();
     if (session.callSid) this.callSidIndex.delete(session.callSid);
     this.locks.delete(sessionId);
+    session.pendingTurnPersist.clear();
+    session.pendingReplyStamps.clear();
     this.sessions.delete(sessionId);
   }
 

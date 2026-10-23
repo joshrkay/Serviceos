@@ -15,6 +15,8 @@ import { calcMaterialsTotal, formatAppointmentDurationLabel } from '../../utils/
 import { formatCurrency } from '../../utils/currency';
 import { useDetailQuery } from '../../hooks/useDetailQuery';
 import { JobSchedulePanel } from './JobSchedulePanel';
+import { RequiredSkillsCard } from './RequiredSkillsCard';
+import { useMe } from '../../hooks/useMe';
 import { useMutation } from '../../hooks/useMutation';
 import { useApiClient } from '../../lib/apiClient';
 import { useWorkerTerm } from '../../hooks/useWorkerTerm';
@@ -87,6 +89,7 @@ import type { CapturedMedia } from '../shared/CameraCapture';
 import { SuppliersSheet } from './SuppliersSheet';
 import { JobPhotoGallery } from './JobPhotoGallery';
 import { JobProfitCard } from './JobProfitCard';
+import { LatestTextStatus } from '../interactions/LatestTextStatus';
 import { JobFormsPanel } from './JobFormsPanel';
 import { JobCustomFieldsPanel } from './JobCustomFieldsPanel';
 import {
@@ -869,6 +872,9 @@ export function JobDetailView({
   const ownerLabel = `${firstNameFromUser(user?.fullName, user?.primaryEmailAddress?.emailAddress)} (owner)`;
 
   const { data: apiJob, isLoading, error, refetch: refetchJob } = useDetailQuery<JobDetailResponse>('/api/jobs', id);
+  // Dispatch FR-2 phase 2 — required skills follow jobs:assign (owners, dispatchers).
+  const { me } = useMe();
+  const canEditRequiredSkills = (me?.permissions ?? []).includes('jobs:assign');
   const { mutate: transitionJob } = useMutation<{ status: string; reason?: string }, JobDetailResponse>('POST', `/api/jobs/${id}/transition`);
 
   // Real linked documents / schedule, derived from the jobId-filtered lists
@@ -1232,6 +1238,8 @@ export function JobDetailView({
           onViewCustomer={() => navigate(`/customers/${customer.id}`)}
         />
       )}
+      {/* D-045 — the latest text about this job: sent, held, or not sent and why. */}
+      <LatestTextStatus filter={{ jobId: job.id }} />
       <StatusStepper job={job} />
       <ScheduleTechCard
         job={job}
@@ -1259,6 +1267,12 @@ export function JobDetailView({
           }}
         />
       </div>
+      <RequiredSkillsCard
+        jobId={id}
+        requiredSkills={apiJob?.requiredSkills ?? []}
+        canEdit={canEditRequiredSkills}
+        onSaved={() => void refetchJob()}
+      />
       <DescriptionCard job={job} />
       {job.estimateId && (
         <EstimateScopeCard

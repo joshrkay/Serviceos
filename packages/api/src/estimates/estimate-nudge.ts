@@ -135,7 +135,7 @@ export async function dispatchEstimateNudge(
   };
 
   // #1528 — the channel the nudge actually went out on. With 'auto' the
-  // send picks it (email on file, else a text); the audit names what it
+  // send picks it (a text when the customer can be texted, else email; D-045); the audit names what it
   // picked. A reconciled 'sent' tombstone carries no send result, so it keeps
   // the requested channel.
   let sentChannel: SendChannel = channel;

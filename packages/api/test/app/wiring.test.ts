@@ -52,6 +52,26 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
     expect(src).toMatch(/defaultRules:\s*platformDefaultSupervisorRules/);
   });
 
+  it('the daily payment-link reconciliation sweep runs under its own leader lock, worker roles only (S5a-6)', () => {
+    expect(src).toMatch(/paymentLinkReconciliation:\s*590034/);
+    const segment = src.slice(src.indexOf('// S5a-6 (U8) — daily payment-link reconciliation sweep.'));
+    const block = segment.slice(0, segment.indexOf('// Billing resilience (Part B)'));
+    expect(block).toContain('if (shouldRunWorkers) {');
+    expect(block).toContain('isPaymentLinkReconciliationHour(new Date())');
+    expect(block).toMatch(/runAsLeader\(SWEEP_LOCK\.paymentLinkReconciliation/);
+    expect(block).toContain('listCollectOnSiteTenantIds(pool)');
+  });
+
+  it('the geocode sweep runs under its own leader lock, worker roles only, and only with a pool and a geocoder (dispatch FR-2)', () => {
+    expect(src).toMatch(/geocodeLocations:\s*590035/);
+    const segment = src.slice(src.indexOf('// Dispatch FR-2 phase 1 — geocode sweep.'));
+    const block = segment.slice(0, segment.indexOf('// P8-009'));
+    expect(block).toContain('if (shouldRunWorkers && pool && geocoder) {');
+    expect(block).toMatch(/runAsLeader\(SWEEP_LOCK\.geocodeLocations/);
+    expect(block).toContain('listPendingLocations(pool, limit)');
+    expect(block).toContain('writeGeocodeOutcome(pool, loc, outcome)');
+  });
+
   it('exactly one digest path remains; SWEEP_LOCK has no duplicate keys (U5)', () => {
     // U5 — the redundant P5-020 hourly digest worker was deleted; only the
     // RV-063 daily digest sweep remains.
@@ -162,5 +182,69 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
     // must not block boot (fire-and-forget, never `await`ed).
     expect(src).toMatch(/fillerCache\.load\(\);\s*void startFillerSynthesis\(fillerCache, sharedTtsProvider\);/);
     expect(src).not.toMatch(/await\s+startFillerSynthesis/);
+  });
+
+  it('B4 — the SMS reply transport and the one-tap link get the approval-time reference checks', () => {
+    // Both seams take the checks as an OPTIONAL dep (unit fixtures omit it),
+    // so a dropped line here would silently let a texted Y or a tapped link
+    // approve a card the dashboard approve route holds.
+    const depsOf = (call: string) => {
+      const from = src.slice(src.indexOf(call));
+      return from.slice(0, from.indexOf('});'));
+    };
+    expect(depsOf('registerProposalReplySms(')).toMatch(/\bapprovalReferenceChecks,/);
+    expect(depsOf('createOneTapApproveRouter({')).toMatch(/\bapprovalReferenceChecks,/);
+  });
+
+  it('B1 — every one-tap approve-link mint site resolves who its recipient approves as', () => {
+    // routeUnsupervisedProposal mints the legacy OWNER link when this optional
+    // dep is absent, so a dropped line would hand the backup supervisor's
+    // mobile a link that approves as 'owner' again.
+    const block = (opener: string) => {
+      const from = src.slice(src.indexOf(`\n    ${opener}`));
+      return from.slice(0, from.indexOf('\n    },'));
+    };
+    expect(src).toMatch(/const resolveLinkApprover = \(tenantId: string, phone: string\) =>\s*resolveApproverRole\(/);
+    for (const opener of ['unsupervisedRouting: {', 'voiceApprovalOneTap: {', 'autonomousClose: {']) {
+      expect(block(opener)).toMatch(/\bresolveLinkApprover,/);
+    }
+  });
+
+  it('C-1698-P1 — the memo worker reads the creator mode through the fail-closed loader', () => {
+    // The request middleware's mode loader defaults a missing user or a DB
+    // error to 'supervisor' (the permissive threshold); the memo path must not.
+    expect(src).toMatch(/resolveMemberMode: createMemoCreatorModeLoader\(\(\) => userModeService\),/);
+    expect(src).not.toMatch(/resolveUserMode/);
+  });
+
+  it('B1 follow-up — every approval SMS recipient is resolved through the active-member check', () => {
+    // The inline resolver read the backup's users row by id and texted it
+    // whatever its status, so a deactivated backup still got job details.
+    expect(src).toMatch(
+      /const resolveUnsupervisedOwnerPhone = \(tenantId: string\): Promise<string \| null> =>\s*resolveApprovalSmsPhone\(\{ settingsRepo, userRepo \}, tenantId\);/,
+    );
+    expect(src).not.toMatch(/backup\?\.mobileNumber/);
+    expect(src.match(/resolveOwnerPhone: resolveUnsupervisedOwnerPhone,/g)?.length ?? 0).toBeGreaterThan(0);
+    // B3-2 — the three approval-link senders get the same recipient, with
+    // whose phone it is (the owner phone needs no second lookup).
+    expect(src).toMatch(
+      /const resolveApprovalRecipient = \(tenantId: string\) =>\s*resolveApprovalSmsRecipient\(\{ settingsRepo, userRepo \}, tenantId\);/,
+    );
+    const block = (opener: string) => {
+      const from = src.slice(src.indexOf(`\n    ${opener}`));
+      return from.slice(0, from.indexOf('\n    },'));
+    };
+    for (const opener of ['unsupervisedRouting: {', 'voiceApprovalOneTap: {', 'autonomousClose: {']) {
+      expect(block(opener)).toMatch(/\bresolveSmsRecipient: resolveApprovalRecipient,/);
+    }
+  });
+
+  it('B1 — the one-tap route re-checks a backup link against the current backup supervisor', () => {
+    // Optional dep: dropped, a link minted for a backup who has since been
+    // replaced or deactivated would still approve for its 30 minutes.
+    const from = src.slice(src.indexOf('createOneTapApproveRouter({'));
+    expect(from.slice(0, from.indexOf('});'))).toMatch(
+      /resolveBackupApprover: \(tenantId: string\) =>\s*resolveBackupSupervisorApprover\(\{ settingsRepo, userRepo \}, tenantId\)/,
+    );
   });
 });

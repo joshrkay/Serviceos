@@ -40,6 +40,7 @@ import {
   type RouteUnsupervisedProposalDeps,
 } from './auto-approve';
 import { renderChainSms, type ChainSmsMember } from './sms/render';
+import type { ApprovalSmsRecipient } from './approver-identity';
 import { createAuditEvent, type AuditRepository } from '../audit/audit';
 import { createLogger } from '../logging/logger';
 
@@ -97,7 +98,10 @@ export async function queueCloseFallbackChain(
   deps: {
     proposalRepo: ProposalRepository;
     auditRepo?: AuditRepository;
-    routing?: RouteUnsupervisedProposalDeps & { ownerPhoneResolver?: (tenantId: string) => Promise<string | null | undefined> };
+    /** B3-2 — `resolveSmsRecipient` says whose phone it is (the owner phone needs no lookup). */
+    routing?: RouteUnsupervisedProposalDeps & {
+      resolveSmsRecipient?: (tenantId: string) => Promise<ApprovalSmsRecipient | null | undefined>;
+    };
   },
   args: CloseFallbackArgs,
 ): Promise<{ queued: boolean; smsSent: boolean }> {
@@ -229,10 +233,10 @@ export async function queueCloseFallbackChain(
   // starred comms member (send_estimate) keeps its separate approval, exactly
   // as renderChainSms legends it. Nothing here approves anything.
   let smsSent = false;
-  if (deps.routing?.sendSms && deps.routing.ownerPhoneResolver) {
+  if (deps.routing?.sendSms && deps.routing.resolveSmsRecipient) {
     try {
-      const ownerPhone = await deps.routing.ownerPhoneResolver(args.tenantId);
-      if (ownerPhone) {
+      const recipient = await deps.routing.resolveSmsRecipient(args.tenantId);
+      if (recipient) {
         const smsMembers: ChainSmsMember[] = members.map((m) => ({
           proposalType: m.proposalType,
           summary: m.summary,
@@ -242,10 +246,12 @@ export async function queueCloseFallbackChain(
           tenantId: args.tenantId,
           proposalId: updatedHead.id,
           channel: 'voice_inbound',
-          ownerPhone,
+          ownerPhone: recipient.phone,
+          recipientVia: recipient.via,
           summaryText: updatedHead.summary,
-          renderSmsBody: (approveUrl: string) =>
-            renderChainSms(smsMembers, { approveUrl: approveUrl || undefined }),
+          // B1 follow-up — a recipient who cannot approve is asked for no reply.
+          renderSmsBody: (approveUrl: string, { recipientCannotApprove }) =>
+            renderChainSms(smsMembers, { approveUrl: approveUrl || undefined, recipientCannotApprove }),
           payload: updatedHead.payload,
         });
         smsSent = result.smsSent;

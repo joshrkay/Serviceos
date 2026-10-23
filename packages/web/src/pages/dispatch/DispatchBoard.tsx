@@ -62,6 +62,8 @@ interface PendingDrop {
   proposedStart: string;
   proposedEnd: string;
   placement: SlotPlacement;
+  /** Picked from the suggested-technician list rather than dragged. */
+  viaSuggestion?: boolean;
 }
 
 function generateIdempotencyKey(): string {
@@ -417,6 +419,31 @@ export function DispatchBoard() {
     [dragSource, findAppointment, findTechnicianName, laneByTechId, data?.date, dateParam, filters.status, timezone],
   );
 
+  // FR-2 phase 3 — a suggested tech becomes the same reassign proposal a
+  // queue→lane drag makes: confirmed in the dialog (with its live feasibility
+  // preview), keeping the visit's own window.
+  const handlePickSuggestion = useCallback(
+    (appointmentId: string, technicianId: string, technicianName: string) => {
+      const appointment = findAppointment(appointmentId);
+      if (!appointment) return;
+      setEditedStart(toDatetimeLocalValue(appointment.scheduledStart, timezone));
+      setEditedEnd(toDatetimeLocalValue(appointment.scheduledEnd, timezone));
+      setPendingDrop({
+        source: { appointmentId, sourceType: 'queue', sourceTechnicianId: null },
+        targetKind: 'lane',
+        targetTechnicianId: technicianId,
+        proposalType: 'reassign_appointment',
+        appointment,
+        targetDescription: `Assign to ${technicianName} (suggested)`,
+        proposedStart: appointment.scheduledStart,
+        proposedEnd: appointment.scheduledEnd,
+        placement: 'gap',
+        viaSuggestion: true,
+      });
+    },
+    [findAppointment, timezone],
+  );
+
   const handleDragStartFromLane = useCallback(
     (technicianId: string) =>
       (e: React.DragEvent, appointmentId: string) => {
@@ -552,7 +579,7 @@ export function DispatchBoard() {
     [laneByTechId, filters.status, data?.date, dateParam, timezone],
   );
 
-  const submitProposal = useCallback(async () => {
+  const submitProposal = useCallback(async ({ acceptOverlap }: { acceptOverlap: boolean }) => {
     if (!pendingDrop) return;
     setIsSubmittingProposal(true);
 
@@ -571,13 +598,24 @@ export function DispatchBoard() {
     let summary: string;
 
     if (proposalType === 'reassign_appointment') {
+      // FR-2 phase 3c — `acceptOverlap` is only ever true from the dialog's
+      // explicit "Book anyway" tick; the summary says so, so the approver
+      // sees the dispatcher chose the clash rather than missed it.
+      const baseReason = pendingDrop.viaSuggestion
+        ? 'Assigned from dispatch board technician suggestion'
+        : 'Reassigned via dispatch board drag-and-drop';
       payload = {
         appointmentId: source.appointmentId,
         ...(source.sourceTechnicianId ? { fromTechnicianId: source.sourceTechnicianId } : {}),
         toTechnicianId: targetTechnicianId,
-        reason: 'Reassigned via dispatch board drag-and-drop',
+        reason: acceptOverlap
+          ? `${baseReason} — dispatcher accepted an overlap with an existing visit`
+          : baseReason,
+        ...(acceptOverlap ? { acceptOverlap: true } : {}),
       };
-      summary = 'Reassign appointment to a different technician';
+      summary = acceptOverlap
+        ? 'Reassign appointment to a technician who is already booked at this time (dispatcher accepted the overlap)'
+        : 'Reassign appointment to a different technician';
     } else if (proposalType === 'reschedule_appointment') {
       payload = {
         appointmentId: source.appointmentId,
@@ -779,6 +817,7 @@ export function DispatchBoard() {
               onDragLeave={handleDragLeaveGap()}
               onDrop={handleDropOnUnassigned}
               conflictIds={conflictIds}
+              onPickSuggestion={handlePickSuggestion}
             />
           </div>
 

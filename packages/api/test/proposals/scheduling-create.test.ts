@@ -5,8 +5,9 @@ import { createProposalsRouter } from '../../src/routes/proposals';
 import { InMemoryProposalRepository } from '../../src/proposals/proposal';
 import { InMemoryAppointmentRepository, createAppointment } from '../../src/appointments/appointment';
 import { FeasibilityDependencies } from '../../src/scheduling/feasibility-types';
-import { StubSkillMatcher } from '../../src/scheduling/skill-matcher';
+import { noSkillConstraints } from '../helpers/no-skill-constraints';
 import { HaversineFallbackProvider } from '../../src/scheduling/travel-time/haversine-fallback';
+import { InMemoryTransactionRunner } from '../../src/db/tenant-transaction';
 
 describe('POST /api/proposals — scheduling create with version + feasibility gates', () => {
   let app: express.Express;
@@ -34,14 +35,14 @@ describe('POST /api/proposals — scheduling create with version + feasibility g
       workingHoursRepo: { findByTechnician: async () => [] } as any,
       unavailableBlockRepo: { findByTechnicianAndDateRange: async () => [] } as any,
       travelTimeProvider: new HaversineFallbackProvider(),
-      skillMatcher: new StubSkillMatcher(),
+      skillMatcher: noSkillConstraints(),
     };
     const userRepo = { findById: async () => ({ id: 'tech-1', role: 'technician' }) } as any;
 
     app = express();
     app.use(express.json());
     app.use((req: any, _r, n) => { req.auth = { tenantId, userId: 'user-1', role: 'dispatcher' }; n(); });
-    app.use('/api/proposals', createProposalsRouter(proposalRepo, appointmentRepo, undefined, feasibilityDeps));
+    app.use('/api/proposals', createProposalsRouter(proposalRepo, new InMemoryTransactionRunner(), appointmentRepo, undefined, feasibilityDeps));
   });
 
   function send(over: Record<string, unknown> = {}, headers: Record<string, string> = {}) {

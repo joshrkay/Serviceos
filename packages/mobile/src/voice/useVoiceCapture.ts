@@ -1,4 +1,4 @@
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import { useCallback, useState } from 'react';
 import { useApiClient } from '../lib/useApiClient';
 import { isCurrentlyOnline } from '../lib/connectivity';

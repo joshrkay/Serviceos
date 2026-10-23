@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { installClerkStub } from '../helpers/clerk-stub';
 import { blockExternalHosts } from '../helpers/api-mocks/shell';
 import { hasViteClerkKey } from '../helpers/clerk-key';
+import { clerkInviteeUserCreated } from '../helpers/clerk-invitee';
 
 /**
  * §8.3 row 3.6 — rung-5 reachability: "it is IMPOSSIBLE to double-book
@@ -161,14 +162,14 @@ async function bootstrapOwnerAndTechnician(request: APIRequestContext, label: st
   const invitationId = invitation.id!;
 
   const techSub = `user_e2e_${label}tech_${randomUUID().replace(/-/g, '')}`;
-  const joinRes = await postSignedWebhook(request, {
-    type: 'user.created',
-    data: {
-      id: techSub,
-      email_addresses: [{ email_address: techEmail }],
-      public_metadata: { invitation_id: invitationId, tenant_id: tenantId, role: 'technician' },
-    },
-  });
+  const joinRes = await postSignedWebhook(
+    request,
+    clerkInviteeUserCreated({
+      sub: techSub,
+      email: techEmail,
+      invitation: { id: invitationId, tenantId, role: 'technician' },
+    }),
+  );
   expect(joinRes.status(), `invitee-join webhook (${label}) -> ${await joinRes.text()}`).toBe(200);
 
   const techToken = hmacToken(techSub, tenantId, 'technician');

@@ -29,6 +29,7 @@ import { InMemoryWebhookRepository } from '../../src/webhooks/webhook-handler';
 import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PgPendingInvitationRepository } from '../../src/users/pg-pending-invitation';
 import type { AppConfig } from '../../src/shared/config';
+import { clerkUserCreatedEvent } from '../support/clerk-user-created';
 
 const WEBHOOK_SECRET = 'whsec_dGVzdC1zZWNyZXQ='; // base64("test-secret")
 
@@ -94,14 +95,12 @@ describe('Postgres integration — #1032 Clerk invitation join enforces expiry',
       expiresAt: new Date(Date.now() - 60_000), // expired a minute ago
     });
 
-    const payload = {
-      type: 'user.created',
-      data: {
-        id: invitee,
-        email_addresses: [{ email_address: email }],
-        public_metadata: { invitation_id: invitation.id },
-      },
-    };
+    // Verified address, so expiry is the only reason left to refuse the join.
+    const payload = clerkUserCreatedEvent({
+      userId: invitee,
+      emails: [{ address: email, status: 'verified' }],
+      publicMetadata: { invitation_id: invitation.id },
+    });
     const res = await postClerkWebhook(app, payload);
     expect(res.status).toBe(200);
 
@@ -138,10 +137,10 @@ describe('Postgres integration — #1032 Clerk invitation join enforces expiry',
       expiresAt: new Date(Date.now() - 60_000),
     });
 
-    const payload = {
-      type: 'user.created',
-      data: { id: invitee, email_addresses: [{ email_address: email }] },
-    };
+    const payload = clerkUserCreatedEvent({
+      userId: invitee,
+      emails: [{ address: email, status: 'verified' }],
+    });
     const res = await postClerkWebhook(app, payload);
     expect(res.status).toBe(200);
 
@@ -174,14 +173,12 @@ describe('Postgres integration — #1032 Clerk invitation join enforces expiry',
       expiresAt: new Date(Date.now() + 60_000),
     });
 
-    const payload = {
-      type: 'user.created',
-      data: {
-        id: invitee,
-        email_addresses: [{ email_address: email }],
-        public_metadata: { invitation_id: invitation.id },
-      },
-    };
+    // Verified address, so expiry is the only reason left to refuse the join.
+    const payload = clerkUserCreatedEvent({
+      userId: invitee,
+      emails: [{ address: email, status: 'verified' }],
+      publicMetadata: { invitation_id: invitation.id },
+    });
     const res = await postClerkWebhook(app, payload);
     expect(res.status).toBe(200);
     expect(res.body.joined).toBe(inviter.tenantId);

@@ -9,6 +9,7 @@ import { CallOutcome, VoiceRepository } from '../voice/voice-service';
 import type { LanguageDetector } from '../voice/language-detector';
 import {
   EMBEDDING_MODEL,
+  KnowledgeChunkDedupeCollisionError,
   KnowledgeChunkRepository,
   KnowledgeChunkSourceType,
 } from '../ai/training/knowledge-chunks';
@@ -383,6 +384,13 @@ async function emitChunk(input: EmitChunkInput): Promise<void> {
       },
     });
   } catch (err) {
+    if (err instanceof KnowledgeChunkDedupeCollisionError) {
+      logger.warn('knowledge_chunks insert skipped: another tenant holds this source tuple', {
+        sourceType,
+        sourceId,
+      });
+      return;
+    }
     const error = err instanceof Error ? err : new Error(String(err));
     logger.warn('knowledge_chunks insert failed', {
       sourceType,

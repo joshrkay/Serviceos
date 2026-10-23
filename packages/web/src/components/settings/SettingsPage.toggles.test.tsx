@@ -9,6 +9,8 @@ const apiFetchMock = vi.fn();
 vi.mock('./AiMinutesCard', () => ({ AiMinutesCard: () => null }));
 // #1602 — same for the call-quality card (CallQualityCard.test covers it).
 vi.mock('./CallQualityCard', () => ({ CallQualityCard: () => null }));
+// #1736 — same for the call-review card (CallReviewCard.test covers it).
+vi.mock('./CallReviewCard', () => ({ CallReviewCard: () => null }));
 
 vi.mock('../../utils/api-fetch', () => ({
   apiFetch: (...args: unknown[]) => apiFetchMock(...args),
@@ -185,6 +187,35 @@ describe('SettingsPage Quick toggles persistence', () => {
         screen.getByRole('switch', { name: 'Text technicians about assignments' }),
       ).toHaveAttribute('aria-checked', 'true'),
     );
+  });
+
+  it('#1738 — "Text new leads right away" starts OFF and persists speedToLeadEnabled when turned on', async () => {
+    apiFetchMock.mockImplementation(async (url: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') return jsonResponse({ speedToLeadEnabled: true });
+      if (url === '/api/settings') return jsonResponse({ speedToLeadEnabled: false });
+      return jsonResponse({});
+    });
+    fetchLanguageMock.mockResolvedValueOnce({
+      defaultLanguage: 'en',
+      ttsVoiceEn: null,
+      ttsVoiceEs: null,
+      autoDetectLanguage: true,
+      spanishDispatcherUserIds: [],
+    });
+
+    renderPage();
+    const toggle = await screen.findByRole('switch', { name: 'Text new leads right away' });
+    await waitFor(() => expect(toggle).toHaveAttribute('aria-checked', 'false'));
+    expect(toggle.className).toContain('min-h-11');
+    fireEvent.click(toggle);
+
+    await waitFor(() => {
+      const putCall = apiFetchMock.mock.calls.find(
+        (c) => c[1] && (c[1] as RequestInit).method === 'PUT',
+      );
+      expect(putCall).toBeDefined();
+      expect(JSON.parse((putCall![1] as RequestInit).body as string)).toEqual({ speedToLeadEnabled: true });
+    });
   });
 
   it('9.6 — hydrates the Daily digest toggle from /api/settings on mount', async () => {

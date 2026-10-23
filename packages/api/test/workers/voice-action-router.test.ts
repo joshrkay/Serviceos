@@ -8,6 +8,7 @@
  * surprised by actions they didn't clearly request.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { resolvesCustomer } from '../helpers/resolves-customer';
 
 // OBS — capture recordVoiceError calls without touching the real PostHog SDK.
 const recordVoiceErrorMock = vi.fn();
@@ -260,6 +261,7 @@ describe('voice-action-router worker', () => {
       proposalRepo,
       tenantSchedulingResolver: TZ_RESOLVER,
       ...OWNER_MEMO_DEPS,
+      entityResolver: resolvesCustomer(),
     });
     await worker.handle(
       msg({
@@ -1926,6 +1928,9 @@ describe('P8/latency — per-segment resolver reads run concurrently', () => {
         userId: 'u-1',
         transcript: 'Book the AC repair tomorrow at 2pm',
         recordingId: OWNER_MEMO_RECORDING_ID,
+        // Recorded on the job's page: the job id is verified, so drafting
+        // keeps it (a job id only the drafting model wrote would be scrubbed).
+        jobId: JOB_ID,
       }),
       silentLogger(),
     );

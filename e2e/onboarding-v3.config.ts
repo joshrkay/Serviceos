@@ -18,17 +18,35 @@ import { defineConfig, devices } from '@playwright/test';
  *     npx playwright test -c e2e/onboarding-v3.config.ts
  *
  * Optional: E2E_V3_DATABASE_URL (default postgres://postgres:postgres@localhost:5432/serviceos_e2e),
- * E2E_V3_API_PORT (3011), E2E_V3_WEB_PORT (5176).
+ * E2E_V3_API_PORT (3011), E2E_V3_WEB_PORT (5176), E2E_V3_SERVER_TIMEOUT_MS (180000, the API's boot).
  *
  * Billing is hermetic (synthetic Stripe keys, no plan prices): the trial turn is
  * proven against the real routes' real answers, and a trial cannot be completed
  * here, so the number and the test call are proven by component and shell tests.
+ *
+ * Speech is hermetic the same way (S3-6): TTS_PROVIDER=fixture makes the API
+ * speak every line as one bundled 200 ms silent mp3 (a non-production provider
+ * at the vendor boundary), so the browser really plays a clip after the tap
+ * while the voice routes, the clip cache, the per-clip charge and the audit run
+ * for real. Listening is hermetic too: STT_PROVIDER=fixture makes the real
+ * POST /api/voice/stream-token mint a fixture token (refused in production),
+ * and e2e/helpers/fake-deepgram.ts plays scripted transcripts into the
+ * browser's Deepgram socket, so spoken answers are proven with no vendor key.
+ *
+ * WebKit (iPhone 13) is a second project, opt-in with E2E_V3_WEBKIT=1 because
+ * it needs `npx playwright install --with-deps webkit`. It runs the voice spec
+ * only. Browser-specific tests are tagged and filtered per project (never
+ * skipped at run time: scripts/release/verify.mjs fails a run with any skip):
+ * `@webkit` runs only on WebKit, `@chromium` (the fake microphone) only on Chromium.
  */
 const apiPort = process.env.E2E_V3_API_PORT ?? '3011';
 const webPort = process.env.E2E_V3_WEB_PORT ?? '5176';
 const databaseUrl = process.env.E2E_V3_DATABASE_URL ?? 'postgres://postgres:postgres@localhost:5432/serviceos_e2e';
 const apiURL = `http://127.0.0.1:${apiPort}`;
 const baseURL = `http://127.0.0.1:${webPort}`;
+// How long the API may take to migrate and boot. ts-node compiles the whole API on start, which takes minutes
+// on a loaded shared machine; E2E_V3_SERVER_TIMEOUT_MS raises it there without changing what CI waits for.
+const serverTimeout = Number(process.env.E2E_V3_SERVER_TIMEOUT_MS ?? 180_000);
 
 // Tells the spec it is on the stack it needs; it skips itself under any other config.
 process.env.E2E_ONBOARDING_V3_STACK = '1';
@@ -37,8 +55,7 @@ process.env.E2E_V3_API_URL = apiURL;
 
 export default defineConfig({
   testDir: './',
-  testMatch: ['onboarding-v3-ready-readback.spec.ts', 'onboarding-v3-voice-webkit.spec.ts'],
-  testMatch: ['onboarding-v3-ready-readback.spec.ts', 'invoice-payment-collect-on-site.spec.ts'],
+  testMatch: ['onboarding-v3-ready-readback.spec.ts', 'onboarding-v3-voice-webkit.spec.ts', 'invoice-payment-collect-on-site.spec.ts'],
   fullyParallel: false,
   workers: 1,
   retries: 0,
@@ -46,15 +63,46 @@ export default defineConfig({
   reporter: [['list']],
   outputDir: '../test-results/onboarding-v3',
   use: {
-    ...devices['Desktop Chrome'],
     baseURL,
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     actionTimeout: 10_000,
     navigationTimeout: 20_000,
-    ...(process.env.QA_CHROMIUM_PATH ? { launchOptions: { executablePath: process.env.QA_CHROMIUM_PATH } } : {}),
   },
-  projects: [{ name: 'onboarding-v3' }],
+  projects: [
+    {
+      name: 'onboarding-v3',
+      grepInvert: /@webkit/,
+      use: {
+        ...devices['Desktop Chrome'],
+        // Full Chromium (new headless), not Playwright's default headless shell: the shell answers
+        // getUserMedia with NotSupportedError whether or not the permission is granted, so the
+        // listening tests saw "unavailable" instead of a refused mic / a real token mint. The full
+        // build refuses with NotAllowedError and hands over the fake device when granted, as a
+        // phone does. `npx playwright install chromium` installs both builds.
+        ...(process.env.QA_CHROMIUM_PATH ? {} : { channel: 'chromium' as const }),
+        launchOptions: {
+          ...(process.env.QA_CHROMIUM_PATH ? { executablePath: process.env.QA_CHROMIUM_PATH } : {}),
+          // A fake microphone, so a test that grants the permission can open one (S3-5). A test that does not
+          // grant it is refused, as an owner who taps "Don't allow" is: headless Chromium would otherwise leave
+          // the prompt unanswered forever, which no owner can do to a visible prompt.
+          args: ['--use-fake-device-for-media-stream', '--deny-permission-prompts'],
+        },
+      },
+    },
+    ...(process.env.E2E_V3_WEBKIT === '1'
+      ? [
+          {
+            // iOS Safari's engine. Playwright's build plays without a gesture and (on Linux) has no
+            // MediaRecorder, so the voice spec emulates the gesture rule at play() for its WebKit test.
+            name: 'onboarding-v3-webkit',
+            testMatch: ['onboarding-v3-voice-webkit.spec.ts'],
+            grepInvert: /@chromium/,
+            use: { ...devices['iPhone 13'] },
+          },
+        ]
+      : []),
+  ],
   webServer: [
     {
       // Prepare the database (create, migrate, seed one price tier), then boot the API on it.
@@ -62,7 +110,7 @@ export default defineConfig({
       cwd: '../',
       url: `${apiURL}/health`,
       reuseExistingServer: false,
-      timeout: 180_000,
+      timeout: serverTimeout,
       stdout: 'ignore',
       stderr: 'pipe',
       env: {
@@ -86,8 +134,20 @@ export default defineConfig({
         STRIPE_STARTER_PRICE_ID: '',
         STRIPE_GROWTH_PRICE_ID: '',
         STRIPE_PRICE_ID: '',
+        // The synthetic key would send pay-link requests to Stripe (401), and an invoice send now
+        // needs its pay link made first (D-045), so links come from the dev-only mock provider.
+        PAYMENT_LINK_PROVIDER: 'mock',
+        // Scripted transcription (e2e/helpers/fake-deepgram.ts): the token route mints a fixture token, and
+        // the key is blanked so a developer's own cannot open a real socket.
+        DEEPGRAM_API_KEY: '',
+        STT_PROVIDER: 'fixture',
+        // Rivet's voice: the dev-only fixture provider (refused in production), so a clip really plays
+        // after the tap with no vendor key. It wins over any vendor key in a developer's own shell.
+        TTS_PROVIDER: 'fixture',
         DATABASE_URL: databaseUrl,
         E2E_V3_DATABASE_URL: databaseUrl,
+        // The lane's Postgres is local and plain (CI sets the same at job level); without it every
+        // query fails "The server does not support SSL connections" while /health still answers.
         // The local test Postgres speaks no SSL; the pool asks for it unless told not to (db/pool.ts).
         DB_SSL: process.env.DB_SSL ?? 'false',
       },

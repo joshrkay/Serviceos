@@ -37,10 +37,21 @@
  *    candidate) the operator-confirmed spoken price recorded at grounding
  *    time. Either way it's a recorded candidate, never a fresh number.
  *  - Audited: every resolution emits `proposal.line_resolved`.
+ *  - Row lock (A4-4): runs inside the caller's tenant transaction (the /api
+ *    request transaction) and reads the row under its lock, so a pick that
+ *    races it never loses its write. The Pg repository refuses the lock
+ *    outside a transaction.
+ *  - Compare-and-write: the write goes through `updateIfUnchanged` against
+ *    that read. Under the Pg row lock the row cannot have moved, so the
+ *    compare always passes there. Without a pool the in-memory "locked" read
+ *    is a plain copy and no lock is held, so another pick or an edit can land
+ *    between the read and the write; the pick is then refused with a plain
+ *    409 and writes nothing, rather than putting back a payload and
+ *    sourceContext that erase that change.
  */
 import { Role, hasPermission } from '../auth/rbac';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
-import { ForbiddenError, NotFoundError, ValidationError } from '../shared/errors';
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../shared/errors';
 import { Proposal, ProposalRepository } from './proposal';
 import { calculateLineItemTotal } from '../shared/billing-engine';
 
@@ -81,6 +92,26 @@ export interface ResolveLineInput {
 export interface ResolveLineDeps {
   proposalRepo: ProposalRepository;
   auditRepo?: AuditRepository;
+}
+
+/**
+ * Owner copy (the route sends it verbatim): the same plain words the entity
+ * pick (resolve-entity.ts) uses when the row changed under a pick. A retry
+ * reads the row as it is now and goes through.
+ */
+const PICK_CHANGED = 'This changed while you were choosing. Please try again.';
+
+type ProposalPatch = Parameters<ProposalRepository['update']>[2];
+
+/**
+ * Write the pick built from `read`, only while the row is still `read`
+ * (see the compare-and-write invariant above).
+ */
+async function writePick(deps: ResolveLineDeps, read: Proposal, patch: ProposalPatch): Promise<void> {
+  const written = await deps.proposalRepo.updateIfUnchanged(read.tenantId, read.id, read, patch);
+  if (!written) {
+    throw new ConflictError(PICK_CHANGED, { status: read.status });
+  }
 }
 
 function asRecord(v: unknown): Record<string, unknown> {
@@ -153,7 +184,13 @@ export async function resolveProposalLine(
     throw new ValidationError('catalogItemId is required');
   }
 
-  const proposal = await deps.proposalRepo.findById(tenantId, proposalId);
+  // A4-4 — read under the row lock, held until the request transaction ends,
+  // and build the write below from this row only. The write puts back the
+  // whole payload and sourceContext; from an unlocked read, an entity pick
+  // that committed in between had its picker restored and its resolved id
+  // dropped. Now that pick either committed first (and is in this row) or
+  // waits for this request, then builds on what it wrote (A3-1).
+  const [proposal] = await deps.proposalRepo.findByIdsForUpdate(tenantId, [proposalId]);
   if (!proposal) {
     throw new NotFoundError('Proposal', proposalId);
   }
@@ -261,7 +298,7 @@ export async function resolveProposalLine(
     catalogResolution: nextCatalogResolution,
   };
 
-  await deps.proposalRepo.update(tenantId, proposalId, {
+  await writePick(deps, proposal, {
     payload: nextPayload,
     sourceContext: nextSourceContext,
   });
@@ -398,7 +435,7 @@ async function resolveEditActionLine(
     catalogResolution: nextCatalogResolution,
   };
 
-  await deps.proposalRepo.update(tenantId, proposalId, {
+  await writePick(deps, proposal, {
     payload: nextPayload,
     sourceContext: nextSourceContext,
   });

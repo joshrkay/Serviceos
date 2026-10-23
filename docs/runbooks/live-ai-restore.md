@@ -150,7 +150,7 @@ voice DEGRADED→50/50 plan). Partial config (key without URL) is ignored.
 | `AI_FALLBACK_STANDARD_MODEL` | `meta-llama/llama-3.3-70b-instruct` (optional) |
 | `AI_FALLBACK_COMPLEX_MODEL` | `qwen/qwen2.5-vl-72b-instruct` (optional) |
 | `AI_CLASSIFY_INTENT_DEADLINE_MS` | **12000** (never leave empty — empty → 4s default) |
-| `AI_FALLBACK_RESERVE_MS` | `2500` (optional) — failover shares the ONE request deadline; a hanging primary is cut off this many ms early (at most 1/4 of the budget) so the fallback still gets a try. `0` = primary keeps the whole budget. |
+| `AI_FALLBACK_RESERVE_MS` | `2500` (optional) — failover shares the ONE request deadline; a hanging primary is cut off up to this many ms early so the fallback still gets a try. The reserve is a quarter of the budget, at most this value, but a reserve that is kept is never under 1000 ms (one 700 ms attempt plus room for a late timer): budgets from 2.8 s up to 4 s reserve 1000 ms (about 25–36% of the budget, the primary keeping at least 1.8 s), and a value from 700 to 999 acts as 1000. A budget under 2.8 s, a value below 700, or `0` keeps no reserve: the primary keeps the whole budget. |
 
 ```bash
 export AI_FALLBACK_PROVIDER_API_KEY='sk-or-...'

@@ -62,7 +62,12 @@ export interface DelayNoticeDeliveryState {
 
 export interface DelayNoticeStateRepository {
   upsert(state: DelayNoticeDeliveryState): Promise<DelayNoticeDeliveryState>;
-  findByKey(idempotencyKey: string): Promise<DelayNoticeDeliveryState | null>;
+  /**
+   * The delivery state for `idempotencyKey`, if it belongs to `tenantId`.
+   * Tenant-scoped like every other read of a tenant table: a row another
+   * tenant owns is never returned, even for an identical key.
+   */
+  findByKey(tenantId: string, idempotencyKey: string): Promise<DelayNoticeDeliveryState | null>;
 }
 
 export class InMemoryDelayNoticeStateRepository implements DelayNoticeStateRepository {
@@ -73,9 +78,9 @@ export class InMemoryDelayNoticeStateRepository implements DelayNoticeStateRepos
     return { ...state };
   }
 
-  async findByKey(idempotencyKey: string): Promise<DelayNoticeDeliveryState | null> {
+  async findByKey(tenantId: string, idempotencyKey: string): Promise<DelayNoticeDeliveryState | null> {
     const found = this.states.get(idempotencyKey);
-    return found ? { ...found } : null;
+    return found && found.tenantId === tenantId ? { ...found } : null;
   }
 }
 
@@ -347,7 +352,7 @@ export class DelayNotificationCoordinator {
     }
 
     const idempotencyKey = `${target.appointment.id}:${input.delayVersion}`;
-    const existing = await this.stateRepo.findByKey(idempotencyKey);
+    const existing = await this.stateRepo.findByKey(input.tenantId, idempotencyKey);
     if (existing?.status === 'queued' || existing?.status === 'retrying' || existing?.status === 'sent') {
       return idempotencyKey;
     }
@@ -430,7 +435,7 @@ export class DelayNotificationCoordinator {
     }
 
     const idempotencyKey = `${target.appointment.id}:en_route`;
-    const existing = await this.stateRepo.findByKey(idempotencyKey);
+    const existing = await this.stateRepo.findByKey(input.tenantId, idempotencyKey);
     if (
       existing?.status === 'queued' ||
       existing?.status === 'retrying' ||

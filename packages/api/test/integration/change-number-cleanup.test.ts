@@ -32,6 +32,8 @@ import type { AuthenticatedRequest } from '../../src/auth/clerk';
 import type { VapiClient } from '../../src/integrations/vapi/client';
 import { runOrphanedNumberSweep } from '../../src/workers/orphaned-number-sweep';
 import type { OperatorAlert } from '../../src/monitoring/alert-operator';
+import { ForwardingCheckService, PgForwardingCheckRepository } from '../../src/onboarding/forwarding-check';
+import { PgCallForwardingRepository } from '../../src/onboarding/call-forwarding';
 
 const KEY = 'a'.repeat(64);
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
@@ -241,6 +243,60 @@ describe('Postgres integration — change-number cleanup (#1575)', () => {
     expect([...vapi.live]).toEqual(['vpn-1575-3']);
     const line = await request(app).get('/api/onboarding/phone');
     expect(line.body).toMatchObject({ state: 'active', phoneNumber: THIRD_PICK, changeError: null });
+  });
+
+  it('a number change voids the call-forwarding proof and fails a check still in flight (D-044)', async () => {
+    const { tenantId, queue, app } = await activeTenantWithVapi(fakeVapi().client);
+    await pool.query(
+      `UPDATE tenant_settings
+          SET call_forwarding_carrier = 'verizon', call_forwarding_mode = 'missed',
+              call_forwarding_verified_at = now() - interval '1 day'
+        WHERE tenant_id = $1`,
+      [tenantId],
+    );
+    const pendingId = crypto.randomUUID();
+    const settledId = crypto.randomUUID();
+    await pool.query(
+      `INSERT INTO call_forwarding_checks (id, tenant_id, status, mode, rivet_number, business_number, expires_at, completed_at)
+       VALUES ($1, $3, 'pending', 'missed', '+15550000001', '+15550000002', now() + interval '2 minutes', NULL),
+              ($2, $3, 'passed',  'missed', '+15550000001', '+15550000002', now() - interval '1 day', now() - interval '1 day')`,
+      [pendingId, settledId, tenantId],
+    );
+
+    await request(app).post('/api/onboarding/phone/change').send({ phoneNumber: SECOND_PICK });
+    await drain(queue, pool);
+
+    const settings = await pool.query(
+      `SELECT call_forwarding_verified_at, call_forwarding_carrier, call_forwarding_mode FROM tenant_settings WHERE tenant_id = $1`,
+      [tenantId],
+    );
+    // The proof reopens; the owner's carrier and mode choices are kept.
+    expect(settings.rows[0]).toEqual({
+      call_forwarding_verified_at: null,
+      call_forwarding_carrier: 'verizon',
+      call_forwarding_mode: 'missed',
+    });
+    const checks = await pool.query<{ id: string; status: string; completed_at: Date | null }>(
+      `SELECT id, status, completed_at FROM call_forwarding_checks WHERE tenant_id = $1`,
+      [tenantId],
+    );
+    const byId = new Map(checks.rows.map((r) => [r.id, r]));
+    expect(byId.get(pendingId)?.status).toBe('failed');
+    expect(byId.get(pendingId)?.completed_at).not.toBeNull();
+    // A check that already settled is history, left as it was...
+    expect(byId.get(settledId)?.status).toBe('passed');
+    // ...but with the proof cleared it no longer reads as "Forwarding works".
+    const service = new ForwardingCheckService({
+      repo: new PgForwardingCheckRepository(pool),
+      forwardingRepo: new PgCallForwardingRepository(pool),
+      getBusinessPhone: async () => null,
+      getCreds: async () => {
+        throw new Error('unused');
+      },
+    });
+    const view = await service.latestView(tenantId, { id: 'u-owner', role: 'owner' });
+    expect(view?.guidance).not.toMatch(/Forwarding works/);
+    expect(view?.guidance).toMatch(/test again/i);
   });
 
   function sweepDeps(tenantId: string) {

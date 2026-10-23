@@ -50,6 +50,7 @@ import {
 } from './retry';
 import {
   adoptDeadline,
+  asLocalAbort,
   MAX_GATEWAY_DEADLINE_MS,
   MIN_RETRY_BUDGET_MS,
   STAGE_BUDGETS,
@@ -99,24 +100,44 @@ function isFailoverEligible(err: unknown): boolean {
 /**
  * Default cap on the slice of the shared deadline held back for the next
  * provider in a failover chain (GATEWAY-03). Tunable per deploy with
- * AI_FALLBACK_RESERVE_MS (0 disables the reserve).
+ * AI_FALLBACK_RESERVE_MS: below 700 (or 0) disables the reserve, and 700–999
+ * acts as 1000 (`fallbackReserveFor`'s floor).
  */
 export const DEFAULT_FALLBACK_RESERVE_MS = 2_500;
 
 /**
+ * How late the primary's slice timer may fire while the reserve still fits a
+ * viable fallback attempt. The chain only advances with MIN_RETRY_BUDGET_MS
+ * left, and it measures that AFTER the slice ends — so a reserve of exactly a
+ * viable attempt is skipped by any timer lateness at all.
+ */
+const FALLBACK_RESERVE_TIMER_SLACK_MS = 300;
+
+/**
  * How much of `remainingMs` to hold back for the next provider when a fallback
- * exists: at most a quarter of the budget, at most `reserveCapMs`, and nothing
- * when that would be less than one viable attempt (MIN_RETRY_BUDGET_MS).
+ * exists. It starts from a quarter of the budget capped at `reserveCapMs`:
+ * when that is less than one viable attempt (MIN_RETRY_BUDGET_MS) nothing is
+ * held back, and otherwise the reserve is that amount raised to the floor
+ * below. So it is not always at most a quarter or at most the cap: a 2.8–4s
+ * budget reserves 1s (25–36%), and a cap of 700–999 acts as 1000.
+ *
+ * A reserve that IS carved is at least a viable attempt plus
+ * FALLBACK_RESERVE_TIMER_SLACK_MS (1s), even above the quarter or the cap: a
+ * busy event loop fires the slice timer late, and a reserve that left no room
+ * for that (a 3.2s budget's quarter, 800ms, absorbed 100ms) wasted the window
+ * on exactly the hang it exists for. Carving needs a budget of at least 2.8s,
+ * so the primary still keeps at least 1.8s.
  *
  * The reserve only matters when the primary HANGS — a fast primary failure
  * (5xx, refused socket, 429) leaves the fallback everything that is left
- * anyway. A hang is the rare case, so the primary keeps at least three
- * quarters of the caller's budget for the common success path (prod classify:
- * 12s → 9.5s primary, 2.5s fallback). Exported for unit testing.
+ * anyway. A hang is the rare case, so the primary keeps most of the caller's
+ * budget for the common success path (prod classify: 12s → 9.5s primary,
+ * 2.5s fallback). Exported for unit testing.
  */
 export function fallbackReserveFor(remainingMs: number, reserveCapMs: number): number {
   const reserve = Math.floor(Math.min(remainingMs / 4, Math.max(0, reserveCapMs)));
-  return reserve >= MIN_RETRY_BUDGET_MS ? reserve : 0;
+  if (reserve < MIN_RETRY_BUDGET_MS) return 0;
+  return Math.max(reserve, MIN_RETRY_BUDGET_MS + FALLBACK_RESERVE_TIMER_SLACK_MS);
 }
 
 /**
@@ -125,10 +146,15 @@ export function fallbackReserveFor(remainingMs: number, reserveCapMs: number): n
  * lease outside the failover chain is sized to the deadline, so the deadline
  * must bound the hold for a provider that does not cooperate too. A late
  * settlement of `work` is observed and dropped (no unhandled rejection).
+ *
+ * The abort rejects with a local-abort-shaped error (`asLocalAbort`): it
+ * usually wins the race against the provider's own abort error, so a caller's
+ * foreign abort reason would otherwise reach the breaker raw and be counted
+ * as a provider-health failure.
  */
 function settleByDeadline<T>(work: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(signal.reason);
+    const onAbort = () => reject(asLocalAbort(signal.reason));
     if (signal.aborted) onAbort();
     else signal.addEventListener('abort', onAbort, { once: true });
     work.then(
@@ -150,6 +176,16 @@ function settleByDeadline<T>(work: Promise<T>, signal: AbortSignal): Promise<T> 
  * Wraps an LLMProvider with retry (exponential backoff + jitter) and a
  * per-request deadline (AbortSignal).
  *
+ * Every attempt settles no later than this wrapper's deadline, even when the
+ * provider ignores the abort (C-1699-P2). Inside a failover chain that
+ * deadline is the provider's SLICE: the chain only bounds itself by the whole
+ * budget, so without this a deaf primary held the chain until the whole
+ * budget was gone and the fallback's reserved window was never used. It also
+ * returns the breaker's half-open probe slot, which a never-settling attempt
+ * would otherwise hold for good. The abandoned attempt's late result is
+ * dropped here, so it never reaches the breaker, the quota lease or the
+ * gateway's ai_runs row.
+ *
  * Exposed as a named class (not an anonymous object literal) so the test
  * suite can traverse the wrapper chain for structural assertions.
  */
@@ -170,7 +206,11 @@ export class ProviderRetryDeadlineWrapper implements LLMProvider {
 
     try {
       return await runWithRetry(
-        () => this.inner.complete({ ...request, signal: deadline.signal }),
+        () =>
+          settleByDeadline(
+            this.inner.complete({ ...request, signal: deadline.signal }),
+            deadline.signal,
+          ),
         {
           policy: this.retryPolicy,
           deadline,

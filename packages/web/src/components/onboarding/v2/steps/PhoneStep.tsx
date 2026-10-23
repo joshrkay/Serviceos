@@ -4,6 +4,11 @@ import { useApiClient } from '../../../../lib/apiClient';
 import { Button } from '../../../ui';
 import { NumberPicker, formatPhone } from '../../../phone/NumberPicker';
 import type { OnboardingStatusResponse } from '../../../../types/onboarding';
+import {
+  buildCallForwardingInstructions,
+  CALL_FORWARDING_CARRIERS,
+  CALL_FORWARDING_CARRIER_LABELS,
+} from '@ai-service-os/shared';
 
 interface PhoneStepProps {
   status: OnboardingStatusResponse;
@@ -11,46 +16,18 @@ interface PhoneStepProps {
   onRetryComplete?: () => void;
 }
 
-interface CarrierTip {
-  name: string;
-  /**
-   * Returns the full dial string the operator should punch into their
-   * existing phone — prefix, the national 10-digit number, and any
-   * carrier-specific terminator. The function form lets each carrier
-   * compose its own format (e.g. T-Mobile's `**21*1<number>#` has a
-   * leading 1 and a trailing #, neither of which fits the simple
-   * "prefix + number" pattern Verizon/AT&T use).
-   */
-  formatCode: (national: string) => string;
-  note?: string;
-}
-
-const CARRIERS: CarrierTip[] = [
-  { name: 'Verizon',  formatCode: (n) => n ? `*72 ${n}` : '*72' },
-  { name: 'AT&T',     formatCode: (n) => n ? `*72 ${n}` : '*72' },
-  // T-Mobile per support.t-mobile.com short-code table: unconditional
-  // forwarding is `**21*1+PhoneNumber#` — needs the leading 1 and
-  // the trailing # to register the forward.
-  { name: 'T-Mobile', formatCode: (n) => n ? `**21*1${n}#` : '**21*1...#' },
-  { name: 'Other',    formatCode: () => 'Ask your carrier', note: 'Most US carriers support unconditional call forwarding.' },
-];
-
 const BLOCKER_COPY: Record<string, string> = {
   twilio_provisioning_failed:
     "We couldn't claim a phone number for you. Our team has been alerted.",
+  // Reachable on the live wizard since the status puts the failure's own
+  // blocker first (S5b-1): plain words, no vendor or system names.
   twilio_credentials_missing:
-    'Twilio is not configured for this environment. Contact support to enable phone provisioning.',
+    "We can't set up phone numbers on your account yet. Please contact support.",
   area_code_unavailable:
     'No numbers were available in the area code we tried. Hit Retry — we will try the next one.',
   rate_limited:
     'Too many provisioning attempts. Hit Retry in a minute and we will try again.',
 };
-
-function nationalDigits(e164: string | null | undefined): string {
-  if (!e164) return '';
-  const digits = e164.replace(/\D/g, '');
-  return digits.length === 11 && digits.startsWith('1') ? digits.slice(1) : digits;
-}
 
 export function PhoneStep({ status, onAdvance, onRetryComplete }: PhoneStepProps) {
   const apiFetch = useApiClient();
@@ -63,7 +40,6 @@ export function PhoneStep({ status, onAdvance, onRetryComplete }: PhoneStepProps
   };
   const phoneNumber = meta.phoneNumber ?? null;
   const formatted = formatPhone(phoneNumber);
-  const national = nationalDigits(phoneNumber);
   const [copied, setCopied] = useState(false);
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
@@ -246,18 +222,27 @@ export function PhoneStep({ status, onAdvance, onRetryComplete }: PhoneStepProps
           Rivet number. Forwarding turns on right away.
         </p>
         <ul className="mt-4 divide-y divide-slate-200 rounded-xl border border-slate-200 bg-white">
-          {CARRIERS.map((c) => (
-            <li key={c.name} className="flex flex-col gap-1 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-              <span className="text-sm font-medium text-slate-700">{c.name}</span>
-              <span className="font-mono text-sm text-slate-600">
-                {c.formatCode(national)}
-              </span>
-            </li>
-          ))}
+          {CALL_FORWARDING_CARRIERS.map((carrier) => {
+            const instructions = buildCallForwardingInstructions({
+              carrier,
+              mode: 'missed',
+              rivetNumber: phoneNumber,
+            });
+            return (
+              <li key={carrier} className="flex flex-col gap-1 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+                <span className="text-sm font-medium text-slate-700">
+                  {CALL_FORWARDING_CARRIER_LABELS[carrier]}
+                </span>
+                <span className="font-mono text-sm text-slate-600">
+                  {instructions?.kind === 'codes' ? instructions.dial : 'Ask your carrier'}
+                </span>
+              </li>
+            );
+          })}
         </ul>
         <p className="mt-3 text-xs text-slate-500">
-          To turn forwarding off later, dial <span className="font-mono">*73</span> (Verizon/AT&amp;T)
-          or <span className="font-mono">##21#</span> (T-Mobile) from the same line.
+          These forward missed calls only. Pick your carrier in Settings → Phone later to see the
+          code for forwarding every call and the code that turns forwarding off.
         </p>
       </section>
 

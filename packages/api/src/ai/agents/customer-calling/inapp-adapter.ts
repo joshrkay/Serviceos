@@ -59,6 +59,7 @@ import { isDeadlineExceeded } from '../../gateway/deadline';
 import { escalateToHuman } from '../../skills/escalate-to-human';
 import type { EscalationReason } from '../../skills/escalate-to-human';
 import { summarizeSession } from '../../skills/summarize-session';
+import type { CallSummaryRepository } from '../../skills/pg-call-summary';
 import { runOutsideRequestTransaction } from '../../../middleware/tenant-context';
 import { estimateCostCents } from '../../skills/session-cost-tracker';
 import {
@@ -188,13 +189,17 @@ export interface InAppAdapterDeps {
   auditRepo: AuditRepository;
   onCallRepo: OnCallRepository;
   /**
-   * Postgres pool — when present, end-of-call summaries are persisted to
-   * call_summaries. Optional so dev mode (no DB) still works.
-   *
-   * Also used to self-construct a bare `PgEntityResolver` (no tenant
-   * aliases) when no `entityResolver` is injected.
+   * Postgres pool — used to self-construct a bare `PgEntityResolver` (no
+   * tenant aliases) when no `entityResolver` is injected. Optional so dev
+   * mode (no DB) still works.
    */
   pool?: Pool;
+  /**
+   * A2 — when present, end-of-call summaries are persisted to call_summaries
+   * through it (its own tenant transaction under the RLS runtime role).
+   * Optional so dev mode (no DB) still works.
+   */
+  callSummaryRepo?: CallSummaryRepository;
   /**
    * P0 voice-safety — shared, tenant-scoped entity resolver (production:
    * app.ts's `sharedEntityResolver`, `AliasFirstEntityResolver →
@@ -3083,7 +3088,7 @@ export class InAppVoiceAdapter {
         durationMs,
         gateway: this.deps.gateway,
         ...(intentDetected ? { intentDetected } : {}),
-        ...(this.deps.pool ? { pool: this.deps.pool } : {}),
+        ...(this.deps.callSummaryRepo ? { callSummaryRepo: this.deps.callSummaryRepo } : {}),
         // RIVET I13 — this is an authenticated in-app OPERATOR session. The
         // adapter stores the operator's own turns with a `caller:` prefix, so
         // they must NOT be fenced as untrusted caller content.

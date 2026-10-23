@@ -92,14 +92,51 @@ export class PgQueue extends PgBaseRepository implements Queue {
       // receive/receiveBatch skip the row until the delay elapses. Delay 0 is
       // the pre-existing immediate path.
       const delaySeconds = Math.max(0, options?.delaySeconds ?? 0);
-      await client.query(
-        `INSERT INTO _queue_messages (id, type, payload, attempts, max_attempts, idempotency_key, visible_at, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, NOW() + ($7 || ' seconds')::interval, NOW())
-         ON CONFLICT (idempotency_key) DO NOTHING`,
-        [id, type, JSON.stringify(payload), 0, this.config.maxRetries, key, String(delaySeconds)]
-      );
+      await this.insertMessage(client, id, type, payload, key, delaySeconds);
       return id;
     });
+  }
+
+  /**
+   * S5a-3 (U8) — enqueue inside the caller's open transaction on the
+   * caller's client (see `Queue.sendOn`). The table bootstrap is DDL and must
+   * never run in the caller's transaction (a ROLLBACK there would take the
+   * table with it), so it runs first on the queue's own connection — and once
+   * the bootstrap promise exists no connection is taken at all, so a caller
+   * holding the pool's last connection cannot wait on itself.
+   */
+  async sendOn<T>(
+    client: import('pg').PoolClient,
+    type: string,
+    payload: T,
+    idempotencyKey: string,
+    options?: SendOptions,
+  ): Promise<string> {
+    if (this.initPromise) {
+      await this.initPromise;
+    } else {
+      await this.withClient((own) => this.ensureTable(own));
+    }
+    const id = randomUUID();
+    await this.insertMessage(client, id, type, payload, idempotencyKey, Math.max(0, options?.delaySeconds ?? 0));
+    return id;
+  }
+
+  /** The one enqueue statement `send` and `sendOn` share. */
+  private async insertMessage<T>(
+    client: import('pg').PoolClient,
+    id: string,
+    type: string,
+    payload: T,
+    key: string,
+    delaySeconds: number,
+  ): Promise<void> {
+    await client.query(
+      `INSERT INTO _queue_messages (id, type, payload, attempts, max_attempts, idempotency_key, visible_at, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW() + ($7 || ' seconds')::interval, NOW())
+       ON CONFLICT (idempotency_key) DO NOTHING`,
+      [id, type, JSON.stringify(payload), 0, this.config.maxRetries, key, String(delaySeconds)]
+    );
   }
 
   async receive<T>(): Promise<QueueMessage<T> | null> {
@@ -118,16 +155,22 @@ export class PgQueue extends PgBaseRepository implements Queue {
         // LOCKED means concurrent ticks/replicas each grab a DISJOINT set — no
         // message is processed twice.
         //
+        // The locking pick is a MATERIALIZED CTE so it runs exactly once. As
+        // `WHERE id IN (SELECT … LIMIT $3)` the planner may rescan it as the
+        // inner side of a nested loop, and every rescan skips the rows this
+        // UPDATE already claimed and locks the NEXT $3 — receiveBatch(3) then
+        // claimed every due row (pg-queue-claim-rescan.test.ts). A CTE scan
+        // rescans its stored result instead; MATERIALIZED states that
+        // requirement rather than leaving it to the planner's CTE-inlining
+        // rules.
+        //
         // visible_at scales with the (pre-increment) attempt count:
         // base * 2^attempts, capped. This gives failed messages exponential
         // retry backoff instead of hammering a struggling downstream every
         // `visibilityTimeout` seconds, and gives later attempts of slow jobs
         // a longer processing window before another replica re-claims them.
         const result = await client.query(
-          `UPDATE _queue_messages
-           SET attempts = attempts + 1,
-               visible_at = NOW() + (LEAST($1::float * POWER(2, attempts), $2)::int || ' seconds')::interval
-           WHERE id IN (
+          `WITH picked AS MATERIALIZED (
              SELECT id FROM _queue_messages
              WHERE visible_at <= NOW()
                AND attempts < max_attempts
@@ -135,7 +178,12 @@ export class PgQueue extends PgBaseRepository implements Queue {
              FOR UPDATE SKIP LOCKED
              LIMIT $3
            )
-           RETURNING *`,
+           UPDATE _queue_messages q
+           SET attempts = attempts + 1,
+               visible_at = NOW() + (LEAST($1::float * POWER(2, attempts), $2)::int || ' seconds')::interval
+           FROM picked
+           WHERE q.id = picked.id
+           RETURNING q.*`,
           [String(this.config.visibilityTimeout), String(MAX_VISIBILITY_SECONDS), max]
         );
 
@@ -145,10 +193,11 @@ export class PgQueue extends PgBaseRepository implements Queue {
         // and it never reaches the DLQ — a silently stuck message. Move any
         // such expired rows to the DLQ (same redaction as moveToDeadLetter),
         // bounded per tick; SKIP LOCKED + ON CONFLICT keep concurrent
-        // replicas idempotent.
+        // replicas idempotent. The bound holds only because the locking pick
+        // is a MATERIALIZED CTE, for the same reason as the claim above: as an
+        // IN-subquery a rescan would lock and delete the next 10.
         const orphans = await client.query(
-          `DELETE FROM _queue_messages
-           WHERE id IN (
+          `WITH orphaned AS MATERIALIZED (
              SELECT id FROM _queue_messages
              WHERE visible_at <= NOW()
                AND attempts >= max_attempts
@@ -156,7 +205,10 @@ export class PgQueue extends PgBaseRepository implements Queue {
              FOR UPDATE SKIP LOCKED
              LIMIT 10
            )
-           RETURNING *`
+           DELETE FROM _queue_messages q
+           USING orphaned
+           WHERE q.id = orphaned.id
+           RETURNING q.*`
         );
         for (const row of orphans.rows) {
           const orphan: QueueMessage = {

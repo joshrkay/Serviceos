@@ -1,4 +1,5 @@
 import { Router, Response } from 'express';
+import type { Queue } from '../queues/queue';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { requireAuth, requireTenant, requirePermission, requireRole } from '../middleware/auth';
 import { updateSettingsSchema } from '../shared/contracts';
@@ -11,7 +12,14 @@ import { PackActivationRepository } from '../settings/pack-activation';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
 import { resolveCanonicalUser, type UserRepository } from '../users/user';
 import { requireActiveTenantMember } from '../users/tenant-member';
+import { hasPermission, isValidRole } from '../auth/rbac';
 import { z } from 'zod';
+import type { Pool } from 'pg';
+import type { VapiClient } from '../integrations/vapi/client';
+import { refreshVapiFirstMessage } from '../voice/voice-config';
+import { runAfterCommit } from '../middleware/tenant-context';
+import { tenantQuery } from '../workers/tenant-query';
+import { createLogger } from '../logging/logger';
 import {
   getSettings,
   updateSettings,
@@ -325,6 +333,11 @@ function projectDunningConfig(config: DunningConfig, configured: boolean) {
   };
 }
 
+const settingsLogger = createLogger({
+  service: 'settings-route',
+  environment: process.env.NODE_ENV || 'development',
+});
+
 export function createSettingsRouter(
   settingsRepo: SettingsRepository,
   deps?: SettingsRouterDependencies,
@@ -332,12 +345,25 @@ export function createSettingsRouter(
   capabilityDeps?: SettingsCapabilityDependencies,
   dunningDeps?: SettingsDunningDependencies,
   /**
-   * #1463 — when wired (app.ts always does), `backupSupervisorUserId` must
-   * name an active member of the caller's tenant. Readers already scope the
-   * lookup to the tenant, but the write must not persist another tenant's
-   * user id (or 500 on the FK for an id naming nobody).
+   * #1463 — when wired (app.ts always does), a NEW `backupSupervisorUserId`
+   * must name an active member of the caller's tenant. Readers already scope
+   * the lookup to the tenant, but the write must not persist another
+   * tenant's user id (or 500 on the FK for an id naming nobody). The value
+   * already on file, sent back unchanged, is accepted (B3-3).
    */
   memberDeps?: { userRepo: Pick<UserRepository, 'findById'> },
+  /**
+   * S5a-5 (U8) — the app queue. A PUT that switches payment_collection_mode
+   * to "Collect on the spot" enqueues the pay-link cleanup in the settings
+   * write's own (request) transaction; `updateSettings` attaches the hook.
+   */
+  paymentModeDeps?: { queue: Queue },
+  /**
+   * PRIV-4 — a Vapi assistant's first message carries the virtual-assistant
+   * notice in the tenant's `default_language`, so a language change re-pushes
+   * it. Absent (no pool, or VAPI_API_KEY unset) → no push.
+   */
+  vapiDeps?: { pool: Pool; vapiClient: Pick<VapiClient, 'updateAssistant'> | null },
 ): Router {
   const router = Router();
 
@@ -428,6 +454,33 @@ export function createSettingsRouter(
         // creation, but tests / legacy tenants may not have a row yet).
         await ensureTenantSettings(tenantId, settingsRepo);
         const updated = await updateSettings(tenantId, patch, settingsRepo);
+
+        // PRIV-4 — a Vapi-routed caller hears the notice from the assistant's
+        // first message, built in `default_language`; re-push it so a switch
+        // to Spanish is heard in Spanish. After COMMIT, on its own tenant-scoped
+        // connection, so a slow Vapi never holds the request transaction (or
+        // reads the language before it is durable). The setting is already
+        // saved, so a failure is logged, not thrown; the next voice save or the
+        // backfill script re-pushes.
+        const vapiClient = vapiDeps?.vapiClient;
+        if (patch.defaultLanguage !== undefined && vapiDeps && vapiClient) {
+          const { pool } = vapiDeps;
+          runAfterCommit(res, () => {
+            void refreshVapiFirstMessage(
+              {
+                pool: { query: (sql: string, params?: unknown[]) => tenantQuery(pool, tenantId, sql, params) } as never,
+                vapiClient,
+              },
+              tenantId,
+            )
+              .catch(() => 'failed' as const)
+              .then((outcome) => {
+                if (outcome === 'failed') {
+                  settingsLogger.warn('settings.language: Vapi first-message refresh failed', { tenantId });
+                }
+              });
+          });
+        }
 
         // D2-1c — audit-log the language settings change.
         if (auditRepo) {
@@ -529,13 +582,40 @@ export function createSettingsRouter(
           }
         }
 
-        if (parsed.backupSupervisorUserId && memberDeps) {
-          await requireActiveTenantMember(
-            memberDeps.userRepo,
-            req.auth!.tenantId,
-            parsed.backupSupervisorUserId,
-            'backupSupervisorUserId',
-          );
+        if (parsed.backupSupervisorUserId !== undefined && memberDeps) {
+          // B1 follow-up / B3-3 — both checks are about who is being MADE the
+          // backup. A value sent back unchanged with another field is
+          // accepted even when that member was deactivated (#1463) or holds
+          // a role that cannot approve (B1): approval SMS, the owner line and
+          // one-tap links already treat such a backup as nobody, and refusing
+          // it blocked every save of the section.
+          const stored = await getSettings(req.auth!.tenantId, settingsRepo);
+          const sent = parsed.backupSupervisorUserId?.toLowerCase() ?? null;
+          if ((stored?.backupSupervisorUserId?.toLowerCase() ?? null) === sent) {
+            // Codex P2 on #1810 — and it is left out of the write. This read
+            // and the write are separate statements: a save that changed the
+            // backup in between would otherwise be reverted to this unchecked
+            // value, or cleared by an unchanged "no backup". Leaving it out
+            // also keeps it out of the audit's changedKeys.
+            delete parsed.backupSupervisorUserId;
+          } else if (parsed.backupSupervisorUserId) {
+            const backup = await requireActiveTenantMember(
+              memberDeps.userRepo,
+              req.auth!.tenantId,
+              parsed.backupSupervisorUserId,
+              'backupSupervisorUserId',
+            );
+            // B1 — the backup's mobile is an approval phone (SMS replies, the
+            // voice owner line, one-tap links), and it approves with the
+            // backup's own role. A role without proposals:approve would be an
+            // approval phone that can approve nothing.
+            if (!isValidRole(backup.role) || !hasPermission(backup.role, 'proposals:approve')) {
+              throw new ValidationError(
+                "That team member can't approve work, so they can't be your backup.",
+                { field: 'backupSupervisorUserId' },
+              );
+            }
+          }
         }
 
         if (parsed.terminologyPreferences) {
@@ -576,6 +656,7 @@ export function createSettingsRouter(
         // racing a rotation in another tab.
         const result = await updateSettings(req.auth!.tenantId, parsed, settingsRepo, {
           preserveVoiceApprovalPin: true,
+          ...(paymentModeDeps ? { paymentModeQueue: paymentModeDeps.queue } : {}),
         });
         if (!result) {
           res.status(404).json({ error: 'NOT_FOUND', message: 'Settings not found' });

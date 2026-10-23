@@ -63,12 +63,19 @@ import type { SettingsRepository } from '../settings/settings';
 import { resolveEscalationSettings } from '../settings/settings';
 import type { LeadRepository } from '../leads/lead';
 import type { GateReason } from '../voice/trial-limits';
+import type { ForwardingCheckService } from '../onboarding/forwarding-check';
 import { t, type Language } from '../ai/i18n/i18n';
+import { discloseAiIdentity } from '../ai/skills/disclose-ai-identity';
 import type { CallMeBackRepository } from '../voice/call-me-back/call-me-back';
 import { createAuditEvent } from '../audit/audit';
 import { isValidTenantId } from '../db/schema';
 import { recordVoiceError } from '../analytics/posthog';
 import { isCredentialFailure, type TtsHealthCheck, type TtsHealthState } from '../ai/tts/tts-health';
+import {
+  DEFAULT_REGISTRY_CONFIG,
+  TWILIO_MEDIA_STREAMS_SURFACE,
+  type ConnectionRegistry,
+} from '../ws/connection-registry';
 
 const logger = createLogger({
   service: 'routes.telephony',
@@ -110,6 +117,12 @@ export interface TelephonyRouterDeps {
    * `createDidTenantResolver`, which goes through the same repository.
    */
   resolveTenantId: (opts: { to: string; from: string }) => Promise<string | undefined> | string | undefined;
+  /**
+   * D-044 / #1766 — recognises the owner's call-forwarding check coming back
+   * through their carrier. Consulted for every resolved inbound call BEFORE
+   * the voice gate or any AI work; a recognised call is hung up on.
+   */
+  forwardingCheck?: Pick<ForwardingCheckService, 'recognizeInbound'>;
   /**
    * D2-3 — test seam for the Sentry client used to capture
    * `telephony.tenant_lookup_miss` events. Defaults to
@@ -206,6 +219,14 @@ export interface TelephonyRouterDeps {
    * recordSuccess. Unwired → treated as always-closed (no extra gating).
    */
   realtimeCircuit?: { isOpen(): boolean };
+  /**
+   * LCR-06 — the per-tenant connection registry the media-streams adapter
+   * acquires its slot from (app.ts passes the SAME instance to both). A tenant
+   * already at the cap gets Gather instead of a `<Stream>` whose socket the
+   * adapter would refuse. Unwired → no cap gate (the adapter still enforces
+   * the cap and degrades the overflow leg to Gather itself).
+   */
+  connectionRegistry?: Pick<ConnectionRegistry, 'count'>;
   /**
    * WS3 — realtime prerequisites probe. Returns false when the realtime path
    * can't physically work (STT/TTS not configured), so the /voice branch
@@ -529,6 +550,23 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       return;
     }
 
+    // D-044 / #1766 — the owner's forwarding check coming back. Hang up: the
+    // call must never reach the gate, a session or the AI. A lookup failure
+    // is not a pass; the call carries on as an ordinary call.
+    if (deps.forwardingCheck) {
+      try {
+        if (await deps.forwardingCheck.recognizeInbound({ tenantId, from, callSid })) {
+          res.status(200).type('text/xml').send('<?xml version="1.0" encoding="UTF-8"?><Response><Hangup/></Response>');
+          return;
+        }
+      } catch (err) {
+        logger.warn('telephony/voice: forwarding check lookup failed — treating as a normal call', {
+          callSid,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     // §10 voice gates — subscription, go-live, usage caps. Voicemail on a
     // setup block; usage caps ring the owner first (forwardToOwnerTwiml).
     if (deps.voiceGate) {
@@ -701,10 +739,26 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
           sessionId: session.id,
         });
       }
+      // PRIV-4 — a degrade before the caller heard the greeting (the STT
+      // socket never opened, or the stream dropped mid-greeting) must still
+      // tell them they are talking to a virtual assistant.
+      const speaksNotice = !session.assistantNoticeHeard;
+      const assistantNotice = discloseAiIdentity({
+        tenantId: session.tenantId,
+        businessName: deps.businessName ?? 'our team',
+        language: lang,
+        ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
+        voiceSessionId: session.id,
+        actorId: 'system:inbound-call',
+        channel: session.channel,
+      });
       res
         .status(200)
         .type('text/xml')
-        .send(buildDegradeFallbackTwiml(session, action, lang));
+        .send(buildDegradeFallbackTwiml(session, action, lang, assistantNotice.disclosureText));
+      // Gather's point of evidence: the notice is a <Say> ahead of the
+      // <Gather> in the document just sent (as handleInbound commits).
+      if (speaksNotice) void assistantNotice.commitDisclosureLedger();
       return;
     }
 
@@ -1345,18 +1399,28 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
  * disclose-recording.ts (no caller state is available here). Latches
  * `recordingDisclosed` so a caller who degrades more than once is not
  * re-read the notice every turn.
+ *
+ * PRIV-4 — the same holds for the virtual-assistant notice: when the caller
+ * never heard the greeting that carries it (`assistantNoticeHeard` unset),
+ * `assistantNotice` is spoken first, then latched.
  */
 export function buildDegradeFallbackTwiml(
-  session: { recordingDisclosed?: boolean },
+  session: { recordingDisclosed?: boolean; assistantNoticeHeard?: boolean },
   actionUrl: string,
   lang: Language,
+  assistantNotice: string,
 ): string {
   // The disclosure must be a standalone <Say> BEFORE the <Gather>, not the
   // Gather's nested prompt: `<Gather input="speech">` starts recognizing at
   // the first millisecond, so a notice nested inside it plays while capture
   // is already armed — the exact ordering this gate exists to prevent.
-  const preambleText = session.recordingDisclosed ? undefined : t('disclose.two_party', lang);
+  const preambleParts = [
+    ...(session.assistantNoticeHeard ? [] : [assistantNotice]),
+    ...(session.recordingDisclosed ? [] : [t('disclose.two_party', lang)]),
+  ];
+  const preambleText = preambleParts.length > 0 ? preambleParts.join(' ') : undefined;
   session.recordingDisclosed = true;
+  session.assistantNoticeHeard = true;
   return buildCallbackGatherTwiml({
     promptText: t('realtime.degraded_repair', lang),
     actionUrl,
@@ -1398,6 +1462,7 @@ function buildCallbackGatherTwiml(opts: {
  *
  *   (a) realtime prerequisites present (STT + TTS configured), AND
  *   (b) the pre-connect health circuit is not open, AND
+ *   (b2) the tenant is below its realtime connection cap (LCR-06), AND
  *   (c) the per-tenant `voice_realtime` flag is enabled (default ON).
  *
  * Any gate failing — including a flag-read throw — returns false so the caller
@@ -1448,6 +1513,37 @@ async function shouldUseRealtimeStream(opts: {
       tenantId,
     });
     return false;
+  }
+
+  // (b2) LCR-06 — per-tenant realtime connection cap. The adapter refuses a
+  // socket over the cap, so a tenant already at it gets Gather here. This is
+  // a pre-check (count-then-acquire races between concurrent /voice requests
+  // are caught by the adapter, which degrades that leg to Gather). Runs before
+  // the flag read; a count error fails toward Gather like every other gate.
+  if (deps.connectionRegistry) {
+    let open: number;
+    try {
+      open = await deps.connectionRegistry.count(TWILIO_MEDIA_STREAMS_SURFACE, tenantId);
+    } catch (err) {
+      logger.warn('telephony/voice: connection count failed → Gather fallback', {
+        callSid,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+    if (open >= DEFAULT_REGISTRY_CONFIG.perTenantMax) {
+      logger.warn('telephony/voice: tenant at realtime connection cap → Gather fallback', {
+        callSid,
+        open,
+      });
+      recordVoiceError({
+        errorKind: 'tenant_connection_cap',
+        channel: 'gather',
+        callSid,
+        tenantId,
+      });
+      return false;
+    }
   }
 
   // (c) per-tenant flag (default ON). Fail toward Gather on a read error.

@@ -38,7 +38,7 @@ jobs:
       PLAYWRIGHT_JSON_OUTPUT_FILE: test-results/onboarding-results.json
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version-file: '.nvmrc'
           cache: npm
@@ -47,10 +47,12 @@ jobs:
         run: node --test scripts/release/*.test.mjs
       - name: Install browser and database client
         run: |
-          sudo rm -f /etc/apt/sources.list.d/deadsnakes-* /etc/apt/sources.list.d/ondrej-* || true
+          sudo rm -f /etc/apt/sources.list.d/deadsnakes-* /etc/apt/sources.list.d/ondrej-* /etc/apt/sources.list.d/microsoft-prod* || true
           sudo apt-get update
           sudo apt-get install -y postgresql-client
-          npx playwright install --with-deps chromium
+          # WebKit (iOS Safari's engine) runs the v3 voice spec (E2E_V3_WEBKIT=1 below): owner
+          # decision 7 of slice S3, both browsers from day one, at ~1-2 min of CI.
+          npx playwright install --with-deps chromium webkit
       - name: Migrate before API webServer starts
         run: npx tsx e2e/fixtures/setup-test-db.ts
       - name: Onboarding against real Postgres
@@ -70,13 +72,15 @@ jobs:
         if: always()
         env:
           E2E_V3_DATABASE_URL: postgresql://test:test@127.0.0.1:5432/serviceos_test
+          # Adds the onboarding-v3-webkit project: gesture-unlocked playback and audio/mp4 recording.
+          E2E_V3_WEBKIT: '1'
           # Absolute: the json reporter resolves a relative path against the config dir (e2e/).
           PLAYWRIGHT_JSON_OUTPUT_FILE: ${{ github.workspace }}/test-results/onboarding-v3-results.json
         run: npx playwright test -c e2e/onboarding-v3.config.ts --reporter=list,json
       - name: Require the v3 journey to execute and pass
         if: always()
         run: node scripts/release/verify.mjs test-results/onboarding-v3-results.json
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: always()
         with:
           name: onboarding-database-results

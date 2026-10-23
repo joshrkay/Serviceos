@@ -4,8 +4,9 @@ import { Router, Response } from 'express';
 import { AuthenticatedRequest } from '../auth/clerk';
 import { asyncRoute } from '../middleware/async-route';
 import { requireAuth, requireTenant, requirePermission } from '../middleware/auth';
-import type { DispatchRepository } from '../notifications/dispatch-repository';
+import { DISPATCH_STATUSES, type DispatchRepository } from '../notifications/dispatch-repository';
 import { routeParam } from '../shared/route-params';
+import { withTenantClient } from '../db/tenant-transaction';
 
 export interface InteractionsRouterDeps {
   pool: Pool;
@@ -49,6 +50,13 @@ const SESSION_COLUMNS = `
 FROM voice_sessions vs
 LEFT JOIN customers c ON c.id = vs.customer_id AND c.tenant_id = vs.tenant_id`;
 
+
+const dispatchFiltersSchema = z.object({
+  status: z.enum(DISPATCH_STATUSES).optional(),
+  customerId: z.guid().optional(),
+  jobId: z.guid().optional(),
+});
+
 export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
   const { pool, dispatchRepo } = deps;
   const router = Router();
@@ -68,66 +76,55 @@ export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
       return;
     }
 
-    const client = await pool.connect();
-    try {
-      const tenantId = req.auth!.tenantId;
-      await client.query('BEGIN');
-      await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
-
-      const [countResult, dataResult] = await Promise.all([
+    const tenantId = req.auth!.tenantId;
+    const [countResult, dataResult] = await withTenantClient(pool, tenantId, (client) =>
+      Promise.all([
         client.query(`SELECT COUNT(*) AS total FROM voice_sessions WHERE tenant_id = $1`, [tenantId]),
         client.query(
           `SELECT ${SESSION_COLUMNS} WHERE vs.tenant_id = $1 ORDER BY vs.started_at DESC LIMIT $2 OFFSET $3`,
           [tenantId, limit, offset],
         ),
-      ]);
+      ]),
+    );
 
-      await client.query('COMMIT');
+    const total = parseInt((countResult.rows[0] as { total: string })?.total ?? '0', 10);
+    const data = dataResult.rows.map(row => {
+      const transcript = Array.isArray(row.transcript) ? (row.transcript as string[]) : null;
+      const startedAt = row.started_at ? new Date(row.started_at as string) : null;
+      const endedAt = row.ended_at ? new Date(row.ended_at as string) : null;
+      const durationSeconds =
+        startedAt && endedAt
+          ? Math.round((endedAt.getTime() - startedAt.getTime()) / 1000)
+          : null;
 
-      const total = parseInt((countResult.rows[0] as { total: string })?.total ?? '0', 10);
-      const data = dataResult.rows.map(row => {
-        const transcript = Array.isArray(row.transcript) ? (row.transcript as string[]) : null;
-        const startedAt = row.started_at ? new Date(row.started_at as string) : null;
-        const endedAt = row.ended_at ? new Date(row.ended_at as string) : null;
-        const durationSeconds =
-          startedAt && endedAt
-            ? Math.round((endedAt.getTime() - startedAt.getTime()) / 1000)
-            : null;
+      return {
+        id: row.id,
+        channel: row.channel,
+        outcome: row.outcome,
+        callSid: row.call_sid,
+        startedAt: row.started_at,
+        endedAt: row.ended_at,
+        endedReason: row.ended_reason,
+        costCents: row.cost_cents,
+        durationSeconds,
+        transcriptTurnCount: transcript ? transcript.length : 0,
+        excerpt: toExcerpt(transcript),
+        customer: toCustomer(row as Record<string, unknown>),
+      };
+    });
 
-        return {
-          id: row.id,
-          channel: row.channel,
-          outcome: row.outcome,
-          callSid: row.call_sid,
-          startedAt: row.started_at,
-          endedAt: row.ended_at,
-          endedReason: row.ended_reason,
-          costCents: row.cost_cents,
-          durationSeconds,
-          transcriptTurnCount: transcript ? transcript.length : 0,
-          excerpt: toExcerpt(transcript),
-          customer: toCustomer(row as Record<string, unknown>),
-        };
-      });
-
-      res.json({ data, total, limit, offset });
-    } catch (err) {
-      // Without this, an error mid-transaction releases the client with the
-      // transaction (and tenant GUC) still open — the next checkout gets a
-      // dirty connection. Best-effort rollback, then rethrow for asyncRoute.
-      await client.query('ROLLBACK').catch(() => {});
-      throw err;
-    } finally {
-      client.release();
-    }
+    res.json({ data, total, limit, offset });
   }));
 
   /**
-   * GET /api/interactions/dispatches?limit=&offset=
+   * GET /api/interactions/dispatches?limit=&offset=&status=&customerId=&jobId=
    *
    * Outbound message dispatch log (SMS / email) — appointment
-   * confirmations, delay notices, estimate / invoice deliveries. Backs
-   * the web DispatchLogPage. Gated by `dispatch:view` (owner + dispatcher;
+   * confirmations, delay notices, estimate / invoice deliveries, and (D-045)
+   * texts that were held or blocked. The optional filters back the status
+   * bubble on a job or customer (latest message: `jobId`/`customerId`,
+   * `limit=1`) and the owner's list of blocked texts (`status=blocked`).
+   * Backs the web DispatchLogPage. Gated by `dispatch:view` (owner + dispatcher;
    * technicians get a 403 — they have no billing/comms surface). Registered
    * before `/:id` so "dispatches" isn't matched as an interaction id.
    */
@@ -146,8 +143,21 @@ export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
       return;
     }
 
+    const filters = dispatchFiltersSchema.safeParse(req.query);
+    if (!filters.success) {
+      res.status(400).json({
+        error: 'VALIDATION_ERROR',
+        message: 'status must be a message status; customerId and jobId must be ids',
+      });
+      return;
+    }
+
     const tenantId = req.auth!.tenantId;
-    const { dispatches, total } = await dispatchRepo.listByTenant(tenantId, { limit, offset });
+    const { dispatches, total } = await dispatchRepo.listByTenant(tenantId, {
+      limit,
+      offset,
+      ...filters.data,
+    });
 
     res.json({ dispatches, total, limit, offset });
   }));
@@ -166,56 +176,40 @@ export function createInteractionsRouter(deps: InteractionsRouterDeps): Router {
       return;
     }
 
-    const client = await pool.connect();
-    try {
-      const tenantId = req.auth!.tenantId;
+    const tenantId = req.auth!.tenantId;
+    const result = await withTenantClient(pool, tenantId, (client) =>
+      client.query(`SELECT ${SESSION_COLUMNS} WHERE vs.tenant_id = $1 AND vs.id = $2`, [tenantId, id]),
+    );
 
-      await client.query('BEGIN');
-      await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
-
-      const result = await client.query(
-        `SELECT ${SESSION_COLUMNS} WHERE vs.tenant_id = $1 AND vs.id = $2`,
-        [tenantId, id],
-      );
-
-      await client.query('COMMIT');
-
-      if (result.rows.length === 0) {
-        res.status(404).json({ error: 'NOT_FOUND', message: 'Interaction not found' });
-        return;
-      }
-
-      const row = result.rows[0];
-      const transcript = Array.isArray(row.transcript) ? (row.transcript as string[]) : [];
-      const startedAt = row.started_at ? new Date(row.started_at as string) : null;
-      const endedAt = row.ended_at ? new Date(row.ended_at as string) : null;
-      const durationSeconds =
-        startedAt && endedAt
-          ? Math.round((endedAt.getTime() - startedAt.getTime()) / 1000)
-          : null;
-
-      res.json({
-        id: row.id,
-        channel: row.channel,
-        outcome: row.outcome,
-        callSid: row.call_sid,
-        startedAt: row.started_at,
-        endedAt: row.ended_at,
-        endedReason: row.ended_reason,
-        costCents: row.cost_cents,
-        durationSeconds,
-        transcriptTurnCount: transcript.length,
-        excerpt: toExcerpt(transcript),
-        transcript,
-        customer: toCustomer(row as Record<string, unknown>),
-      });
-    } catch (err) {
-      // Same dirty-connection guard as the list route above.
-      await client.query('ROLLBACK').catch(() => {});
-      throw err;
-    } finally {
-      client.release();
+    if (result.rows.length === 0) {
+      res.status(404).json({ error: 'NOT_FOUND', message: 'Interaction not found' });
+      return;
     }
+
+    const row = result.rows[0];
+    const transcript = Array.isArray(row.transcript) ? (row.transcript as string[]) : [];
+    const startedAt = row.started_at ? new Date(row.started_at as string) : null;
+    const endedAt = row.ended_at ? new Date(row.ended_at as string) : null;
+    const durationSeconds =
+      startedAt && endedAt
+        ? Math.round((endedAt.getTime() - startedAt.getTime()) / 1000)
+        : null;
+
+    res.json({
+      id: row.id,
+      channel: row.channel,
+      outcome: row.outcome,
+      callSid: row.call_sid,
+      startedAt: row.started_at,
+      endedAt: row.ended_at,
+      endedReason: row.ended_reason,
+      costCents: row.cost_cents,
+      durationSeconds,
+      transcriptTurnCount: transcript.length,
+      excerpt: toExcerpt(transcript),
+      transcript,
+      customer: toCustomer(row as Record<string, unknown>),
+    });
   }));
 
   return router;

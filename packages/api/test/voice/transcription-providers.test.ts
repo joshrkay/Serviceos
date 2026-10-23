@@ -206,6 +206,18 @@ describe('DeepgramStreamingProvider URL builder', () => {
     }).buildWsUrl('en');
     expect(url).toContain('model=nova-3');
   });
+
+  it('asks Deepgram for an UtteranceEnd after 1s without words, with or without boost terms (LCR-03)', () => {
+    const build = (provider as unknown as {
+      buildWsUrl: (lang: 'en' | 'es', options?: { keywords?: ReadonlyArray<string>; endpointingMs?: number }) => string;
+    }).buildWsUrl.bind(provider);
+    for (const url of [build('en'), build('es'), build('en', { keywords: ['heat pump:3'] })]) {
+      const params = new URL(url).searchParams;
+      expect(params.getAll('utterance_end_ms')).toEqual(['1000']);
+      // UtteranceEnd is only sent when interim results are on.
+      expect(params.get('interim_results')).toBe('true');
+    }
+  });
 });
 
 // A2 — Nova-3 uses Deepgram's `keyterm` prompting param; the legacy

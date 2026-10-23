@@ -93,6 +93,60 @@ PgBouncer config: `pool_mode = transaction`, `max_client_conn` high (e.g. 1000),
   > held the request connection across classify/draft/TTS, and the in-app
   > resolver and onboarding lock took a second one inside it). Pinned by
   > `test/routes/llm-long-call-routes.route.test.ts`.
+  >
+  > ✅ **Fixed (A1) — `POST /proposals/:id/resolve-entity`.** The "which Bob?"
+  > pick re-runs the drafting handler's LLM call, so it is on the bypass too;
+  > its post-LLM writes (re-draft, promotion, audit row) commit together in one
+  > short `PgTenantTransactionRunner` transaction opened after the call. Pinned
+  > by `test/integration/resolve-entity-outside-request-transaction.test.ts`.
+  > A route that bypasses the request transaction and makes more than one
+  > write needs its own transaction for them — the bypass alone drops their
+  > atomicity.
+  >
+  > ✅ **Fixed — `POST /tenant-site/about/draft`.** The website "About us"
+  > draft awaited the `tenant_site_about` LLM call (up to the 60s gateway
+  > deadline) inside the request transaction. It is on the bypass now; its
+  > post-LLM writes (supersede the pending draft, create the new one, audit)
+  > commit together in one short `PgTenantTransactionRunner` transaction under
+  > a per-tenant advisory lock, so concurrent drafts keep one pending. Pinned
+  > by `test/integration/tenant-site-about-draft-outside-request-transaction.test.ts`.
+  >
+  > ✅ **Fixed — speech-provider routes.** Not LLM gateway calls, the same
+  > shape: `POST /voice/tts` and `POST /voice/tts/batch` await the TTS
+  > provider (30s timeout per clip, up to four clips in sequence per batch).
+  > Their only DB touches are the voice-setting read and one audit row per
+  > billed clip, each a repo call with an explicit tenantId.
+  > `POST /voice/transcribe` reads the upload (up to 25MB) and then awaits
+  > Whisper (60s timeout); its one audit row (completed or failed) is
+  > standalone, so a failure row is no longer rolled back with the 500.
+  > `POST /voice/stream-token` awaits the Deepgram grant fetch, which has no
+  > deadline of its own; its one audit row (minted or failed) is standalone
+  > too.
+  >
+  > **Guard — `gateway_llm_call_in_transaction_total`.** `LLMGateway.complete`
+  > checks for an open tenant transaction (`currentTenantContext()`: the
+  > request transaction, or an explicit unit of work spanning the call) when
+  > a call starts. Under `NODE_ENV=test` it throws `LlmCallInTransactionError`
+  > (`LLM_CALL_IN_TRANSACTION`), so a route that awaits the gateway in-request
+  > fails its own test. Anywhere else it logs an error with the call site and
+  > increments this counter, and the call proceeds. Any non-zero rate is a
+  > route that belongs on `LLM_LONG_CALL_ROUTES`; the log's `taskType` and
+  > `stack` name it. The check only sees calls through `LLMGateway`: a route
+  > awaiting another external API (speech, DNS, a certificate provider)
+  > inside the request transaction is not caught by it.
+  >
+  > Each entry is anchored at both ends and matches the way Express routes:
+  > one optional trailing slash and any letter case (A-R4). Without that,
+  > `POST /proposals/:id/resolve-entity/` reached the same handler inside the
+  > request transaction, and its runner took a second connection inside it.
+  > The SSE stream bypass (`SSE_STREAM_ROUTES`: `GET/HEAD /escalations/events`,
+  > `GET/HEAD /dispatch/board/events`, `GET/HEAD /voice/sessions/:id/events`)
+  > matches the same way (A3-5); before, `GET /escalations/events/` held a
+  > request transaction and a pooled connection for the whole life of the
+  > stream. HEAD is on it because Express sends HEAD to a route's GET handler
+  > when the route has no HEAD handler: the stream handler then never ends the
+  > response, and a HEAD inside the request transaction held its connection
+  > until the client closed the socket.
 - Direct pool: `DB_DIRECT_MAX_CONNECTIONS` small (default 10) — only lock holders
   + the LISTEN client use it.
 - Postgres ceiling = PgBouncer `default_pool_size` (server side), independent of

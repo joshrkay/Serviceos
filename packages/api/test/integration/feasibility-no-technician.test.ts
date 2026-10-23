@@ -10,7 +10,7 @@ import { PgWorkingHoursRepository } from '../../src/availability/pg-working-hour
 import { PgUnavailableBlockRepository } from '../../src/availability/pg-unavailable-block';
 import { checkFeasibility } from '../../src/scheduling/feasibility';
 import { FeasibilityDependencies } from '../../src/scheduling/feasibility-types';
-import { StubSkillMatcher } from '../../src/scheduling/skill-matcher';
+import { noSkillConstraints } from '../helpers/no-skill-constraints';
 import { HaversineFallbackProvider } from '../../src/scheduling/travel-time/haversine-fallback';
 
 /**
@@ -62,7 +62,7 @@ describe('Postgres integration — checkFeasibility with no assigned technician 
       workingHoursRepo,
       unavailableBlockRepo,
       travelTimeProvider: new HaversineFallbackProvider(),
-      skillMatcher: new StubSkillMatcher(),
+      skillMatcher: noSkillConstraints(),
     };
   });
 

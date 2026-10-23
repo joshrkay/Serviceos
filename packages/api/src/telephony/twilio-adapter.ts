@@ -20,6 +20,7 @@
 
 import type { FeasibilityDependencies } from '../scheduling/feasibility-types';
 import type { Pool } from 'pg';
+import type { CallSummaryRepository } from '../ai/skills/pg-call-summary';
 import {
   classifyIntent,
   isLookupIntent,
@@ -42,6 +43,7 @@ import { isCustomerDuplicateLoader } from '../customers/dedup';
 import type { EstimateRepository } from '../estimates/estimate';
 import type { LLMGateway } from '../ai/gateway/gateway';
 import { discloseRecording } from '../ai/skills/disclose-recording';
+import { buildAiDisclosureText, discloseAiIdentity } from '../ai/skills/disclose-ai-identity';
 import { t, type Language } from '../ai/i18n/i18n';
 import { identifyCaller } from '../ai/skills/identify-caller';
 import { findOrCreateLeadByPhone } from '../ai/skills/find-or-create-lead';
@@ -57,7 +59,7 @@ import type {
   CallingAgentEvent,
   SideEffect,
 } from '../ai/agents/customer-calling/types';
-import type { VoiceSession, VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
+import type { CallerTurnTiming, VoiceSession, VoiceSessionStore } from '../ai/agents/customer-calling/voice-session-store';
 import type { VulnerabilityTriageHook } from '../ai/agents/customer-calling/vulnerability-triage-hook';
 import { extractPriorTurns } from '../ai/agents/customer-calling/transcript-turns';
 import type { VoiceSessionRepository } from '../voice/voice-session';
@@ -79,7 +81,7 @@ import {
   injectSafetySayLines,
 } from './shared/safety-say-lines';
 import { isBlockedCallerId } from '../ai/voice-turn/shared/blocked-caller-id';
-import { resolveOwnerSession } from '../ai/voice-turn/shared/owner-session';
+import { ownerLineStamp, resolveOwnerLineApprover } from '../ai/voice-turn/shared/owner-session';
 import { switchSessionLanguage } from '../ai/voice-turn/shared/language-switch';
 import {
   queueCallbackProposal as queueCallbackProposalShared,
@@ -125,13 +127,16 @@ import {
   maxCallDurationEffects,
 } from '../ai/voice-turn/shared/max-call-duration';
 import {
-  LOW_STT_LADDER_TERMINAL_REASON,
   createLowSttStreak,
   clearLowSttStreak,
   isLowSttConfidence,
+  parkedHandoffKind,
   runLowSttConfidenceLadder,
   recordLowSttLadderError,
+  type LadderVoicemailKind,
+  type LowSttStrikeCause,
 } from '../ai/voice-turn/shared/low-stt-ladder';
+import { buildVoicemailTwiml } from './voicemail-fallback';
 import {
   detectRecordingObjection,
   RECORDING_OBJECTION_ACK,
@@ -186,8 +191,10 @@ export interface TwilioAdapterDeps {
    * media-streams transport has.
    */
   vulnerabilityTriageHook?: VulnerabilityTriageHook;
-  /** Postgres pool — passed to identifyCaller and summarizeSession. */
+  /** Postgres pool — passed to identifyCaller and updateDerivedConsentStatus. */
   pool?: Pool;
+  /** A2 — end-of-call summary persistence; reaches the processor via the deps spread. */
+  callSummaryRepo?: CallSummaryRepository;
   /** Repos used to persist side-effect rows (audit/proposal/escalation). */
   proposalRepo?: ProposalRepository;
   auditRepo?: AuditRepository;
@@ -504,21 +511,26 @@ export interface TwilioAdapterDeps {
 /**
  * Build the full telephony greeting.
  *
- * `disclosureText` (recording notice) is always appended after the
- * greeting when present — it is a compliance requirement that cannot
- * be opted out.
+ * Two notices ride in every branch, in this order, and neither can be opted
+ * out:
+ *   - `assistantNotice` (PRIV-4) — the caller is talking to a virtual
+ *     assistant, not a person. Placed straight after the opener / the
+ *     tenant's own greeting, so a persona name ("This is Sarah.") is never
+ *     left standing as a human introduction. Defaults to the built-in copy
+ *     (`buildAiDisclosureText`) when the caller passes none; a caller passes
+ *     the per-tenant wording through `discloseAiIdentity`.
+ *   - `disclosureText` — the recording notice, after the assistant notice.
  *
  * Branch priority:
  *   1. Custom greeting (`persona.greeting` set):
- *        Returns `${persona.greeting} ${disclosureText}` (trimmed).
- *        The tenant owns the entire opening line — NO CTA is appended.
- *        The result is returned as-is so the tenant's chosen wording
- *        is preserved verbatim.
+ *        `${persona.greeting} ${assistantNotice} ${disclosureText}` (trimmed).
+ *        The tenant's own words stay verbatim and first — NO CTA is
+ *        appended, and this branch is not localized.
  *   2. Agent name only (`persona.agentName` set, no custom greeting):
- *        `Thank you for calling ${name}. This is ${agentName}. ${disclosure} How can I help you today?`
+ *        `Thank you for calling ${name}. This is ${agentName}. ${assistantNotice} ${disclosure} How can I help you today?`
  *        A CTA is appended if the assembled string does not already end with `?`.
  *   3. Neither:
- *        `Thank you for calling ${name}. ${disclosure} How can I help you today?`
+ *        `Thank you for calling ${name}. ${assistantNotice} ${disclosure} How can I help you today?`
  *        A CTA is appended if the assembled string does not already end with `?`.
  *
  * `${name}` in branches 2/3 (#1156) is `persona.businessName` — the
@@ -534,26 +546,34 @@ export function buildTelephonyGreeting(
   businessName: string,
   disclosureText: string,
   persona?: VoicePersona | null,
-  language: Language = 'en'
+  language: Language = 'en',
+  assistantNotice?: string,
 ): string {
-  const disclosure = disclosureText.trim();
+  const resolvedBusinessName = persona?.businessName || businessName;
+  const notices = [
+    (assistantNotice ?? '').trim() ||
+      buildAiDisclosureText({ businessName: resolvedBusinessName, language }),
+    disclosureText.trim(),
+  ]
+    .filter(Boolean)
+    .join(' ');
 
-  // Branch 1 — tenant owns the entire opening line. Return without CTA
-  // append. The custom greeting is used verbatim (the tenant authored it
-  // in their own language), so we do NOT localize this branch.
-  if (persona?.greeting) {
-    const greeting = persona.greeting.trim();
-    return disclosure ? `${greeting} ${disclosure}`.trim() : greeting;
+  // Branch 1 — the tenant's own opening line, verbatim, then the notices. No
+  // CTA append; not localized (the tenant authored it in their own language).
+  // A whitespace-only greeting falls through to the default opener, so the
+  // caller still hears the business name before the notices.
+  const customGreeting = persona?.greeting?.trim();
+  if (customGreeting) {
+    return `${customGreeting} ${notices}`;
   }
 
   // Branch 2 / 3 — assemble a localized default greeting, then ensure it
   // ends with a CTA (the ES CTA already ends with '?'). #1156: the
   // tenant's own resolved business name wins over the env-wide fallback.
-  const resolvedBusinessName = persona?.businessName || businessName;
   const opener = persona?.agentName
     ? t('greeting.opener_named', language, { business: resolvedBusinessName, agent: persona.agentName })
     : t('greeting.opener_default', language, { business: resolvedBusinessName });
-  const assembled = disclosure ? `${opener} ${disclosure}`.trim() : opener;
+  const assembled = `${opener} ${notices}`.trim();
   return assembled.endsWith('?') ? assembled : `${assembled} ${t('greeting.cta', language)}`;
 }
 
@@ -830,6 +850,15 @@ export class TwilioGatherAdapter {
   private readonly pendingConsentCommit = new Map<string, () => Promise<void>>();
 
   /**
+   * PRIV-4 — the virtual-assistant notice's half of the parked greeting
+   * commit, on its own so a cached-greeting replay can ledger the notice it
+   * spoke without also claiming recording consent (a replay arms no
+   * `<Start><Record>`). Same lifetime and sweep as {@link pendingConsentCommit};
+   * the `assistantNoticeHeard` latch keeps the two from writing twice.
+   */
+  private readonly pendingAssistantNoticeCommit = new Map<string, () => Promise<void>>();
+
+  /**
    * Drop parked consent thunks for sessions the store has already reaped.
    * Runs on each park, so the map stays bounded by concurrent live sessions —
    * the same lifetime the store itself enforces — without needing a hook on
@@ -840,6 +869,11 @@ export class TwilioGatherAdapter {
     for (const sessionId of this.pendingConsentCommit.keys()) {
       if (!this.deps.store.get(sessionId)) {
         this.pendingConsentCommit.delete(sessionId);
+      }
+    }
+    for (const sessionId of this.pendingAssistantNoticeCommit.keys()) {
+      if (!this.deps.store.get(sessionId)) {
+        this.pendingAssistantNoticeCommit.delete(sessionId);
       }
     }
   }
@@ -1174,7 +1208,10 @@ export class TwilioGatherAdapter {
     // untrusted caller (no ownerSession, no phone actor, S1 profile).
     const attested = isOwnerLineAttested(opts.stirVerstat);
     // #1601 step 2 — the shared RV-070 resolver (`ai/voice-turn/shared/owner-session.ts`).
-    const approverCallerId = await resolveOwnerSession(this.deps, opts.tenantId, opts.from);
+    // B1 — it also says WHO the line approves as (owner, or the backup as
+    // their own role), carried on the session for every voice approval turn.
+    const lineApprover = await resolveOwnerLineApprover(this.deps, opts.tenantId, opts.from);
+    const approverCallerId = lineApprover !== null;
     const ownerSession = approverCallerId && attested;
     // Owner extended lookups (day/digest/pending) stay owner+flag gated.
     const extendedIntents = extendedIntentsFlag && ownerSession;
@@ -1208,6 +1245,7 @@ export class TwilioGatherAdapter {
     // stays as defense-in-depth but is no longer the sole source.
     if (opts.from) session.callerPhone = opts.from;
     if (opts.stirVerstat) session.stirVerstat = opts.stirVerstat;
+    if (ownerSession && lineApprover) session.ownerLineApprover = ownerLineStamp(lineApprover);
     if (approverCallerId) {
       if (!ownerSession) session.ownerLineUnverified = true;
       this.auditOwnerLineAttestation(session, opts.stirVerstat, ownerSession);
@@ -1218,12 +1256,15 @@ export class TwilioGatherAdapter {
     // carry only the ownerSession boolean. Fail-soft: never blocks the call.
     // #1223 — the actor is a caller-ID identity too (a registered mobile), so
     // it is only resolved on an A-attested call; otherwise no actor.
+    // B4-1 — it is told which owner line the caller-ID was recognised as (on an
+    // attested call, `lineApprover` is exactly the owner line), so a backup's
+    // line is authorised as that backup or nobody, never as the owner.
     const actor = attested
       ? await resolvePhoneActor(
           { ...(this.deps.userRepo ? { userRepo: this.deps.userRepo } : {}) },
           opts.tenantId,
           opts.from,
-          ownerSession,
+          ownerSession ? lineApprover : null,
         )
       : null;
     if (actor) {
@@ -1296,16 +1337,6 @@ export class TwilioGatherAdapter {
       ...(from ? { callerPhone: from } : {}),
       voiceSessionId: session.id,
     });
-    // C5 — the ledger write is DEFERRED, not skipped. Generating the copy is
-    // not evidence the caller heard it, so the thunk is parked here and each
-    // transport commits at its own point of evidence (see
-    // {@link commitRecordingConsent}). Overwrites any prior entry for this
-    // session — a re-bootstrap supersedes an uncommitted thunk. Swept first so
-    // the never-committed paths (transfer short-circuit, fail-closed hang-ups)
-    // cannot accumulate closures across calls.
-    this.sweepPendingConsentCommits();
-    this.pendingConsentCommit.set(session.id, disclosure.commitConsentLedger);
-
     // 2. Identify caller by phone number.
     // WS16c (divergence #3, CONVERGED) — identify-guard parity: BOTH transports
     // now require `pool && from`. Previously Gather ran identifyCaller even on a
@@ -1360,12 +1391,49 @@ export class TwilioGatherAdapter {
         persona = undefined;
       }
     }
+    // PRIV-4 — the virtual-assistant notice, spoken on EVERY call in the same
+    // greeting turn as the recording notice (never gated on caller state).
+    const assistantNotice = discloseAiIdentity({
+      tenantId: opts.tenantId,
+      businessName: persona?.businessName || this.deps.businessName,
+      language,
+      ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
+      voiceSessionId: session.id,
+      actorId: this.deps.systemActorId ?? 'system:inbound-call',
+      channel: session.channel,
+    });
     const baseGreeting = buildTelephonyGreeting(
       this.deps.businessName,
       disclosure.disclosureText,
       persona,
       language,
+      assistantNotice.disclosureText,
     );
+    // C5 — the ledger writes are DEFERRED, not skipped. Generating the copy is
+    // not evidence the caller heard it, so ONE thunk covering both notices
+    // (they ride in the same greeting turn) is parked here and each transport
+    // commits it at its own point of evidence (see
+    // {@link commitRecordingConsent}). Overwrites any prior entry for this
+    // session — a re-bootstrap supersedes an uncommitted thunk. Swept first so
+    // the never-committed paths (transfer short-circuit, fail-closed hang-ups)
+    // cannot accumulate closures across calls. Both inner thunks are
+    // idempotent and never reject.
+    this.sweepPendingConsentCommits();
+    this.pendingConsentCommit.set(session.id, async () => {
+      // The point of evidence for the greeting is the point the caller heard
+      // the assistant notice; a later degrade reads this latch. A replay or a
+      // fallback that already spoke (and ledgered) the notice set it first,
+      // so the notice is not ledgered twice.
+      const noticeAlreadyLedgered = session.assistantNoticeHeard === true;
+      session.assistantNoticeHeard = true;
+      await disclosure.commitConsentLedger();
+      if (!noticeAlreadyLedgered) await assistantNotice.commitDisclosureLedger();
+    });
+    this.pendingAssistantNoticeCommit.set(session.id, async () => {
+      if (session.assistantNoticeHeard) return;
+      session.assistantNoticeHeard = true;
+      await assistantNotice.commitDisclosureLedger();
+    });
     // #1223 — an approver caller-ID that was not A-attested runs as a caller;
     // say so, so a genuine owner on a partially-attested route knows why owner
     // actions are unavailable and where to take them.
@@ -1377,6 +1445,7 @@ export class TwilioGatherAdapter {
     // resumes capture on this leg (the realtime→Gather degrade) reads this
     // instead of assuming establishment ran.
     session.recordingDisclosed = true;
+    session.greetingText = greetingText;
     const expanded = sideEffects.map((fx) =>
       fx.type === 'tts_play' && fx.payload.text === 'greeting'
         ? { ...fx, payload: { ...fx.payload, text: greetingText } }
@@ -1504,6 +1573,7 @@ export class TwilioGatherAdapter {
     const commit = this.pendingConsentCommit.get(session.id);
     if (!commit) return;
     this.pendingConsentCommit.delete(session.id);
+    this.pendingAssistantNoticeCommit.delete(session.id);
     await commit();
 
     // Row 2.2 — the GRANT of implicit recording consent is a mutation
@@ -2042,6 +2112,8 @@ export class TwilioGatherAdapter {
     callSid: string;
     speechResult: string;
     tenantId: string;
+    /** U1 — this final's timing, stamped onto the caller line appended below. */
+    callerTiming?: CallerTurnTiming;
   }): Promise<SideEffect[]> {
     // PRIV-3 — a recited card number is scrubbed where the caller's words
     // enter the turn, so the FSM events, task handlers and the proposals they
@@ -2070,6 +2142,7 @@ export class TwilioGatherAdapter {
         // at each consumer, so every derived summary inherits it.
         text: callerTranscriptText(session, opts.speechResult),
         ts: Date.now(),
+        ...(opts.callerTiming ? { timing: opts.callerTiming } : {}),
       });
     }
 
@@ -2153,6 +2226,9 @@ export class TwilioGatherAdapter {
     session: VoiceSession,
     tenantId: string,
   ): Promise<SideEffect[] | null> {
+    // B3-1 / B4-4 — a silence is a turn too: the owner line is re-checked
+    // first, as the speech turns do, and the approval step below uses that.
+    await this.processor.refreshOwnerLine(session, tenantId);
     const approvalTurn = await this.processor.handlePendingVoiceApproval(session, '', tenantId);
     if (approvalTurn) {
       await this.processor.executeSideEffects(session, approvalTurn, tenantId);
@@ -2198,15 +2274,73 @@ export class TwilioGatherAdapter {
         sessionId: session.id,
       });
       const replayHints = await this.resolveGatherHints(opts.tenantId);
-      return buildTwiML(
-        [{ type: 'tts_play', payload: { text: t('greeting.one_moment', session.language ?? 'en') } }],
+      // PRIV-4 — Twilio discarded the first response, so this document is the
+      // only greeting the caller hears: replay the established greeting (it
+      // carries the virtual-assistant and recording notices). A retry that
+      // lands while the first attempt is still establishing says both notices
+      // ahead of the hold line.
+      if (session.greetingText) {
+        const replayTwiml = buildTwiML(
+          [{ type: 'tts_play', payload: { text: session.greetingText } }],
+          {
+            gatherActionUrl: this.gatherUrl(session.id),
+            ...(session.language ? { language: session.language } : {}),
+            ...(session.ttsVoice ? { voiceOverride: session.ttsVoice } : {}),
+            ...(replayHints ? { hints: replayHints } : {}),
+          },
+        );
+        // The caller hears the virtual-assistant notice from this document,
+        // so ledger it here if the first attempt has not (it may be the
+        // stalled request Twilio gave up on). Recording consent stays with
+        // the first attempt: this replay arms no `<Start><Record>`, so it is
+        // no evidence of consent to a recording.
+        const noticeCommit = this.pendingAssistantNoticeCommit.get(session.id);
+        if (noticeCommit) {
+          this.pendingAssistantNoticeCommit.delete(session.id);
+          void noticeCommit();
+        }
+        return replayTwiml;
+      }
+      // Establishment has not pinned the language yet: resolve the tenant's
+      // own (never assume English), without pinning it on the session —
+      // bootstrap still owns that.
+      const pinned =
+        session.language === 'en' || session.language === 'es' ? session.language : undefined;
+      const { language: replayLanguage, ttsVoice: replayVoice } = await this.resolveTenantLanguage(
+        opts.tenantId,
+        pinned,
+      );
+      // This document is the evidence the caller heard the notice, so it is
+      // ledgered here; the latch stops the first attempt's deferred commit
+      // from writing a second row.
+      const replayNotice = discloseAiIdentity({
+        tenantId: opts.tenantId,
+        businessName: this.deps.businessName,
+        language: replayLanguage,
+        ...(this.deps.auditRepo ? { auditRepo: this.deps.auditRepo } : {}),
+        voiceSessionId: session.id,
+        actorId: this.deps.systemActorId ?? 'system:inbound-call',
+        channel: session.channel,
+      });
+      const replayText = [
+        replayNotice.disclosureText,
+        t('disclose.two_party', replayLanguage),
+        t('greeting.one_moment', replayLanguage),
+      ].join(' ');
+      const twiml = buildTwiML(
+        [{ type: 'tts_play', payload: { text: replayText } }],
         {
           gatherActionUrl: this.gatherUrl(session.id),
-          ...(session.language ? { language: session.language } : {}),
-          ...(session.ttsVoice ? { voiceOverride: session.ttsVoice } : {}),
+          language: replayLanguage,
+          ...(replayVoice ? { voiceOverride: replayVoice } : {}),
           ...(replayHints ? { hints: replayHints } : {}),
         },
       );
+      if (!session.assistantNoticeHeard) {
+        session.assistantNoticeHeard = true;
+        void replayNotice.commitDisclosureLedger();
+      }
+      return twiml;
     }
 
     // WS16b — Phase B (shared): language pin + disclosure + identify + FSM
@@ -2255,6 +2389,7 @@ export class TwilioGatherAdapter {
       // implicit consent here would assert a notice that was never rendered.
       // Discard the parked thunk rather than leaving it for the sweep.
       this.pendingConsentCommit.delete(session.id);
+      this.pendingAssistantNoticeCommit.delete(session.id);
     } else {
       void this.commitRecordingConsent({ callSid: opts.callSid }).catch(() => {
         /* swallow — the thunk already swallows; this guards the lookup */
@@ -2335,13 +2470,20 @@ export class TwilioGatherAdapter {
     //    call as caller speech and classify/summarize it as a spoken
     //    no-intent call instead of a silent one.
     if (opts.speechResult.trim().length > 0) {
+      // U1 — Gather has no stream clock: only the webhook receipt is known, so
+      // the row records transport + stt_final_at and never a reply gap.
       this.deps.store.appendTranscript(opts.sessionId, {
         speaker: 'caller',
         // #850 — see the sibling append above.
         text: callerTranscriptText(session, opts.speechResult),
         ts: Date.now(),
+        timing: { transport: 'gather', sttFinalAt: new Date() },
       });
     }
+
+    // B3-1 — the owner line's privileges as of this turn (re-checked from
+    // the pinned caller-ID), before anything below reads them.
+    await this.processor.refreshOwnerLine(session, opts.tenantId);
 
     // RV-140 — shared deterministic safety scan (see
     // runDeterministicSafetyScan). Runs after the transcript append so the
@@ -2414,7 +2556,7 @@ export class TwilioGatherAdapter {
     // reprompted forever. Same caller experience as a low-confidence turn:
     // reprompt below the cap, graceful escalation + hangup at it.
     if (opts.speechResult.trim().length === 0) {
-      return this.runLowSttConfidenceGatherLadder(session, opts.sessionId);
+      return this.runLowSttConfidenceGatherLadder(session, opts.sessionId, opts.tenantId, 'silence');
     }
 
     // A3 — low acoustic STT confidence gate. Twilio's Gather `Confidence` on
@@ -3006,14 +3148,9 @@ export class TwilioGatherAdapter {
    * Mirrors the media-streams adapter's `recoverFromLowSttConfidence`
    * shape: reprompt on an isolated low-confidence turn using
    * {@link LOW_STT_CONFIDENCE_REPROMPT_COPY}; after
-   * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS} back-to-back, speak the
-   * SAME escalation line VOX-35c uses
-   * ({@link SPEECH_TURN_FAILURE_ESCALATION_COPY}) and end the call
-   * gracefully via a synthetic `end_session` side effect + explicit
-   * `finalizeTerminatedSession` call (this path never touches the FSM, so
-   * `finalizeTwiml`'s own `currentState === 'terminated'` finalize check
-   * would never fire — the manual call here is required, same pattern
-   * `/dial-result`'s successful-transfer branch already uses).
+   * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS} back-to-back, end the
+   * ladder by the capping strike's cause (LCR-02, see
+   * {@link runLowSttConfidenceGatherLadder}).
    */
   /**
    * U5 — end a Gather call whose age (`Date.now() - session.createdAt`, the
@@ -3055,7 +3192,7 @@ export class TwilioGatherAdapter {
 
   private async maybeHandleLowSttConfidenceGather(
     session: VoiceSession,
-    opts: { sessionId: string; confidence: number | undefined },
+    opts: { sessionId: string; confidence: number | undefined; tenantId: string },
   ): Promise<string | null> {
     if (!isLowSttConfidence(opts.confidence)) {
       // High confidence (or no signal at all) clears the streak so a later
@@ -3064,7 +3201,7 @@ export class TwilioGatherAdapter {
       return null;
     }
 
-    return this.runLowSttConfidenceGatherLadder(session, opts.sessionId);
+    return this.runLowSttConfidenceGatherLadder(session, opts.sessionId, opts.tenantId, 'low_confidence');
   }
 
   /**
@@ -3074,28 +3211,92 @@ export class TwilioGatherAdapter {
    * (silence, delivered by `actionOnEmptyResult`). One streak for both, so
    * a caller alternating silence and mumbling still terminates at
    * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS} — matching the
-   * media-streams ladder semantics.
+   * media-streams ladder semantics. LCR-02: the cap is split on the capping
+   * strike's `cause` — silence → voicemail (never a page); low confidence →
+   * the FSM's system_failure → the parked `<Dial>` / no-one-available
+   * message, or a voicemail when nothing was parked. The ladder never
+   * returns a "connect you" line ahead of a hang-up. These paths finalize
+   * explicitly: the FSM never reaches `terminated` here, so `finalizeTwiml`'s
+   * own finalize check would not fire.
    */
   private async runLowSttConfidenceGatherLadder(
     session: VoiceSession,
     sessionId: string,
+    tenantId: string,
+    cause: LowSttStrikeCause,
   ): Promise<string> {
     // #1601 step 2 — the rules (floor, cap, copy, terminal reason) are the
     // shared ladder's; this method owns the Gather streak map, the TwiML and
     // the terminal finalize. `sessionId` IS `session.id` (store.get).
-    const { effects, step } = runLowSttConfidenceLadder(session, this.lowConfidenceGatherStreak);
-    const twiml = await this.finalizeTwiml(session, effects, sessionId);
-    if (step.escalate && !session.ended) {
-      session.ended = true;
-      this.finalizeTerminatedSession(session, effects, LOW_STT_LADDER_TERMINAL_REASON);
-      // PR #975 F5 — same omission as the max-duration end: without this a
-      // ladder hand-off left no call_summaries row.
-      void this.processor.runSummary(session).catch(() => {
-        /* swallow — summary is best-effort */
-      });
+    const { effects, step } = runLowSttConfidenceLadder(session, this.lowConfidenceGatherStreak, cause);
+    let twiml: string;
+    if (step.kind === 'reprompt') {
+      twiml = await this.finalizeTwiml(session, effects, sessionId);
+    } else if (step.kind === 'silence_close') {
+      // LCR-02 — a silent line: nobody may be there, so nobody is paged.
+      // Offer the voicemail; the recording reaches the owner as any other.
+      twiml = this.endLadderWithVoicemail(session, 'silence', step.reason);
+    } else {
+      // LCR-02 — the caller is speaking but cannot be heard: the FSM's
+      // system_failure. Its notify_oncall parks a <Dial> (finalizeTwiml hands
+      // it back in place of the "connect you" <Say>), or the no-one-available
+      // message, or nothing — then the caller is offered a voicemail rather
+      // than told they are being connected.
+      await this.processor.executeSideEffects(session, effects, tenantId);
+      const parked = parkedHandoffKind(this.pendingTransferTwiml.get(sessionId));
+      if (parked === 'none') {
+        twiml = this.endLadderWithVoicemail(session, 'no_handoff', step.reason);
+      } else {
+        twiml = await this.finalizeTwiml(session, effects, sessionId);
+        // A <Dial> is finalized by /dial-result; the message ends the call.
+        if (parked === 'message') this.endLadderSession(session, step.reason);
+      }
     }
     recordLowSttLadderError(step, 'gather', { callSid: session.callSid, tenantId: session.tenantId });
     return twiml;
+  }
+
+  /**
+   * LCR-02 — the voicemail a ladder cap offers mid-call: the ladder's own
+   * line (in the call's language and voice), then `<Record>`, whose
+   * /voicemail-status callback finds the session by CallSid and carries the
+   * caller ID (the same signed threading every voicemail uses). Also the
+   * media-streams adapter's `ladderVoicemailTwiml` (delivered over REST).
+   */
+  buildLadderVoicemailTwiml(session: VoiceSession, kind: LadderVoicemailKind): string {
+    const language = session.language === 'es' ? 'es' : 'en';
+    const base = (this.deps.publicBaseUrl ?? '').replace(/\/+$/, '');
+    const callerPhone = this.callerIdBySession.get(session.id) || undefined;
+    return buildVoicemailTwiml({
+      shopName: this.deps.businessName,
+      recordingStatusCallback: `${base}/api/telephony/voicemail-status`,
+      prompt: ttsCopy(kind === 'silence' ? 'silence_voicemail' : 'handoff_unavailable_voicemail', language),
+      voice: session.ttsVoice ?? (language === 'es' ? GATHER_VOICE_ES : GATHER_VOICE_EN),
+      ...(callerPhone ? { callerPhone } : {}),
+      ...(session.stirVerstat ? { stirVerstat: session.stirVerstat } : {}),
+    });
+  }
+
+  private endLadderWithVoicemail(session: VoiceSession, kind: LadderVoicemailKind, reason: string): string {
+    const twiml = this.buildLadderVoicemailTwiml(session, kind);
+    this.deps.store.appendTranscript(session.id, {
+      speaker: 'agent',
+      text: ttsCopy(kind === 'silence' ? 'silence_voicemail' : 'handoff_unavailable_voicemail', session.language === 'es' ? 'es' : 'en'),
+      ts: Date.now(),
+    });
+    this.endLadderSession(session, reason);
+    return twiml;
+  }
+
+  /** Stamp the ladder's terminal reason once (first stamp wins) and kick off the summary. */
+  private endLadderSession(session: VoiceSession, reason: string): void {
+    session.ended = true;
+    if (session.terminalOutcome) return;
+    this.finalizeTerminatedSession(session, [{ type: 'end_session', payload: { reason } }], reason);
+    // PR #975 F5 — without this a ladder hand-off left no call_summaries row.
+    void this.processor.runSummary(session).catch(() => {
+      /* swallow — summary is best-effort */
+    });
   }
 
   /**

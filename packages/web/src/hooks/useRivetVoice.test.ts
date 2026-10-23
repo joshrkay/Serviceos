@@ -9,6 +9,11 @@
  * so `play`/`pause` are stubbed on HTMLMediaElement and the test drives the
  * element's own `playing` / `ended` / `error` events; speechSynthesis is faked
  * the way useConversationVoice.test.ts fakes it.
+ *
+ * S3-5 — the listening half (`openMic`, `useRivetTurnListener`): the microphone,
+ * MediaRecorder and Deepgram's socket are faked at the browser/vendor boundary
+ * the way useDeepgramDictation.test.ts fakes them; POST /api/voice/stream-token
+ * is answered at fetch like the other routes.
  */
 import { act, cleanup, renderHook } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -16,7 +21,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 const track = vi.hoisted(() => ({ trackFunnel: vi.fn(), track: vi.fn() }));
 vi.mock('../lib/analytics', () => track);
 
-import { useRivetVoice, type RivetVoice } from './useRivetVoice';
+import { useRivetTurnListener, useRivetVoice, type RivetVoice } from './useRivetVoice';
+import type { UtteranceScreen } from '../lib/onboarding-utterance';
 
 const FUNNEL = { tenantId: 'tenant-1', userId: 'user-1' };
 
@@ -31,6 +37,9 @@ let sent: Sent[];
 let faults: Array<number | 'network'>;
 /** Clips the server holds by hash (what GET /tts/clip/:hash can serve). */
 let serverCache: Map<string, string>;
+/** How POST /api/voice/stream-token answers: 200 with a fresh token each time, or an error status. */
+let tokenStatus: number;
+let tokensMinted: number;
 
 const b64 = (text: string) => btoa(`clip:${text}`);
 const hashFor = (text: string) => text.split('').reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7).toString(16).padStart(64, '0');
@@ -55,6 +64,8 @@ function stubServer() {
   sent = [];
   faults = [];
   serverCache = new Map();
+  tokenStatus = 200;
+  tokensMinted = 0;
   vi.stubGlobal(
     'fetch',
     vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -66,6 +77,11 @@ function stubServer() {
         const text = serverCache.get(path.slice(path.lastIndexOf('/') + 1));
         if (!text) return json(404, { error: 'NOT_CACHED', message: 'That clip is not cached here' });
         return new Response(new TextEncoder().encode(`clip:${text}`), { status: 200, headers: { 'Content-Type': 'audio/mpeg' } });
+      }
+      if (path.startsWith('/api/voice/stream-token') && method === 'POST') {
+        if (tokenStatus !== 200) return json(tokenStatus, { error: 'NOT_CONFIGURED', message: 'Live transcription is not configured' });
+        tokensMinted += 1;
+        return json(200, { token: `dg-${tokensMinted}`, expiresIn: 30, model: 'nova-3' });
       }
       const fault = faults.shift();
       if (fault === 'network') throw new TypeError('Failed to fetch');
@@ -198,6 +214,50 @@ describe('useRivetVoice — playback', () => {
     expect(result.current.speaking).toBe(true);
     await finish();
     expect(result.current.speaking).toBe(false);
+  });
+
+  it('speakAll narrates a turn in order from one batch, with a breath between lines', async () => {
+    const { result } = mount();
+    await act(async () => {
+      void result.current.speakAll(GREETING, { turn: 'greeting', with: GREETING });
+    });
+    await settle();
+    expect(batches().map((r) => r.body?.items)).toEqual([GREETING]);
+    expect(played).toEqual([srcFor(GREETING[0])]);
+    for (let i = 1; i < GREETING.length; i += 1) {
+      await finish();
+      await act(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+      });
+      await settle();
+      expect(played.at(-1)).toBe(srcFor(GREETING[i]));
+    }
+    expect(ttsRequests()).toHaveLength(1);
+  });
+
+  it('anything that interrupts a narration (stop, the owner talking, another line) ends the rest of it', async () => {
+    const { result } = mount();
+    await act(async () => {
+      void result.current.speakAll(GREETING, { turn: 'greeting', with: GREETING });
+    });
+    await settle();
+    expect(played).toEqual([srcFor(GREETING[0])]);
+    act(() => result.current.stop());
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    });
+    expect(played).toEqual([srcFor(GREETING[0])]);
+
+    await act(async () => {
+      void result.current.speakAll(GREETING, { turn: 'greeting', with: GREETING });
+    });
+    await settle();
+    await speak(() => result.current, LINE_B, 'greeting', GREETING);
+    await finish();
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    });
+    expect(played.slice(-2)).toEqual([srcFor(GREETING[0]), srcFor(LINE_B)]);
   });
 
   it('an option tapped on that turn plays from the batch already received, with no new request', async () => {
@@ -373,5 +433,375 @@ describe('useRivetVoice — time to first heard', () => {
     expect(firstHeard()).toEqual([
       expect.objectContaining({ source: 'speech_synthesis', gesture: 'keep_as_is', ms_since_make_it_mine: expect.any(Number) }),
     ]);
+  });
+});
+
+// ── The listening half (S3-5) ─────────────────────────────────
+// The microphone and Deepgram's socket are the browser/vendor boundary: faked the way
+// useDeepgramDictation.test.ts fakes them. Everything between them and the turn is real.
+class FakeWebSocket {
+  static OPEN = 1;
+  static instances: FakeWebSocket[] = [];
+  readyState = 0;
+  url: string;
+  protocols?: string | string[];
+  onopen: (() => void) | null = null;
+  onmessage: ((e: { data: string }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  onclose: (() => void) | null = null;
+  constructor(url: string, protocols?: string | string[]) {
+    this.url = url;
+    this.protocols = protocols;
+    FakeWebSocket.instances.push(this);
+  }
+  send() {}
+  close() {
+    this.readyState = 3;
+  }
+  open() {
+    this.readyState = 1;
+    this.onopen?.();
+  }
+  emit(obj: unknown) {
+    this.onmessage?.({ data: JSON.stringify(obj) });
+  }
+  drop() {
+    this.readyState = 3;
+    this.onclose?.();
+  }
+  refuse() {
+    this.readyState = 3;
+    this.onerror?.();
+    this.onclose?.();
+  }
+}
+class FakeMediaRecorder {
+  static instances: FakeMediaRecorder[] = [];
+  state: 'inactive' | 'recording' = 'inactive';
+  ondataavailable: unknown = null;
+  constructor(readonly stream: unknown) {
+    FakeMediaRecorder.instances.push(this);
+  }
+  start() {
+    this.state = 'recording';
+  }
+  stop() {
+    this.state = 'inactive';
+  }
+}
+const trackStop = vi.fn();
+const micStream = { getTracks: () => [{ stop: trackStop }] };
+const getUserMedia = vi.fn(async () => micStream);
+
+function withMic() {
+  FakeWebSocket.instances = [];
+  FakeMediaRecorder.instances = [];
+  trackStop.mockReset();
+  getUserMedia.mockReset();
+  getUserMedia.mockImplementation(async () => micStream);
+  vi.stubGlobal('WebSocket', FakeWebSocket as unknown as typeof WebSocket);
+  vi.stubGlobal('MediaRecorder', FakeMediaRecorder as unknown as typeof MediaRecorder);
+  vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia } });
+}
+
+const LABELS = [
+  { key: 'a', label: 'Book it on the call' },
+  { key: 'b', label: 'Hold it for me' },
+] as const;
+const voiceInputs = () => track.trackFunnel.mock.calls.filter(([e]) => e === 'v3_voice_input').map(([, , extra]) => extra);
+const socket = () => FakeWebSocket.instances.at(-1)!;
+const say = (transcript: string) =>
+  act(() => {
+    socket().emit({ is_final: true, speech_final: true, channel: { alternatives: [{ transcript }] } });
+  });
+const partial = (transcript: string) =>
+  act(() => {
+    socket().emit({ is_final: false, channel: { alternatives: [{ transcript }] } });
+  });
+
+/** The shell's voice with one turn listening, the way the shell and OptionPairTurn compose them. */
+const SCREEN: UtteranceScreen = { options: LABELS };
+
+function mountTurn(over: { enabled?: boolean; screen?: UtteranceScreen } = {}) {
+  const onResult = vi.fn();
+  const screen = over.screen ?? SCREEN;
+  const view = renderHook(
+    ({ enabled }: { enabled: boolean }) => {
+      const voice = useRivetVoice({ funnel: FUNNEL });
+      const listening = useRivetTurnListener(voice, { turn: 'booking_posture', screen, enabled, onResult });
+      return { voice, listening };
+    },
+    { initialProps: { enabled: over.enabled ?? true } },
+  );
+  return { ...view, onResult };
+}
+
+/** "Make it mine": the tap that unlocks the audio and asks for the microphone, once. */
+async function makeItMine(result: { current: { voice: RivetVoice } }) {
+  act(() => {
+    result.current.voice.unlock('make_it_mine');
+    result.current.voice.openMic();
+  });
+  await settle();
+}
+
+describe('useRivetVoice — listening (S3-5)', () => {
+  beforeEach(withMic);
+
+  it('asks for the microphone inside the "Make it mine" tap, after the audio is unlocked, and only once', async () => {
+    const { result } = mountTurn();
+    act(() => {
+      result.current.voice.unlock('make_it_mine');
+      result.current.voice.openMic();
+      expect(play).toHaveBeenCalledTimes(1);
+      expect(getUserMedia).toHaveBeenCalledTimes(1);
+    });
+    expect(play.mock.invocationCallOrder[0]).toBeLessThan(getUserMedia.mock.invocationCallOrder[0]);
+    await settle();
+    act(() => result.current.voice.openMic());
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+    expect(result.current.voice.input).toBe('on');
+  });
+
+  it('opens one socket for the turn with a fresh token, in English, with both labels and first/second as keyterms', async () => {
+    const { result } = mountTurn();
+    await makeItMine(result);
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    expect(sent.filter((r) => r.path.startsWith('/api/voice/stream-token'))).toEqual([
+      { method: 'POST', path: '/api/voice/stream-token?language=en', body: undefined },
+    ]);
+    const url = new URL(socket().url);
+    expect(url.searchParams.getAll('keyterm')).toEqual(['Book it on the call', 'Hold it for me', 'first', 'second']);
+    expect(url.searchParams.get('language')).toBe('en');
+    expect(url.searchParams.get('utterance_end_ms')).toBe('1200');
+    expect(socket().protocols).toEqual(['bearer', 'dg-1']);
+    act(() => socket().open());
+    expect(FakeMediaRecorder.instances[0].stream).toBe(micStream);
+    expect(result.current.listening.listening).toBe(true);
+  });
+
+  it('pauses Rivet within 200 ms of the first words the owner says over him', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date', 'performance'] });
+    try {
+      withSpeechSynthesis();
+      const pause = vi.spyOn(HTMLMediaElement.prototype, 'pause').mockImplementation(() => {});
+      const { result } = mountTurn();
+      await makeItMine(result);
+      act(() => socket().open());
+      await speak(() => result.current.voice, QUESTION, 'booking_posture', [QUESTION]);
+      expect(result.current.voice.speaking).toBe(true);
+      pause.mockClear();
+      const cancel = (globalThis.speechSynthesis as unknown as { cancel: ReturnType<typeof vi.fn> }).cancel;
+      cancel.mockClear();
+
+      partial('the sec');
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200);
+      });
+      expect(pause).toHaveBeenCalled();
+      expect(cancel).toHaveBeenCalled();
+      expect(result.current.voice.speaking).toBe(false);
+      expect(result.current.listening.partial).toBe('the sec');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('matches "the second one" to the second card with no request but the token', async () => {
+    const { result, onResult } = mountTurn();
+    await makeItMine(result);
+    act(() => socket().open());
+    const before = sent.length;
+    say('the second one');
+    expect(onResult).toHaveBeenCalledWith(expect.objectContaining({ kind: 'pick', key: 'b', transcript: 'the second one' }));
+    expect(onResult).toHaveBeenCalledTimes(1);
+    expect(sent.slice(before)).toEqual([]);
+    expect(result.current.listening.missed).toBeNull();
+  });
+
+  it('an unclear answer is never silent: Rivet says what he heard and what the turn accepts, then an example', async () => {
+    const { result, onResult } = mountTurn();
+    await makeItMine(result);
+    act(() => socket().open());
+    const before = sent.length;
+    say('banana');
+    expect(onResult).toHaveBeenCalledWith({ kind: 'unclear', transcript: 'banana' });
+    expect(result.current.listening.missed).toEqual({
+      transcript: 'banana',
+      reply: 'I heard “banana”. Tap one, or say first or second.',
+      count: 1,
+    });
+    await settle();
+    expect(sent.slice(before)).toEqual([
+      { method: 'POST', path: '/api/voice/tts', body: { text: 'I heard “banana”. Tap one, or say first or second.' } },
+    ]);
+
+    say('something else');
+    expect(result.current.listening.missed?.reply).toBe(
+      'I heard “something else”. Tap one, or say first or second. For example, say “first”.',
+    );
+    say('the first one');
+    expect(result.current.listening.missed).toBeNull();
+  });
+
+  it("boosts a screen's own words after its command phrases, and hands free answers back as said", async () => {
+    const { result, onResult } = mountTurn({
+      screen: { freeAnswer: true, commands: [{ id: 'show', phrases: ['show me my shop'] }], keyterms: ['plumbing', 'HVAC'] },
+    });
+    await makeItMine(result);
+    expect(new URL(socket().url).searchParams.getAll('keyterm')).toEqual(['show me my shop', 'plumbing', 'HVAC']);
+    act(() => socket().open());
+    say('Walsh Plumbing');
+    expect(onResult.mock.calls.map(([u]) => u)).toEqual([{ kind: 'free', text: 'Walsh Plumbing' }]);
+  });
+
+  it('sorts help and commands on a screen that offers them, and boosts the command phrases', async () => {
+    const { result, onResult } = mountTurn({
+      screen: { help: ['repeat'], commands: [{ id: 'make_it_mine', phrases: ['make it mine'] }] },
+    });
+    await makeItMine(result);
+    expect(new URL(socket().url).searchParams.getAll('keyterm')).toEqual(['make it mine']);
+    act(() => socket().open());
+    say('say that again');
+    say("let's make it mine");
+    expect(onResult.mock.calls.map(([u]) => u)).toEqual([
+      { kind: 'help', help: 'repeat', transcript: 'say that again' },
+      { kind: 'command', command: 'make_it_mine', transcript: "let's make it mine" },
+    ]);
+    expect(result.current.listening.missed).toBeNull();
+  });
+
+  it('a turn paused while its socket is still starting listens again when it resumes', async () => {
+    // The shell's save flickers `enabled` as a turn opens: the start in flight is cancelled, and the
+    // turn must not take that as "stop listening".
+    const { result, rerender } = mountTurn({ enabled: false });
+    await makeItMine(result);
+    expect(FakeWebSocket.instances).toHaveLength(0);
+    rerender({ enabled: true }); // the start asks for its token...
+    rerender({ enabled: false }); // ...and is cancelled before it arrives
+    rerender({ enabled: true });
+    await settle();
+    expect(FakeWebSocket.instances).toHaveLength(1);
+    act(() => socket().open());
+    expect(result.current.listening.listening).toBe(true);
+  });
+
+  it('a socket dropped mid-turn is reopened once with a new token, on the same microphone', async () => {
+    const { result } = mountTurn();
+    await makeItMine(result);
+    act(() => socket().open());
+    act(() => socket().drop());
+    await settle();
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(socket().protocols).toEqual(['bearer', 'dg-2']);
+    act(() => socket().open());
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+    expect(trackStop).not.toHaveBeenCalled();
+    expect(FakeMediaRecorder.instances.at(-1)!.stream).toBe(micStream);
+    expect(FakeMediaRecorder.instances.at(-1)!.state).toBe('recording');
+    expect(result.current.listening.listening).toBe(true);
+
+    // Only once: a second drop leaves the turn to the cards.
+    act(() => socket().drop());
+    await settle();
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(result.current.listening.listening).toBe(false);
+    expect(result.current.listening.available).toBe(true);
+  });
+
+  it('when the first socket is refused with keyterms, reopens once without them and keeps them off for the pass', async () => {
+    const { result, rerender } = mountTurn();
+    await makeItMine(result);
+    act(() => socket().refuse());
+    await settle();
+    expect(FakeWebSocket.instances).toHaveLength(2);
+    expect(new URL(socket().url).searchParams.getAll('keyterm')).toEqual([]);
+    expect(voiceInputs()).toEqual([{ state: 'keyterms_off' }]);
+    act(() => socket().open());
+    expect(result.current.listening.listening).toBe(true);
+
+    // The next turn opens without them, and says nothing again.
+    rerender({ enabled: false });
+    rerender({ enabled: true });
+    await settle();
+    expect(new URL(socket().url).searchParams.getAll('keyterm')).toEqual([]);
+    expect(voiceInputs()).toEqual([{ state: 'keyterms_off' }]);
+  });
+
+  it('a refused microphone leaves the turn to the cards: denied once, never asked again, nothing matched', async () => {
+    getUserMedia.mockImplementation(async () => {
+      throw new DOMException('Permission denied', 'NotAllowedError');
+    });
+    const { result, onResult } = mountTurn();
+    await makeItMine(result);
+    expect(result.current.voice.input).toBe('denied');
+    expect(result.current.listening.available).toBe(false);
+    expect(voiceInputs()).toEqual([{ state: 'denied' }]);
+    act(() => result.current.voice.openMic());
+    act(() => result.current.listening.toggle());
+    await settle();
+    expect(getUserMedia).toHaveBeenCalledTimes(1);
+    expect(sent.filter((r) => r.path.startsWith('/api/voice/stream-token'))).toEqual([]);
+    expect(FakeWebSocket.instances).toEqual([]);
+    expect(onResult).not.toHaveBeenCalled();
+  });
+
+  it('no transcription here (the token route answers 503): unavailable once, and the microphone is let go', async () => {
+    tokenStatus = 503;
+    const { result } = mountTurn();
+    await makeItMine(result);
+    expect(result.current.voice.input).toBe('unavailable');
+    expect(result.current.listening.available).toBe(false);
+    expect(voiceInputs()).toEqual([{ state: 'unavailable' }]);
+    expect(trackStop).toHaveBeenCalled();
+    expect(FakeWebSocket.instances).toEqual([]);
+  });
+
+  it('a browser that cannot listen says so once and never asks for the microphone', async () => {
+    vi.stubGlobal('MediaRecorder', undefined);
+    const { result } = mountTurn();
+    await makeItMine(result);
+    expect(result.current.voice.input).toBe('unsupported');
+    expect(result.current.listening.available).toBe(false);
+    expect(getUserMedia).not.toHaveBeenCalled();
+    expect(voiceInputs()).toEqual([{ state: 'unsupported' }]);
+  });
+
+  it('after 6 s of quiet once Rivet is done, stops listening and says so once; the mic tap listens again', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date', 'performance'] });
+    try {
+      const { result } = mountTurn();
+      await makeItMine(result);
+      act(() => socket().open());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_900);
+      });
+      expect(result.current.listening.quiet).toBe(false);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(200);
+      });
+      expect(result.current.listening.quiet).toBe(true);
+      expect(result.current.listening.listening).toBe(false);
+
+      act(() => result.current.listening.toggle());
+      await settle();
+      expect(FakeWebSocket.instances).toHaveLength(2);
+      act(() => socket().open());
+      expect(result.current.listening.listening).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('a closed turn closes its socket but keeps the microphone for the next one', async () => {
+    const { result, rerender, unmount } = mountTurn();
+    await makeItMine(result);
+    const first = socket();
+    act(() => first.open());
+    rerender({ enabled: false });
+    expect(first.readyState).toBe(3);
+    expect(trackStop).not.toHaveBeenCalled();
+    unmount();
+    expect(trackStop).toHaveBeenCalled();
   });
 });

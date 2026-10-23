@@ -6,12 +6,7 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
-    "newArchEnabled": true,
     "icon": "./assets/icon.png",
-    "splash": {
-      "image": "./assets/splash.png",
-      "backgroundColor": "#030213"
-    },
     "ios": {
       "supportsTablet": false,
       "bundleIdentifier": "com.serviceos.app",
@@ -44,7 +39,8 @@
       [
         "expo-audio",
         {
-          "microphonePermission": "Allow Rivet to use the microphone to capture voice actions and field voice notes."
+          "microphonePermission": "Allow Rivet to use the microphone to capture voice actions and field voice notes.",
+          "enableBackgroundPlayback": true
         }
       ],
       [
@@ -96,6 +92,15 @@
               ]
             }
           }
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash.png",
+          "backgroundColor": "#030213",
+          "resizeMode": "contain",
+          "imageWidth": 200
         }
       ],
       "expo-font"

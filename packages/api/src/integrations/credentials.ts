@@ -4,6 +4,7 @@
 
 import { Pool } from 'pg';
 import { decrypt } from './crypto';
+import { applyTenantContext, withTenantSession } from '../db/rls-runtime-role';
 
 export interface TenantTwilioCreds {
   accountSid: string;
@@ -47,22 +48,48 @@ export function flushCredentialCache(tenantId: string): void {
   }
 }
 
+/** The platform account the pre-signup demo call dials from (U7, D-037). */
+export interface PlatformTwilioCreds {
+  accountSid: string;
+  authToken: string;
+  fromE164: string;
+}
+
+/**
+ * The demo call's platform Twilio account, from the explicit
+ * `PLATFORM_TWILIO_ACCOUNT_SID` / `PLATFORM_TWILIO_AUTH_TOKEN` /
+ * `PLATFORM_TWILIO_FROM_NUMBER`, or null when any is missing or blank. Fails
+ * closed and never falls through to the global `TWILIO_*` names or to a
+ * tenant's integration: a demo tenant has none, and the platform number must
+ * never be confused with a customer's account
+ * (docs/solutions/logic-errors/click-to-call-gate-requires-global-twilio-sid.md).
+ */
+export function getPlatformTwilioCreds(
+  env: Record<string, string | undefined> = process.env,
+): PlatformTwilioCreds | null {
+  const accountSid = env.PLATFORM_TWILIO_ACCOUNT_SID?.trim();
+  const authToken = env.PLATFORM_TWILIO_AUTH_TOKEN?.trim();
+  const fromE164 = env.PLATFORM_TWILIO_FROM_NUMBER?.trim();
+  if (!accountSid || !authToken || !fromE164) return null;
+  return { accountSid, authToken, fromE164 };
+}
+
 export async function getTenantTwilioCreds(
   tenantId: string,
   pool: Pool
 ): Promise<TenantTwilioCreds> {
-  // tenant_integrations is FORCE RLS (migration 074): a SELECT only returns rows
-  // when app.current_tenant_id (or app.system_lookup) is set on the connection.
-  // This resolver runs off a bare pooled connection (the notification SMS path
-  // does NOT reuse the request-scoped withTenantTransaction client), so without
-  // scoping the read even a fully-provisioned tenant resolves zero rows and
-  // fails closed. Scope a short transaction to THIS tenant before reading its
-  // own integration row.
+  // tenant_integrations is FORCE RLS (migration 074). The policy binds only a
+  // client that has dropped to the RLS runtime role; the connection principal
+  // bypasses it. So read this tenant's own row in a short transaction carrying
+  // its tenant context and role (applyTenantContext), on its own pooled
+  // connection: the notification SMS path does not reuse the request-scoped
+  // withTenantTransaction client. Under the role, a read without the tenant
+  // context would return zero rows and fail closed.
   const client = await pool.connect();
   let rows: IntegrationRow[];
   try {
     await client.query('BEGIN');
-    await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+    await applyTenantContext(client, tenantId, { transactional: true });
     const result = await client.query<IntegrationRow>(
       `SELECT subaccount_sid, auth_token_primary_enc, credential_version, provider_data, status
        FROM tenant_integrations
@@ -158,7 +185,7 @@ type CreateCredentialResolverDeps = {
    * (dev / no PgBouncer). Credential SELECTs keep using `pool`.
    */
   directPool?: Pool;
-  createListener?: (config: string | PoolConfig) => ListenerClient;
+  createListener?: (config: PoolConfig) => ListenerClient;
   sleep?: (ms: number) => Promise<void>;
 };
 
@@ -172,15 +199,15 @@ export function createCredentialResolver({
   const keyOf = (tenantId: string, provider: string): string => `${tenantId}:${provider}`;
 
   // LISTEN must run on a direct (non-PgBouncer) connection — see directPool.
+  // Either way the pool's `ssl` setting (db/pool.ts buildPgSsl) is carried
+  // over explicitly: a bare connectionString would make the LISTEN client fall
+  // back to pg's default (no TLS / no verification) while every pooled
+  // connection verifies the server certificate.
   const listenerSource = directPool ?? pool;
-  const listenerConfig = listenerSource.options.connectionString ?? {
-    host: listenerSource.options.host,
-    port: listenerSource.options.port,
-    user: listenerSource.options.user,
-    password: listenerSource.options.password,
-    database: listenerSource.options.database,
-    ssl: listenerSource.options.ssl,
-  };
+  const { connectionString, host, port, user, password, database, ssl } = listenerSource.options;
+  const listenerConfig: PoolConfig = connectionString
+    ? { connectionString, ssl }
+    : { host, port, user, password, database, ssl };
 
   const listener = createListener(listenerConfig);
   let closed = false;
@@ -250,11 +277,17 @@ export function createCredentialResolver({
         return cache.get(key) ?? null;
       }
 
-      const result = await pool.query<CredentialRow>(
-        `SELECT tenant_id, provider, credentials, credential_version
-         FROM tenant_integrations
-         WHERE tenant_id = $1 AND provider = $2`,
-        [tenantId, provider],
+      // A short transaction of its own, with tenant context and the RLS role
+      // (tenant_integrations is FORCE RLS). Deliberately not the request's
+      // client: the row is cached across requests, so it must be committed
+      // data, never a write the current request could still roll back.
+      const result = await withTenantSession(pool, tenantId, (client) =>
+        client.query<CredentialRow>(
+          `SELECT tenant_id, provider, credentials, credential_version
+           FROM tenant_integrations
+           WHERE tenant_id = $1 AND provider = $2`,
+          [tenantId, provider],
+        ),
       );
 
       const row = result.rows[0] ?? null;

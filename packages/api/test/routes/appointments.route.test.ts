@@ -15,6 +15,7 @@ import { InMemoryAppointmentRepository } from '../../src/appointments/appointmen
 import { InMemoryAssignmentRepository } from '../../src/appointments/assignment';
 import { InMemoryJobRepository } from '../../src/jobs/job';
 import { InMemoryJobTimelineRepository } from '../../src/jobs/job-lifecycle';
+import { RepoSkillMatcher } from '../../src/scheduling/skill-matcher';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
 import { permissiveTenantOwnership } from '../../src/shared/tenant-ownership';
@@ -528,7 +529,7 @@ describe('#1279 — appointment technician assignment routes', () => {
   const TECH = '0b7f6a64-2f0f-4c52-9d7b-0e6a4b6b1279';
   const OWNER_USER = '5f2b9b35-51c3-4a7a-8f6e-6d1a0c5c1279';
 
-  async function buildApp(withAssignment: boolean) {
+  async function buildApp(withAssignment: boolean, requiredSkills: string[] = []) {
     const { InMemoryUserRepository } = await import('../../src/users/user');
     const assignmentRepo = new InMemoryAssignmentRepository();
     const appointmentRepo = new InMemoryAppointmentRepository(assignmentRepo);
@@ -546,9 +547,11 @@ describe('#1279 — appointment technician assignment routes', () => {
       status: 'new',
       priority: 'normal',
       createdBy: OWNER_USER,
+      requiredSkills,
       createdAt: new Date(),
       updatedAt: new Date(),
     });
+    const skillMatcher = new RepoSkillMatcher(jobRepo, userRepo);
     const app = express();
     app.use(express.json());
     app.use((req: Request, _res: Response, next: NextFunction) => {
@@ -567,7 +570,7 @@ describe('#1279 — appointment technician assignment routes', () => {
         permissiveTenantOwnership(),
         jobRepo,
         new InMemoryJobTimelineRepository(),
-        withAssignment ? { assignment: { assignmentRepo, userRepo } } : undefined,
+        withAssignment ? { assignment: { assignmentRepo, userRepo, skillMatcher } } : undefined,
         new InMemoryAuditRepository(),
       ),
     );
@@ -639,5 +642,101 @@ describe('#1279 — appointment technician assignment routes', () => {
     const ok = await request(app).post(`/api/appointments/${id}/assignments`).send({ technicianId: TECH });
     expect(ok.status).toBe(200);
     expect(ok.body).toEqual({ appointmentId: id, technicianId: TECH });
+  });
+
+  it('create and POST /:id/assignments → 409 when the technician lacks a required skill (Dispatch FR-2)', async () => {
+    const { app, assignmentRepo, jobId } = await buildApp(true, ['gas_certified']);
+    const create = await request(app).post('/api/appointments').send({
+      jobId, scheduledStart: window.start, scheduledEnd: window.end, timezone: 'UTC', technicianId: TECH,
+    });
+    expect(create.status).toBe(409);
+    expect(create.body.message).toContain('gas_certified');
+
+    const created = await request(app).post('/api/appointments').send({
+      jobId, scheduledStart: window.start, scheduledEnd: window.end, timezone: 'UTC',
+    });
+    const id: string = created.body.id;
+    const res = await request(app).post(`/api/appointments/${id}/assignments`).send({ technicianId: TECH });
+    expect(res.status).toBe(409);
+    expect(await assignmentRepo.findByAppointment(TENANT, id)).toHaveLength(0);
+  });
+
+  it('PUT /:id time move → 409 when the retained primary now lacks a required skill (Dispatch FR-2)', async () => {
+    const { app, jobRepo, jobId } = await buildApp(true);
+    const created = await request(app).post('/api/appointments').send({
+      jobId, scheduledStart: window.start, scheduledEnd: window.end, timezone: 'UTC', technicianId: TECH,
+    });
+    expect(created.status).toBe(201);
+    await jobRepo.update(TENANT, jobId, { requiredSkills: ['gas_certified'] });
+    const later = tomorrowIso(48, 50);
+    const moved = await request(app).put(`/api/appointments/${created.body.id}`).send({
+      scheduledStart: later.start, scheduledEnd: later.end,
+    });
+    expect(moved.status).toBe(409);
+    expect(moved.body.message).toContain('gas_certified');
+    // A non-time edit is not a re-assignment and is left alone.
+    const noted = await request(app).put(`/api/appointments/${created.body.id}`).send({ notes: 'gate code 1234' });
+    expect(noted.status).toBe(200);
+  });
+});
+
+describe('PUT /api/appointments/:id — strict body allowlist (T4-F07, hardening sweep 2026-10)', () => {
+  let app: Express;
+
+  beforeEach(async () => {
+    ({ app } = await buildTestApp());
+  });
+
+  async function createAppointment(): Promise<string> {
+    const { start, end } = tomorrowIso(24, 26);
+    const created = await request(app).post('/api/appointments').send({
+      jobId: 'job-strict',
+      scheduledStart: start,
+      scheduledEnd: end,
+      timezone: 'UTC',
+    });
+    expect(created.status).toBe(201);
+    return created.body.id as string;
+  }
+
+  it.each([
+    ['jobId', { jobId: 'job-other' }],
+    ['holdPendingApproval', { holdPendingApproval: false }],
+    ['holdExpiryAt', { holdExpiryAt: new Date().toISOString() }],
+    ['idempotencyKey', { idempotencyKey: 'x' }],
+    ['tenantId', { tenantId: '22222222-2222-4222-8222-222222222222' }],
+  ])('rejects %s with 400 and writes nothing', async (_label, body) => {
+    const id = await createAppointment();
+    const res = await request(app).put(`/api/appointments/${id}`).send(body);
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('VALIDATION_ERROR');
+
+    const after = await request(app).get(`/api/appointments/${id}`);
+    expect(after.body.jobId).toBe('job-strict');
+    expect(after.body.holdPendingApproval).toBe(false);
+  });
+
+  it('rejects a status outside the enum and a non-string notes', async () => {
+    const id = await createAppointment();
+    expect((await request(app).put(`/api/appointments/${id}`).send({ status: 'done' })).status).toBe(400);
+    expect((await request(app).put(`/api/appointments/${id}`).send({ notes: { x: 1 } })).status).toBe(400);
+  });
+
+  it('still accepts the fields the web and mobile clients send', async () => {
+    const id = await createAppointment();
+    const cancel = await request(app)
+      .put(`/api/appointments/${id}`)
+      .send({ status: 'canceled', notes: 'Customer no-show' });
+    expect(cancel.status).toBe(200);
+    expect(cancel.body.status).toBe('canceled');
+    expect(cancel.body.notes).toBe('Customer no-show');
+
+    const id2 = await createAppointment();
+    const { start, end } = tomorrowIso(30, 32);
+    const move = await request(app)
+      .put(`/api/appointments/${id2}`)
+      .send({ scheduledStart: start, scheduledEnd: end });
+    expect(move.status).toBe(200);
+    expect(new Date(move.body.scheduledStart).toISOString()).toBe(new Date(start).toISOString());
   });
 });

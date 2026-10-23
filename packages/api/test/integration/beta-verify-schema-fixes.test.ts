@@ -80,14 +80,14 @@ describe('beta-verify schema fixes (real Postgres)', () => {
     const saved = await repo.upsert(base);
     expect(saved.idempotencyKey).toBe(key);
 
-    const found = await repo.findByKey(key);
+    const found = await repo.findByKey(tenantId, key);
     expect(found).not.toBeNull();
     expect(found!.status).toBe('queued');
 
     // Same key upserts in place — this is the idempotency guard that was dead
     // while the table was missing.
     await repo.upsert({ ...base, status: 'sent', attempts: 1, updatedAt: new Date() });
-    const after = await repo.findByKey(key);
+    const after = await repo.findByKey(tenantId, key);
     expect(after!.status).toBe('sent');
     expect(after!.attempts).toBe(1);
   });

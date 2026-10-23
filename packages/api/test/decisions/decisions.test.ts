@@ -686,7 +686,11 @@ describe('D12 — Founding sentence as filter', () => {
 
 describe('A1 — Multi-tenant managed agent runtime', () => {
   it('RLS + tenant context middleware exists', async () => {
-    expect(await exists('db/client.ts')).toBe(true);
+    // The RLS runtime role + tenant GUC helpers, and the request middleware
+    // that opens the tenant-scoped transaction. (Previously pinned on
+    // db/client.ts, a dead PgDatabaseClient with no importer; removed.)
+    expect(await exists('db/rls-runtime-role.ts')).toBe(true);
+    expect(await exists('middleware/tenant-context.ts')).toBe(true);
     expect(await exists('middleware/auth.ts')).toBe(true);
   });
 

@@ -38,6 +38,20 @@ function formatAmount(amountCents: number, currency: string): string {
   }).format(amountCents / 100);
 }
 
+/**
+ * The included-minutes line comes from the plans the API returns (which read
+ * the billing policy), so it can never drift from what a plan actually
+ * includes. Left out until both plans have loaded.
+ */
+function minutesLine(plans: BillingPlan[] | null): string[] {
+  const starter = plans?.find((p) => p.id === 'starter');
+  const growth = plans?.find((p) => p.id === 'growth');
+  if (!starter || !growth) return [];
+  return [
+    `${starter.includedAiMinutes} AI answering minutes a month on Starter (${growth.includedAiMinutes} on Growth); ${formatAmount(starter.overageCentsPerAiMinute, starter.currency)}/min after`,
+  ];
+}
+
 export function BillingStep() {
   const apiFetch = useApiClient();
   const [plans, setPlans] = useState<BillingPlan[] | null>(null);
@@ -128,7 +142,7 @@ export function BillingStep() {
           {[
             'Set up AI phone answering during onboarding',
             'AI drafts quotes from each call &amp; sends invoices when jobs close',
-            '20 AI answering minutes a month on Starter (60 on Growth); $1.25/min after',
+            ...minutesLine(plans),
             'End-of-day digest by text — what got done, what got paid',
           ].map((line) => (
             <li key={line} className="flex items-start gap-2">

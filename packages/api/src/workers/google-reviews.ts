@@ -227,8 +227,11 @@ export async function runGoogleReviewsSweep(
   const encKey = process.env.TENANT_ENCRYPTION_KEY;
 
   for (const tenantId of tenantIds) {
+    // Read before the credentials: a reconnect after this point bumps it.
+    let authGeneration = 0;
     try {
       const state = await deps.pollStateRepo.getPollState(tenantId);
+      authGeneration = state?.authGeneration ?? 0;
       if (isThrottled(state, now())) {
         throttled++;
         deps.logger.debug('Google reviews sweep: tenant throttled', {
@@ -267,8 +270,7 @@ export async function runGoogleReviewsSweep(
         continue;
       }
 
-      const cursor = state?.cursor ?? null;
-      const cursorDate = parseCursorDate(cursor);
+      const cursorDate = parseCursorDate(state?.cursor ?? null, locationId);
 
       let pageToken: string | null = null;
       let pages = 0;
@@ -391,10 +393,10 @@ export async function runGoogleReviewsSweep(
       // Persist the new cursor (ISO timestamp of the newest review
       // we touched). Falls back to the previous cursor when no
       // reviews were seen, so the watermark never goes backwards.
-      const newCursor =
-        newestUpdateTime.getTime() > 0
-          ? newestUpdateTime.toISOString()
-          : cursor ?? now().toISOString();
+      const newCursor = formatCursor(
+        locationId,
+        newestUpdateTime.getTime() > 0 ? newestUpdateTime : now(),
+      );
       await deps.pollStateRepo.recordSuccess(tenantId, newCursor);
 
       fetched += tenantFetched;
@@ -407,9 +409,12 @@ export async function runGoogleReviewsSweep(
         // the degradation is visible — the status endpoint surfaces
         // `backoffUntil`, and subsequent sweeps skip the tenant instead
         // of hammering Google — rather than only a log line.
-        failed++;
-        await deps.pollStateRepo
-          .recordQuotaError(tenantId, GOOGLE_BUSINESS_AUTH_BACKOFF_SECONDS)
+        const recorded = await deps.pollStateRepo
+          .recordAuthFailure(
+            tenantId,
+            GOOGLE_BUSINESS_AUTH_BACKOFF_SECONDS,
+            authGeneration,
+          )
           .catch((recordErr) => {
             deps.logger.error(
               'Google reviews sweep: failed to record auth-failure backoff',
@@ -421,7 +426,18 @@ export async function runGoogleReviewsSweep(
                     : String(recordErr),
               },
             );
+            return true;
           });
+        if (!recorded) {
+          // The owner reconnected while this sweep was using the old
+          // credentials; the new ones haven't failed.
+          deps.logger.info(
+            'Google reviews sweep: auth failure from credentials replaced by a reconnect — not pausing',
+            { tenantId },
+          );
+          continue;
+        }
+        failed++;
         deps.logger.warn(
           'Google reviews sweep: authorization failed and token refresh did not recover — backing off; operator must reconnect Google Business',
           {
@@ -562,13 +578,24 @@ function summarizeReviewProposal(review: Review): string {
 }
 
 /**
- * Cursor is the ISO timestamp of the newest review.updateTime we've
- * persisted. Returns null when no cursor (first poll) or unparseable.
+ * Cursor is `<locationId>@<ISO timestamp>` of the newest review.updateTime
+ * we've persisted for that listing. Binding it to the listing means a sweep
+ * still running for an old listing (it read the credentials before the owner
+ * switched) can write its watermark back after the switch's reset without
+ * making the new listing skip its older reviews: a cursor for another
+ * listing reads as "no cursor". A bare ISO timestamp is a cursor written
+ * before the binding and counts as the current listing's.
  */
-function parseCursorDate(cursor: string | null): Date | null {
+export function parseCursorDate(cursor: string | null, locationId: string): Date | null {
   if (!cursor) return null;
-  const d = new Date(cursor);
+  const at = cursor.lastIndexOf('@');
+  if (at >= 0 && cursor.slice(0, at) !== locationId) return null;
+  const d = new Date(at >= 0 ? cursor.slice(at + 1) : cursor);
   return Number.isFinite(d.getTime()) ? d : null;
+}
+
+export function formatCursor(locationId: string, newest: Date): string {
+  return `${locationId}@${newest.toISOString()}`;
 }
 
 /** Adapter: Google payload → our typed Review. */

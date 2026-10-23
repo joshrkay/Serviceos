@@ -158,24 +158,40 @@ export const tenantContextStore = new AsyncLocalStorage<TenantContext>();
  * than crash the database with a missing GUC.
  */
 /**
- * Authenticated GET endpoints whose responses are long-lived SSE event streams
- * (dispatch board / escalation / voice-session events). The request-transaction
- * bypass in `withTenantTransaction` is restricted to these — NOT keyed off the
- * client-controlled `Accept` header — so a caller can't send
- * `Accept: text/event-stream` to a mutating route to skip the transaction and
- * lose multi-write atomicity (Codex P2). Suffix-anchored so they match whether
- * or not the `/api` mount prefix has been stripped from `req.path`. Adding a
- * new SSE route? add its matcher here; until then it keeps the (safe)
- * transactional path.
+ * Authenticated GET/HEAD endpoints whose responses are long-lived SSE event
+ * streams (dispatch board / escalation / voice-session events). The
+ * request-transaction bypass in `withTenantTransaction` is restricted to
+ * these — NOT keyed off the client-controlled `Accept` header — so a caller
+ * can't send `Accept: text/event-stream` to a mutating route to skip the
+ * transaction and lose multi-write atomicity (Codex P2). Adding a new SSE
+ * route? add its matcher here; until then it keeps the (safe) transactional
+ * path.
+ *
+ * A3-5 — the same treatment as LLM_LONG_CALL_ROUTES (TI-02, A-R4): anchored at
+ * both ends (the `/api` mount prefix optional, as it is stripped from
+ * req.path) so a nested router sharing the suffix inherits nothing, with one
+ * optional trailing slash and any letter case because that is how Express
+ * routes. Otherwise `/escalations/events/` reached the same stream handler
+ * INSIDE the request transaction and held a pooled connection for the whole
+ * life of the stream.
+ *
+ * HEAD too: Express sends HEAD to a route's GET handler when the route has no
+ * HEAD handler of its own, and these routes have none. The stream handler
+ * flushes its headers and never ends the response, so a HEAD inside the
+ * request transaction held a pooled connection until the client closed the
+ * socket. HEAD reaches only the GET handlers here, never a mutating route.
  */
 const SSE_STREAM_ROUTES: readonly RegExp[] = [
-  /\/escalations\/events$/,
-  /\/dispatch\/board\/events$/,
-  /\/voice\/sessions\/[^/]+\/events$/,
+  /^(?:\/api)?\/escalations\/events\/?$/i,
+  /^(?:\/api)?\/dispatch\/board\/events\/?$/i,
+  /^(?:\/api)?\/voice\/sessions\/[^/]+\/events\/?$/i,
 ];
 
 function isSseStreamRoute(req: { method: string; path: string }): boolean {
-  return req.method === 'GET' && SSE_STREAM_ROUTES.some((re) => re.test(req.path));
+  return (
+    (req.method === 'GET' || req.method === 'HEAD') &&
+    SSE_STREAM_ROUTES.some((re) => re.test(req.path))
+  );
 }
 
 /**
@@ -208,17 +224,27 @@ const REQUEST_IDLE_TX_TIMEOUT_MS = positiveIntEnv('DB_REQUEST_IDLE_TX_TIMEOUT_MS
  * accepted: multi-write atomicity across a single request is lost on these
  * routes — each proposal/conversation write commits independently, which is
  * already the contract on the voice path.
+ *
+ * TI-02 — every pattern is anchored at both ends (the `/api` mount prefix
+ * optional, as it is stripped from req.path) so no other router can inherit
+ * the bypass by sharing a suffix. A-R4 — and every pattern matches the way
+ * Express routes: one optional trailing slash (routing is not strict) and any
+ * letter case (routing is not case-sensitive). Otherwise `/resolve-entity/`
+ * reached the same handler INSIDE the request transaction, where the
+ * handler's own runner then took a second pooled connection.
+ *
+ * The same holds for any other slow external call a handler awaits (the
+ * speech-provider routes below). The LLM gateway enforces the list: a
+ * `gateway.complete()` started while a tenant transaction is open throws
+ * LlmCallInTransactionError under NODE_ENV=test and, elsewhere, logs an error
+ * and counts `gateway_llm_call_in_transaction_total` (ai/gateway/gateway.ts).
  */
 const LLM_LONG_CALL_ROUTES: readonly { method: string; re: RegExp }[] = [
-  { method: 'POST', re: /\/assistant\/chat$/ },
+  { method: 'POST', re: /^(?:\/api)?\/assistant\/chat\/?$/i },
   // #1602 — the owner's call-quality grading trigger: a named call is up to
   // 13 judge calls in-request, and the sampling pass is kicked off detached
   // (outside tenantContextStore) — neither may hold a request transaction.
-  { method: 'POST', re: /\/voice\/quality\/grade$/ },
-  // TI-02 — anchored at both ends (the `/api` mount prefix optional, as it is
-  // stripped from req.path) so no other router can inherit the bypass by
-  // sharing a suffix.
-  //
+  { method: 'POST', re: /^(?:\/api)?\/voice\/quality\/grade\/?$/i },
   // In-app voice: a turn holds classify, drafting, entity resolution and TTS
   // synthesis (seconds each); start speaks a greeting; end kicks off the
   // summary. The entity resolver also takes its OWN pooled connection, so
@@ -226,16 +252,46 @@ const LLM_LONG_CALL_ROUTES: readonly { method: string; re: RegExp }[] = [
   // overlapping turns deadlocked on checkout and 500'd every tenant's /api.
   // Every write the adapter makes is a repo call with an explicit tenantId,
   // the contract the telephony voice path already runs under.
-  { method: 'POST', re: /^(?:\/api)?\/voice\/sessions$/ },
-  { method: 'POST', re: /^(?:\/api)?\/voice\/sessions\/[^/]+\/input$/ },
-  { method: 'DELETE', re: /^(?:\/api)?\/voice\/sessions\/[^/]+$/ },
+  { method: 'POST', re: /^(?:\/api)?\/voice\/sessions\/?$/i },
+  { method: 'POST', re: /^(?:\/api)?\/voice\/sessions\/[^/]+\/input\/?$/i },
+  { method: 'DELETE', re: /^(?:\/api)?\/voice\/sessions\/[^/]+\/?$/i },
   // AI drafts awaited in-request: a suggested reply (reads + one draft call,
   // no writes), an estimate suggestion (one draft proposal row), and an
   // onboarding conversation turn (extractor calls; its writes commit together
   // in the orchestrator's own short transaction).
-  { method: 'POST', re: /^(?:\/api)?\/conversations\/[^/]+\/suggest-reply$/ },
-  { method: 'POST', re: /^(?:\/api)?\/estimates\/suggest$/ },
-  { method: 'POST', re: /^(?:\/api)?\/onboarding\/conversation\/turn$/ },
+  { method: 'POST', re: /^(?:\/api)?\/conversations\/[^/]+\/suggest-reply\/?$/i },
+  { method: 'POST', re: /^(?:\/api)?\/estimates\/suggest\/?$/i },
+  { method: 'POST', re: /^(?:\/api)?\/onboarding\/conversation\/turn\/?$/i },
+  // A1 — the "which Bob?" pick re-runs the original drafting handler (an
+  // invoice/estimate LLM call) before it writes. Its post-LLM writes commit
+  // together in one short tenant transaction of its own (resolve-entity.ts).
+  { method: 'POST', re: /^(?:\/api)?\/proposals\/[^/]+\/resolve-entity\/?$/i },
+  // The website "About us" draft awaits the tenant_site_about LLM call (up to
+  // the 60s gateway deadline, the same as the idle-in-transaction timeout).
+  // Its post-LLM writes (supersede the pending draft, create the new one,
+  // audit) commit together in one short tenant transaction (tenant-site.ts).
+  { method: 'POST', re: /^(?:\/api)?\/tenant-site\/about\/draft\/?$/i },
+  // Speech synthesis for the device (not the LLM gateway, the same shape):
+  // each clip awaits the TTS provider for up to TTS_SYNTH_TIMEOUT_MS (30s),
+  // and a batch turn synthesizes up to four in sequence, past the 60s
+  // idle-in-transaction timeout. The only DB touches are the voice-setting
+  // read and one audit row per billed clip, each a repo call with an explicit
+  // tenantId; none needs another's atomicity. GET /tts/clip/:hash reads the
+  // cache only and keeps the request transaction.
+  { method: 'POST', re: /^(?:\/api)?\/voice\/tts\/?$/i },
+  { method: 'POST', re: /^(?:\/api)?\/voice\/tts\/batch\/?$/i },
+  // Speech-to-text for a memo: the handler reads the whole upload (up to
+  // 25MB) and then awaits the Whisper call (60s timeout), which together can
+  // pass the idle-in-transaction timeout and turn a finished transcript into
+  // a 500. Its only DB touch is one audit row (completed or failed), written
+  // with an explicit tenantId — and standalone, the failure row is no longer
+  // rolled back with the 415/500 that follows it.
+  { method: 'POST', re: /^(?:\/api)?\/voice\/transcribe\/?$/i },
+  // Live-dictation token mint: the Deepgram grant fetch has no deadline of
+  // its own, so a stalled upstream held a pooled connection for as long as it
+  // stalled. Its only DB touch is one audit row (minted or failed) with an
+  // explicit tenantId, which now also survives the 502/503 after a failure.
+  { method: 'POST', re: /^(?:\/api)?\/voice\/stream-token\/?$/i },
 ];
 
 function isLlmLongCallRoute(req: { method: string; path: string }): boolean {

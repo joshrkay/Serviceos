@@ -91,3 +91,18 @@ describe('approveProposal — linked money/comms step', () => {
     await expect(approveProposal(repo, TENANT, child.id, OWNER, 'owner')).rejects.toThrow(/issue/i);
   });
 });
+
+// B4 follow-up — each hold names its reason, so a surface that cannot show the
+// message (the one-tap page) can still say the right next step.
+describe('approveProposal — linked-step hold reasons', () => {
+  it.each([
+    ['step 1 still unapproved', 'draft_estimate', 'ready_for_review', 'send_estimate', 'estimateId', 'approve_parent_first'],
+    ['step 1 rejected', 'draft_estimate', 'rejected', 'send_estimate', 'estimateId', 'parent_did_not_run'],
+    ['step 1 drafts the invoice this sends', 'draft_invoice', 'approved', 'send_invoice', 'invoiceId', 'issue_invoice_first'],
+  ] as const)('%s', async (_label, parentType, parentStatus, childType, kind, linkedStepReason) => {
+    const { repo, child } = await twoStepChain({ parentType, parentStatus, childType, kind });
+    await expect(approveProposal(repo, TENANT, child.id, OWNER, 'owner')).rejects.toMatchObject({
+      details: { missingFields: ['linkedStep'], linkedStepReason },
+    });
+  });
+});

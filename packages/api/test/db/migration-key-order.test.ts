@@ -10,6 +10,8 @@ import {
   validateMigrationKeyOrder,
   validateAgainstBase,
   extractKeysFromSource,
+  extractPinnedHashesFromSnapshot,
+  hashMigration,
   GRANDFATHERED_KEYS,
   baseFetchArgs,
 } from '../../scripts/check-migration-keys';
@@ -49,6 +51,72 @@ describe('migration key guard', () => {
     expect(v).toHaveLength(1);
     expect(v[0]).toContain("'196_mine'");
     expect(validateAgainstBase([...base, '267_mine'], base)).toEqual([]);
+  });
+
+  it('a key the base snapshot pins is a restoration only when the branch body hashes to that pin', () => {
+    // 2026-10-22: a merge dropped '332_assignment_overlap_accepted' from main's
+    // registry while the snapshot kept its pin; putting it back byte-for-byte
+    // must pass, a changed body under the old name must not.
+    const base = ['331_a', '333_b', '334_c', '335_d'];
+    const appliedBody = 'ALTER TABLE t ADD COLUMN IF NOT EXISTS x INT;';
+    const pins = new Map([['332_restored', hashMigration(appliedBody)]]);
+    const sameBody = new Map([['332_restored', hashMigration(appliedBody)]]);
+    const mutatedBody = new Map([['332_restored', hashMigration(appliedBody + ' -- changed')]]);
+    expect(validateAgainstBase([...base, '332_restored'], base, pins, sameBody)).toEqual([]);
+    const mutated = validateAgainstBase([...base, '332_restored'], base, pins, mutatedBody);
+    expect(mutated).toHaveLength(1);
+    expect(mutated[0]).toContain('does not match the hash');
+    // ...and an unpinned key below the tail is still stale-fork numbering.
+    expect(validateAgainstBase([...base, '332_other'], base, pins, sameBody)).toHaveLength(1);
+  });
+
+  it('a pinned restoration may not displace a base key that already owns its prefix', () => {
+    // Stale branch: it still carries the old '332_old' (pinned on the base's
+    // snapshot, body intact) but lost the '332_current' main renumbered into
+    // that slot. Hash equality alone would wave it through.
+    const base = ['331_a', '332_current', '333_b'];
+    const body = 'ALTER TABLE t ADD COLUMN IF NOT EXISTS x INT;';
+    const pins = new Map([['332_old', hashMigration(body)]]);
+    const hashes = new Map([['332_old', hashMigration(body)]]);
+    const v = validateAgainstBase(['331_a', '332_old', '333_b'], base, pins, hashes);
+    expect(v.some((m) => m.includes("'332_old' would displace base key '332_current'"))).toBe(true);
+    expect(v.some((m) => m.includes("base key '332_current' is missing"))).toBe(true);
+    // Same restoration with the base key kept and the restoration moved past
+    // the tail is the shape #1792 shipped: no violations.
+    expect(
+      validateAgainstBase(
+        [...base, '346_old'],
+        base,
+        new Map([['346_old', hashMigration(body)]]),
+        new Map([['346_old', hashMigration(body)]]),
+      ),
+    ).toEqual([]);
+  });
+
+  it('a base key absent from the branch is reported as dropped', () => {
+    const base = ['331_a', '332_b', '333_c'];
+    const v = validateAgainstBase(['331_a', '333_c'], base);
+    expect(v).toHaveLength(1);
+    expect(v[0]).toContain("base key '332_b' is missing from this branch");
+  });
+
+  it('extractPinnedHashesFromSnapshot reads snapshot rows only, key → hash', () => {
+    const src =
+      "const SNAPSHOT = [\n" +
+      "  ['332_assignment_overlap_accepted', 'eb06c6a9b4dc679fa9532a486a8941a19abcceb6e95875e0fb9d930b94eef471'],\n" +
+      "  // ['333_commented_out', 'eb06c6a9b4dc679fa9532a486a8941a19abcceb6e95875e0fb9d930b94eef471'],\n" +
+      "  ['334_next', 'a55ccb06da1509baa49df4ff5d76102e8f9ea2115ae2a3f28516b78e7966755c'],\n" +
+      '];\n';
+    expect([...extractPinnedHashesFromSnapshot(src)]).toEqual([
+      ['332_assignment_overlap_accepted', 'eb06c6a9b4dc679fa9532a486a8941a19abcceb6e95875e0fb9d930b94eef471'],
+      ['334_next', 'a55ccb06da1509baa49df4ff5d76102e8f9ea2115ae2a3f28516b78e7966755c'],
+    ]);
+  });
+
+  it('hashMigration matches the immutability snapshot digest of a live migration', () => {
+    expect(hashMigration(MIGRATIONS['346_assignment_overlap_accepted'])).toBe(
+      'eb06c6a9b4dc679fa9532a486a8941a19abcceb6e95875e0fb9d930b94eef471',
+    );
   });
 
   it('extractKeysFromSource matches registry keys only, never SQL body text', () => {

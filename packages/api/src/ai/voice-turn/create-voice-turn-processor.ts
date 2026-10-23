@@ -55,6 +55,7 @@ import {
 } from '../../db/tenant-transaction';
 import { currentTenantContext } from '../../middleware/tenant-context';
 import type { ApprovalReferenceCheck } from '../../proposals/approval-reference-checks';
+import type { RouteUnsupervisedProposalDeps } from '../../proposals/auto-approve';
 import { appendAgentTts, callerTranscriptText } from './transcript-append';
 import { redactCardNumbers } from '../privacy/pan-redact';
 import {
@@ -96,6 +97,7 @@ import {
 import type { ProposalSmsEventRepository } from '../../proposals/sms/sms-event';
 import { confirmIntent } from '../skills/confirm-intent';
 import { summarizeSession } from '../skills/summarize-session';
+import type { CallSummaryRepository } from '../skills/pg-call-summary';
 import {
   escalateToHuman,
   emergencyImmediateDial,
@@ -333,14 +335,20 @@ import {
   type SpeechTurnHandler,
 } from '../../telephony/media-streams/mediastream-adapter';
 import {
-  LOW_STT_LADDER_TERMINAL_REASON,
   createLowSttStreak,
   clearLowSttStreak,
   isLowSttConfidence,
   runLowSttConfidenceLadder as sharedLowSttLadder,
   recordLowSttLadderError,
+  parkedHandoffKind,
+  noHandoffCloseEffects,
+  type LowSttStrikeCause,
 } from './shared/low-stt-ladder';
 import { createLogger } from '../../logging/logger';
+import { resolveOwnerLineApprover } from './shared/owner-session';
+import type { ApprovalSmsRecipient, ResolvedApprover } from '../../proposals/approver-identity';
+import type { UserRepository } from '../../users/user';
+import type { VoiceApprovalSessionRef } from '../tasks/proposal-approval-task';
 import {
   detectConfirmTurnQuestion,
   type ConfirmTurnQuestionKind,
@@ -708,6 +716,11 @@ export interface VoiceTurnProcessorDeps {
   store: VoiceSessionStore;
   gateway: LLMGateway;
   pool?: Pool;
+  /**
+   * A2 — when present, end-of-call summaries are persisted to call_summaries
+   * through it (its own tenant transaction under the RLS runtime role).
+   */
+  callSummaryRepo?: CallSummaryRepository;
   auditRepo?: AuditRepository;
   proposalRepo?: ProposalRepository;
   onCallRepo?: OnCallRepository;
@@ -861,13 +874,15 @@ export interface VoiceTurnProcessorDeps {
     platformDisabled?: boolean;
     /** AUTONOMOUS_BOOKING_DISABLED === 'true' — the composed D-015 leg. */
     bookingPlatformDisabled?: boolean;
-    /** Owner phone for the one-tap approval chain SMS. */
-    ownerPhoneResolver?: (tenantId: string) => Promise<string | null | undefined>;
+    /** Owner phone for the one-tap approval chain SMS, and (B3-2) whose phone it is. */
+    resolveSmsRecipient?: (tenantId: string) => Promise<ApprovalSmsRecipient | null | undefined>;
     /** Owner-class SMS sender (never customer-gated). */
     sendOwnerSms?: (to: string, body: string) => Promise<void>;
     /** One-tap HMAC secret (approve token). */
     oneTapSecret?: string;
     buildApproveUrl?: (token: string) => string;
+    /** B1 — who the owner-phone recipient's link approves as (owner, or the backup). */
+    resolveLinkApprover?: RouteUnsupervisedProposalDeps['resolveLinkApprover'];
   };
   /**
    * D-015 — the owner one-tap UNDO SMS for a lane-approved live-call booking
@@ -924,6 +939,15 @@ export interface VoiceTurnProcessorDeps {
    * Optional: when absent, all three channels default to enabled.
    */
   settingsRepo?: SettingsRepository;
+  /**
+   * B1 follow-up — with `settingsRepo`, re-resolves the owner line's approver
+   * (role + active membership, `resolveOwnerLineApprover`) at every voice
+   * approve / reject / edit turn, and (B3-1) at the start of every turn for
+   * the line's other privileges (`refreshOwnerLine`). The Gather adapter
+   * passes its own through the deps spread. Absent → a caller-ID-established
+   * backup line approves nothing and keeps no owner-line privilege.
+   */
+  userRepo?: Pick<UserRepository, 'findById'>;
   /**
    * #1331 — clock for spoken-time resolution ("Tuesday at 2pm"), passed to
    * `resolveSchedulingEntities` as its existing `now` seam. Production leaves
@@ -1131,6 +1155,18 @@ export interface VoiceTurnProcessor {
     tenantId: string,
   ): Promise<SideEffect[] | null>;
   /**
+   * B3-1 — re-check a caller-ID-established owner line at the start of a
+   * turn, before anything reads its privileges (`ownerSession`,
+   * `extendedIntents`, `actorUserId`): kept while the line still resolves,
+   * dropped for the turn when it does not. `speechTurn` runs it first; the
+   * Gather loop, which drives the turn itself, calls it at its own start, and
+   * so does the silence turn (`handlePendingDialogueSilence`). B4-4 — the
+   * turn's approval step reuses its answer.
+   * Resolves who the line approves as now (null: it no longer resolves),
+   * or undefined — a no-op — for a session with no `ownerLineApprover`.
+   */
+  refreshOwnerLine(session: VoiceSession, tenantId: string): Promise<ResolvedApprover | null | undefined>;
+  /**
    * WS18 — consume the turn when an on-call SMS-consent capture is pending
    * on the session (the caller's utterance is the yes/no answer to "is it
    * okay to text you the quote?"). Returns the side effects to render, or
@@ -1326,7 +1362,7 @@ export interface VoiceTurnProcessor {
   maybeHandleLowSttConfidence(
     session: VoiceSession,
     confidence: number | undefined,
-  ): SideEffect[] | null;
+  ): Promise<SideEffect[] | null>;
 }
 
 export function createVoiceTurnProcessor(
@@ -3574,6 +3610,9 @@ export function createVoiceTurnProcessor(
   const ownRevocationTx: TenantTransactionRunner = deps.pool
     ? new PgTenantTransactionRunner(deps.pool)
     : new InMemoryTransactionRunner();
+  // The in-place path uses InMemoryTransactionRunner even with a pool: its
+  // scope.lock is a process-local mutex, not an advisory lock, so code run
+  // here must not rely on lock() to serialize across instances.
   const revocationTx: Pick<TenantTransactionRunner, 'run'> = {
     run: (tenantId, fn) =>
       currentTenantContext()?.tenantId === tenantId
@@ -3888,7 +3927,8 @@ export function createVoiceTurnProcessor(
         outcome,
         state: session.machine.currentState,
         channel:
-          session.channel === 'telephony' ? 'voice_inbound' : 'inapp_voice',
+          session.persistChannel ??
+          (session.channel === 'telephony' ? 'voice_inbound' : 'inapp_voice'),
         ...(session.callSid !== undefined ? { callSid: session.callSid } : {}),
         // 15.8/15.9 — persist the in-memory transcript so /api/interactions
         // can surface the full conversation without relying on the
@@ -3974,7 +4014,7 @@ export function createVoiceTurnProcessor(
             durationMs,
             gateway: deps.gateway,
             ...(intentDetected ? { intentDetected } : {}),
-            ...(deps.pool ? { pool: deps.pool } : {}),
+            ...(deps.callSummaryRepo ? { callSummaryRepo: deps.callSummaryRepo } : {}),
           });
           lastErr = null;
           break;
@@ -4055,6 +4095,97 @@ export function createVoiceTurnProcessor(
     return [{ type: 'tts_play', payload: { text: result.speak, source: 'voice_approval' } }];
   }
 
+  /**
+   * B3-1 — the owner line's privileges for THIS turn. The telephony
+   * establishment stamps `ownerLineApprover` from the caller-ID once, with
+   * `ownerSession`, `extendedIntents` and the phone actor (`actorUserId`, the
+   * subject every owner lookup is authorised by). A line carrying the stamp
+   * is re-resolved from that same caller-ID (role + active membership,
+   * `resolveOwnerLineApprover`) at the start of every turn and before every
+   * approval step: while it resolves, the line keeps what it was granted at
+   * pick-up; on a turn where it does not (the backup deactivated or replaced
+   * mid-call, the owner phone changed, the lookup failed, or it now resolves
+   * to someone other than who the line was picked up as) the caller is an
+   * unrecognised caller for that turn: no owner session, no extended
+   * lookups, no actor. A later turn that resolves the line again restores
+   * them. Returns who the line approves as now, null when it no longer
+   * resolves, or undefined for a session whose owner authority did not come
+   * from caller-ID (in-app, a harness fixture) — that session is untouched.
+   * B4-4 — the answer is kept on the session for this turn's approval step
+   * (`currentApprovalLine`), so an approval turn reads the line once.
+   */
+  async function refreshOwnerLine(
+    session: VoiceSession,
+    tenantId: string,
+  ): Promise<ResolvedApprover | null | undefined> {
+    if (!session.ownerLineApprover) return undefined;
+    const now = await recheckOwnerLine(session, session.ownerLineApprover, tenantId);
+    session.ownerLineThisTurn = { approver: now };
+    return now;
+  }
+
+  /** The re-check itself (`refreshOwnerLine`): resolve the line, set or drop its privileges. */
+  async function recheckOwnerLine(
+    session: VoiceSession,
+    pickedUpAs: NonNullable<VoiceSession['ownerLineApprover']>,
+    tenantId: string,
+  ): Promise<ResolvedApprover | null> {
+    // What establishment granted, recorded before the first re-check can drop it.
+    const grant = (session.ownerLineGrant ??= {
+      extendedIntents: session.machine.currentContext.extendedIntents === true,
+      ...(session.actorUserId ? { actorUserId: session.actorUserId } : {}),
+    });
+    const resolved = await resolveOwnerLineApprover(
+      {
+        ...(deps.settingsRepo ? { settingsRepo: deps.settingsRepo } : {}),
+        ...(deps.userRepo ? { userRepo: deps.userRepo } : {}),
+      },
+      tenantId,
+      session.callerPhone,
+    );
+    // The grant belongs to whoever the line was picked up as: the owner phone
+    // (no users row) or that one backup (their users row — B4-2: not their
+    // subject, which changes when they link a login mid-call). A caller-ID
+    // that now resolves to someone else (the owner phone moved to the
+    // backup's mobile, another teammate made backup on it) is not that line:
+    // it gets nothing while it does, and only a turn that names the same
+    // person again gets the grant back.
+    const now = resolved && resolved.userRowId === pickedUpAs.userRowId ? resolved : null;
+    session.machine.setOwnerLinePrivileges({
+      ownerSession: now !== null,
+      extendedIntents: now !== null && grant.extendedIntents,
+    });
+    if (now !== null && grant.actorUserId) session.actorUserId = grant.actorUserId;
+    else delete session.actorUserId;
+    return now;
+  }
+
+  /**
+   * B1 follow-up — who the line approves as AT THIS STEP, re-checked before
+   * every approve / reject / edit step — the way a one-tap link re-checks
+   * when tapped — so a backup demoted, deactivated or replaced mid-call acts
+   * as who they are now: a technician is turned away, and a caller-ID that
+   * no longer names an approver (or cannot be looked up) is no owner line for
+   * approvals at all. A session whose owner authority did not come from
+   * caller-ID (in-app) carries no stamp and is the owner, as before.
+   * B4-4 — the check is the one this turn ran at its start
+   * (`refreshOwnerLine`), taken once: a second settings + users read on the
+   * same turn told it nothing new. A step that finds none re-checks now. A
+   * turn whose check failed (lookup error) refuses its step — fail closed,
+   * the same turn the lookups were refused.
+   */
+  async function currentApprovalLine(
+    session: VoiceSession,
+    tenantId: string,
+  ): Promise<Pick<VoiceApprovalSessionRef, 'ownerSession' | 'approver'>> {
+    if (!session.ownerLineApprover) return { ownerSession: session.machine.currentContext.ownerSession === true };
+    const turnCheck = session.ownerLineThisTurn;
+    delete session.ownerLineThisTurn;
+    const now = turnCheck ? turnCheck.approver : await recheckOwnerLine(session, session.ownerLineApprover, tenantId);
+    if (now === null) return { ownerSession: false };
+    return { ownerSession: true, approver: { role: now.role, ...(now.userId ? { userId: now.userId } : {}) } };
+  }
+
   async function handlePendingVoiceApproval(
     session: VoiceSession,
     speechResult: string,
@@ -4077,7 +4208,9 @@ export function createVoiceTurnProcessor(
     const result = await continueTurn(approvalDeps, {
       tenantId,
       sessionId: session.id,
-      ownerSession: session.machine.currentContext.ownerSession === true,
+      // B1 — who the line approves as (the backup supervisor as their role),
+      // re-checked now: the yes that executes is this turn.
+      ...(await currentApprovalLine(session, tenantId)),
       // Session-level lockout / fail-counter state — without this the
       // challenge lockout is dead code (the task can't see prior failures).
       sessionState: session.voiceApprovalState,
@@ -4136,11 +4269,13 @@ export function createVoiceTurnProcessor(
     // stays single-target — a batch is an approve-all pass.
     const isApprove = args.intentType !== 'reject_proposal';
     const batchTrigger = /\b(all|everything|queue|what'?s\s+waiting|go\s+through)\b/i;
+    // B1 follow-up — the line's approver as of this turn.
+    const line = await currentApprovalLine(session, args.tenantId);
     if (isApprove && (batchTrigger.test(reference) || batchTrigger.test(args.utterance))) {
       const batchResult = await startVoiceBatchApproval(approvalDeps, {
         tenantId: args.tenantId,
         sessionId: session.id,
-        ownerSession,
+        ...line,
         sessionState: session.voiceApprovalState,
       });
       return applyVoiceApprovalResult(session, batchResult);
@@ -4149,7 +4284,7 @@ export function createVoiceTurnProcessor(
     const result = await startVoiceApproval(approvalDeps, {
       tenantId: args.tenantId,
       sessionId: session.id,
-      ownerSession,
+      ...line,
       // Session-level lockout state: a locked session refuses fresh
       // money/irreversible dialogues immediately (capture-class still works).
       sessionState: session.voiceApprovalState,
@@ -4213,7 +4348,8 @@ export function createVoiceTurnProcessor(
     const result = await startVoiceEdit(approvalDeps, {
       tenantId: args.tenantId,
       sessionId: session.id,
-      ownerSession,
+      // B1 follow-up — the line's approver as of this turn.
+      ...(await currentApprovalLine(session, args.tenantId)),
       sessionState: session.voiceApprovalState,
       reference,
       instruction,
@@ -4256,8 +4392,9 @@ export function createVoiceTurnProcessor(
                   ...(ac.sendOwnerSms ? { sendSms: ac.sendOwnerSms } : {}),
                   ...(ac.oneTapSecret ? { secret: ac.oneTapSecret } : {}),
                   ...(ac.buildApproveUrl ? { buildApproveUrl: ac.buildApproveUrl } : {}),
-                  ...(ac.ownerPhoneResolver
-                    ? { ownerPhoneResolver: ac.ownerPhoneResolver }
+                  ...(ac.resolveLinkApprover ? { resolveLinkApprover: ac.resolveLinkApprover } : {}),
+                  ...(ac.resolveSmsRecipient
+                    ? { resolveSmsRecipient: ac.resolveSmsRecipient }
                     : {}),
                 },
               }
@@ -5580,22 +5717,41 @@ export function createVoiceTurnProcessor(
    * inside `speechTurn`) and low acoustic confidence (via
    * `maybeHandleLowSttConfidence`). One streak for both, so a caller
    * alternating silence and mumbling still terminates at
-   * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS}. At the cap this path
-   * never touches the FSM, so the terminated-session finalize is called
-   * explicitly here (the same pattern Gather's ladder uses). The
+   * {@link MAX_CONSECUTIVE_LOW_CONFIDENCE_TURNS}. LCR-02: the cap is split
+   * on the capping strike's cause — silence closes with a call-us-back line
+   * and pages nobody; low confidence dispatches the FSM's system_failure.
+   * The FSM never reaches `terminated` here, so the terminal finalize is
+   * called explicitly (the same pattern Gather's ladder uses). The
    * `recordVoiceError` channel stays 'gather' — the only surface whose cell
    * declares this branch today.
    */
-  function runLowSttConfidenceLadder(session: VoiceSession): SideEffect[] {
+  async function runLowSttConfidenceLadder(
+    session: VoiceSession,
+    cause: LowSttStrikeCause,
+    tenantId: string,
+  ): Promise<SideEffect[]> {
     // #1601 step 2 — the rules are the shared ladder's; this owns the
     // processor's streak map and the terminal finalize.
-    const { effects, step } = sharedLowSttLadder(session, lowConfidenceStreak);
-    if (step.escalate && !session.ended) {
+    const { effects, step } = sharedLowSttLadder(session, lowConfidenceStreak, cause);
+    let out = effects;
+    let terminalReason: string | undefined = step.kind === 'silence_close' ? step.reason : undefined;
+    if (step.kind === 'system_failure') {
+      // LCR-02 — page through the FSM's own escalation. A parked <Dial> is
+      // handed back by the transport in place of the "connect you" line; a
+      // parked no-one-available message ends the call; with nothing parked
+      // the caller hears that nobody could be reached (this host builds no
+      // voicemail TwiML), never a transfer promise.
+      await executeSideEffects(session, effects, tenantId);
+      const parked = parkedHandoffKind(pendingTransferTwiml.get(session.id));
+      if (parked === 'none') out = noHandoffCloseEffects(session, step.reason);
+      if (parked !== 'dial') terminalReason = step.reason;
+    }
+    if (terminalReason !== undefined) {
       session.ended = true;
-      finalizeTerminatedSession(session, effects, LOW_STT_LADDER_TERMINAL_REASON);
+      finalizeTerminatedSession(session, [{ type: 'end_session', payload: { reason: terminalReason } }], terminalReason);
     }
     recordLowSttLadderError(step, 'gather', { callSid: session.callSid, tenantId: session.tenantId });
-    return effects;
+    return out;
   }
 
   /**
@@ -5605,10 +5761,10 @@ export function createVoiceTurnProcessor(
    * surface whose ladder lives elsewhere (media-streams' adapter-side A3)
    * is never double-gated.
    */
-  function maybeHandleLowSttConfidence(
+  async function maybeHandleLowSttConfidence(
     session: VoiceSession,
     confidence: number | undefined,
-  ): SideEffect[] | null {
+  ): Promise<SideEffect[] | null> {
     if (!servesFamilyHere('silence_low_stt_ladder')) return null;
     if (!isLowSttConfidence(confidence)) {
       // High confidence (or no signal at all) clears the streak so a later
@@ -5617,7 +5773,7 @@ export function createVoiceTurnProcessor(
       return null;
     }
 
-    return runLowSttConfidenceLadder(session);
+    return runLowSttConfidenceLadder(session, 'low_confidence', session.tenantId);
   }
 
   /**
@@ -5856,6 +6012,10 @@ export function createVoiceTurnProcessor(
       });
     }
 
+    // B3-1 — the owner line's privileges as of this turn, before anything
+    // below reads them.
+    await refreshOwnerLine(session, tenantId);
+
     // RV-071 — an in-flight owner approval dialogue consumes the turn
     // BEFORE the FSM-state branch (including silence: an empty utterance
     // is "anything else" → no action, keep for later). #962 (PR-B): gated
@@ -5897,7 +6057,7 @@ export function createVoiceTurnProcessor(
       // keeps today's `confidence_low` dispatch (media-streams' own ladder
       // is adapter-side).
       if (servesFamilyHere('silence_low_stt_ladder')) {
-        const ladderFx = runLowSttConfidenceLadder(session);
+        const ladderFx = await runLowSttConfidenceLadder(session, 'silence', tenantId);
         appendAgentTts(deps.store, session.id, ladderFx);
         return ladderFx;
       }
@@ -6668,6 +6828,7 @@ export function createVoiceTurnProcessor(
     resolveThresholdOverride,
     runSummary,
     handlePendingVoiceApproval,
+    refreshOwnerLine,
     handlePendingConsentCapture,
     handleVoiceApprovalIntent,
     handleVoiceEditIntent,

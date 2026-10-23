@@ -43,13 +43,15 @@
  * turn arriving after that point makes no model call and speaks nothing; the
  * turn marker is still recorded so the graders' per-turn windows line up.
  *
- * # Identity (unchanged, #869)
+ * # Identity (#869)
  * The phone resolves its ACTOR once, at establishment, from caller-ID
- * (`telephony/phone-actor.ts`). This harness has no users substrate, so a
- * recognized owner line (the `callerIsOwner` fixture or a caller-ID match
- * against `tenant_settings.owner_phone`) stamps a SYNTHETIC actor the
- * harness-owned `lookups.answers.resolveMemberRole` maps to `owner`; everyone
- * else gets no actor, exactly like a customer on the phone.
+ * (`telephony/phone-actor.ts`). This harness has no owner users row, so the
+ * owner phone (the `callerIsOwner` fixture or a caller-ID match against
+ * `tenant_settings.owner_phone`) stamps a SYNTHETIC actor the harness-owned
+ * `lookups.answers.resolveMemberRole` maps to `owner`. The backup
+ * supervisor's line and a team member's registered mobile resolve through
+ * the production resolver to that member's own subject (B3-7, #1604);
+ * everyone else gets no actor, exactly like a customer on the phone.
  *
  * # Synthetic CallSid
  * `TEXT_MODE_<uuid>` — unambiguous against real Twilio CallSids (`CA…`).
@@ -61,7 +63,7 @@
 import { performance } from 'node:perf_hooks';
 import { v4 as uuidv4 } from 'uuid';
 import { LLMGateway } from '../gateway/gateway';
-import { resolveOwnerSession } from '../voice-turn/shared/owner-session';
+import { ownerLineStamp, resolveOwnerLineApprover } from '../voice-turn/shared/owner-session';
 import {
   createVoiceTurnProcessor,
   type VoiceTurnProcessor,
@@ -313,6 +315,9 @@ export class TextModeDriver implements AgentDriver {
       coverageSurface: 'gather',
       proposalRepo: deps.proposalRepo,
       ...(deps.settingsRepo ? { settingsRepo: deps.settingsRepo } : {}),
+      // B1 follow-up — the processor re-resolves the owner line's approver
+      // (role + active membership) at every approval turn, as in production.
+      ...(deps.userRepo ? { userRepo: deps.userRepo } : {}),
       ...(deps.auditRepo ? { auditRepo: deps.auditRepo } : {}),
       ...(deps.onCallRepo ? { onCallRepo: deps.onCallRepo } : {}),
       ...(deps.appointmentRepo ? { appointmentRepo: deps.appointmentRepo } : {}),
@@ -338,9 +343,14 @@ export class TextModeDriver implements AgentDriver {
     const synthetic = `${TEXT_MODE_CALLSID_PREFIX}${uuidv4()}`;
     const tenantId = opts.tenantId;
     // RV-070 owner-line recognition at session establishment (mirrors
-    // TwilioGatherAdapter.resolveOwnerSession): an explicit fixture flag OR a
-    // caller-ID match against tenant_settings.owner_phone. Fail-closed.
-    const ownerSession = await this.resolveOwnerSession(opts);
+    // TwilioGatherAdapter.establishInboundSession): an explicit fixture flag
+    // OR a caller-ID match against tenant_settings.owner_phone / the backup
+    // supervisor's mobile. Fail-closed.
+    // B1 follow-up — and WHO the line approves as, from that same caller-ID
+    // match: the owner phone is the owner, the backup supervisor is their own
+    // role and user (a technician backup approves nothing).
+    const lineApprover = await resolveOwnerLineApprover(this.deps, tenantId, opts.callerId ?? undefined);
+    const ownerSession = opts.callerIsOwner === true || lineApprover !== null;
     const session = this.deps.voiceSessionStore.create(tenantId, 'telephony', {
       callSid: synthetic,
       ...(ownerSession ? { ownerSession: true } : {}),
@@ -352,25 +362,43 @@ export class TextModeDriver implements AgentDriver {
     if (this.deps.bus) {
       this.deps.bus.subscribe(session);
     }
-
-    // #869 — ACTOR, stamped ONCE at establishment and never from utterance
-    // content (telephony/phone-actor.ts). See the module doc on identity.
-    if (ownerSession) {
-      session.actorUserId = vqOwnerActorId(tenantId);
-      // The owner line is identity-resolved the instant the session is
-      // established (the caller-ID matched the owner phone). Production has
-      // no lookup skill for this, so the identity stamp is recorded here for
-      // the floor PII grader. The PIN challenge remains the money gate.
-      session.events.emit(
-        'voice-event',
-        lookupExecutedEvent(OWNER_IDENTITY_LOOKUP_SKILL, 0, true),
-      );
-    }
+    // B1 — carried on the session for every approval turn, exactly as the
+    // telephony establishment stamps it. A fixture forced to the owner line
+    // with no caller-ID match carries none: that is the owner.
+    if (lineApprover) session.ownerLineApprover = ownerLineStamp(lineApprover);
 
     // The caller's number as Twilio sends it; '' when blocked/withheld
     // (establishInboundSession pins it for both transports).
     const from = opts.callerId && !opts.callerIdBlocked ? opts.callerId : '';
     if (from) session.callerPhone = from;
+
+    // #869 — ACTOR, stamped ONCE at establishment and never from utterance
+    // content (telephony/phone-actor.ts). See the module doc on identity.
+    if (ownerSession) {
+      // B3-7 — the backup supervisor's line resolves its actor exactly as
+      // production does (`resolvePhoneActor`: their registered mobile → their
+      // own subject; nothing resolved → no actor, never the owner — B4-1), so
+      // their lookups are authorised as their role. The owner phone (or a forced owner
+      // fixture) keeps the synthetic owner subject: the harness's stand-in
+      // for the owner_phone bridge.
+      if (lineApprover?.via === 'backup_supervisor') {
+        const actor = this.deps.userRepo
+          ? await resolvePhoneActor({ userRepo: this.deps.userRepo }, tenantId, from, lineApprover)
+          : null;
+        if (actor) session.actorUserId = actor.userId;
+      } else {
+        session.actorUserId = vqOwnerActorId(tenantId);
+      }
+      // The owner line is identity-resolved the instant the session is
+      // established (the caller-ID matched the owner phone or the backup's
+      // mobile). Production has no lookup skill for this, so the identity
+      // stamp is recorded here for the floor PII grader. The PIN challenge
+      // remains the money gate.
+      session.events.emit(
+        'voice-event',
+        lookupExecutedEvent(OWNER_IDENTITY_LOOKUP_SKILL, 0, true),
+      );
+    }
 
     // #1604 — a caller-ID that matches a team member's registered mobile is
     // the D-026 phone actor, resolved ONCE here through the production
@@ -378,7 +406,7 @@ export class TextModeDriver implements AgentDriver {
     // exactly as establishInboundSession resolves it. The owner line keeps
     // its synthetic subject above; the owner-phone bridge is not exercised.
     if (!ownerSession && from && this.deps.userRepo) {
-      const actor = await resolvePhoneActor({ userRepo: this.deps.userRepo }, tenantId, from, false);
+      const actor = await resolvePhoneActor({ userRepo: this.deps.userRepo }, tenantId, from, null);
       if (actor) {
         session.actorUserId = actor.userId;
         session.events.emit(
@@ -476,22 +504,6 @@ export class TextModeDriver implements AgentDriver {
     } catch {
       return null;
     }
-  }
-
-  /**
-   * WS21b — resolve whether this caller is a recognized owner line. An
-   * explicit fixture `callerIsOwner` wins; otherwise mirror production's
-   * caller-ID identity check (`isApproverPhone` against
-   * tenant_settings.owner_phone). Best-effort + fail-closed: any lookup
-   * failure resolves to non-owner so a degraded dependency can never mint an
-   * owner session.
-   */
-  private async resolveOwnerSession(opts: AgentDriverStartOpts): Promise<boolean> {
-    if (opts.callerIsOwner === true) return true;
-    // #1601 step 2 — the shared RV-070 resolver the Gather adapter uses
-    // (`ai/voice-turn/shared/owner-session.ts`), userRepo included, so the
-    // backup supervisor's mobile is an owner line here as in production.
-    return resolveOwnerSession(this.deps, opts.tenantId, opts.callerId ?? undefined);
   }
 
   async speak(

@@ -49,6 +49,7 @@ import { classifyCallerSafety } from '../../../src/ai/agents/customer-calling/em
 import { EMERGENCY_SAFETY_LINE } from '../../../src/ai/agents/customer-calling/emergency-detector';
 import { UpdateBrandVoiceExecutionHandler } from '../../../src/proposals/execution/brand-voice-handler';
 import { InMemoryBrandVoiceRepository } from '../../../src/tenants/brand/in-memory-brand-voice-repository';
+import { markExecuted } from '../../helpers/proposal-status';
 
 /** A configured (opted-in) discount policy + a grounded $250 quote, for U6 tests. */
 const u6DiscountDeps = {
@@ -1520,6 +1521,51 @@ describe('createVoiceTurnProcessor.runSummary', () => {
       'escalated_to_human',
     );
   });
+
+  // A2 — the summary row goes through the injected repository (its own
+  // tenant transaction under the RLS runtime role), not a raw pool.query.
+  it('persists the end-of-call summary through deps.callSummaryRepo', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    const create = vi.fn().mockResolvedValue({ id: 'cs-1' });
+    const processor = createVoiceTurnProcessor({
+      store,
+      gateway: makeGatewayReturning(JSON.stringify({ summary: 'Caller asked about a tune-up.' })),
+      businessName: 'Acme Plumbing',
+      systemActorId: 'test-actor',
+      callSummaryRepo: { create },
+    });
+    const session = store.create('tenant-abc', 'telephony', { callSid: 'CA-summary' });
+    session.transcript.push('agent: Acme Plumbing, how can I help?', 'caller: I need a tune-up.');
+
+    await processor.runSummary(session);
+
+    expect(create).toHaveBeenCalledTimes(1);
+    expect(create).toHaveBeenCalledWith('tenant-abc', {
+      callId: null,
+      summary: 'Caller asked about a tune-up.',
+      detectedIntent: null,
+      proposalIds: [],
+      qualityScore: null,
+    });
+  });
+
+  it('a failed summary write never fails runSummary (call teardown)', async () => {
+    const store = new VoiceSessionStore({ startInterval: false });
+    const create = vi.fn().mockRejectedValue(new Error('insert failed'));
+    const processor = createVoiceTurnProcessor({
+      store,
+      gateway: makeGatewayReturning(JSON.stringify({ summary: 'Caller asked about a tune-up.' })),
+      businessName: 'Acme Plumbing',
+      systemActorId: 'test-actor',
+      callSummaryRepo: { create },
+    });
+    const session = store.create('tenant-abc', 'telephony', { callSid: 'CA-summary-fail' });
+    session.transcript.push('caller: I need a tune-up.');
+
+    await expect(processor.runSummary(session)).resolves.toBeUndefined();
+    // Retried like any other summary failure (3 attempts), then logged.
+    expect(create).toHaveBeenCalledTimes(3);
+  });
 });
 
 // ─── Codex P1 round 5 — onSessionTerminated awaitable + persist fields ──────
@@ -2265,7 +2311,7 @@ describe('ANS-001 — E1 booking revocation (conditional write + compensation)',
         createdBy: 'voice',
       }),
     );
-    await proposalRepo.updateStatus('tenant-e1', booking.id, 'executed', {
+    await markExecuted(proposalRepo, 'tenant-e1', booking.id, {
       resultEntityId: 'appt-77',
     });
     session.proposalIds.push(booking.id);
@@ -2566,7 +2612,7 @@ describe('ANS-001 — E1 tenant alert (owner cell, durable fallback, push fan-ou
         createdBy: 'voice',
       }),
     );
-    await proposalRepo.updateStatus('tenant-e1', booking.id, 'executed');
+    await markExecuted(proposalRepo, 'tenant-e1', booking.id);
     session.proposalIds.push(booking.id);
 
     // Same order the FSM emits them in.

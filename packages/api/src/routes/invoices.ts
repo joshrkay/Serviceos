@@ -25,7 +25,7 @@ import { AuditRepository, createAuditEvent, createAuditEventBestEffort } from '.
 import { resolveDefaultTaxRateBps, SettingsRepository } from '../settings/settings';
 import { PaymentRepository, recordPayment } from '../invoices/payment';
 import { applyDepositCreditToInvoice } from '../invoices/deposit-credit';
-import { SendService } from '../notifications/send-service';
+import { SendService, PayLinkUnavailableError, NotDeliveredError } from '../notifications/send-service';
 import { Job, JobRepository } from '../jobs/job';
 import { Customer, CustomerRepository } from '../customers/customer';
 import { EstimateRepository } from '../estimates/estimate';
@@ -36,6 +36,7 @@ import { getCustomerMemberDiscountBps } from '../agreements/member-pricing';
 import { createLogger } from '../logging/logger';
 import { PaymentLinkProvider } from '../payments/payment-link-provider';
 import { createInvoicePaymentLink } from '../invoices/invoice-payment-link';
+import { CollectOnSiteError, PaymentModeUnavailableError } from '../invoices/payment-collection-mode';
 import { ConnectAccountResolver } from '../invoices/public-invoice-service';
 import { InvoiceScheduleRepository } from '../invoices/invoice-schedule';
 import { wholeInvoiceBlockedByPlan } from '../invoices/milestone-billing-guard';
@@ -497,6 +498,15 @@ export function createInvoiceRouter(
         });
         res.json(result);
       } catch (err) {
+        // S5a-4 (U8) — a payment-mode refusal writes nothing but its audit
+        // rows (the attach rolled back to its savepoint; the CAS clear is a
+        // no-op on a link that was never stored), and the link it minted is
+        // already deactivated at Stripe. Commit those rows with the 409/503,
+        // or the request transaction's rollback would erase the only record
+        // of that link.
+        if (err instanceof CollectOnSiteError || err instanceof PaymentModeUnavailableError) {
+          res.locals.forceCommit = true;
+        }
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
       }
@@ -688,7 +698,7 @@ export function createInvoiceRouter(
           entityId: routeParam(req, 'id'),
           metadata: {
             channels: result.channelsSent.map((c) => c.channel),
-            dispatchIds: result.channelsSent.map((c) => c.dispatchId),
+            dispatchIds: result.channelsSent.flatMap((c) => (c.dispatchId ? [c.dispatchId] : [])),
             // S5a-1 (U8) — the payment policy applied at SEND time (the
             // value then wins over whatever held when the invoice was issued).
             paymentCollectionMode: result.paymentCollectionMode,
@@ -701,6 +711,13 @@ export function createInvoiceRouter(
         // where SendService transitions the estimate to 'sent' internally.
         res.status(202).json(result);
       } catch (err) {
+        // D-045 — a refused send keeps what it wrote: the audit of a payment
+        // setting that couldn't be read, or the pay link it already made
+        // before every channel failed. A rollback would erase the only record
+        // of the refusal, or orphan a live Stripe link.
+        if (err instanceof PayLinkUnavailableError || err instanceof NotDeliveredError) {
+          res.locals.forceCommit = true;
+        }
         const { statusCode, body } = toErrorResponse(err);
         res.status(statusCode).json(body);
       }

@@ -55,7 +55,7 @@ import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { PgWorkingHoursRepository } from '../../src/availability/pg-working-hours';
 import { PgUnavailableBlockRepository } from '../../src/availability/pg-unavailable-block';
 import { HaversineFallbackProvider } from '../../src/scheduling/travel-time/haversine-fallback';
-import { StubSkillMatcher } from '../../src/scheduling/skill-matcher';
+import { noSkillConstraints } from '../helpers/no-skill-constraints';
 import { FeasibilityDependencies } from '../../src/scheduling/feasibility-types';
 import { createProposalsRouter } from '../../src/routes/proposals';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
@@ -68,6 +68,7 @@ import { ProposalExecutor } from '../../src/proposals/execution/executor';
 import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
 import { createExecutionHandlerRegistry, type ExecutionContext } from '../../src/proposals/execution/handlers';
 import { UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
+import { PgTenantTransactionRunner } from '../../src/db/tenant-transaction';
 
 // #1402 — far-future anchor: the reschedule proposal below would otherwise move a
 // visit to a start in the past, which execution now refuses.
@@ -198,7 +199,7 @@ describe('Real Redis + real Postgres — dispatch presence & revision-token orde
     });
     app.use(
       '/api/proposals',
-      createProposalsRouter(proposalRepo, appointmentRepo, auditRepo, feasibilityDeps),
+      createProposalsRouter(proposalRepo, new PgTenantTransactionRunner(pool), appointmentRepo, auditRepo, feasibilityDeps),
     );
     return app;
   }
@@ -262,7 +263,7 @@ describe('Real Redis + real Postgres — dispatch presence & revision-token orde
       workingHoursRepo: new PgWorkingHoursRepository(pool),
       unavailableBlockRepo: new PgUnavailableBlockRepository(pool),
       travelTimeProvider: new HaversineFallbackProvider(),
-      skillMatcher: new StubSkillMatcher(),
+      skillMatcher: noSkillConstraints(),
     };
 
     const before = await appointmentRepo.findById(tenantA.tenantId, appointmentId);

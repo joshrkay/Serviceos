@@ -42,6 +42,8 @@ export const jobSchema = z.object({
   depositStripePaymentLinkUrl: z.string().optional(),
   depositCreditedToInvoiceId: z.string().optional(),
   moneyState: jobMoneyStateSchema.optional(),
+  /** Dispatch FR-2 phase 2 — canonical skill tags (./skill-tags.ts) an assigned technician must hold. */
+  requiredSkills: z.array(z.string()).optional(),
   createdBy: z.string(),
   createdAt: z.string(),
   updatedAt: z.string(),

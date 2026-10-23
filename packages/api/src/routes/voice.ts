@@ -170,6 +170,10 @@ export function createVoiceRouter(
    * browser dictation client. The long-lived DEEPGRAM_API_KEY never leaves the
    * server; the browser opens the streaming WebSocket with this short-lived
    * token. Authenticated + tenant-scoped like every other voice route.
+   *
+   * Runs outside the request transaction (LLM_LONG_CALL_ROUTES): the grant
+   * fetch is an external call with no deadline of its own. The audit row is
+   * the only DB touch and names the tenant explicitly.
    */
   router.post(
     '/stream-token',
@@ -221,7 +225,11 @@ export function createVoiceRouter(
       }
 
       try {
-        const minted = await mintDeepgramStreamToken({ apiKey: process.env.DEEPGRAM_API_KEY });
+        const minted = await mintDeepgramStreamToken({
+          apiKey: process.env.DEEPGRAM_API_KEY,
+          sttProvider: process.env.STT_PROVIDER,
+          nodeEnv: process.env.NODE_ENV,
+        });
         await auditMint('voice.stream_token_minted', {
           model: minted.model,
           expiresInSeconds: minted.expiresInSeconds,
@@ -327,6 +335,11 @@ export function createVoiceRouter(
    *
    * S3-2 — the per-user cap is charged after the cache lookup, one unit per
    * clip synthesized, from the budget the batch route shares.
+   *
+   * Runs outside the request transaction (LLM_LONG_CALL_ROUTES in
+   * middleware/tenant-context.ts): the provider call can take up to 30s, and
+   * it must not pin a pooled connection meanwhile. Every DB touch here (the
+   * voice setting, the audit row) is a repo call with an explicit tenantId.
    */
   router.post(
     '/tts',
@@ -458,8 +471,8 @@ export function createVoiceRouter(
    * lines) while the current one plays; three single requests every few
    * seconds would meet the per-user cap for a fast owner, so a turn is one
    * request. The batch is not a way around the cap: it is bounded to one
-   * turn (ai/tts/tts-batch.ts — at most three items, 240 characters each,
-   * 600 in all, a 400 otherwise before anything is charged or looked up),
+   * turn (ai/tts/tts-batch.ts — at most four items, 320 characters each,
+   * 900 in all, a 400 otherwise before anything is charged or looked up),
    * cache hits are resolved first and cost nothing, the misses are charged
    * in one go from the same per-user budget as POST /tts (a turn that does
    * not fit is a 429 and nothing is synthesized), and each synthesized clip
@@ -467,6 +480,10 @@ export function createVoiceRouter(
    * whole turn (the client degrades the turn); clips already made stay
    * cached, and the units already taken are not refunded, since the
    * provider may have billed the failed call.
+   *
+   * Outside the request transaction, like POST /tts: up to four clips in
+   * sequence can outlast the 60s idle-in-transaction timeout, which killed
+   * the backend and answered 500 for a turn whose clips were already billed.
    */
   router.post(
     '/tts/batch',
@@ -580,6 +597,11 @@ export function createVoiceRouter(
   /**
    * POST /transcribe — Synchronous transcription.
    * Accepts multipart form with 'audio' field, returns { transcript, metadata } immediately.
+   *
+   * Runs outside the request transaction (LLM_LONG_CALL_ROUTES): reading the
+   * upload and the Whisper call (60s timeout) must not pin a pooled
+   * connection. Its one DB touch, the completed/failed audit row, names the
+   * tenant explicitly and commits on its own.
    */
   router.post(
     '/transcribe',

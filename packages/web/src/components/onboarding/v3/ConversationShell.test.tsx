@@ -10,7 +10,7 @@
 import { act, cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router';
-import type { OnboardingDraft } from '@ai-service-os/shared';
+import { narrateTurn, type OnboardingDraft } from '@ai-service-os/shared';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { fullyAnsweredDraft, plumbingCleDraft, plumbingCmhDraft, withChoices } from './__fixtures__';
 import { PLANS, statusAt } from './__fixtures__/after';
@@ -46,6 +46,7 @@ const REFUSED_CELL = 'That does not look like a US cell number. Include the 10-d
 interface Server {
   draft: OnboardingDraft | null;
   status: object;
+  streamToken?: number;
   /** Forced outcomes for the next staged choices, in order; after that the stub behaves. */
   stageFaults?: StageFault[];
   /** Forced outcomes for the next creates of the draft, in order; after that the stub behaves. */
@@ -66,7 +67,7 @@ interface Server {
 interface Request {
   method: string;
   path: string;
-  body: { choice?: unknown; version?: number; items?: string[]; text?: string } | undefined;
+  body: { choice?: unknown; version?: number; items?: string[]; text?: string; metro?: string } | undefined;
 }
 
 const TTS_ERRORS = {
@@ -86,7 +87,6 @@ function ttsAnswer(path: string, method: string, body: Request['body']): Respons
   if (mode !== 'ok') return json(mode, TTS_ERRORS[mode]);
   if (path === '/api/voice/tts/batch') return json(200, { clips: body!.items!.map((text, i) => ({ text, ...clipFor(text, i) })) });
   return json(200, clipFor(body!.text!, 0));
-  body: { choice?: unknown; version?: number; metro?: string } | undefined;
 }
 
 let server: Server;
@@ -106,6 +106,13 @@ function stubNetwork(initial: Server) {
       requests.push({ method, path, body });
       const tts = ttsAnswer(path, method, body);
       if (tts) return resolved(tts);
+      if (path.startsWith('/api/voice/stream-token') && method === 'POST') {
+        return resolved(
+          (server.streamToken ?? 200) === 200
+            ? json(200, { token: 'dg-temp', expiresIn: 30, model: 'nova-3' })
+            : json(503, { error: 'NOT_CONFIGURED', message: 'Live transcription is not configured' }),
+        );
+      }
       if (path === '/api/onboarding/status') return resolved(json(200, server.status));
       if (path === '/api/onboarding/billing/plans') return resolved(json(200, { plans: PLANS }));
       if (path === '/api/onboarding/draft' && method === 'GET') {
@@ -274,9 +281,11 @@ describe('ConversationShell', () => {
 
       // Turn 1: Rivet's own words, both options, the typical one marked, nothing selected, Next waiting.
       expect(await onTurn(0)).toBeInTheDocument();
-      // Rivet speaks (S3-3): tapping an option plays it. Nothing listens yet (S3-5), so nothing says "say first".
+      // Rivet speaks: tapping an option plays it. This browser cannot listen (jsdom has no microphone),
+      // so the line keeps only its hearing half; "Rivet listens" below has the whole line.
       expect(screen.getByText('Tap one to hear it.')).toBeInTheDocument();
       expect(screen.queryByText(/say "first"|say "second"/i)).not.toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Answer out loud' })).not.toBeInTheDocument();
       expect(screen.getAllByRole('radio')).toHaveLength(2);
       expect(screen.getAllByText('Most shops like yours')).toHaveLength(1);
       expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
@@ -488,10 +497,9 @@ describe('ConversationShell', () => {
   });
 
   describe('Rivet speaks', () => {
-    const lines = (i: number) => {
-      const t = draftJson.assembled.choices.find((c) => c.settingKey === turn(i).key)!;
-      return [t.question, t.options[0].rivetLine, t.options[1].rivetLine];
-    };
+    const choiceAt = (i: number) => draftJson.assembled.choices.find((c) => c.settingKey === turn(i).key)!;
+    /** The turn's narration: what one batch asks for, less any line already fetched for an earlier turn. */
+    const lines = (i: number) => narrateTurn(choiceAt(i));
 
     it('the "Make it mine" tap plays the audio inside the tap, then the first question is spoken in the server voice', async () => {
       stubNetwork({ draft: draftJson, status: statusBody(), tts: 'ok' });
@@ -503,7 +511,7 @@ describe('ConversationShell', () => {
       expect(play).toHaveBeenCalled();
       await onTurn(0);
       await waitFor(() => expect(played).toContain(srcFor(turn(0).question)));
-      // The turn's three lines came in one request (fetched while Ready was on screen).
+      // The turn's narration came in one request (fetched while Ready was on screen).
       expect(ttsBatches()).toContainEqual(lines(0));
       await waitFor(() =>
         expect(track.trackFunnel).toHaveBeenCalledWith(
@@ -527,7 +535,7 @@ describe('ConversationShell', () => {
       await waitFor(() => expect(screen.queryByText('Speaking')).not.toBeInTheDocument());
     });
 
-    it('tapping an option plays what Rivet would say, from the turn already fetched', async () => {
+    it('tapping an option plays what Rivet would say to a caller, as one clip of its own', async () => {
       stubNetwork({ draft: draftJson, status: statusBody(), tts: 'ok' });
       renderShell();
       await makeItMine();
@@ -540,12 +548,12 @@ describe('ConversationShell', () => {
       await waitFor(() => expect(played.at(-1)).toBe(srcFor(turn(2).question)));
       const before = ttsPosts().length;
       await userEvent.click(screen.getByRole('radio', { name: turn(2).b }));
-      await waitFor(() => expect(played.at(-1)).toBe(srcFor(lines(2)[2])));
+      await waitFor(() => expect(played.at(-1)).toBe(srcFor(choiceAt(2).options[1].rivetLine)));
       expect(screen.getByRole('radio', { name: turn(2).b })).toHaveAttribute('aria-checked', 'true');
-      expect(ttsPosts().length).toBe(before);
+      expect(ttsPosts().length).toBe(before + 1);
     });
 
-    it('counts the clips of a full pass: one request a turn, at most three clips each, never two turns ahead', async () => {
+    it('counts the clips of a full pass: one request a turn, at most four clips each, a shared line fetched once, never two turns ahead', async () => {
       stubNetwork({ draft: draftJson, status: statusBody(), tts: 'ok' });
       renderShell();
       await makeItMine();
@@ -564,9 +572,16 @@ describe('ConversationShell', () => {
       }
       expect(await screen.findByRole('heading', READBACK)).toBeInTheDocument();
       const batches = ttsBatches();
-      expect(batches).toEqual(TURNS.map((_, i) => lines(i)));
-      expect(batches.every((items) => items.length <= 3)).toBe(true);
-      expect(batches.flat()).toHaveLength(21);
+      const seen = new Set<string>();
+      const expected = TURNS.map((_, i) => {
+        const fresh = lines(i).filter((l) => !seen.has(l));
+        fresh.forEach((l) => seen.add(l));
+        return fresh;
+      });
+      expect(batches).toEqual(expected);
+      expect(batches.every((items) => items.length <= 4)).toBe(true);
+      // Seven questions, fourteen option lines, and "Most shops pick the first. Which one?" once.
+      expect(batches.flat()).toHaveLength(22);
     });
 
     it.each([429, 501, 502] as const)('a %s from the voice routes still leaves every turn answerable by tap, with no alert', async (status) => {
@@ -594,6 +609,147 @@ describe('ConversationShell', () => {
       expect(await screen.findByRole('heading', READBACK)).toBeInTheDocument();
       await waitFor(() => expect(played.at(-1)).toBe(srcFor(READBACK.name)));
       expect(ttsPosts().find((r) => r.body?.text === READBACK.name)?.path).toBe('/api/voice/tts');
+    });
+  });
+
+  describe('Rivet listens (S3-5)', () => {
+    // The microphone and Deepgram's socket are the browser/vendor boundary, faked as in
+    // useDeepgramDictation.test.ts; the shell, its hooks, the matcher and the stage path are real.
+    class FakeWebSocket {
+      static OPEN = 1;
+      static instances: FakeWebSocket[] = [];
+      readyState = 0;
+      onopen: (() => void) | null = null;
+      onmessage: ((e: { data: string }) => void) | null = null;
+      onerror: (() => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor(readonly url: string) {
+        FakeWebSocket.instances.push(this);
+      }
+      send() {}
+      close() {
+        this.readyState = 3;
+      }
+    }
+    class FakeMediaRecorder {
+      state = 'inactive';
+      ondataavailable: unknown = null;
+      start() {
+        this.state = 'recording';
+      }
+      stop() {
+        this.state = 'inactive';
+      }
+    }
+    let micRefused: boolean;
+    const getUserMedia = vi.fn(async () => {
+      if (micRefused) throw new DOMException('Permission denied', 'NotAllowedError');
+      return { getTracks: () => [{ stop: vi.fn() }] };
+    });
+
+    beforeEach(() => {
+      FakeWebSocket.instances = [];
+      micRefused = false;
+      getUserMedia.mockClear();
+      vi.stubGlobal('WebSocket', FakeWebSocket as unknown as typeof WebSocket);
+      vi.stubGlobal('MediaRecorder', FakeMediaRecorder as unknown as typeof MediaRecorder);
+      vi.stubGlobal('navigator', { ...navigator, mediaDevices: { getUserMedia } });
+    });
+
+    /** The turn's socket opens (Deepgram accepted the token). */
+    async function socketOpens() {
+      await waitFor(() => expect(FakeWebSocket.instances.at(-1)?.onopen).toBeTruthy());
+      act(() => {
+        const ws = FakeWebSocket.instances.at(-1)!;
+        ws.readyState = 1;
+        ws.onopen?.();
+      });
+    }
+    function ownerSays(transcript: string) {
+      act(() => {
+        FakeWebSocket.instances
+          .at(-1)!
+          .onmessage?.({ data: JSON.stringify({ is_final: true, speech_final: true, channel: { alternatives: [{ transcript }] } }) });
+      });
+    }
+
+    it('asks the greeting with the whole line, and a spoken "the second one" saves through the same call as a tap', async () => {
+      stubNetwork({ draft: draftJson, status: statusBody() });
+      renderShell();
+      await makeItMine();
+      await onTurn(0);
+      expect(getUserMedia).toHaveBeenCalledTimes(1);
+      expect(screen.getByText('Tap one to hear it. Say "first" or "second" to pick.')).toBeInTheDocument();
+      await socketOpens();
+      expect(screen.getByRole('button', { name: 'Answer out loud' })).toHaveAttribute('aria-pressed', 'true');
+
+      ownerSays('the second one');
+      expect(await onTurn(1)).toBeInTheDocument();
+      expect(stagedCalls().map((r) => [r.path, r.body])).toEqual([
+        ['/api/onboarding/draft/choices/greeting', { choice: { option: 'b' }, version: 1 }],
+      ]);
+      expect(funnel('v3_choice_made')).toEqual([{ choice_key: 'greeting', answer_mode: 'voice', option: 'b', is_most_shops: false }]);
+      // The transcript never reaches the funnel.
+      expect(JSON.stringify(track.trackFunnel.mock.calls)).not.toContain('second one');
+      // The next turn listens on its own socket, on the same microphone.
+      await socketOpens();
+      expect(FakeWebSocket.instances).toHaveLength(2);
+      expect(getUserMedia).toHaveBeenCalledTimes(1);
+    });
+
+    it('shows "Heard" under the card it picked while the answer is being saved', async () => {
+      let release!: () => void;
+      const stageGate = new Promise<void>((r) => {
+        release = r;
+      });
+      stubNetwork({ draft: draftJson, status: statusBody(), stageGate });
+      renderShell();
+      await makeItMine();
+      await onTurn(0);
+      await socketOpens();
+      ownerSays('the first one');
+      const picked = screen.getByRole('radio', { name: turn(0).a });
+      expect(picked).toHaveAttribute('aria-checked', 'true');
+      expect(within(picked).getByText('Heard: “the first one”')).toBeInTheDocument();
+      release();
+      expect(await onTurn(1)).toBeInTheDocument();
+      expect(funnel('v3_choice_made')).toHaveLength(1);
+    });
+
+    it('with the microphone refused, every turn is still answered by tap, with no alert and no mic', async () => {
+      micRefused = true;
+      stubNetwork({ draft: draftJson, status: statusBody() });
+      renderShell();
+      await makeItMine();
+      for (let i = 0; i < TURNS.length; i += 1) {
+        expect(await onTurn(i)).toBeInTheDocument();
+        expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+        expect(screen.queryByRole('button', { name: 'Answer out loud' })).not.toBeInTheDocument();
+        if (i === 0) {
+          expect(screen.getByText('Tap one to hear it.')).toBeInTheDocument();
+          expect(screen.queryByText(/say "first"/i)).not.toBeInTheDocument();
+        }
+        await choose(turn(i).a);
+      }
+      expect(await screen.findByRole('heading', READBACK)).toBeInTheDocument();
+      expect(funnel('v3_choice_made').map((e) => (e as { answer_mode: string }).answer_mode)).toEqual(Array(7).fill('tap'));
+      expect(funnel('v3_voice_input')).toEqual([{ state: 'denied' }]);
+      expect(requests.filter((r) => r.path.startsWith('/api/voice/stream-token'))).toEqual([]);
+      expect(getUserMedia).toHaveBeenCalledTimes(1);
+    });
+
+    it('with no transcription on the server (503), the mic goes away and the turn is the cards', async () => {
+      stubNetwork({ draft: draftJson, status: statusBody(), streamToken: 503 });
+      renderShell();
+      await makeItMine();
+      await onTurn(0);
+      await waitFor(() => expect(funnel('v3_voice_input')).toEqual([{ state: 'unavailable' }]));
+      expect(screen.queryByRole('button', { name: 'Answer out loud' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument();
+      expect(screen.getByText('Tap one to hear it.')).toBeInTheDocument();
+      await choose(turn(0).a);
+      expect(await onTurn(1)).toBeInTheDocument();
+      expect(requests.filter((r) => r.path.startsWith('/api/voice/stream-token'))).toHaveLength(1);
     });
   });
 
