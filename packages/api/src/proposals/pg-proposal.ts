@@ -577,6 +577,25 @@ export class PgProposalRepository extends PgBaseRepository implements ProposalRe
     });
   }
 
+  async mergeSourceContext(tenantId: string, id: string, entries: Record<string, unknown>): Promise<Proposal | null> {
+    // R2-2 — one UPDATE: jsonb `||` adds the keys to source_context as it
+    // stands in the row (a NULL or non-object one counts as empty), so a
+    // write that committed after the caller's read is kept.
+    return this.withTenantTransaction(tenantId, async (client) => {
+      const result = await client.query(
+        `UPDATE proposals
+            SET source_context =
+                  (CASE WHEN jsonb_typeof(source_context) = 'object' THEN source_context ELSE '{}'::jsonb END)
+                  || $3::jsonb,
+                updated_at = NOW()
+          WHERE tenant_id = $1 AND id = $2
+          RETURNING *`,
+        [tenantId, id, JSON.stringify(entries)]
+      );
+      return result.rows.length > 0 ? mapRow(result.rows[0]) : null;
+    });
+  }
+
   /** The `update` write on `client`, inside a transaction the caller owns. */
   private async updateOn(
     client: PoolClient,

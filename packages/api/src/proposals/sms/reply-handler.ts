@@ -890,13 +890,14 @@ async function applyEditInstruction(
   // stamped on sourceContext (the review UI's annotation carrier, like
   // missingFields/pendingReference) so "your note is attached" is true:
   // the operator sees WHAT the owner asked to change, in the queue.
-  await deps.proposalRepo.update(ctx.tenantId, proposal.id, {
-    sourceContext: {
-      ...(proposal.sourceContext ?? {}),
-      pendingSmsEditRequest: {
-        instruction,
-        receivedAt: (deps.now ? deps.now() : new Date()).toISOString(),
-      },
+  // R2-2 — added to the row as it stands, never written back from
+  // `proposal`: that copy was read before the interpreter's LLM call, so a
+  // pick that landed in between had its picker put back and its resolution
+  // dropped.
+  await deps.proposalRepo.mergeSourceContext(ctx.tenantId, proposal.id, {
+    pendingSmsEditRequest: {
+      instruction,
+      receivedAt: (deps.now ? deps.now() : new Date()).toISOString(),
     },
   });
   await audit(deps, ctx, 'proposal.sms_edit_requested', proposal.id, {});

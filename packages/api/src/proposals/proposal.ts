@@ -1214,6 +1214,14 @@ export interface ProposalRepository {
     read: Proposal,
     updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt' | 'status'>>
   ): Promise<Proposal | null>;
+  /**
+   * R2-2 — sets these top-level sourceContext keys on the row as it stands,
+   * leaving every other key as it is now, in one write with no read. For a
+   * writer that only adds an annotation (the voice and text "your note is
+   * attached" stamps) and must not put back a sourceContext it read earlier.
+   * Returns null when the row is missing (or another tenant's).
+   */
+  mergeSourceContext(tenantId: string, id: string, entries: Record<string, unknown>): Promise<Proposal | null>;
 
   /**
    * System-level query for the auto-delivery worker. Returns all
@@ -1821,6 +1829,12 @@ export class InMemoryProposalRepository implements ProposalRepository {
     const now = await this.findById(tenantId, id);
     if (!now || proposalChangedSince(read, now)) return null;
     return this.update(tenantId, id, updates);
+  }
+
+  async mergeSourceContext(tenantId: string, id: string, entries: Record<string, unknown>): Promise<Proposal | null> {
+    const now = this.proposals.get(id);
+    if (!now || now.tenantId !== tenantId) return null;
+    return this.update(tenantId, id, { sourceContext: { ...(now.sourceContext ?? {}), ...entries } });
   }
 
   async findReadyForExecution(windowMs: number): Promise<Proposal[]> {
