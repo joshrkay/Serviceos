@@ -1009,7 +1009,7 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
   {
     file: 'src/voice/voice-config.ts', fn: 'refreshVapiFirstMessage', access: 'pool.query', count: 1,
     category: 'tenant_context_applied', tables: ['tenant_settings'],
-    why: "Both callers (PATCH /api/settings/language after commit, and scripts/backfill-vapi-assistant-notice.ts) pass { query } wrapping tenantQuery(pool, tenantId, …), so the tenant_settings read runs under rls_app_runtime for that tenant. The Pick<Pool, 'query'> parameter is a latent trap for a future raw caller.",
+    why: "Its one caller, the PATCH /api/settings/language after-commit re-push (routes/settings.ts), passes { query } wrapping tenantQuery(pool, tenantId, …), so the tenant_settings read runs under rls_app_runtime for that tenant. (scripts/backfill-vapi-assistant-notice.ts runs the same read through tenantQuery itself and does not call this.) The Pick<Pool, 'query'> parameter is a latent trap for a future raw caller.",
   },
   {
     file: 'src/voice/voice-gate.ts', fn: 'createVoiceGate', access: 'pool.query', count: 2,
