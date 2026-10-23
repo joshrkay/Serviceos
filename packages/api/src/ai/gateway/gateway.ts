@@ -339,6 +339,11 @@ export class LlmCallInTransactionError extends AppError {
  * the route ships. Anywhere else it logs an error with the call site and
  * counts `gateway_llm_call_in_transaction_total`, and the call goes ahead:
  * the guard must never break production traffic.
+ *
+ * A call spawned without `await` from inside an open transaction is flagged
+ * too, though it holds nothing: start such work with
+ * runOutsideRequestTransaction (or tenantContextStore.exit), as the in-app
+ * adapter and supervisor spawns do.
  */
 function refuseCallInsideTransaction(request: LLMRequest, logger?: LLMGatewayLogger): void {
   const held = currentTenantContext();

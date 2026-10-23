@@ -57,6 +57,9 @@ export class DeepgramTokenPermissionError extends Error {
  * and plays scripted transcripts, so no key and no network are needed. Never a
  * real credential: Deepgram refuses it.
  */
+/** A grant is one small POST; without a deadline a stalled Deepgram held the request open indefinitely. */
+export const GRANT_TIMEOUT_MS = 10_000;
+
 export const FIXTURE_STREAM_TOKEN = 'fixture-stt-token';
 export const FIXTURE_STREAM_MODEL = 'fixture';
 
@@ -68,6 +71,8 @@ export interface MintDeepgramTokenDeps {
   nodeEnv?: string;
   /** Injectable for tests; defaults to the global fetch. */
   fetchImpl?: typeof fetch;
+  /** Deadline for the grant request; defaults to GRANT_TIMEOUT_MS. */
+  timeoutMs?: number;
   /** Requested TTL; clamped to [1, STREAM_TOKEN_TTL_SECONDS]. */
   ttlSeconds?: number;
 }
@@ -107,6 +112,7 @@ export async function mintDeepgramStreamToken(
         'Content-Type': 'application/json',
       },
       body: JSON.stringify({ ttl_seconds: ttl }),
+      signal: AbortSignal.timeout(deps.timeoutMs ?? GRANT_TIMEOUT_MS),
     });
   } catch (err) {
     throw new DeepgramTokenMintError(

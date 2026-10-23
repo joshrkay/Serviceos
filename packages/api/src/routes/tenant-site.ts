@@ -263,8 +263,11 @@ export function createTenantSiteRouter(deps: TenantSiteRouteDeps): Router {
     }),
   );
 
+  // One status at a time: inside the draft's transaction every read shares one
+  // client, and pg deprecates queueing a query on a client that is still busy.
   async function pendingAboutProposals(tenantId: string) {
-    const lists = await Promise.all(PENDING_STATUSES.map((s) => deps.proposalRepo.findByStatus(tenantId, s)));
+    const lists = [];
+    for (const status of PENDING_STATUSES) lists.push(await deps.proposalRepo.findByStatus(tenantId, status));
     return lists
       .flat()
       .filter((p) => p.proposalType === 'update_tenant_site_about')

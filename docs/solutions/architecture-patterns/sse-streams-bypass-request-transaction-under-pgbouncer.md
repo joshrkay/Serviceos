@@ -113,3 +113,21 @@ Route the requests through routers mounted the production way, so Express's
 own routing (trailing slash, letter case, HEAD to GET) decides which handler
 runs, and include nested routers that share each suffix as negatives.
 See `packages/api/test/middleware/tenant-context.test.ts`.
+
+### The same rule for slow upstream calls (LLM, TTS, STT)
+
+A handler that awaits an LLM, speech or other provider call inside the request
+transaction pins its pooled connection for the whole call, the same failure as
+a stream. Such routes go on `LLM_LONG_CALL_ROUTES`. Reads before the call name
+their `tenantId` explicitly, and writes that must agree after the call commit
+together in one short `PgTenantTransactionRunner` transaction (see
+`routes/tenant-site.ts` `POST /about/draft` and `proposals/resolve-entity.ts`).
+
+`LLMGateway.complete` refuses a call made while a tenant transaction is held
+(`refuseCallInsideTransaction` in `ai/gateway/gateway.ts`). Under
+`NODE_ENV=test` it throws `LLM_CALL_IN_TRANSACTION`, so a new in-request route
+fails its own route test. Anywhere else it logs and counts
+`gateway_llm_call_in_transaction_total{task_type}`, and the call goes ahead.
+A non-zero counter in production names a route to move. Provider calls that
+skip the gateway (TTS, STT, token mints) are not covered by the guard. Give
+them a fetch deadline and list them by hand.
