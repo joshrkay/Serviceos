@@ -117,6 +117,23 @@ const COVERING_SETTLEMENT_SQL = `
    LIMIT 1
 `;
 
+/**
+ * Path 1's read: every tenant's stuck settlements, on purpose — a sweep with
+ * no tenant filter, on the raw pool (unattributed; audit 2026-10-23 §4 P3.1
+ * moves it to the cross-tenant role). Its own function so the raw-pg guard
+ * lists it as the cross-tenant sweep it is, apart from the per-tenant read.
+ */
+async function listStaleSettlements(pool: Pool, updatedBefore: Date): Promise<StaleSettlementRow[]> {
+  const res = await pool.query<StaleSettlementRow>(STALE_SQL, [updatedBefore]);
+  return res.rows;
+}
+
+/** Path 2's tenant list: the tenants registry only (no tenant_id, no RLS). */
+async function listGapTenants(pool: Pool): Promise<GapTenantRow[]> {
+  const res = await pool.query<GapTenantRow>(GAP_TENANTS_SQL);
+  return res.rows;
+}
+
 function toSettlementRow(row: StaleSettlementRow): CallUsageSettlementRow {
   return {
     id: row.id,
@@ -148,10 +165,7 @@ export async function runOverageSettlementReconciliation(
   // ── Path 1: re-drive stale pending/failed settlements ──
   let staleRows: StaleSettlementRow[];
   try {
-    const res = await deps.pool.query<StaleSettlementRow>(STALE_SQL, [
-      new Date(asOf.getTime() - STALE_AFTER_MS),
-    ]);
-    staleRows = res.rows;
+    staleRows = await listStaleSettlements(deps.pool, new Date(asOf.getTime() - STALE_AFTER_MS));
   } catch (err) {
     deps.logger.error('Overage reconciliation: stale-settlement query failed', {
       error: err instanceof Error ? err.message : String(err),
@@ -187,8 +201,7 @@ export async function runOverageSettlementReconciliation(
   // ── Path 2: backfill gap periods (metered usage, never billed) ──
   let tenants: GapTenantRow[];
   try {
-    const res = await deps.pool.query<GapTenantRow>(GAP_TENANTS_SQL);
-    tenants = res.rows;
+    tenants = await listGapTenants(deps.pool);
   } catch (err) {
     deps.logger.error('Overage reconciliation: gap-tenant query failed', {
       error: err instanceof Error ? err.message : String(err),
