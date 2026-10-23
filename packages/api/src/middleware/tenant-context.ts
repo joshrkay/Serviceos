@@ -281,6 +281,11 @@ const LLM_LONG_CALL_ROUTES: readonly { method: string; re: RegExp }[] = [
   // with an explicit tenantId — and standalone, the failure row is no longer
   // rolled back with the 415/500 that follows it.
   { method: 'POST', re: /^(?:\/api)?\/voice\/transcribe\/?$/i },
+  // Live-dictation token mint: the Deepgram grant fetch has no deadline of
+  // its own, so a stalled upstream held a pooled connection for as long as it
+  // stalled. Its only DB touch is one audit row (minted or failed) with an
+  // explicit tenantId, which now also survives the 502/503 after a failure.
+  { method: 'POST', re: /^(?:\/api)?\/voice\/stream-token\/?$/i },
 ];
 
 function isLlmLongCallRoute(req: { method: string; path: string }): boolean {

@@ -596,6 +596,8 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       ['post', '/api/voice/tts/batch'],
       // Speech-to-text: the upload, then the Whisper call (60s timeout).
       ['post', '/api/voice/transcribe'],
+      // The Deepgram grant fetch has no deadline of its own.
+      ['post', '/api/voice/stream-token'],
     ] as const)('%s %s holds no request transaction', async (method, path) => {
       const seen = await probe(method, path);
       expect(seen).toEqual({ connects: 0, began: false, storeAtHandler: undefined });
@@ -640,6 +642,8 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       ['get', '/api/voice/transcribe'],
       ['post', '/api/voice/transcribe/extra'],
       ['post', '/api/admin/voice/transcribe'],
+      ['get', '/api/voice/stream-token'],
+      ['post', '/api/admin/voice/stream-token'],
     ] as const)('%s %s still opens the transaction', async (method, path) => {
       const seen = await probe(method, path);
       expect(seen.connects).toBe(1);
@@ -669,6 +673,7 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       ['post', '/api/voice/tts/'],
       ['post', '/api/Voice/TTS/Batch/'],
       ['post', '/api/voice/Transcribe/'],
+      ['post', '/api/Voice/Stream-Token/'],
     ] as const)('%s %s (trailing slash / letter case) holds no request transaction', async (method, path) => {
       const seen = await probe(method, path);
       expect(seen).toEqual({ connects: 0, began: false, storeAtHandler: undefined });
@@ -701,6 +706,7 @@ describe('P0-024 — tenant-context middleware (withTenantTransaction)', () => {
       ['post', '/api/voice/tts//'],
       ['post', '/api/voice/tts/batch/extra/'],
       ['post', '/api/voice/transcribe//'],
+      ['post', '/api/voice/stream-token/extra'],
     ] as const)('%s %s still opens the transaction', async (method, path) => {
       const seen = await probe(method, path);
       expect(seen.connects).toBe(1);

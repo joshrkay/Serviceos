@@ -119,6 +119,9 @@ PgBouncer config: `pool_mode = transaction`, `max_client_conn` high (e.g. 1000),
   > `POST /voice/transcribe` reads the upload (up to 25MB) and then awaits
   > Whisper (60s timeout); its one audit row (completed or failed) is
   > standalone, so a failure row is no longer rolled back with the 500.
+  > `POST /voice/stream-token` awaits the Deepgram grant fetch, which has no
+  > deadline of its own; its one audit row (minted or failed) is standalone
+  > too.
   >
   > Each entry is anchored at both ends and matches the way Express routes:
   > one optional trailing slash and any letter case (A-R4). Without that,

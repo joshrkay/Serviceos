@@ -322,4 +322,46 @@ describe('TI-02 — in-request LLM routes bypass the request transaction', () =>
     expect(await v.audited('voice.transcription.failed')).toHaveLength(1);
     expect(v.auditStores).toEqual([undefined, undefined]);
   });
+
+  it('POST /voice/stream-token: the Deepgram grant fetch holds no request transaction, and a failed mint is still audited', async () => {
+    const h = harness(() => '');
+    const saved = { DEEPGRAM_API_KEY: process.env.DEEPGRAM_API_KEY, STT_PROVIDER: process.env.STT_PROVIDER };
+    process.env.DEEPGRAM_API_KEY = 'dg-key-test';
+    delete process.env.STT_PROVIDER;
+    let status = 200;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        h.probes.push({ store: currentTenantContext(), connects: h.connect.mock.calls.length });
+        return new Response(JSON.stringify({ access_token: 'dg-temp-token', expires_in: 30 }), {
+          status,
+          headers: { 'content-type': 'application/json' },
+        });
+      }),
+    );
+    try {
+      const v = voiceApp(h);
+
+      const minted = await request(h.app).post('/api/voice/stream-token').send({});
+      expect(minted.status).toBe(200);
+      expect(minted.body.token).toBe('dg-temp-token');
+
+      status = 500;
+      const failed = await request(h.app).post('/api/voice/stream-token').send({});
+      expect(failed.status).toBe(502);
+      expect(failed.body.error).toBe('TOKEN_MINT_FAILED');
+
+      h.expectNoRequestTransaction();
+      expect(await v.audited('voice.stream_token_minted')).toHaveLength(1);
+      // Inside the request transaction this row was rolled back by the 502.
+      expect(await v.audited('voice.stream_token_mint_failed')).toHaveLength(1);
+      expect(v.auditStores).toEqual([undefined, undefined]);
+    } finally {
+      vi.unstubAllGlobals();
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    }
+  });
 });

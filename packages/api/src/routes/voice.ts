@@ -170,6 +170,10 @@ export function createVoiceRouter(
    * browser dictation client. The long-lived DEEPGRAM_API_KEY never leaves the
    * server; the browser opens the streaming WebSocket with this short-lived
    * token. Authenticated + tenant-scoped like every other voice route.
+   *
+   * Runs outside the request transaction (LLM_LONG_CALL_ROUTES): the grant
+   * fetch is an external call with no deadline of its own. The audit row is
+   * the only DB touch and names the tenant explicitly.
    */
   router.post(
     '/stream-token',
