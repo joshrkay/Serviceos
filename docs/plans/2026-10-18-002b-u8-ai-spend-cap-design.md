@@ -287,9 +287,21 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           `ai_spend_ledger`, `ai_spend_bound_breaches` (see "A settle above its reservation is
           caught" below), the ceiling and their audit events. The U7 manifest classifies the
           three spend tables `keep`, since they hold a model, token counts and amounts but no
-          subject content, so they carry no erasure trigger. Their audit events set no PII metadata key,
-          so the `audit_events` trigger takes no stripe for them (see U7's "`audit_events` is
-          classified `anonymize` by metadata key").
+          subject content, so they carry no erasure trigger. Their audit events set no PII metadata
+          pair and carry no value U7's value probe reads. So neither the `audit_events` trigger nor
+          the audit insert's probe takes a stripe for them (see U7's "`audit_events` is classified
+          `anonymize` by metadata key" and "Which values the value pass reads"). So:
+          - The spend module writes audit events only through one writer, typed to a
+            `SpendAuditEventType` union. A structural test fails on any other audit write in the
+            spend module.
+          - A schema test iterates that union. Each member's metadata may have no string leaf
+            other than a UUID or a literal enum, and its `entity_id` and `actor_id` must each be a
+            UUID or a literal. A later free-text, email or other id value fails the test, before
+            it can raise under the lock in production.
+          - Spend events use the `users` row id (`canonicalUserId`) as `actor_id`, never the
+            Clerk subject. The breach event carries the breach row's UUID, never the model name.
+          - Negative fixtures: a spend event type with a free-text `note` leaf fails the schema
+            test, and so does one keyed by a model name.
         - **The order is checked at runtime, not only by the repricing test.** A later change
           could write the `ai_runs` cost inside the settle transaction, which is the obvious place
           for it, or put a PII key into a spend audit event. Either would take a stripe under the

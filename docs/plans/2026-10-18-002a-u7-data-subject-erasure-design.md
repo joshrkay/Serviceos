@@ -178,25 +178,239 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           `tech_status.unverified_mobile` row that no tombstone key selects. So the step:
           - strips the PII pairs from every audit row whose `entity_id` or `correlation_id` is a
             tombstone key
-          - also normalizes and keyed-hashes every string leaf of `metadata` in the tenant's
-            audit rows, not only PII-classified values, in a batched scan, and compares it with
-            the subject's phone and email hashes. A
-            match is scrubbed or candidate-listed by the same corroborated-or-candidate rule as
-            the historical `ai_runs` scan, since a household can share a phone.
-          The row, its ids and its other keys stay. The final re-scan repeats the value pass.
-        - The `audit_events` trigger refuses only a write that sets a PII pair on a row whose
-          `entity_id` or `correlation_id` is a tombstone key. It takes a stripe only for a row
-          that sets one. `erase_*`, financial and spend events set none, so they pass without a
+          - also scans the tenant's audit rows by value, in batches (see "Which values the value
+            pass reads" below). It keyed-hashes each value under the candidate set and compares it
+            with the job's recipient hashes. A match is scrubbed or candidate-listed by the rule
+            in "An audit match is corroborated by hashes alone" below, since a household can
+            share a phone.
+          The row and its other keys stay, and so do its ids, except a phone or email used as
+          `entity_id` or `actor_id` (below). The final re-scan repeats the value pass.
+        - **Which values the value pass reads.** It reads every phone- or email-shaped span inside
+          each string leaf of `metadata`, whatever its pair's class. A phone inside a `reason` or
+          a message body counts, not only a leaf that is a phone. It also reads:
+          - `entity_id` and `actor_id`, since `voice/outbound-consent.ts:268` keys its row by the
+            phone itself
+          - every id-typed leaf, whatever the manifest types it as. A conversation with an
+            unmatched texter is keyed by the phone (`sms/inbound-capture.ts:156`), and
+            `conversation.created` (`conversations/conversation-service.ts:302,345`) and
+            `dropped_call_recovery.threaded` (`sms/recovery/recovery-threader.ts:126`) copy that
+            key into `entityId` and `threadEntityId`.
+          A phone span is a maximal run of digits and the separators the phone normalizer accepts
+          (a space, `-`, `.`, `(`, `)` and a leading `+`), bounded by characters that are neither
+          letters nor digits. It is normalized before it is hashed. So "(555) 123-4567" in a
+          staff-typed reason counts, and the digits inside a Twilio SID or a hex hash don't. It
+          skips:
+          - a UUID-shaped value, in any leaf or in `entity_id` or `actor_id`, since a UUID's
+            digits can look like a phone. The skip goes by the value's shape, never by the leaf's
+            declared type, so a phone in a leaf typed as an id is still read.
+          - a leaf the manifest types as a literal enum
+          - the suppression event types, `tenant.dnc_added` and `tenant.dnc_removed`
+            (`routes/dnc.ts:89,119`), which follow the DNC rows' rule (below). One list in the
+            manifest names them. The value pass, the late-write probe and the missing-key drop all
+            read that list.
+          Metadata types are exact down to their leaves (see above), so a phone can't sit in a
+          numeric leaf or an object key. Names aren't hashed, so a name inside free text, on a row
+          that no tombstone key selects, isn't found. That is a known limit, and the erase result
+          says the value pass matches phones and emails only.
+        - **An audit match is corroborated by hashes alone.** The historical scan's rule counts a
+          name, which needs the raw identifiers. An audit-value target must still work after
+          they are deleted (see "The step re-open and `inputs_expired`" below). So:
+          - An audit-value match is corroborated when it meets both of these:
+            - its values match at least two of the job's recipient hashes, such as a phone and an
+              email
+            - no other customer, contact, lead or user in the tenant hashes to one that matched.
+              Users count because an owner who tests with their own phone and email would
+              otherwise have their own audit rows scrubbed automatically.
+          - Any other match is a candidate.
+          - The scrub re-reads the whole row with the value pass's reader, and blanks every span
+            that matches one of the job's hashes, wherever it is. A matched `entity_id` or
+            `actor_id` becomes the declared scrubbed value `erased`.
+          - **Two jobs' scrubs of one row can't overwrite each other.** Customers A and B share
+            phone P and are both erased. A row's `reason` holds P and A's email, so it is a
+            target of A's job and a candidate of B's. Both workers read the row, A's writes it
+            with both spans blanked, and B's then writes back its stale copy with only P blanked,
+            so A's email returns. So every scrub of an audit row, the value pass's included,
+            reads the row with `SELECT … FOR NO KEY UPDATE`, in ascending id order after the
+            job-row lock, in the transaction that writes it. It computes the new value from
+            that locked read.
+          - **The check for another person never hashes the tenant.** No customer, contact, lead
+            or user row stores a hash. The mover and the value pass have the matched span itself,
+            so they look that value up among those four by normalized value.
+          - The manifest declares that neither the audit-value step nor the confirmation step of
+            the audit-value candidate kind reads the identifiers.
+        - **The `audit_events` trigger blanks, never refuses.** Take a write that sets a PII pair
+          on a row whose `entity_id` or `correlation_id` is a tombstone key. The trigger blanks that
+          pair in `NEW`, as in every `anonymize` table (see "In an `anonymize` table, the trigger
+          blanks it instead of raising" below). A refusal would roll back the state change the
+          event records, since `executeAudited` commits both or neither
+          (`commands/command-runner.ts:88-101`). The trigger takes a stripe only for a row that
+          sets a PII pair. `erase_*`, financial and spend events set none, so they pass without a
           stripe.
-        - A DNC audit row (`routes/dnc.ts:92`) follows the DNC rows' rule, as a suppression
-          record.
-        - Test: erase a customer who has a call-me-back audit row. Its `callerPhone` is gone,
-          `erase_started` commits, and a later payment on the retained invoice commits with its
-          audit event. The seed also holds a message-SID-keyed `tech_status.unverified_mobile` row
-          with the subject's phone, and a `{ from, to }` phone-change row on the customer. The
+        - **`audit_events` is the one `anonymize` table without a late-link trigger or an own-`id`
+          key.** Its rows link no new data to the subject. An own-`id` key would take a stripe for
+          every event, U8's spend events included. The late-link trigger would treat the job's own
+          `erase_completed`, keyed by the customer id, as a late link and re-open the job on every
+          close. Its trigger therefore checks only `entity_id` and `correlation_id`, and only on a
+          row that sets a PII pair. The key-mapping schema test and the catalog test list it as
+          their one exception, with that reason.
+        - **A late audit write is probed by its values too, because the value pass reads only rows
+          that already exist.** The tech-status handler builds `{ fromE164 }` before its insert
+          (`sms/tech-status/handler.ts:75-92,115-118`), with the message SID as `entity_id` and a
+          random `correlation_id` (`audit/audit.ts:83`). Suppose it pauses between the two while the
+          erase runs. Its insert can then commit after the final re-scan. Neither of its keys is a
+          tombstone key, so the trigger passes it. The external-sink drain waits only for provider
+          sends, not for a local insert. The subject's phone would sit in a row written after
+          `erase_completed`. So the audit repository's insert, the only path into `audit_events`
+          (see the structural test above), fences on the values it writes:
+          - It reads the values the value pass reads, and hashes each under the candidate set of
+            key ids and normalization versions (see "A recipient hash records its key, and a key a
+            hash uses is never retired" below). A row with none takes no stripe.
+          - It takes those hashes' stripes in shared mode, all at once in ascending order, as
+            `withErasureFence` does. It probes the tombstones' recipient-hash keys in a later
+            statement (see "The tombstone probe is its own statement" below), and then inserts.
+          - **Its deadlock exposure is the `BEFORE` triggers'.** It can take a stripe while its
+            transaction already holds row locks, as an `executeAudited` command does after its
+            state change.
+            - Phase 1 gives up before such a writer's deadlock check (see "Why the deadline is
+              below `deadlock_timeout`" below).
+            - That doesn't cover a three-party cycle. Either writer in the cycle can be the one
+              aborted: the audit writer, or a writer waiting on one of its row locks.
+            - The inbound SMS and status-callback handlers retry their transaction once on
+              `40P01`, as the live-call paths and the late-linking write paths do, because their
+              callers don't retry.
+            - Any other transaction accepts that abort. It needs a three-party cycle with a
+              sub-second phase 1, nothing commits, and its caller gets the error. An audit-value
+              inbox row is not a late link, since it names no entity, so writing one doesn't put
+              a path on the late-linking retry list.
+          - A match is never refused, since a household can share a phone, and the event still has
+            to be recorded. In the same transaction the insert writes a late-link inbox row of the
+            audit-value kind. It writes one for every job whose tombstone holds a matched hash,
+            naming the audit row, every place a match was (a leaf path, `entity_id` or `actor_id`)
+            and the matched hashes, never a value. Like the
+            late-link trigger, it touches no job row, so a writer that holds other rows can't
+            deadlock with a worker that holds the job row.
+          - **An inbox-row insert doesn't trip the runtime order check.** That check raises when a
+            transaction locks a job row after it has written a U7 row (see "The order is checked at
+            runtime" below). Some handlers write a phone-bearing audit event and then lock job rows,
+            such as the status callbacks. They would raise, but only when the phone matches a
+            tombstone, which ordinary tests don't reach. An inbox-row insert is safe in that order.
+            The row is new, so no other transaction can wait on it. Its foreign-key lock on the job
+            row is `FOR KEY SHARE`, which no job-row lock conflicts with. So an inbox-row insert
+            doesn't set `erasure.u7_written`. An update of an inbox row still does. For the same
+            reason, a new audit row and its inbox row don't count as "any other row" in the rule
+            that a handler locks its jobs before it touches any other row (see "One lock order: the
+            job row first" below).
+          - **The mover moves an audit-value inbox row without a collection.** The row names no
+            entity, so the mover adds no tombstone key and takes no exclusive stripe for it. Under
+            the job-row lock, the mover:
+            - re-extracts the spans from the value at each recorded place with the value pass's
+              reader, and re-hashes them. A row none of whose spans still matches is moved with no
+              candidate. A hash of the whole leaf would never equal a phone inside a `reason`.
+            - applies the rule above. A corroborated row becomes a target of the audit-value step,
+              whose trigger re-opens the job and the step.
+            - gives each other row one membership, unique on `(job_id, store, row id)`, which
+              records the candidate `version` it joined at. A row's key is its lowest matched
+              hash. A late candidate's key is its first row's key, and it lists every hash its
+              rows matched.
+            - adds the row to the job's undecided late candidate with the row's key, with no
+              re-open, and bumps the candidate's `version`. The current outcome already lists that
+              candidate.
+            - opens a new late candidate with the row's key, and runs the same re-open directly,
+              only when the membership insert adds a row and no late candidate with that key is
+              undecided. A value-pass candidate never counts. A row the value pass already listed
+              adds no membership. The re-opened job closes again with a new outcome that lists the
+              candidate.
+            - Grouping applies only to these late rows. The value pass's own candidates stay one
+              row each, so a decision on the subject's history never also covers a later
+              household row.
+          - **An owner decision covers only the rows the owner saw.** A late candidate can gain rows
+            after it is listed. Suppose a confirmation read its rows before the mover added one.
+            That row would sit in a decided candidate and never become a target. So:
+            - Confirmation and dismissal carry the candidate's `version` from the list.
+            - After the job-row lock, they apply only to the rows whose membership `version` is at
+              most that version.
+            - Rows added since move to a new undecided late candidate for the same hash, which
+              re-opens the job once. A busy household phone therefore can't keep a decision from
+              landing, as a `409` on every moved version would.
+          - **A household phone keeps producing candidates, and that is accepted.** Its hash can't
+            tell a household member's text from the subject's. So:
+            - Each decision ends one candidate, and later texts gather into the next one. Each new
+              candidate re-opens the job once, and texts that join it don't.
+            - A dismissal records nothing that skips later rows. An exemption by hash would also
+              skip a write of the subject's own that resumes later, and every row the owner never
+              saw.
+            - The erase result names the hashes that keep producing candidates.
+          - **Each pause point ends in the same place:**
+            - A write paused before phase 1 commits waits for its shared stripes, then sees the
+              tombstone in its probe.
+            - A write that has taken its stripes and probed, and then pauses before it commits,
+              holds phase 1 off until it commits or phase 1 times out and retries. Its row exists
+              before phase 1 commits, so the value pass finds it.
+            - A write that resumes after the final re-scan or after `erase_completed` still matches
+              the tombstone, which is never lifted.
+          - Tests, Docker-gated:
+            - **Paused past the close.** A tech-status `unverified_mobile` write from the subject's
+              phone builds its metadata and pauses before its insert. The erase runs through the
+              final re-scan and closes `erase_completed`. Once resumed, the insert commits. Its
+              inbox row re-opens the job, and the row is candidate-listed. The owner confirms and
+              the row is scrubbed. The job closes `erase_completed` again after the mover lists
+              the row, and once more after the scrub.
+            - **Paused past the identifier delete.** The same case, with `identifiers_deleted_at`
+              already stamped when the write resumes. The row is still candidate-listed and
+              scrubbed, never `inputs_expired`.
+            - **Paused inside the fence.** A write that has taken its stripes and probed, and pauses
+              before it commits, for less than phase 1's budget. A lock-wait probe shows phase 1
+              waiting on the writer's stripe, which phase 1 is granted only after the writer
+              commits. The value pass finds the committed row.
+            - **Paused during phase 1.** The write waits while phase 1 holds the stripes, then sees
+              the tombstone. Its own transaction writes the audit-value inbox row, which exists
+              before the value pass runs.
+            - **A phone in free text.** A row whose `reason` leaf holds the subject's phone, written
+              as "(555) 123-4567" inside a sentence, is written after the final re-scan, next to a
+              UUID-shaped leaf and a Twilio SID. The phone is candidate-listed, and a lock spy shows
+              no stripe taken for the UUID or the SID.
+            - **A phone in an id leaf.** A `conversation.created` row for an unmatched texter,
+              whose `metadata.entityId` is the subject's phone, is candidate-listed. So is a
+              `dropped_call_recovery.threaded` row whose `threadEntityId` is that phone, with the
+              leaf typed as a UUID in the manifest.
+            - **Two jobs, one row.** Two customers who share a phone are both erased, and one
+              row holds the phone and the first customer's email. Both jobs scrub it at the same
+              time, and neither job's spans come back.
+            - **A row listed twice.** A row inserted between phase 1 and the final re-scan is
+              listed by the value pass and by its own inbox row. It has one membership, and the
+              inbox row opens no candidate and re-opens nothing.
+            - **A phone as `entity_id`.** A `voice.outbound_blocked` row keyed by the subject's
+              phone is candidate-listed. Once the owner confirms, its `entity_id` is `erased` and
+              its `metadata.phone` is blank.
+            - **A household phone.** A household member texts from the same phone twice. Both texts
+              are recorded, and the second joins the first's candidate with no re-open. The owner
+              dismisses the candidate. A third text opens a new candidate, which re-opens the job
+              once. A write of the subject's own, paused before the dismissal and resumed after
+              it, is listed undecided. With a value-pass candidate for the phone still undecided,
+              a late row matching the phone opens a late candidate and re-opens the job.
+            - **A stale decision.** The owner loads a candidate, the mover adds a row to it, and
+              the owner confirms. Only the row the owner saw is scrubbed. The added row is on a new
+              undecided candidate.
+            - **A shared identity.** A test customer shares the owner's phone and email. An owner's
+              audit row carrying both is candidate-listed, not scrubbed automatically.
+            - **Order check.** A status callback writes an audit event whose phone matches a
+              tombstone. The inbox row exists, and the callback then calls the job-lock helper,
+              which doesn't raise.
+            - **A missing key.** A boot with a referenced key's material missing. An audit insert
+              carrying a phone commits with the phone dropped, and the drop is counted. A DNC audit
+              row keeps its phone.
+        - A DNC audit row (`routes/dnc.ts:89,119`) follows the DNC rows' rule, as a suppression
+          record. Its event types are on the manifest's suppression list, which the value pass,
+          the late-write probe and the missing-key drop skip (see "Which values the value pass
+          reads" above).
+        - Test: erase a customer who has a call-me-back audit row. Its `callerPhone` is gone, and
+          `erase_started` commits. A later payment on the retained invoice commits with its audit
+          event, and so does a later audit event on the customer that sets `phone`, with that pair
+          blanked. The seed also holds a message-SID-keyed `tech_status.unverified_mobile` row with
+          the subject's phone, and a `{ from, to }` phone-change row on the customer. The
           phone-change row is stripped, and the tech-status row is candidate-listed. Once the
-          owner confirms it, no `audit_events` row other than a DNC suppression record holds the
-          subject's name, phone or email.
+          owner confirms it, no seeded `audit_events` row other than a DNC suppression record holds
+          the subject's name, phone or email.
       - **Every target the later steps need is recorded before any step destroys the links to
         it.** A step takes its targets from its own row, never by re-walking links. A crash after
         the scrub has nulled a nullable link, such as `leads.converted_customer_id`, or blanked
@@ -416,7 +630,9 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           - Every worker checkpoint renews the lease as its first statement.
           - A handler that may add a late target finds its jobs with an unlocked read, then
             locks them (below) before it touches any other row. The trigger's own job-row
-            `UPDATE` then finds the lock already held.
+            `UPDATE` then finds the lock already held. A new audit row and its audit-value inbox
+            row don't count (see "An inbox-row insert doesn't trip the runtime order check"
+            above).
           - A handler that learns of a job only after it has locked another row rolls back and
             starts again, job rows first.
           - Inside the trigger and the re-open, the job row comes before the step row.
@@ -430,7 +646,8 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           with events for rows of different jobs, the recording refusal path ("every job whose
           tombstone holds the matched key") and the per-tenant sweeps meet the same cycle. So:
           - A transaction that touches more than one job row locks all of them first, before
-            any other U7 row, with one `SELECT id FROM customer_erasure_jobs WHERE tenant_id =
+            any other U7 row (a new audit row and its audit-value inbox row don't count, as
+            above), with one `SELECT id FROM customer_erasure_jobs WHERE tenant_id =
             $t AND id = ANY($ids) ORDER BY id FOR NO KEY UPDATE`. Postgres locks the rows in the
             sorted order. The transaction then adds its targets in that order.
           - A re-read after the locks that finds a job outside the locked set rolls back and
@@ -481,7 +698,8 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           - The job-lock helper, which every lease renewal goes through too, sets
             `set_config('erasure.jobs_locked', '1', true)`. It raises when the transaction has
             already written a U7 row or a dispatch or claims row, which their triggers flag with
-            `erasure.u7_written` the same way.
+            `erasure.u7_written` the same way. An inbox-row insert sets no flag (see "An inbox-row
+            insert doesn't trip the runtime order check" above).
           - A `BEFORE UPDATE` trigger on `customer_erasure_jobs` raises unless
             `current_setting('erasure.jobs_locked', true) = '1'`, so every job-row update, the
             re-open trigger's included, needs the helper first. Each check reads `= '1'`, as
@@ -1548,7 +1766,12 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
       - **A missing key fails closed.** A boot check loads the material for every referenced key
         id. If one can't be loaded, the write paths that need the recipient-hash probe refuse with
         the typed erasure-unavailable error, never proceed unmatched, and `alertOperator` fires.
-        Writes keyed by customer id or another non-hash key are unaffected.
+        Writes keyed by customer id or another non-hash key are unaffected. An audit insert is
+        the one exception: refusing it would roll back the write it records. So it drops each
+        phone- or email-shaped span the probe would have hashed, outside a DNC suppression record.
+        A phone- or email-shaped `entity_id` or `actor_id` becomes `erased`. It counts the drop in
+        `audit_pii_withheld_total{event_type}`. It logs the event type, never the value (see "A late
+        audit write is probed by its values too" above).
       - Tests: a tombstone is made under key `k1`, the key is rotated to `k2`, and a recipient-only
         write of the same phone and the same email is still refused. The same holds after a change
         of `norm_version`. A boot with a referenced key's material missing refuses recipient-only
@@ -1597,9 +1820,9 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         against the snapshot from before the wait. It sees no tombstone and inserts a `claimed`
         row that phase 1's claim fence never saw, so the send goes out to the erased subject.
         So:
-        - In `withErasureFence`, the senders' claim transaction, the release re-fence and the
-          `BEFORE` trigger, the statement that takes the stripes runs first. The probe, and any
-          write that depends on it, run in a later statement.
+        - In `withErasureFence`, the senders' claim transaction, the release re-fence, the
+          `BEFORE` trigger and the audit insert, the statement that takes the stripes runs first.
+          The probe, and any write that depends on it, run in a later statement.
         - Each fence and late-link trigger function is `plpgsql` and `VOLATILE`, so each
           statement inside it takes a fresh snapshot. A `STABLE` function would reuse its
           caller's.
@@ -1980,7 +2203,8 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         only tombstone key is its own id. So:
         - The manifest's key mapping lists `id` for every `scrub` or `anonymize` table in the
           closure and for every identifier-linked store. The schema test fails on any such table
-          whose mapping leaves `id` out.
+          whose mapping leaves `id` out, except `audit_events` (see "`audit_events` is the one
+          `anonymize` table without a late-link trigger or an own-`id` key" above).
         - Test: after the job nulls a converted lead's link and blanks it, a stale lead-form save
           that carries the old name and email is refused. The same holds for an unconverted lead
           recorded as a source.
@@ -2082,8 +2306,9 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         it. It is never an error that retries. The transcription worker ends that recording's job
         without writing.
       - The manifest schema test reads `pg_trigger` in the Docker-gated suite. It fails when any
-        `scrub` or `anonymize` table lacks the trigger, or an `anonymize` table lacks its late-link
-        trigger, so a new table or repository is covered by construction.
+        `scrub` or `anonymize` table lacks the trigger, or an `anonymize` table other than
+        `audit_events` lacks its late-link trigger, so a new table or repository is covered by
+        construction.
       - **It checks that each trigger fires, not only that it exists.** Every migration re-runs on
         each boot, so a backfill migration that runs `DISABLE TRIGGER` and never re-enables it
         leaves `tgenabled = 'D'` for good. A trigger created `BEFORE UPDATE` only is listed too.
@@ -2858,7 +3083,9 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         household can share a phone. The scrub is irreversible, so it runs automatically only for a
         corroborated row, which meets both of these:
         - its text carries at least two of the subject's identifiers
-        - no other customer or contact in the tenant shares any identifier that matched
+        - no other customer, contact, lead or user in the tenant shares any identifier that
+          matched. Users count because an owner who tests with their own phone and email would
+          otherwise have their own AI runs scrubbed automatically.
       - Every other match goes onto a candidate list, returned with the erase result and shown to the
         owner. Those rows are scrubbed only after the owner explicitly confirms them.
       - The erase result reports how many rows each strategy scrubbed, and how many candidates are
