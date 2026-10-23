@@ -87,6 +87,20 @@ describe('A4-4 — InMemoryProposalRepository.updateIfUnchanged', () => {
     expect(await repo.updateIfUnchanged('other-tenant', read.id, read, { summary: 'x' })).toBeNull();
     expect(await repo.updateIfUnchanged(TENANT, 'missing-id', read, { summary: 'x' })).toBeNull();
   });
+
+  it('two edits started from the same read: exactly one writes, the other is refused', async () => {
+    const repo = new InMemoryProposalRepository();
+    const read = await repo.create(row());
+
+    const [first, second] = await Promise.all([
+      repo.updateIfUnchanged(TENANT, read.id, read, { payload: { transcript: 'first' } }),
+      repo.updateIfUnchanged(TENANT, read.id, read, { payload: { transcript: 'second' } }),
+    ]);
+
+    expect([first, second].filter((w) => w !== null)).toHaveLength(1);
+    expect(second).toBeNull();
+    expect((await repo.findById(TENANT, read.id))!.payload).toEqual({ transcript: 'first' });
+  });
 });
 
 // R2-1 — a Postgres read is a fresh object every time. The in-memory read

@@ -1819,15 +1819,19 @@ export class InMemoryProposalRepository implements ProposalRepository {
     return { ...proposal };
   }
 
-  /** In-memory callers are single-threaded: the read, the check and the write cannot interleave. */
+  /**
+   * The check and the write run in one synchronous step: an `await` between
+   * them would let a second edit from the same read pass the check before the
+   * first one writes, and overwrite it.
+   */
   async updateIfUnchanged(
     tenantId: string,
     id: string,
     read: Proposal,
     updates: Partial<Omit<Proposal, 'id' | 'tenantId' | 'createdBy' | 'createdAt' | 'status'>>
   ): Promise<Proposal | null> {
-    const now = await this.findById(tenantId, id);
-    if (!now || proposalChangedSince(read, now)) return null;
+    const now = this.proposals.get(id);
+    if (!now || now.tenantId !== tenantId || proposalChangedSince(read, now)) return null;
     return this.update(tenantId, id, updates);
   }
 
