@@ -51,6 +51,21 @@ describe('B1 — the one-tap token carries a non-owner recipient', () => {
     });
   });
 
+  // B4-2 parity — the subject (`u`) changes when the backup links a login;
+  // the users row id does not, so the tap compares it (one-tap route).
+  it("round-trips the recipient's users row id beside their subject", async () => {
+    const { token } = createOneTapApproveToken({
+      proposalId: 'p-1',
+      tenantId: 't-1',
+      secret: SECRET,
+      approver: { userId: 'clerk-backup', role: 'dispatcher', userRowId: 'row-backup' },
+    });
+    expect(payloadOf(token)).toMatchObject({ u: 'clerk-backup', r: 'dispatcher', i: 'row-backup' });
+    await expect(verify(token)).resolves.toMatchObject({
+      approver: { userId: 'clerk-backup', role: 'dispatcher', userRowId: 'row-backup' },
+    });
+  });
+
   it('an owner token is unchanged: exactly p, t, n, e and no approver on verify', async () => {
     const { token } = createOneTapApproveToken({ proposalId: 'p-1', tenantId: 't-1', secret: SECRET });
     expect(Object.keys(payloadOf(token)).sort()).toEqual(['e', 'n', 'p', 't']);
@@ -62,6 +77,9 @@ describe('B1 — the one-tap token carries a non-owner recipient', () => {
     ['a user id without a role', { u: 'clerk-backup' }],
     ['a role without a user id', { r: 'dispatcher' }],
     ['an empty user id', { u: '', r: 'dispatcher' }],
+    ['a users row id without a recipient', { i: 'row-backup' }],
+    ['an empty users row id', { u: 'clerk-backup', r: 'dispatcher', i: '' }],
+    ['a users row id that is not a string', { u: 'clerk-backup', r: 'dispatcher', i: 42 }],
   ])('a signed token with %s is malformed', async (_label, claims) => {
     const { token } = createOneTapApproveToken({ proposalId: 'p-1', tenantId: 't-1', secret: SECRET });
     await expect(verify(resign({ ...payloadOf(token), ...claims }))).resolves.toEqual({
@@ -117,15 +135,18 @@ describe('B1 — routeUnsupervisedProposal mints the link for its recipient', ()
 
   const tokenIn = (body: string) => body.match(/token=([A-Za-z0-9._-]+)/)?.[1];
 
-  it("the backup's link carries their user id and role", async () => {
-    const r = route({ role: 'dispatcher', userId: 'clerk-backup', via: 'backup_supervisor' }, BACKUP_PHONE);
+  it("the backup's link carries their user id, role and users row id", async () => {
+    const r = route(
+      { role: 'dispatcher', userId: 'clerk-backup', userRowId: 'row-backup', via: 'backup_supervisor' },
+      BACKUP_PHONE,
+    );
     await r.run;
 
     expect(r.lookups).toEqual([BACKUP_PHONE]);
     const token = tokenIn(r.sms[0].body)!;
-    expect(payloadOf(token)).toMatchObject({ u: 'clerk-backup', r: 'dispatcher' });
+    expect(payloadOf(token)).toMatchObject({ u: 'clerk-backup', r: 'dispatcher', i: 'row-backup' });
     await expect(verify(token)).resolves.toMatchObject({
-      approver: { userId: 'clerk-backup', role: 'dispatcher' },
+      approver: { userId: 'clerk-backup', role: 'dispatcher', userRowId: 'row-backup' },
     });
   });
 
