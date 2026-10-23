@@ -96,8 +96,15 @@ function redraftInvoiceFromPickedEstimate(
   copyEstimateOntoInvoicePayload(proposal.payload, estimate);
   const meta = proposal.payload._meta as ProposalConfidenceMeta | undefined;
   if (meta) {
-    delete meta.fieldConfidence;
-    delete meta.markers;
+    // A copy, never `meta` itself: the card's pick (editProposal) builds this
+    // payload with a shallow spread of the row it read, so `meta` is that
+    // row's object. Changed in place, the read stopped matching the stored
+    // row (the edit was refused as raced) and the payload kept as first
+    // proposed lost these markers too.
+    const redrafted: ProposalConfidenceMeta = { ...meta };
+    delete redrafted.fieldConfidence;
+    delete redrafted.markers;
+    proposal.payload._meta = redrafted;
   }
   const ctx = { ...((proposal.sourceContext ?? {}) as Record<string, unknown>) };
   delete ctx.catalogResolution;

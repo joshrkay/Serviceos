@@ -9,7 +9,7 @@
  * the webhook layer (test/webhooks/twilio-sms-dispatch.test.ts) — here we
  * prove a REPEATED approval intent (new sid) cannot double-execute.
  */
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { ACCEPTANCE_VOID_MARKER } from '../../../src/proposals/acceptance-void';
 import {
   handleProposalSmsReply,
@@ -859,6 +859,64 @@ describe('edit session flow', () => {
   });
 });
 
+// R2-2 — the "I attached your note" write stamped the instruction onto a
+// sourceContext copied from the row read BEFORE the interpreter's LLM call,
+// and wrote that whole sourceContext back. A pick that landed in between
+// (the picker it cleared, the resolution it recorded) was put back the way
+// it was. Now the one note key is added to the row as it stands.
+describe('R2-2 — a text edit recorded as a note keeps what landed while it ran', () => {
+  const PICKER = { source: 'voice', entityCandidates: [{ id: 'cust-a', label: 'Bob Smith', score: 0.8 }] };
+  const PICKED = { source: 'voice', resolvedEntity: { id: 'cust-a', kind: 'customer' } };
+
+  /** What an entity pick does to sourceContext: the picker cleared, the resolution recorded. */
+  async function pickLands(h: Harness, id: string): Promise<void> {
+    const ctx = { ...((await h.proposalRepo.findById(TENANT, id))!.sourceContext ?? {}) };
+    delete ctx.entityCandidates;
+    ctx.resolvedEntity = PICKED.resolvedEntity;
+    await h.proposalRepo.update(TENANT, id, { sourceContext: ctx });
+  }
+
+  it('nothing could be applied: the note is added and the pick that landed meanwhile is kept', async () => {
+    const h = makeHarness();
+    const proposal = await seedPendingProposal(h, TENANT, { sourceContext: PICKER });
+    h.deps.interpretEdit = async () => {
+      await pickLands(h, proposal.id);
+      return null;
+    };
+
+    await handleProposalSmsReply(ctx('EDIT'), h.deps);
+    const result = await handleProposalSmsFallback(ctx('make it nicer somehow'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'edit_recorded' });
+    const stored = (await h.proposalRepo.findById(TENANT, proposal.id))!;
+    expect(stored.sourceContext).toEqual({
+      ...PICKED,
+      pendingSmsEditRequest: { instruction: 'make it nicer somehow', receivedAt: expect.any(String) },
+    });
+  });
+
+  it("a pick that lands between the edit's read and its write refuses the edit; the note is added and the pick kept", async () => {
+    const h = makeHarness({ interpretEdit: async () => ({ customerName: 'Mr Chen' }) });
+    const proposal = await seedPendingProposal(h, TENANT, { sourceContext: PICKER });
+    const realUpdateIfUnchanged = h.proposalRepo.updateIfUnchanged.bind(h.proposalRepo);
+    vi.spyOn(h.proposalRepo, 'updateIfUnchanged').mockImplementationOnce(async (...args) => {
+      await pickLands(h, proposal.id);
+      return realUpdateIfUnchanged(...args);
+    });
+
+    await handleProposalSmsReply(ctx('EDIT'), h.deps);
+    const result = await handleProposalSmsFallback(ctx('it is for Mr Chen'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'edit_recorded' });
+    const stored = (await h.proposalRepo.findById(TENANT, proposal.id))!;
+    expect(stored.payload.customerName).toBe('Mrs Lee');
+    expect(stored.sourceContext).toEqual({
+      ...PICKED,
+      pendingSmsEditRequest: { instruction: 'it is for Mr Chen', receivedAt: expect.any(String) },
+    });
+  });
+});
+
 describe('clarification flow (fallback)', () => {
   it('nudges once on unrecognized text, then escalates silently', async () => {
     const h = makeHarness();
@@ -1492,5 +1550,70 @@ describe('B4 — SMS approvals run the approval-time reference checks', () => {
 
     expect(result).toMatchObject({ handled: true, reason: 'approved' });
     expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('approved');
+  });
+});
+
+// B3-6 — a schedule card's 48-hour window is swept hourly, so between its
+// expiresAt and the sweep a texted Y still reaches approveProposal, which
+// marks it expired and refuses with a ValidationError that names no fields.
+// The reply was "it's missing required info" — wrong, and the next step
+// ("finish it") is impossible. Expiry has its own reply now.
+describe('B3-6 — SMS Y on a card whose window has just expired', () => {
+  it('says it expired, approves nothing, and does not claim missing info', async () => {
+    const h = makeHarness();
+    const proposal = await seedPendingProposal(h, TENANT, { expiresAt: new Date(Date.now() - 60_000) });
+
+    const result = await handleProposalSmsReply(ctx('Y'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'approve_blocked' });
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('expired');
+    expect(h.sent).toHaveLength(1);
+    expect(h.sent[0].body).toBe("Can't approve — that one expired. You can redo it in the app.");
+    expect(h.sent[0].body).not.toMatch(/missing/i);
+    expect(h.auditRepo.getAll().map((e) => e.eventType)).not.toContain('proposal.approved');
+    expect(
+      h.auditRepo.getAll().find((e) => e.eventType === 'proposal.sms_approve_blocked')?.metadata,
+    ).toMatchObject({ heldBy: 'expired' });
+  });
+
+  // The first Y flips the card to expired, so a second Y found a card that
+  // was no longer reviewable and was told it "was already handled". Nobody
+  // handled it; it expired. Same for a Y after the hourly sweep.
+  it('a second Y on the now-expired card gets the same expiry reply', async () => {
+    const h = makeHarness();
+    const proposal = await seedPendingProposal(h, TENANT, { expiresAt: new Date(Date.now() - 60_000) });
+
+    await handleProposalSmsReply(ctx('Y'), h.deps);
+    const second = await handleProposalSmsReply(ctx('Y'), h.deps);
+
+    expect(second).toMatchObject({ handled: true, reason: 'already_handled' });
+    expect(h.sent).toHaveLength(2);
+    expect(h.sent[1].body).toBe(h.sent[0].body);
+    expect(h.sent[1].body).toBe("Can't approve — that one expired. You can redo it in the app.");
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('expired');
+  });
+
+  it('a Y after the sweep expired the card gets the expiry reply, not "already handled"', async () => {
+    const h = makeHarness();
+    const proposal = await seedPendingProposal(h);
+    await h.proposalRepo.updateStatus(TENANT, proposal.id, 'expired');
+
+    const result = await handleProposalSmsReply(ctx('Y'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'already_handled' });
+    expect(h.sent[0].body).toBe("Can't approve — that one expired. You can redo it in the app.");
+    expect(h.sent[0].body).not.toMatch(/already handled/i);
+  });
+
+  it('an N on an expired card says it expired and changes nothing', async () => {
+    const h = makeHarness();
+    const proposal = await seedPendingProposal(h);
+    await h.proposalRepo.updateStatus(TENANT, proposal.id, 'expired');
+
+    const result = await handleProposalSmsReply(ctx('N'), h.deps);
+
+    expect(result).toMatchObject({ handled: true, reason: 'already_handled' });
+    expect(h.sent[0].body).toBe("That one expired — this didn't change anything.");
+    expect((await h.proposalRepo.findById(TENANT, proposal.id))?.status).toBe('expired');
   });
 });

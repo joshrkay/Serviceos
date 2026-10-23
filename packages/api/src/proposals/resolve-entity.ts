@@ -41,10 +41,22 @@
  *    drafting handler's LLM call), so each path's writes commit together in
  *    ONE run of `deps.transactionRunner`, opened only after the re-draft
  *    returns. The failure-soft alias capture runs after that commit.
- *  - A concurrent approve/reject wins (A-R3): each transaction re-checks the
- *    status under the row lock before it writes (`lockOpenForPick`, or the
- *    re-draft's own status write), so a pick never patches a row that left
- *    review after the pick read it.
+ *  - Whatever commits first wins (A-R3, A3-1): each path's transaction
+ *    starts by locking the row (`lockOpenForPick`) and re-checking it is
+ *    still under review. The annotate-only and next-ambiguity patches are
+ *    then built from that locked row, so an edit, a resolve-line or another
+ *    pick that landed after the pick's read is kept rather than overwritten;
+ *    the re-draft, built across its LLM call, is refused (409) if the row
+ *    moved at all.
+ *  - Compare-and-write (A4-6): each path's proposal write goes through
+ *    `updateIfUnchanged` against that locked row (`writeFromLockedRow`). Under
+ *    the Pg row lock the row cannot have moved, so the compare always passes
+ *    there. Without a pool the in-memory "locked" read is a plain copy and
+ *    InMemoryTransactionRunner locks nothing unless asked through
+ *    `scope.lock`, so another pick, an edit or a line pick can land between
+ *    the read and the write; the pick is then refused with the "try again"
+ *    409 and writes nothing, rather than putting back a payload and
+ *    sourceContext that erase that change.
  *
  * P8/U-multi (multi-ambiguity chain): a single utterance can carry MORE than
  * one ambiguous reference ("invoice Bob for the Rodriguez job" where both
@@ -61,20 +73,26 @@
  * eventual redraft (once the queue drains) has all of them, not just the
  * last one. Reusing the same proposal id — rather than creating a new
  * proposal per queued ambiguity — is also what makes a retried/double-tapped
- * pick safe: see the `alreadyResolved` check in `resolveProposalEntity`.
+ * pick safe: see the `already_applied` case in `readPick`.
  */
 import { Role, hasPermission } from '../auth/rbac';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
-import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../shared/errors';
-import { Proposal, ProposalRepository, missingFieldsFor, type ProposalStatus } from './proposal';
+import { AppError, ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../shared/errors';
+import {
+  Proposal,
+  ProposalRepository,
+  missingFieldsFor,
+  proposalChangedSince,
+  type ProposalStatus,
+} from './proposal';
 import { assertValidProposalPayload, validateProposalPayload } from './contracts';
 import type { IntentType } from '../ai/orchestration/intent-classifier';
-import type { TaskContext } from '../ai/tasks/task-handlers';
+import type { TaskContext, TaskHandler } from '../ai/tasks/task-handlers';
 import { entitiesForProposal } from '../workers/voice-action-router';
 import type { RedraftHandlerFactory } from './redraft-handler-factory';
 import { clearSatisfiedMissingFields } from './missing-fields';
 import type { EntityAliasCandidateCapture } from '../learning/entity-aliases/candidate-service';
-import { InMemoryTransactionRunner, type TenantTransactionRunner } from '../db/tenant-transaction';
+import type { TenantTransactionRunner } from '../db/tenant-transaction';
 
 interface EntityCandidate {
   id: string;
@@ -114,54 +132,155 @@ export interface ResolveEntityDeps {
    * A1 — commits each path's writes (proposal patch, status promotion, audit
    * row) as one unit. The route holds no request transaction, so without it
    * a failed second write would leave the first one committed. Production:
-   * PgTenantTransactionRunner on the app pool. Absent (in-memory repos) →
-   * the writes run directly.
+   * PgTenantTransactionRunner on the app pool; InMemoryTransactionRunner
+   * with the in-memory repos.
+   *
+   * A3-3 — required: the row lock (findByIdsForUpdate) runs inside it, and
+   * the Pg repository refuses a lock taken outside a tenant transaction, so a
+   * pick wired with the Pg repos and no runner could only ever fail.
    */
-  transactionRunner?: TenantTransactionRunner;
+  transactionRunner: TenantTransactionRunner;
 }
 
-function transactionRunnerOf(deps: ResolveEntityDeps): TenantTransactionRunner {
-  return deps.transactionRunner ?? new InMemoryTransactionRunner();
-}
+// A3-4 — owner copy. The route sends these to the owner verbatim (mobile shows
+// the server's message), so they stay short and plain: never "proposal" or
+// the other words owner copy must not use. See ownerFacingPickError.
+const PICK_NOT_SAVED = 'This was already handled, so that choice was not saved.';
+const PICK_CHANGED = 'This changed while you were choosing. Please try again.';
+const PICK_ROW_GONE = 'This is no longer here, so that choice was not saved.';
+const PICK_NOTHING_TO_CHOOSE = 'There is nothing left to choose here.';
+const PICK_NOT_AN_OPTION = 'That choice is not one of the options.';
+const PICK_CANNOT_SAVE = 'That choice could not be saved.';
+const PICK_TRY_AGAIN = 'That could not be finished right now. Please try again.';
 
-/** Only a proposal still under review takes a pick — never one already
- *  approved/executed/rejected (terminal states can't be re-drafted). */
-function isOpenForPick(status: ProposalStatus): boolean {
-  return status === 'draft' || status === 'ready_for_review';
+/** The ValidationErrors and ConflictErrors this module words for the owner itself. */
+const OWN_VALIDATION_COPY: ReadonlySet<string> = new Set([PICK_NOTHING_TO_CHOOSE, PICK_NOT_AN_OPTION]);
+const OWN_CONFLICT_COPY: ReadonlySet<string> = new Set([PICK_NOT_SAVED, PICK_CHANGED]);
+
+/**
+ * A3-4 — the resolve-entity route's words for whatever a pick throws, keeping
+ * its status and code. The pick's own refusals are already plain; what it
+ * passes through from shared code is not, and that code's messages serve
+ * other callers too, so they are mapped here rather than changed at source:
+ *  - any ConflictError, including the repository's assertStatusWrite
+ *    ("Cannot transition proposal from ..."), is the plain 409, unless it is
+ *    one of this module's own;
+ *  - NotFoundError ("Proposal not found: <id>") is a plain 404;
+ *  - a 429 or 5xx (the re-draft's gateway: "All providers failed ...", "AI
+ *    provider rate limit reached ...") is "try again", keeping only a
+ *    retry-after hint from its details (they name the provider);
+ *  - any other ValidationError (a payload contract check) is a plain 400.
+ * Anything that is not an AppError is left alone: it answers a generic 500.
+ *
+ * A4-1 — every re-wording carries the error it replaced as its `cause`. The
+ * response shows only the owner copy, and asyncRoute's server-error capture
+ * reports the cause, so a 5xx reaches Sentry as the gateway's own failure
+ * (its code, provider path and stack), not as "try again".
+ */
+export function ownerFacingPickError(err: unknown): unknown {
+  if (!(err instanceof AppError)) return err;
+  const replaced = { cause: err };
+  if (err instanceof ConflictError) {
+    return OWN_CONFLICT_COPY.has(err.message) ? err : new ConflictError(PICK_NOT_SAVED, err.details, replaced);
+  }
+  if (err instanceof NotFoundError) {
+    return new AppError(err.code, PICK_ROW_GONE, err.statusCode, undefined, replaced);
+  }
+  if (err.statusCode === 429 || err.statusCode >= 500) {
+    const retryAfterMs = err.details?.retryAfterMs;
+    return new AppError(
+      err.code,
+      PICK_TRY_AGAIN,
+      err.statusCode,
+      typeof retryAfterMs === 'number' ? { retryAfterMs } : undefined,
+      replaced,
+    );
+  }
+  if (err instanceof ValidationError && !OWN_VALIDATION_COPY.has(err.message)) {
+    return new ValidationError(PICK_CANNOT_SAVE, undefined, replaced);
+  }
+  return err;
 }
 
 /**
- * A-R3 — the first statement of the annotate-only and next-ambiguity
- * transactions: lock the row and re-check that it is still open for a pick.
+ * The refusal for a pick that lost to a change someone else committed and
+ * cannot be retried: the row left review (approved, rejected, ...), or another
+ * pick answered the question first (A3-1). A 409 in the same plain words
+ * wherever it is detected.
+ */
+function pickNotSaved(status: ProposalStatus): ConflictError {
+  return new ConflictError(PICK_NOT_SAVED, { status });
+}
+
+/**
+ * The refusal for a pick whose question is still open but whose row changed
+ * under it in a way the pick cannot build on (A3-1): the re-draft was made
+ * from the row as it was, or the choice now takes another path. A retry reads
+ * the row as it is now and goes through, so the owner is told to try again
+ * rather than that it was already handled (the change may be their own, from
+ * another tab).
+ */
+function pickRaced(status: ProposalStatus): ConflictError {
+  return new ConflictError(PICK_CHANGED, { status });
+}
+
+/**
+ * Only a proposal still under review takes a pick — never one already
+ * approved/executed/rejected (terminal states can't be re-drafted).
  *
- * Those two paths patch the payload without writing a status (a
- * ready_for_review row gets no status write at all), and the pick read the
- * row before the transaction opened. An approve or reject that committed in
- * that gap was therefore overwritten after the fact: an approved row's payload
- * changed under the approval, a rejected row came back with a resolved id or
- * a fresh picker. Holding the row lock to commit makes the concurrent
- * decision win: the pick throws and its patch rolls back.
+ * A3-2 — the one refusal for a row that already left review, whether the
+ * first read sees it or the row lock does (A-R3): the owner gets the same 409
+ * and the same plain words either way.
+ */
+function assertOpenForPick(status: ProposalStatus): void {
+  if (status !== 'draft' && status !== 'ready_for_review') {
+    throw pickNotSaved(status);
+  }
+}
+
+/**
+ * A-R3 / A3-1 — the first statement of every path's transaction: lock the row,
+ * re-check that it is still open for a pick, and return it as it stands now.
  *
- * The re-draft path needs no lock: its status write (updateStatus →
- * assertStatusWrite under SELECT ... FOR UPDATE) already refuses a row that
- * left review, and rolls its patch back.
+ * The pick reads the row before its transaction opens (the re-draft's read
+ * comes before its LLM call), so an approve, a reject, a payload edit, a
+ * resolve-line or another pick can commit in between. Holding the row lock
+ * to commit makes whatever committed first win: each path works from the
+ * locked row (`lockPickForPatch`) or refuses when it moved
+ * (`proposalChangedSince`), and its patch rolls back.
  */
 async function lockOpenForPick(
   deps: ResolveEntityDeps,
   tenantId: string,
   proposalId: string,
-): Promise<void> {
+): Promise<Proposal> {
   const locked = (await deps.proposalRepo.findByIdsForUpdate(tenantId, [proposalId])).find(
     (p) => p.id === proposalId,
   );
   if (!locked) {
     throw new NotFoundError('Proposal', proposalId);
   }
-  if (!isOpenForPick(locked.status)) {
-    throw new ConflictError('This was already handled, so that choice was not saved.', {
-      status: locked.status,
-    });
-  }
+  assertOpenForPick(locked.status);
+  return locked;
+}
+
+type ProposalPatch = Parameters<ProposalRepository['update']>[2];
+
+/**
+ * A4-6 — write a patch built from `locked` (the row `lockOpenForPick`
+ * returned) only while the row is still `locked`, in one compare-and-write
+ * (see the module doc). A miss is the "try again" 409 with nothing written: the
+ * question is still open, and a retry builds on the row as it is now. Any
+ * status move and the audit row come after it, so they only follow a write
+ * that landed.
+ */
+async function writeFromLockedRow(
+  deps: ResolveEntityDeps,
+  locked: Proposal,
+  patch: ProposalPatch,
+): Promise<void> {
+  const written = await deps.proposalRepo.updateIfUnchanged(locked.tenantId, locked.id, locked, patch);
+  if (!written) throw pickRaced(locked.status);
 }
 
 /** The structured original-intent context the producer stamps for re-draft. */
@@ -264,6 +383,13 @@ interface ResolvedEntityRecord {
   field: string;
   kind?: string;
   label?: string;
+  /**
+   * A4-5 — every candidate id the question this pick answered offered. A
+   * later pick of one of them comes from a screen showing that answered
+   * question: refused as already handled (`readPick`), whenever it arrives.
+   * Absent on resolutions recorded before this field existed.
+   */
+  offeredIds?: string[];
 }
 
 function readResolvedEntities(sourceContext: Record<string, unknown>): ResolvedEntityRecord[] {
@@ -276,6 +402,9 @@ function readResolvedEntities(sourceContext: Record<string, unknown>): ResolvedE
       field: typeof r.field === 'string' ? r.field : '',
       kind: typeof r.kind === 'string' ? r.kind : undefined,
       label: typeof r.label === 'string' ? r.label : undefined,
+      offeredIds: Array.isArray(r.offeredIds)
+        ? r.offeredIds.filter((id): id is string => typeof id === 'string')
+        : undefined,
     }))
     .filter((r) => r.id.length > 0 && r.field.length > 0);
 }
@@ -347,6 +476,182 @@ async function captureEntityPickerAlias(
   }
 }
 
+/** One pick read off one proposal row. */
+type PickRead = { kind: 'already_applied' } | OpenPick;
+
+/** A pick that still has to land: what it resolves, read off one row. */
+interface OpenPick {
+  kind: 'open';
+  payload: Record<string, unknown>;
+  sourceContext: Record<string, unknown>;
+  chosen: EntityCandidate;
+  entityKind: string | undefined;
+  /** The payload field the chosen id fills. */
+  field: string;
+  /** Every entity resolved across this chain, this pick included. */
+  resolvedEntities: ResolvedEntityRecord[];
+  /** Ambiguities from the same utterance still queued behind this one. */
+  pending: PendingEntityAmbiguity[];
+}
+
+/**
+ * Read `candidateId`'s pick off `proposal`: `already_applied` when this exact
+ * pick already landed on the row (a retried/double-tapped request — see the
+ * module doc), otherwise what it resolves. Throws the already-handled 409
+ * when the choice belongs to a question another pick answered (A4-5), and a
+ * ValidationError when the row is not awaiting a choice or the choice is not
+ * one of its candidates.
+ *
+ * The same read decides at the first read and again under the row lock
+ * (A3-1), so a pick that lost to another one gets the same answer whether
+ * that pick landed before this one's first read or while it waited on the
+ * lock.
+ */
+function readPick(proposal: Proposal, candidateId: string): PickRead {
+  const payload = asRecord(proposal.payload);
+  const sourceContext = asRecord(proposal.sourceContext);
+  const resolved = readResolvedEntities(sourceContext);
+  const alreadyResolved = resolved.some((r) => r.id === candidateId);
+  // A4-5 — offered by a question that is already answered, by a different
+  // choice: the owner picked from a screen that still showed it.
+  const answeredByAnother = !alreadyResolved && resolved.some((r) => r.offeredIds?.includes(candidateId));
+
+  const candidates = readCandidates(payload, sourceContext);
+  if (candidates.length === 0) {
+    // B2 — a single-shot annotate-only resolution (no pending ambiguities,
+    // e.g. a gated send_invoice) clears entityCandidates entirely once
+    // resolved, so a retried/double-tapped request finds no live candidate
+    // set here at all (unlike the multi-ambiguity chain, where the NEXT
+    // ambiguity's candidates keep this list non-empty). Mirror the
+    // alreadyResolved idempotency check below: if this exact candidateId was
+    // already resolved earlier in this proposal's history, the retry is a
+    // successful no-op, not an error.
+    if (alreadyResolved) return { kind: 'already_applied' };
+    if (answeredByAnother) throw pickNotSaved(proposal.status);
+    throw new ValidationError(PICK_NOTHING_TO_CHOOSE);
+  }
+
+  // Grounding invariant: the choice must be one of the surfaced candidates —
+  // never an arbitrary off-list id.
+  const chosen = candidates.find((c) => c.id === candidateId);
+  if (!chosen) {
+    // Idempotency (mirrors the router's createDeduped: a redelivered/
+    // double-tapped request is a successful no-op, not an error). Resolution
+    // mutates a SINGLE proposal row across the whole multi-ambiguity chain
+    // (see advanceToNextAmbiguity) rather than creating a new row per pick —
+    // so once a pick has been applied, its candidateId no longer appears in
+    // the CURRENT candidate set (the row has moved on to the next ambiguity,
+    // or been redrafted away entirely). If the id matches an entity we
+    // already resolved earlier in this chain, this is that same pick arriving
+    // twice: report it applied instead of 400ing a request that already
+    // succeeded once.
+    if (alreadyResolved) return { kind: 'already_applied' };
+    if (answeredByAnother) throw pickNotSaved(proposal.status);
+    throw new ValidationError(PICK_NOT_AN_OPTION);
+  }
+
+  // The entity kind tells us which field the resolved id fills. Prefer the
+  // chosen candidate's own kind, then the proposal-level entityKind, default
+  // generic.
+  const entityKind =
+    chosen.kind ??
+    (typeof sourceContext.entityKind === 'string' ? sourceContext.entityKind : undefined);
+  const field = payloadFieldForKind(entityKind);
+
+  // Accumulate this pick. The eventual redraft (once the pending-ambiguity
+  // queue drains, see advanceToNextAmbiguity) needs EVERY resolved entity from
+  // this chain, not just the last one.
+  const resolvedEntities: ResolvedEntityRecord[] = [
+    ...resolved,
+    {
+      id: chosen.id,
+      field,
+      ...(entityKind ? { kind: entityKind } : {}),
+      ...(chosen.label ? { label: chosen.label } : {}),
+      offeredIds: candidates.map((c) => c.id),
+    },
+  ];
+
+  return {
+    kind: 'open',
+    payload,
+    sourceContext,
+    chosen,
+    entityKind,
+    field,
+    resolvedEntities,
+    pending: readPendingAmbiguities(sourceContext),
+  };
+}
+
+type PickPath =
+  | { kind: 'advance' }
+  | { kind: 'redraft'; originalIntent: OriginalIntent; handler: TaskHandler }
+  | { kind: 'annotate' };
+
+/**
+ * Which of the three paths a pick takes on its row.
+ *
+ * P8/U-multi — more ambiguous references from the SAME utterance queued
+ * behind this one (producer: emitClarification's additionalAmbiguities →
+ * sourceContext.pendingEntityAmbiguities) advance to the next picker. Core
+ * Pattern: ambiguity on a voice path is always a clarification, never a guess
+ * — so as long as ANY reference is still unresolved, advance instead of
+ * redrafting/annotating with the others left as free text (or dropped).
+ *
+ * U1 (E9) — otherwise, when the producer persisted the original intent AND a
+ * handler factory is wired, re-run the ORIGINAL task handler with the
+ * resolved id injected and REPLACE the voice_clarification with the drafted,
+ * executable typed proposal. This is the only path that makes approval do
+ * the work; absent either input it falls back to annotate-only.
+ */
+function pathFor(pick: OpenPick, deps: ResolveEntityDeps): PickPath {
+  if (pick.pending.length > 0) return { kind: 'advance' };
+  const originalIntent = readOriginalIntent(pick.sourceContext);
+  const handler =
+    originalIntent && deps.redraftHandlerFactory
+      ? deps.redraftHandlerFactory(originalIntent.intentType)
+      : undefined;
+  if (originalIntent && handler) return { kind: 'redraft', originalIntent, handler };
+  return { kind: 'annotate' };
+}
+
+/**
+ * A3-1 — the annotate-only and next-ambiguity patches are built from the
+ * LOCKED row, never from the row read before the transaction. Their patch is
+ * a pure function of the row and the choice, so building it under the lock
+ * is the same as rebuilding it whenever the row changed: an edit or a
+ * resolve-line that committed in the gap is kept, and the pick lands on top.
+ *
+ * Unsafe to rebuild, refused with a 409: the row left review
+ * (lockOpenForPick) or another pick answered the question (readPick), both
+ * "already handled", the same answer the first read gives (A3-2, A4-5); or
+ * it now takes a different path, "try again". Returns undefined when the
+ * locked row shows this exact pick already landed (a double tap): no write,
+ * no audit.
+ */
+async function lockPickForPatch(
+  deps: ResolveEntityDeps,
+  tenantId: string,
+  proposalId: string,
+  candidateId: string,
+  expected: 'annotate' | 'advance',
+): Promise<{ row: Proposal; pick: OpenPick } | undefined> {
+  const row = await lockOpenForPick(deps, tenantId, proposalId);
+  const pick = readPick(row, candidateId);
+  if (pick.kind === 'already_applied') return undefined;
+  if (pathFor(pick, deps).kind !== expected) throw pickRaced(row.status);
+  return { row, pick };
+}
+
+interface PickIds {
+  tenantId: string;
+  proposalId: string;
+  candidateId: string;
+  actorId: string;
+  actorRole: Role;
+}
+
 export async function resolveProposalEntity(
   input: ResolveEntityInput,
   deps: ResolveEntityDeps,
@@ -367,200 +672,111 @@ export async function resolveProposalEntity(
     throw new NotFoundError('Proposal', proposalId);
   }
   // Only a proposal still under review can be patched. Re-checked under the
-  // row lock inside each path's transaction (lockOpenForPick / the re-draft's
-  // status write), since a concurrent approve/reject can land after this read.
-  if (!isOpenForPick(proposal.status)) {
-    throw new ValidationError(
-      `Cannot resolve an entity on a proposal in '${proposal.status}' status`,
-    );
+  // row lock inside each path's transaction (lockOpenForPick), since a
+  // concurrent approve/reject can land after this read.
+  assertOpenForPick(proposal.status);
+
+  // This read decides the path and rejects a bad choice early. The
+  // annotate-only and next-ambiguity patches are built again from the locked
+  // row; the re-draft refuses if the row moved (A3-1).
+  const pick = readPick(proposal, candidateId);
+  if (pick.kind === 'already_applied') return proposal;
+
+  const ids: PickIds = { tenantId, proposalId, candidateId, actorId, actorRole };
+  const path = pathFor(pick, deps);
+  if (path.kind === 'advance') return advanceToNextAmbiguity(ids, proposal, deps);
+  if (path.kind === 'redraft') {
+    return redraftResolvedProposal(ids, proposal, pick, path.originalIntent, path.handler, deps);
   }
+  return annotateResolvedProposal(ids, proposal, deps);
+}
 
-  const payload = asRecord(proposal.payload);
-  const sourceContext = asRecord(proposal.sourceContext);
+/** The row as it stands after a path ran, for the response. */
+async function currentRow(deps: ResolveEntityDeps, ids: PickIds, fallback: Proposal): Promise<Proposal> {
+  return (await deps.proposalRepo.findById(ids.tenantId, ids.proposalId)) ?? fallback;
+}
 
-  const candidates = readCandidates(payload, sourceContext);
-  if (candidates.length === 0) {
-    // B2 — a single-shot annotate-only resolution (no pending ambiguities,
-    // e.g. a gated send_invoice) clears entityCandidates entirely once
-    // resolved, so a retried/double-tapped request finds no live candidate
-    // set here at all (unlike the multi-ambiguity chain, where the NEXT
-    // ambiguity's candidates keep this list non-empty). Mirror the
-    // alreadyResolved idempotency check below: if this exact candidateId was
-    // already resolved earlier in this proposal's history, the retry is a
-    // successful no-op, not an error.
-    if (readResolvedEntities(sourceContext).some((r) => r.id === candidateId)) {
-      return proposal;
+/**
+ * Annotate-only fallback (no originalIntent / no factory): stamp every
+ * reference gathered across this chain with its chosen id and clear the
+ * picker, built from the locked row (A3-1).
+ */
+async function annotateResolvedProposal(
+  ids: PickIds,
+  read: Proposal,
+  deps: ResolveEntityDeps,
+): Promise<Proposal> {
+  const { tenantId, proposalId, candidateId, actorId, actorRole } = ids;
+
+  const grounding = await deps.transactionRunner.run(tenantId, async () => {
+    const locked = await lockPickForPatch(deps, tenantId, proposalId, candidateId, 'annotate');
+    if (!locked) return undefined;
+    const { row, pick } = locked;
+    const { payload, sourceContext, chosen, entityKind, field, resolvedEntities } = pick;
+
+    // Re-draft: resolve every reference gathered across this chain to its
+    // chosen id. We stamp each onto the payload (the field its kind fills) so
+    // the executor reads verified ids instead of the free text it choked on,
+    // and the LAST one onto targetEntityId for the detail/deep-link surfaces.
+    const nextPayload: Record<string, unknown> = { ...payload };
+    for (const resolved of resolvedEntities) {
+      nextPayload[resolved.field] = resolved.id;
     }
-    throw new ValidationError('Proposal is not awaiting an entity choice');
-  }
+    // The clarification is resolved — drop the candidate list and the
+    // ambiguity markers so the card no longer renders a picker.
+    delete nextPayload.entityCandidates;
+    delete nextPayload.entityReference;
 
-  // Grounding invariant: the choice must be one of the surfaced candidates —
-  // never an arbitrary off-list id.
-  const chosen = candidates.find((c) => c.id === candidateId);
-  if (!chosen) {
-    // Idempotency (mirrors the router's createDeduped: a redelivered/
-    // double-tapped request is a successful no-op, not an error). Resolution
-    // mutates a SINGLE proposal row across the whole multi-ambiguity chain
-    // (see the pending-ambiguity branch below) rather than creating a new
-    // row per pick — so once a pick has been applied, its candidateId no
-    // longer appears in the CURRENT candidate set (the row has moved on to
-    // the next ambiguity, or been redrafted away entirely). If the id
-    // matches an entity we already resolved earlier in this chain, this is
-    // that same pick arriving twice: return the current state untouched
-    // instead of 400ing a request that already succeeded once.
-    const alreadyResolved = readResolvedEntities(sourceContext).some((r) => r.id === candidateId);
-    if (alreadyResolved) {
-      return proposal;
-    }
-    throw new ValidationError('candidateId is not among this proposal’s candidates');
-  }
-
-  // The entity kind tells us which field the resolved id fills. Prefer the
-  // chosen candidate's own kind, then the proposal-level entityKind, default
-  // generic.
-  const entityKind =
-    chosen.kind ??
-    (typeof sourceContext.entityKind === 'string' ? sourceContext.entityKind : undefined);
-  const field = payloadFieldForKind(entityKind);
-
-  // Accumulate this pick. The eventual redraft (once the pending-ambiguity
-  // queue drains, see below) needs EVERY resolved entity from this chain,
-  // not just the last one.
-  const resolvedEntities: ResolvedEntityRecord[] = [
-    ...readResolvedEntities(sourceContext),
-    {
+    const nextSourceContext: Record<string, unknown> = { ...sourceContext };
+    delete nextSourceContext.entityCandidates;
+    delete nextSourceContext.entityReference;
+    delete nextSourceContext.entityKind;
+    delete nextSourceContext.originalIntent;
+    delete nextSourceContext.pendingEntityAmbiguities;
+    // Record every resolution (and, back-compat, the last one alone under the
+    // singular key) so the re-drafted action (and any later audit) can trace
+    // which reference(s) were resolved to which id(s).
+    nextSourceContext.resolvedEntities = resolvedEntities;
+    nextSourceContext.resolvedEntity = {
       id: chosen.id,
-      field,
       ...(entityKind ? { kind: entityKind } : {}),
       ...(chosen.label ? { label: chosen.label } : {}),
-    },
-  ];
+    };
 
-  // P8/U-multi — more ambiguous references from the SAME utterance are
-  // queued behind this one (producer: emitClarification's
-  // additionalAmbiguities → sourceContext.pendingEntityAmbiguities). Core
-  // Pattern: ambiguity on a voice path is always a clarification, never a
-  // guess — so as long as ANY reference is still unresolved, advance to the
-  // next picker instead of redrafting/annotating with the others left as
-  // free text (or silently dropped).
-  const pending = readPendingAmbiguities(sourceContext);
-  if (pending.length > 0) {
-    const [next, ...rest] = pending;
-    return advanceToNextAmbiguity({
-      tenantId,
-      proposalId,
-      actorId,
-      actorRole,
-      proposal,
-      payload,
-      sourceContext,
-      chosen,
-      entityKind,
-      field,
-      candidateId,
-      resolvedEntities,
-      next,
-      rest,
-      deps,
-    });
-  }
-
-  // U1 (E9) — re-draft path: when the producer persisted the original intent
-  // AND a handler factory is wired, re-run the ORIGINAL task handler with the
-  // resolved id injected and REPLACE the voice_clarification with the drafted,
-  // executable typed proposal. This is the only path that makes approval do the
-  // work; absent either input we fall back to the annotate-only behavior.
-  const originalIntent = readOriginalIntent(sourceContext);
-  const redraftHandler =
-    originalIntent && deps.redraftHandlerFactory
-      ? deps.redraftHandlerFactory(originalIntent.intentType)
+    // B2 — a TYPED money proposal (send_invoice / update_invoice /
+    // update_estimate) reaches this annotate-only path carrying no
+    // originalIntent (verified: none of those handlers stamp it), so it is
+    // NEVER re-drafted here — only annotated. Such a proposal may carry a flat
+    // `sourceContext.missingFields` gate (e.g. ['invoiceId']) stamped by its
+    // drafting handler. This pick just resolved one entry — clear ONLY the
+    // fields this pick actually satisfied (B1's clear-on-fill helper: never a
+    // blanket schema recompute, see missing-fields.ts's doc comment for why
+    // that would silently reopen the doomed-approval bug) and, critically,
+    // promote draft→ready_for_review ONLY when nothing is left gated. A
+    // voice_clarification (the common caller of this path) never carries
+    // missingFields at all, so it keeps promoting unconditionally exactly as
+    // before — this branch is a no-op for that case.
+    const currentMissingFields = Array.isArray(sourceContext.missingFields)
+      ? (sourceContext.missingFields as unknown[]).filter((f): f is string => typeof f === 'string')
       : undefined;
-
-  if (originalIntent && redraftHandler) {
-    return redraftResolvedProposal({
-      tenantId,
-      proposalId,
-      actorId,
-      actorRole,
-      proposal,
-      sourceContext,
-      chosen,
-      entityKind,
-      field,
-      candidateId,
-      resolvedEntities,
-      originalIntent,
-      handler: redraftHandler,
-      deps,
-    });
-  }
-
-  // ── Annotate-only fallback (no originalIntent / no factory) ───────────────
-  // Re-draft: resolve every reference gathered across this chain to its
-  // chosen id. We stamp each onto the payload (the field its kind fills) so
-  // the executor reads verified ids instead of the free text it choked on,
-  // and the LAST one onto targetEntityId for the detail/deep-link surfaces.
-  const nextPayload: Record<string, unknown> = { ...payload };
-  for (const resolved of resolvedEntities) {
-    nextPayload[resolved.field] = resolved.id;
-  }
-  // The clarification is resolved — drop the candidate list and the
-  // ambiguity markers so the card no longer renders a picker.
-  delete nextPayload.entityCandidates;
-  delete nextPayload.entityReference;
-
-  const nextSourceContext: Record<string, unknown> = { ...sourceContext };
-  delete nextSourceContext.entityCandidates;
-  delete nextSourceContext.entityReference;
-  delete nextSourceContext.entityKind;
-  delete nextSourceContext.originalIntent;
-  delete nextSourceContext.pendingEntityAmbiguities;
-  // Record every resolution (and, back-compat, the last one alone under the
-  // singular key) so the re-drafted action (and any later audit) can trace
-  // which reference(s) were resolved to which id(s).
-  nextSourceContext.resolvedEntities = resolvedEntities;
-  nextSourceContext.resolvedEntity = {
-    id: chosen.id,
-    ...(entityKind ? { kind: entityKind } : {}),
-    ...(chosen.label ? { label: chosen.label } : {}),
-  };
-
-  // B2 — a TYPED money proposal (send_invoice / update_invoice /
-  // update_estimate) reaches this annotate-only path carrying no
-  // originalIntent (verified: none of those handlers stamp it), so it is
-  // NEVER re-drafted here — only annotated. Such a proposal may carry a flat
-  // `sourceContext.missingFields` gate (e.g. ['invoiceId']) stamped by its
-  // drafting handler. This pick just resolved one entry — clear ONLY the
-  // fields this pick actually satisfied (B1's clear-on-fill helper: never a
-  // blanket schema recompute, see missing-fields.ts's doc comment for why
-  // that would silently reopen the doomed-approval bug) and, critically,
-  // promote draft→ready_for_review ONLY when nothing is left gated. A
-  // voice_clarification (the common caller of this path) never carries
-  // missingFields at all, so it keeps promoting unconditionally exactly as
-  // before — this branch is a no-op for that case.
-  const currentMissingFields = Array.isArray(sourceContext.missingFields)
-    ? (sourceContext.missingFields as unknown[]).filter((f): f is string => typeof f === 'string')
-    : undefined;
-  let remainingMissingFields: string[] | undefined;
-  if (currentMissingFields) {
-    const editedKeys = resolvedEntities.map((r) => r.field);
-    remainingMissingFields = clearSatisfiedMissingFields(currentMissingFields, editedKeys, nextPayload);
-    if (remainingMissingFields.length > 0) {
-      nextSourceContext.missingFields = remainingMissingFields;
-    } else {
-      delete nextSourceContext.missingFields;
+    let remainingMissingFields: string[] | undefined;
+    if (currentMissingFields) {
+      const editedKeys = resolvedEntities.map((r) => r.field);
+      remainingMissingFields = clearSatisfiedMissingFields(currentMissingFields, editedKeys, nextPayload);
+      if (remainingMissingFields.length > 0) {
+        nextSourceContext.missingFields = remainingMissingFields;
+      } else {
+        delete nextSourceContext.missingFields;
+      }
     }
-  }
 
-  // Surface for approval — but NEVER approve/execute it (D-004). Only a draft
-  // is promoted, and only once nothing is left gated; a proposal already in
-  // ready_for_review stays there.
-  const stillGated = remainingMissingFields !== undefined && remainingMissingFields.length > 0;
-  const movedToReview = proposal.status === 'draft' && !stillGated;
+    // Surface for approval — but NEVER approve/execute it (D-004). Only a draft
+    // is promoted, and only once nothing is left gated; a proposal already in
+    // ready_for_review stays there.
+    const stillGated = remainingMissingFields !== undefined && remainingMissingFields.length > 0;
+    const movedToReview = row.status === 'draft' && !stillGated;
 
-  await transactionRunnerOf(deps).run(tenantId, async () => {
-    await lockOpenForPick(deps, tenantId, proposalId);
-    await deps.proposalRepo.update(tenantId, proposalId, {
+    await writeFromLockedRow(deps, row, {
       payload: nextPayload,
       sourceContext: nextSourceContext,
       targetEntityId: chosen.id,
@@ -589,61 +805,44 @@ export async function resolveProposalEntity(
         }),
       );
     }
+    return row;
   });
 
-  await captureEntityPickerAlias(deps, {
-    tenantId,
-    actorId,
-    actorRole,
-    groundingProposal: proposal,
-    selectedEntityId: candidateId,
-  });
+  if (grounding) {
+    await captureEntityPickerAlias(deps, {
+      tenantId,
+      actorId,
+      actorRole,
+      groundingProposal: grounding,
+      selectedEntityId: candidateId,
+    });
+  }
 
   // Re-read so the response reflects the payload patch AND any status
   // transition.
-  const fresh = await deps.proposalRepo.findById(tenantId, proposalId);
-  return fresh ?? proposal;
+  return currentRow(deps, ids, read);
 }
 
 /**
  * U1 (E9) — re-draft the original action with the resolved id and replace the
  * voice_clarification with the executable typed proposal.
+ *
+ * The draft is built from `read` across the LLM call, so it is only written
+ * when the locked row is still exactly that row (A3-1): anything that
+ * committed in the gap — an edit, a resolve-line, another pick, a decision —
+ * refuses it with the 409. The one exception is this same pick having landed
+ * first (a double tap), which returns the row it left.
  */
-async function redraftResolvedProposal(args: {
-  tenantId: string;
-  proposalId: string;
-  actorId: string;
-  actorRole: Role;
-  proposal: Proposal;
-  sourceContext: Record<string, unknown>;
-  chosen: EntityCandidate;
-  entityKind: string | undefined;
-  field: string;
-  candidateId: string;
-  /** Every entity resolved across this chain (this pick included) — see the
-   *  module doc comment (P8/U-multi). Single-ambiguity callers pass a
-   *  one-element array, so this subsumes the old chosen-only behavior. */
-  resolvedEntities: ResolvedEntityRecord[];
-  originalIntent: OriginalIntent;
-  handler: import('../ai/tasks/task-handlers').TaskHandler;
-  deps: ResolveEntityDeps;
-}): Promise<Proposal> {
-  const {
-    tenantId,
-    proposalId,
-    actorId,
-    actorRole,
-    proposal,
-    sourceContext,
-    chosen,
-    entityKind,
-    field,
-    candidateId,
-    resolvedEntities,
-    originalIntent,
-    handler,
-    deps,
-  } = args;
+async function redraftResolvedProposal(
+  ids: PickIds,
+  read: Proposal,
+  pick: OpenPick,
+  originalIntent: OriginalIntent,
+  handler: TaskHandler,
+  deps: ResolveEntityDeps,
+): Promise<Proposal> {
+  const { tenantId, proposalId, candidateId, actorId, actorRole } = ids;
+  const { sourceContext, chosen, entityKind, field, resolvedEntities } = pick;
 
   // Reconstruct the resolved id into existingEntities EXACTLY as the voice
   // router does on the non-ambiguous path: map the original extracted entities
@@ -679,7 +878,7 @@ async function redraftResolvedProposal(args: {
   // Stored transcript is the original message — re-draft against it, not the
   // clarification summary.
   const storedTranscript =
-    typeof sourceContext.transcript === 'string' ? sourceContext.transcript : proposal.summary;
+    typeof sourceContext.transcript === 'string' ? sourceContext.transcript : read.summary;
   const conversationId =
     typeof sourceContext.conversationId === 'string' ? sourceContext.conversationId : undefined;
   // A verified customer id may have been resolved on ANY pick in the chain
@@ -688,7 +887,7 @@ async function redraftResolvedProposal(args: {
 
   const context: TaskContext = {
     tenantId,
-    userId: proposal.createdBy,
+    userId: read.createdBy,
     message: storedTranscript,
     ...(conversationId ? { conversationId } : {}),
     existingEntities,
@@ -768,8 +967,18 @@ async function redraftResolvedProposal(args: {
   //
   // A1 — the LLM call is over; these three writes commit together, so a failed
   // status write or audit row never leaves a re-drafted payload behind.
-  await transactionRunnerOf(deps).run(tenantId, async () => {
-    await deps.proposalRepo.update(tenantId, proposalId, {
+  const landed = await deps.transactionRunner.run(tenantId, async () => {
+    // A3-1 — the draft came from `read`, across the LLM call. If the row
+    // moved since, the draft is stale: never write it over the change. When
+    // another pick answered the question, readPick refuses it as already
+    // handled; when the question is still open, a retry goes through.
+    const row = await lockOpenForPick(deps, tenantId, proposalId);
+    if (proposalChangedSince(read, row)) {
+      if (readPick(row, candidateId).kind === 'already_applied') return false;
+      throw pickRaced(row.status);
+    }
+
+    await writeFromLockedRow(deps, row, {
       proposalType: drafted.proposalType,
       payload: drafted.payload,
       summary: drafted.summary,
@@ -804,7 +1013,7 @@ async function redraftResolvedProposal(args: {
             field,
             // Record the type transition so the audit trail shows the
             // clarification became an executable action.
-            fromProposalType: proposal.proposalType,
+            fromProposalType: read.proposalType,
             toProposalType: drafted.proposalType,
             intentType: originalIntent.intentType,
             movedToReview: true,
@@ -815,23 +1024,26 @@ async function redraftResolvedProposal(args: {
         }),
       );
     }
+    return true;
   });
 
-  await captureEntityPickerAlias(deps, {
-    tenantId,
-    actorId,
-    actorRole,
-    groundingProposal: proposal,
-    selectedEntityId: candidateId,
-  });
+  if (landed) {
+    await captureEntityPickerAlias(deps, {
+      tenantId,
+      actorId,
+      actorRole,
+      groundingProposal: read,
+      selectedEntityId: candidateId,
+    });
+  }
 
-  const fresh = await deps.proposalRepo.findById(tenantId, proposalId);
-  return fresh ?? proposal;
+  return currentRow(deps, ids, read);
 }
 
 /**
  * P8/U-multi — advance a multi-entity-ambiguity clarification to the NEXT
- * queued ambiguity instead of redrafting/annotating.
+ * queued ambiguity instead of redrafting/annotating, built from the locked
+ * row (A3-1).
  *
  * Mirrors emitClarification's entity-ambiguity payload/summary/explanation/
  * sourceContext shape (voice-action-router.ts) so the surfaced picker is
@@ -846,112 +1058,89 @@ async function redraftResolvedProposal(args: {
  * the operator still owes an answer to", and there is never more than one
  * such question in flight at a time (the payload contract only ever holds
  * one candidate list). Reusing the row is also what makes a retried pick
- * idempotent — see the `alreadyResolved` check in `resolveProposalEntity`,
- * which this makes possible: once this runs, the prior pick's candidateId is
- * gone from the proposal's live candidate set, so a duplicate request can
- * never re-trigger it.
+ * idempotent — see the `already_applied` case in `readPick`, which this
+ * makes possible: once this runs, the prior pick's candidateId is gone from
+ * the proposal's live candidate set, so a duplicate request can never
+ * re-trigger it.
  */
-async function advanceToNextAmbiguity(args: {
-  tenantId: string;
-  proposalId: string;
-  actorId: string;
-  actorRole: Role;
-  proposal: Proposal;
-  payload: Record<string, unknown>;
-  sourceContext: Record<string, unknown>;
-  chosen: EntityCandidate;
-  entityKind: string | undefined;
-  field: string;
-  candidateId: string;
-  resolvedEntities: ResolvedEntityRecord[];
-  next: PendingEntityAmbiguity;
-  rest: PendingEntityAmbiguity[];
-  deps: ResolveEntityDeps;
-}): Promise<Proposal> {
-  const {
-    tenantId,
-    proposalId,
-    actorId,
-    actorRole,
-    proposal,
-    payload,
-    sourceContext,
-    chosen,
-    entityKind,
-    field,
-    candidateId,
-    resolvedEntities,
-    next,
-    rest,
-    deps,
-  } = args;
+async function advanceToNextAmbiguity(
+  ids: PickIds,
+  read: Proposal,
+  deps: ResolveEntityDeps,
+): Promise<Proposal> {
+  const { tenantId, proposalId, candidateId, actorId, actorRole } = ids;
 
-  // Payload contract (voiceClarificationPayloadSchema) requires label/score
-  // on each candidate. Queued candidates always came from a real
-  // EntityCandidate (producer-side, both required) — the fallbacks here only
-  // guard against a malformed/legacy persisted shape, mirroring the
-  // defensive parsing in readPendingAmbiguities.
-  const nextPayloadCandidates = next.candidates.map((c) => ({
-    id: c.id,
-    label: c.label ?? c.id,
-    ...(c.hint ? { hint: c.hint } : {}),
-    score: c.score ?? 0,
-  }));
-  const nextPayload: Record<string, unknown> = {
-    ...payload,
-    entityReference: next.reference,
-    entityCandidates: nextPayloadCandidates,
-  };
-  // P2-002 AI-safety gate — same guard emitClarification applies before
-  // persisting a voice_clarification, so a future edit that breaks the
-  // contract trips here instead of writing a malformed proposal.
-  assertValidProposalPayload('voice_clarification', nextPayload);
+  const grounding = await deps.transactionRunner.run(tenantId, async () => {
+    const locked = await lockPickForPatch(deps, tenantId, proposalId, candidateId, 'advance');
+    if (!locked) return undefined;
+    const { row, pick } = locked;
+    const { payload, sourceContext, chosen, entityKind, field, resolvedEntities } = pick;
+    const [next, ...rest] = pick.pending;
 
-  // Summary/explanation mirror emitClarification's entityAmbiguity branch
-  // (voice-action-router.ts) so this reads exactly like a freshly emitted
-  // clarification for the next reference.
-  const moreCount = rest.length;
-  const summary = `Which ${next.entityKind}? "${next.reference}" matched ${next.candidates.length} records`;
-  const explanation =
-    `Heard the request, but "${next.reference}" matches more than one ${next.entityKind}. Tap the right one below.` +
-    (moreCount > 0
-      ? ` (${moreCount} more reference${moreCount === 1 ? '' : 's'} will need picking after this.)`
-      : '');
-
-  const nextSourceContext: Record<string, unknown> = { ...sourceContext };
-  nextSourceContext.entityKind = next.entityKind;
-  nextSourceContext.entityReference = next.reference;
-  nextSourceContext.entityCandidates = next.candidates.map((c) => ({
-    id: c.id,
-    kind: c.kind ?? next.entityKind,
-    label: c.label,
-    ...(c.hint ? { hint: c.hint } : {}),
-    score: c.score,
-  }));
-  if (rest.length > 0) {
-    nextSourceContext.pendingEntityAmbiguities = rest.map((a) => ({
-      entityKind: a.entityKind,
-      reference: a.reference,
-      candidates: a.candidates.map((c) => ({
-        id: c.id,
-        kind: c.kind,
-        label: c.label,
-        ...(c.hint ? { hint: c.hint } : {}),
-        score: c.score,
-      })),
+    // Payload contract (voiceClarificationPayloadSchema) requires label/score
+    // on each candidate. Queued candidates always came from a real
+    // EntityCandidate (producer-side, both required) — the fallbacks here only
+    // guard against a malformed/legacy persisted shape, mirroring the
+    // defensive parsing in readPendingAmbiguities.
+    const nextPayloadCandidates = next.candidates.map((c) => ({
+      id: c.id,
+      label: c.label ?? c.id,
+      ...(c.hint ? { hint: c.hint } : {}),
+      score: c.score ?? 0,
     }));
-  } else {
-    delete nextSourceContext.pendingEntityAmbiguities;
-  }
-  // originalIntent rides forward untouched — the eventual redraft still
-  // needs it. Accumulate this pick so the eventual redraft (or annotate
-  // fallback) sees every resolution from the chain, not just the last one.
-  nextSourceContext.resolvedEntities = resolvedEntities;
-  nextSourceContext.resolvedEntity = resolvedEntities[resolvedEntities.length - 1];
+    const nextPayload: Record<string, unknown> = {
+      ...payload,
+      entityReference: next.reference,
+      entityCandidates: nextPayloadCandidates,
+    };
+    // P2-002 AI-safety gate — same guard emitClarification applies before
+    // persisting a voice_clarification, so a future edit that breaks the
+    // contract trips here instead of writing a malformed proposal.
+    assertValidProposalPayload('voice_clarification', nextPayload);
 
-  await transactionRunnerOf(deps).run(tenantId, async () => {
-    await lockOpenForPick(deps, tenantId, proposalId);
-    await deps.proposalRepo.update(tenantId, proposalId, {
+    // Summary/explanation mirror emitClarification's entityAmbiguity branch
+    // (voice-action-router.ts) so this reads exactly like a freshly emitted
+    // clarification for the next reference.
+    const moreCount = rest.length;
+    const summary = `Which ${next.entityKind}? "${next.reference}" matched ${next.candidates.length} records`;
+    const explanation =
+      `Heard the request, but "${next.reference}" matches more than one ${next.entityKind}. Tap the right one below.` +
+      (moreCount > 0
+        ? ` (${moreCount} more reference${moreCount === 1 ? '' : 's'} will need picking after this.)`
+        : '');
+
+    const nextSourceContext: Record<string, unknown> = { ...sourceContext };
+    nextSourceContext.entityKind = next.entityKind;
+    nextSourceContext.entityReference = next.reference;
+    nextSourceContext.entityCandidates = next.candidates.map((c) => ({
+      id: c.id,
+      kind: c.kind ?? next.entityKind,
+      label: c.label,
+      ...(c.hint ? { hint: c.hint } : {}),
+      score: c.score,
+    }));
+    if (rest.length > 0) {
+      nextSourceContext.pendingEntityAmbiguities = rest.map((a) => ({
+        entityKind: a.entityKind,
+        reference: a.reference,
+        candidates: a.candidates.map((c) => ({
+          id: c.id,
+          kind: c.kind,
+          label: c.label,
+          ...(c.hint ? { hint: c.hint } : {}),
+          score: c.score,
+        })),
+      }));
+    } else {
+      delete nextSourceContext.pendingEntityAmbiguities;
+    }
+    // originalIntent rides forward untouched — the eventual redraft still
+    // needs it. Accumulate this pick so the eventual redraft (or annotate
+    // fallback) sees every resolution from the chain, not just the last one.
+    nextSourceContext.resolvedEntities = resolvedEntities;
+    nextSourceContext.resolvedEntity = resolvedEntities[resolvedEntities.length - 1];
+
+    await writeFromLockedRow(deps, row, {
       payload: nextPayload,
       summary,
       explanation,
@@ -991,18 +1180,20 @@ async function advanceToNextAmbiguity(args: {
         }),
       );
     }
+    return row;
   });
 
   // After the commit, like the other two paths — an alias review must never
   // exist for a pick whose writes rolled back.
-  await captureEntityPickerAlias(deps, {
-    tenantId,
-    actorId,
-    actorRole,
-    groundingProposal: proposal,
-    selectedEntityId: candidateId,
-  });
+  if (grounding) {
+    await captureEntityPickerAlias(deps, {
+      tenantId,
+      actorId,
+      actorRole,
+      groundingProposal: grounding,
+      selectedEntityId: candidateId,
+    });
+  }
 
-  const fresh = await deps.proposalRepo.findById(tenantId, proposalId);
-  return fresh ?? proposal;
+  return currentRow(deps, ids, read);
 }

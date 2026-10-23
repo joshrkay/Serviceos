@@ -68,6 +68,7 @@ import { ProposalExecutor } from '../../src/proposals/execution/executor';
 import { IdempotencyGuard } from '../../src/proposals/execution/idempotency';
 import { createExecutionHandlerRegistry, type ExecutionContext } from '../../src/proposals/execution/handlers';
 import { UNDO_WINDOW_MS } from '../../src/proposals/lifecycle';
+import { PgTenantTransactionRunner } from '../../src/db/tenant-transaction';
 
 // #1402 — far-future anchor: the reschedule proposal below would otherwise move a
 // visit to a start in the past, which execution now refuses.
@@ -198,7 +199,7 @@ describe('Real Redis + real Postgres — dispatch presence & revision-token orde
     });
     app.use(
       '/api/proposals',
-      createProposalsRouter(proposalRepo, appointmentRepo, auditRepo, feasibilityDeps),
+      createProposalsRouter(proposalRepo, new PgTenantTransactionRunner(pool), appointmentRepo, auditRepo, feasibilityDeps),
     );
     return app;
   }

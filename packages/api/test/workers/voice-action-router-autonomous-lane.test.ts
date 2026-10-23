@@ -190,15 +190,18 @@ describe('voice-action-router — autonomous booking lane (UB-D)', () => {
     platformDisabled?: boolean;
     /** tenant_settings.owner_phone as the lane resolver reads it. */
     laneOwnerPhone?: string | null;
-    /** The owner-or-backup number the routing SMS goes to. */
-    resolveOwnerPhone?: (tenantId: string) => Promise<string | null | undefined>;
+    /** The owner-or-backup number the routing SMS goes to, and whose it is. */
+    resolveSmsRecipient?: NonNullable<
+      Parameters<typeof createVoiceActionRouterWorker>[0]['unsupervisedRouting']
+    >['resolveSmsRecipient'];
     /** Leave the owner UNDO channel unwired (buildLaneUndoChannel returned undefined). */
     noUndoChannel?: boolean;
     /** The UNDO channel's runtime check (false: the outbound SMS kill switch is off). */
     undoCanDeliver?: boolean;
   }) {
     const sendSms = opts.sendSms ?? (async () => {});
-    const resolveOwnerPhone = opts.resolveOwnerPhone ?? (async () => '+15125550100');
+    const resolveSmsRecipient =
+      opts.resolveSmsRecipient ?? (async () => ({ phone: '+15125550100', via: 'owner_phone' as const }));
     return createVoiceActionRouterWorker({
     // Production always resolves a tenant zone; a booking without one now
     // asks the operator instead of guessing at US-Eastern.
@@ -232,7 +235,7 @@ describe('voice-action-router — autonomous booking lane (UB-D)', () => {
                 canDeliver: () => opts.undoCanDeliver ?? true,
               },
             }),
-        resolveOwnerPhone,
+        resolveSmsRecipient,
         resolveRouting: async () => 'queue_and_sms',
       },
     });
@@ -406,7 +409,7 @@ describe('voice-action-router — autonomous booking lane (UB-D)', () => {
     const worker = makeWorker({
       sendSms,
       laneOwnerPhone: null,
-      resolveOwnerPhone: async () => '+15125550777',
+      resolveSmsRecipient: async () => ({ phone: '+15125550777', via: 'backup_supervisor' as const }),
     });
 
     await expect(worker.handle(bookingMessage(), silentLogger())).resolves.toBeUndefined();
@@ -448,7 +451,7 @@ describe('voice-action-router — autonomous booking lane (UB-D)', () => {
     const worker = makeWorker({
       sendSms,
       laneOwnerPhone: '+15125550100',
-      resolveOwnerPhone: async () => {
+      resolveSmsRecipient: async () => {
         throw new Error('settings db down');
       },
     });

@@ -9,7 +9,7 @@
  * Seam: InvoiceTaskHandler.handle (the invoice-from-estimate task handler).
  */
 import { describe, it, expect, vi } from 'vitest';
-import { InvoiceTaskHandler } from '../../../src/ai/tasks/invoice-task';
+import { InvoiceTaskHandler, redraftInvoiceOnEstimatePick } from '../../../src/ai/tasks/invoice-task';
 import { createRedraftHandlerFactory } from '../../../src/proposals/redraft-handler-factory';
 import type { LLMGateway, LLMResponse } from '../../../src/ai/gateway/gateway';
 import { InMemoryEstimateRepository } from '../../../src/estimates/estimate';
@@ -224,5 +224,41 @@ describe('#1405 — several accepted estimates: ask which, never guess', () => {
     );
     // Never a silent guess: the draft waits for the pick.
     expect(proposal.status).toBe('draft');
+  });
+});
+
+// R2-1 — the card's pick builds the edited payload with a shallow spread of
+// the row it read, so `_meta` is the read row's own object. The re-draft
+// deleted the placeholder line's markers from it in place: the read no longer
+// matched the stored row (the edit's "unchanged since my read?" check refused
+// every such pick) and the payload kept as first proposed lost them too.
+describe('R2-1 — the estimate pick re-draft never changes the row the caller read', () => {
+  const lowMeta = () => ({
+    overallConfidence: 'low',
+    fieldConfidence: { 'lineItems[0].unitPriceCents': 'low' },
+    markers: [{ path: 'lineItems[0].unitPriceCents', reason: 'Not in your price list' }],
+  });
+
+  it("drops the placeholder line's markers from the draft's _meta, leaving the read row's _meta as it was", async () => {
+    const read = {
+      proposalType: 'draft_invoice' as const,
+      payload: {
+        lineItems: [{ description: 'Service as per accepted estimate', quantity: 1, unitPriceCents: 1000 }],
+        estimateReference: 'the accepted estimate',
+        _meta: lowMeta(),
+      } as Record<string, unknown>,
+      sourceContext: { missingFields: ['lineItems[0].catalogItemId'] } as Record<string, unknown>,
+    };
+    const picked = { ...read, payload: { ...read.payload, estimateId: ESTIMATE } };
+
+    await redraftInvoiceOnEstimatePick(await acceptedEstimateRepo(), TENANT, picked, 'estimateId', ESTIMATE);
+
+    expect(picked.payload._meta).toEqual({ overallConfidence: 'low' });
+    expect((picked.payload.lineItems as Array<{ description: string }>).map((l) => l.description)).toEqual([
+      'Water heater install',
+      'Haul-away and permit',
+    ]);
+    expect(read.payload._meta).toEqual(lowMeta());
+    expect(read.sourceContext).toEqual({ missingFields: ['lineItems[0].catalogItemId'] });
   });
 });

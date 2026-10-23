@@ -16,6 +16,7 @@ import {
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 import type { Role } from '../../src/auth/rbac';
+import { InMemoryTransactionRunner } from '../../src/db/tenant-transaction';
 
 const TEST_TENANT_ID = 'tenant-route-batch';
 const TEST_USER_ID = 'user-route-batch';
@@ -46,7 +47,7 @@ function buildApp(role: Role): {
   });
   const proposalRepo = new InMemoryProposalRepository();
   const audit = new InMemoryAuditRepository();
-  app.use('/api/proposals', createProposalsRouter(proposalRepo, undefined, audit));
+  app.use('/api/proposals', createProposalsRouter(proposalRepo, new InMemoryTransactionRunner(), undefined, audit));
   return { app, proposalRepo, audit };
 }
 
