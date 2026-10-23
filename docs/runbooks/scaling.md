@@ -123,6 +123,18 @@ PgBouncer config: `pool_mode = transaction`, `max_client_conn` high (e.g. 1000),
   > deadline of its own; its one audit row (minted or failed) is standalone
   > too.
   >
+  > **Guard — `gateway_llm_call_in_transaction_total`.** `LLMGateway.complete`
+  > checks for an open tenant transaction (`currentTenantContext()`: the
+  > request transaction, or an explicit unit of work spanning the call) when
+  > a call starts. Under `NODE_ENV=test` it throws `LlmCallInTransactionError`
+  > (`LLM_CALL_IN_TRANSACTION`), so a route that awaits the gateway in-request
+  > fails its own test. Anywhere else it logs an error with the call site and
+  > increments this counter, and the call proceeds. Any non-zero rate is a
+  > route that belongs on `LLM_LONG_CALL_ROUTES`; the log's `taskType` and
+  > `stack` name it. The check only sees calls through `LLMGateway`: a route
+  > awaiting another external API (speech, DNS, a certificate provider)
+  > inside the request transaction is not caught by it.
+  >
   > Each entry is anchored at both ends and matches the way Express routes:
   > one optional trailing slash and any letter case (A-R4). Without that,
   > `POST /proposals/:id/resolve-entity/` reached the same handler inside the

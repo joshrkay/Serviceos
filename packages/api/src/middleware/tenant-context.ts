@@ -232,6 +232,12 @@ const REQUEST_IDLE_TX_TIMEOUT_MS = positiveIntEnv('DB_REQUEST_IDLE_TX_TIMEOUT_MS
  * letter case (routing is not case-sensitive). Otherwise `/resolve-entity/`
  * reached the same handler INSIDE the request transaction, where the
  * handler's own runner then took a second pooled connection.
+ *
+ * The same holds for any other slow external call a handler awaits (the
+ * speech-provider routes below). The LLM gateway enforces the list: a
+ * `gateway.complete()` started while a tenant transaction is open throws
+ * LlmCallInTransactionError under NODE_ENV=test and, elsewhere, logs an error
+ * and counts `gateway_llm_call_in_transaction_total` (ai/gateway/gateway.ts).
  */
 const LLM_LONG_CALL_ROUTES: readonly { method: string; re: RegExp }[] = [
   { method: 'POST', re: /^(?:\/api)?\/assistant\/chat\/?$/i },

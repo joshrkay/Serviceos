@@ -2,10 +2,12 @@ import { createHash } from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { AppError, ValidationError } from '../../shared/errors';
 import {
+  gatewayLlmCallInTransactionTotal,
   gatewayRequestLatencyMs,
   gatewayRequestsTotal,
   gatewayRequestCostMicroCentsTotal,
 } from '../../monitoring/metrics';
+import { currentTenantContext } from '../../middleware/tenant-context';
 import {
   AiRunRepository,
   createAiRun,
@@ -299,6 +301,64 @@ function enforceTopLevelTenantId(
   );
 }
 
+/**
+ * Thrown under NODE_ENV=test by `refuseCallInsideTransaction` (below): an LLM
+ * call started while a tenant transaction held a pooled connection.
+ */
+export class LlmCallInTransactionError extends AppError {
+  constructor(public readonly taskType: string) {
+    super(
+      'LLM_CALL_IN_TRANSACTION',
+      `LLM call for taskType "${taskType}" started inside a tenant transaction, which holds a pooled ` +
+        'connection (and under PgBouncer a server backend) with BEGIN open for the whole call. A route ' +
+        'that awaits the gateway belongs on LLM_LONG_CALL_ROUTES (middleware/tenant-context.ts), with ' +
+        'its DB work done through repos with an explicit tenantId, and writes that must be atomic in ' +
+        'one short tenant transaction opened after the call (see proposals/resolve-entity.ts).',
+      500,
+      { taskType },
+    );
+    this.name = 'LlmCallInTransactionError';
+  }
+}
+
+/**
+ * No LLM call while a tenant transaction holds a pooled connection.
+ *
+ * `currentTenantContext()` is set while the /api request transaction is open
+ * (withTenantTransaction) and while an explicit unit of work runs
+ * (PgTenantTransactionRunner, runInTenantTransaction); it reads as absent once
+ * that transaction starts settling, when nothing is held for the caller any
+ * more. A call started inside one keeps the connection, and under PgBouncer a
+ * server backend, idle in transaction for the whole call: ~pool-size such
+ * calls stall every tenant's /api, and one past the 60s
+ * idle_in_transaction_session_timeout dies with its backend. Short
+ * transactions opened only after the call returns (the A1 pattern) never trip
+ * this.
+ *
+ * Under NODE_ENV=test the call throws, so the route's own test fails before
+ * the route ships. Anywhere else it logs an error with the call site and
+ * counts `gateway_llm_call_in_transaction_total`, and the call goes ahead:
+ * the guard must never break production traffic.
+ */
+function refuseCallInsideTransaction(request: LLMRequest, logger?: LLMGatewayLogger): void {
+  const held = currentTenantContext();
+  if (!held) return;
+  if (process.env.NODE_ENV === 'test') {
+    throw new LlmCallInTransactionError(request.taskType);
+  }
+  gatewayLlmCallInTransactionTotal.inc({ task_type: request.taskType });
+  const message =
+    'LLM call started inside a tenant transaction - the pooled connection stays held for the whole ' +
+    'call; the route belongs on LLM_LONG_CALL_ROUTES';
+  const meta = {
+    taskType: request.taskType,
+    tenantId: held.tenantId,
+    stack: new Error('LLM call inside a tenant transaction').stack,
+  };
+  if (logger) logger.error(message, meta);
+  else process.stderr.write(`[ERROR] ${message} (taskType=${request.taskType})\n${meta.stack ?? ''}\n`);
+}
+
 // Accepts an image data URL with optional RFC-2397 params before ;base64,
 // e.g. "data:image/png;base64," and "data:image/png;name=x.png;base64,".
 const DATA_URL_IMAGE_RE = /^data:image\/[a-zA-Z0-9.+-]+(?:;[a-zA-Z0-9.+=-]+)*;base64,/i;
@@ -484,6 +544,7 @@ export class LLMGateway {
     }
 
     enforceTopLevelTenantId(request, this.logger);
+    refuseCallInsideTransaction(request, this.logger);
 
     const providerName = this.resolveProvider(request.taskType);
     const provider = this.providers.get(providerName);
