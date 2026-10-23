@@ -4,6 +4,7 @@ import { execFileSync } from 'node:child_process';
 import { installClerkStub } from '../helpers/clerk-stub';
 import { blockExternalHosts } from '../helpers/api-mocks/shell';
 import { hasViteClerkKey } from '../helpers/clerk-key';
+import { clerkInviteeUserCreated } from '../helpers/clerk-invitee';
 
 /**
  * PRD 4.7 — "As M, I want lateness detected from where the truck actually is,
@@ -142,14 +143,14 @@ async function inviteAndJoinTechnician(
   expect(inviteRes.status()).toBe(201);
   const invitationId = ((await inviteRes.json()) as { id: string }).id;
   const techSub = `user_e2e_${label}_${randomUUID().replace(/-/g, '')}`;
-  const joinRes = await postSignedWebhook(request, {
-    type: 'user.created',
-    data: {
-      id: techSub,
-      email_addresses: [{ email_address: techEmail }],
-      public_metadata: { invitation_id: invitationId, tenant_id: tenantId, role: 'technician' },
-    },
-  });
+  const joinRes = await postSignedWebhook(
+    request,
+    clerkInviteeUserCreated({
+      sub: techSub,
+      email: techEmail,
+      invitation: { id: invitationId, tenantId, role: 'technician' },
+    }),
+  );
   expect(joinRes.status()).toBe(200);
   const token = hmacToken(techSub, tenantId, 'technician');
   const me = (await (

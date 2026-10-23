@@ -31,6 +31,7 @@
 import type { Pool } from 'pg';
 import type { AuditRepository } from '../../audit/audit';
 import type { SendEmailFn } from '../../voice/check-upgrade-nudge';
+import { applyTenantContext } from '../../db/rls-runtime-role';
 import { verifyVapiSignature } from './signature';
 import { maybeFireActivationForInboundCall } from '../../voice/activation';
 
@@ -113,7 +114,9 @@ function parseVapiEvent(rawBody: string): ParsedCall {
 }
 
 /**
- * Record an ended inbound voice_session, tenant-scoped (RLS-safe).
+ * Record an ended inbound voice_session for `tenantId`. The transaction carries
+ * tenant context and the RLS runtime role (`applyTenantContext`), so the
+ * voice_sessions policy bounds both statements, not only their WHERE clauses.
  *
  * Idempotent by (tenant_id, channel, external_id): the dedup receipt in
  * `handleVapiCallEvent` is only committed-as-done AFTER this succeeds, so a
@@ -126,7 +129,7 @@ async function recordInboundSession(pool: Pool, tenantId: string, callId: string
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
+    await applyTenantContext(client, tenantId, { transactional: true });
     const existing = await client.query(
       `SELECT 1 FROM voice_sessions
         WHERE tenant_id = $1 AND channel = 'voice_inbound' AND external_id = $2

@@ -17,6 +17,7 @@ import { createHmac, randomUUID } from 'node:crypto';
 import type { Pool } from 'pg';
 import { installClerkStub } from './clerk-stub';
 import { blockExternalHosts } from './api-mocks/shell';
+import { clerkInviteeUserCreated } from './clerk-invitee';
 
 const CLERK_WEBHOOK_SECRET =
   process.env.E2E_CLERK_WEBHOOK_SECRET ?? 'whsec_dGVzdC1zaWdudXAtY3JpdGljYWwtcGF0aA==';
@@ -142,14 +143,15 @@ export async function inviteTechnician(
     role: 'technician',
   });
   const sub = `user_e2e_${label}_${randomUUID().replace(/-/g, '')}`;
-  const joinRes = await postSignedWebhook(request, apiUrl, {
-    type: 'user.created',
-    data: {
-      id: sub,
-      email_addresses: [{ email_address: email }],
-      public_metadata: { invitation_id: invite.id, tenant_id: owner.tenantId, role: 'technician' },
-    },
-  });
+  const joinRes = await postSignedWebhook(
+    request,
+    apiUrl,
+    clerkInviteeUserCreated({
+      sub,
+      email,
+      invitation: { id: invite.id, tenantId: owner.tenantId, role: 'technician' },
+    }),
+  );
   expect(joinRes.status(), `invitee-join webhook (${label}) -> ${await joinRes.text()}`).toBe(200);
   const token = hmacToken(sub, owner.tenantId, 'technician');
   const headers = { Authorization: `Bearer ${token}` };

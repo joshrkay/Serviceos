@@ -25,6 +25,11 @@ import { applyDerivedGoogleReviewUrl } from '../reputation/google-review-link';
 import type { SettingsRepository } from '../settings/settings';
 import { ReviewPollState, ReviewPollStateRepository } from '../reputation/poll-state';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import {
+  clearOAuthStateCookie,
+  relayOrRefuseUnboundOAuthState,
+  setOAuthStateCookie,
+} from '../integrations/oauth-state-binding';
 
 /**
  * Review-monitoring self-serve — per-tenant Google Business Profile
@@ -40,7 +45,9 @@ import { AuditRepository, createAuditEvent } from '../audit/audit';
  * The callback route is unauthenticated by design — Google redirects
  * the operator's browser there with no Clerk session in flight. The
  * one-time nonce in oauth_states binds the callback back to the
- * original (tenant, user).
+ * original (tenant, user), and the connect route's HttpOnly cookie
+ * binds that nonce to the browser that started the flow
+ * (integrations/oauth-state-binding.ts).
  *
  * Unlike calendar (per-USER), this integration is per-TENANT: the
  * credentials land on `tenant_integrations (tenant_id,
@@ -194,7 +201,8 @@ function statusView(
  * Returns just the unauthenticated OAuth callback route. Mounted
  * BEFORE the global /api Clerk-session middleware (the inbound
  * redirect from Google has no session); the state nonce does the auth
- * binding instead. Mirrors createCalendarOAuthCallbackRouter.
+ * binding instead, accepted only from the browser whose cookie holds
+ * it. Mirrors createCalendarOAuthCallbackRouter.
  */
 export function createGoogleBusinessOAuthCallbackRouter(
   deps: GoogleBusinessIntegrationsRouteDeps,
@@ -218,11 +226,16 @@ export function createGoogleBusinessOAuthCallbackRouter(
       if (!deps.googleConfig) {
         throw new ValidationError('Google Business integration is not configured');
       }
+      // Before consume: a refused browser must not spend the state.
+      if (relayOrRefuseUnboundOAuthState(req, res, 'google_business', state, deps.appBaseUrl)) {
+        return;
+      }
 
       const consumed = await deps.stateRepo.consume(state, 'google_business');
       if (!consumed) {
         throw new ValidationError('Invalid or expired OAuth state');
       }
+      clearOAuthStateCookie(res, 'google_business', deps.appBaseUrl);
 
       const fetchFn = deps.googleFetch ?? boundedGoogleFetch;
       const tokens = await exchangeAuthorizationCode(
@@ -400,6 +413,7 @@ export function createGoogleBusinessIntegrationsRouter(
           ...(redirectAfter !== undefined ? { redirectAfter } : {}),
         });
         const url = buildGoogleBusinessAuthUrl(deps.googleConfig, stateId);
+        setOAuthStateCookie(res, 'google_business', stateId, deps.appBaseUrl);
 
         if (deps.auditRepo) {
           // Operator opted into the OAuth flow. Entity id is the

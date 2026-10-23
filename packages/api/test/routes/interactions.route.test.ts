@@ -10,10 +10,11 @@
 import { describe, it, expect, vi } from 'vitest';
 import express, { NextFunction, Request, Response } from 'express';
 import request from 'supertest';
-import type { Pool, QueryResult } from 'pg';
+import type { Pool, PoolClient, QueryResult } from 'pg';
 import { AuthenticatedRequest } from '../../src/auth/clerk';
 import { createInteractionsRouter } from '../../src/routes/interactions';
 import { InMemoryDispatchRepository } from '../../src/notifications/dispatch-repository';
+import { tenantContextStore } from '../../src/middleware/tenant-context';
 import type { Role } from '../../src/auth/rbac';
 
 const TENANT = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
@@ -146,6 +147,29 @@ describe('GET /api/interactions', () => {
     expect(res.status).toBe(200);
     expect(res.body.data).toHaveLength(0);
     expect(res.body.total).toBe(0);
+  });
+
+  it('inside a request transaction, reads on the request client and checks out no second connection', async () => {
+    const pool = makePool([[]]);
+    const requestClient = makeClient([[SESSION_ROW], [SESSION_ROW]], [{ total: '1' }]);
+    const app = express();
+    app.use((req: Request, _res: Response, next: NextFunction) => {
+      (req as AuthenticatedRequest).auth = { userId: 'user-1', sessionId: 'sess-1', tenantId: TENANT, role: 'owner' };
+      tenantContextStore.run({ client: requestClient as unknown as PoolClient, tenantId: TENANT }, () => next());
+    });
+    app.use('/api/interactions', createInteractionsRouter({ pool, dispatchRepo: new InMemoryDispatchRepository() }));
+
+    const list = await request(app).get('/api/interactions');
+    const detail = await request(app).get(`/api/interactions/${SESSION_ROW.id}`);
+
+    expect(list.status).toBe(200);
+    expect(list.body.total).toBe(1);
+    expect(detail.status).toBe(200);
+    expect(detail.body.id).toBe(SESSION_ROW.id);
+    expect(pool.connect).not.toHaveBeenCalled();
+    const sqls = requestClient.query.mock.calls.map((call) => String(call[0]));
+    expect(sqls).toHaveLength(3); // count + page + detail, no BEGIN/COMMIT of its own
+    expect(sqls.every((sql) => /FROM voice_sessions/.test(sql))).toBe(true);
   });
 
   it('respects limit and offset query params', async () => {

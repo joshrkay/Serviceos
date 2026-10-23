@@ -122,6 +122,23 @@ const RELAXED_SINCE: RelaxedInvariant[] = [
     },
   },
   {
+    row: 'knowledge_chunks rows for two tenants sharing one (scope, source_type, source_id, source_version)',
+    strictAt: '062_create_knowledge_chunks (unique scope, source_type, source_id, source_version)',
+    relaxedBy: '351_knowledge_chunks_tenant_dedupe',
+    seed: async (db, t) => {
+      const other = await createTestTenant(db);
+      const sourceId = `replay-${crypto.randomUUID()}`;
+      await db.query(
+        `INSERT INTO knowledge_chunks
+           (tenant_id, scope, source_type, source_id, content, content_scrubbed, embedding, embedding_model)
+         SELECT tid, 'tenant', 'call_summary', $3, 'replay', 'replay',
+                array_fill(0::real, ARRAY[1536])::vector, 'text-embedding-3-small'
+           FROM unnest(ARRAY[$1::uuid, $2::uuid]) AS tid`,
+        [t.tenantId, other.tenantId, sourceId],
+      );
+    },
+  },
+  {
     row: "proposal with status 'executing'",
     strictAt: '039_proposals_v2 (proposals_status_check)',
     relaxedBy: '072_add_executing_status',

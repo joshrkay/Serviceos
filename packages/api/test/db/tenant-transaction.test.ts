@@ -4,6 +4,7 @@ import {
   PgTenantTransactionRunner,
   InMemoryTransactionRunner,
   withTenantConnection,
+  withTenantClient,
 } from '../../src/db/tenant-transaction';
 import { tenantContextStore } from '../../src/middleware/tenant-context';
 import { PgBaseRepository } from '../../src/db/pg-base';
@@ -190,6 +191,69 @@ describe('withTenantConnection', () => {
     expect(texts).toContain('ROLLBACK');
     expect(texts).not.toContain('COMMIT');
     expect(released()).toBe(1);
+  });
+});
+
+describe('withTenantClient', () => {
+  const otherTenant = '6ba7b810-9dad-41d1-80b4-00c04fd430c8';
+
+  it('inside a request for the same tenant, runs on the request client: no checkout, no BEGIN/COMMIT', async () => {
+    const own = fakePool();
+    const request = fakePool();
+    const requestClient = await request.pool.connect();
+
+    const result = await tenantContextStore.run({ client: requestClient, tenantId }, () =>
+      withTenantClient(own.pool, tenantId, async (client) => {
+        await client.query('UPDATE tenant_settings SET updated_at = now() WHERE tenant_id = $1', [tenantId]);
+        return 'value';
+      }),
+    );
+
+    expect(result).toBe('value');
+    expect(own.calls).toEqual([]);
+    expect(request.calls.map((c) => c.text)).toEqual([
+      'UPDATE tenant_settings SET updated_at = now() WHERE tenant_id = $1',
+    ]);
+  });
+
+  it('outside a request, runs in its own BEGIN / set_config / COMMIT transaction', async () => {
+    const { pool, calls, released } = fakePool();
+
+    await withTenantClient(pool, tenantId, (client) => client.query('SELECT 1'));
+
+    const texts = calls.map((c) => c.text);
+    expect(texts[0]).toBe('BEGIN');
+    expect(texts[1]).toContain("set_config('app.current_tenant_id'");
+    expect(calls[1].params).toEqual([tenantId]);
+    expect(texts).toContain('SELECT 1');
+    expect(texts[texts.length - 1]).toBe('COMMIT');
+    expect(released()).toBe(1);
+  });
+
+  it('never reuses a request client scoped to a different tenant', async () => {
+    const own = fakePool();
+    const request = fakePool();
+    const requestClient = await request.pool.connect();
+
+    await tenantContextStore.run({ client: requestClient, tenantId: otherTenant }, () =>
+      withTenantClient(own.pool, tenantId, (client) => client.query('SELECT 1')),
+    );
+
+    expect(request.calls).toEqual([]);
+    expect(own.calls[1].params).toEqual([tenantId]);
+  });
+
+  it('TI-01 — never reuses a request client whose transaction is already settling', async () => {
+    const own = fakePool();
+    const request = fakePool();
+    const requestClient = await request.pool.connect();
+
+    await tenantContextStore.run({ client: requestClient, tenantId, closed: true }, () =>
+      withTenantClient(own.pool, tenantId, (client) => client.query('SELECT 1')),
+    );
+
+    expect(request.calls).toEqual([]);
+    expect(own.calls.map((c) => c.text)).toContain('BEGIN');
   });
 });
 
