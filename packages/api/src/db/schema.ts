@@ -8910,8 +8910,9 @@ export const MIGRATIONS = {
   // that failed INSERT aborted the whole request transaction. Same columns as
   // that branch's 101 (which the store's INSERT/SELECT already name), FORCE
   // RLS added, and only the index the one reader (listForTenant) uses.
-  // tenant_id carries no tenants FK, as on the branch: save() writes a
-  // sentinel tenant id for a call that has none.
+  // tenant_id carries no tenants FK, as on the branch: save() writes an
+  // all-zero placeholder tenant id for a call with no tenant UUID (none, or
+  // the gateway's 'system').
   '352_create_shadow_comparisons': `
     CREATE TABLE IF NOT EXISTS shadow_comparisons (
       id UUID PRIMARY KEY,
