@@ -17,6 +17,7 @@ import { createExecutionHandlerRegistry } from '../../src/proposals/execution/ha
 import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../../src/shared/errors';
 import { InMemoryTransactionRunner, type TenantTransactionRunner } from '../../src/db/tenant-transaction';
 import type { EntityAliasCandidateCapture } from '../../src/learning/entity-aliases/candidate-service';
+import { editProposal } from '../../src/proposals/actions';
 
 const TENANT = 't-resolve-entity';
 const PROPOSAL = 'p-resolve-entity';
@@ -1859,4 +1860,177 @@ describe('A1 — resolveProposalEntity commits each path in one short transactio
       expect(await resolvedAuditCount()).toBe(1);
     });
   });
+});
+
+/**
+ * Without a pool the in-memory findByIdsForUpdate is a plain copy and
+ * InMemoryTransactionRunner locks nothing unless asked through scope.lock, so
+ * the row can change between a pick's "locked" read and its write. Every path
+ * writes a payload and sourceContext built from that read, so each write goes
+ * through updateIfUnchanged against it: a pick whose row moved is refused with
+ * the plain "try again" 409 and writes nothing (no status move, no audit, no
+ * alias review), instead of erasing the change that landed first.
+ */
+describe('A4-6 — resolveProposalEntity when the row changes between its locked read and its write (no row lock)', () => {
+  const PICK_CHANGED = 'This changed while you were choosing. Please try again.';
+  const EDITED_TRANSCRIPT = 'invoice Bob for the water heater and the filter';
+  let repo: InMemoryProposalRepository;
+  let auditRepo: InMemoryAuditRepository;
+
+  beforeEach(() => {
+    repo = new InMemoryProposalRepository();
+    auditRepo = new InMemoryAuditRepository();
+  });
+
+  const PENDING_JOB = {
+    pendingEntityAmbiguities: [
+      {
+        entityKind: 'job',
+        reference: 'Rodriguez job',
+        candidates: [
+          { id: 'job-a', kind: 'job', label: 'Rodriguez — kitchen', score: 0.8 },
+          { id: 'job-b', kind: 'job', label: 'Rodriguez — bath', score: 0.79 },
+        ],
+      },
+    ],
+  };
+  const ORIGINAL_INTENT = {
+    originalIntent: { intentType: 'create_invoice', extractedEntities: { customerName: 'Bob' } },
+  };
+
+  function clarification(extra: Record<string, unknown> = {}): Proposal {
+    const base = ambiguousEntityProposal();
+    return { ...base, sourceContext: { ...base.sourceContext, ...extra } };
+  }
+
+  /** Stands in for the re-draft's LLM call: a draft_invoice for whichever customer was picked. */
+  const draftingHandler = (): TaskHandler => ({
+    taskType: 'draft_invoice',
+    handle: async (ctx: TaskContext) => ({
+      taskType: 'draft_invoice',
+      proposal: createProposal({
+        tenantId: ctx.tenantId,
+        proposalType: 'draft_invoice',
+        payload: {
+          customerId: ctx.existingEntities?.customerId,
+          lineItems: [{ description: 'Water heater service', quantity: 1, unitPriceCents: 45000 }],
+        },
+        summary: 'Invoice Bob',
+        createdBy: ctx.userId,
+      }),
+    }),
+  });
+
+  const PATHS = [
+    { path: 'annotate-only', extra: {}, redraft: false },
+    { path: 'next ambiguity', extra: PENDING_JOB, redraft: false },
+    { path: 're-draft', extra: ORIGINAL_INTENT, redraft: true },
+  ] as const;
+
+  const pick = (candidateId: string, redraft: boolean, capture?: EntityAliasCandidateCapture) =>
+    resolveProposalEntity(
+      { tenantId: TENANT, proposalId: PROPOSAL, candidateId, actorId: OWNER, actorRole: 'owner' },
+      {
+        proposalRepo: repo,
+        auditRepo,
+        transactionRunner: new InMemoryTransactionRunner(),
+        ...(redraft ? { redraftHandlerFactory: () => draftingHandler() } : {}),
+        ...(capture ? { entityAliasCandidateCapture: capture } : {}),
+      },
+    );
+
+  /** Every pick's locked read waits here until `count` picks have made it. */
+  function lockedReadTogether(count: number): void {
+    const realRead = repo.findByIdsForUpdate.bind(repo);
+    let reads = 0;
+    let allRead!: () => void;
+    const together = new Promise<void>((resolve) => {
+      allRead = resolve;
+    });
+    repo.findByIdsForUpdate = async (...args: Parameters<typeof realRead>) => {
+      const rows = await realRead(...args);
+      reads += 1;
+      if (reads === count) allRead();
+      await together;
+      return rows;
+    };
+  }
+
+  /** `then` commits after the next pick's locked read and before its write (once). */
+  function afterLockedRead(then: () => Promise<unknown>): void {
+    const realRead = repo.findByIdsForUpdate.bind(repo);
+    repo.findByIdsForUpdate = async (...args: Parameters<typeof realRead>) => {
+      repo.findByIdsForUpdate = realRead;
+      const rows = await realRead(...args);
+      await then();
+      return rows;
+    };
+  }
+
+  const resolvedAudits = async () =>
+    (await auditRepo.findByEntity(TENANT, 'proposal', PROPOSAL)).filter((a) => a.eventType === 'proposal.entity_resolved');
+
+  const aliasCapture = (): EntityAliasCandidateCapture => ({ capture: vi.fn(async () => []) });
+
+  it.each(PATHS)(
+    '$path: two picks that made the same locked read: one is saved, the other gets the plain 409 and writes nothing',
+    async ({ extra, redraft }) => {
+      await repo.create(clarification(extra));
+      const before = (await repo.findById(TENANT, PROPOSAL))!;
+      lockedReadTogether(2);
+      const capture = aliasCapture();
+
+      const [first, second] = await Promise.allSettled([
+        pick('cust-a', redraft, capture),
+        pick('cust-b', redraft, capture),
+      ]);
+
+      expect(first.status).toBe('fulfilled');
+      expect(second.status).toBe('rejected');
+      const err = (second as PromiseRejectedResult).reason;
+      expect(err).toBeInstanceOf(ConflictError);
+      expect(err.statusCode).toBe(409);
+      expect(err.message).toBe(PICK_CHANGED);
+
+      // The first pick is the one on the row; the refused one left no trace.
+      const stored = (await repo.findById(TENANT, PROPOSAL))!;
+      expect((stored.sourceContext as Record<string, unknown>).resolvedEntities).toEqual([
+        { id: 'cust-a', field: 'customerId', kind: 'customer', label: 'Bob Smith', offeredIds: ['cust-a', 'cust-b'] },
+      ]);
+      expect(stored.targetEntityId).toBe('cust-a');
+      expect(stored.proposalType).toBe(redraft ? 'draft_invoice' : before.proposalType);
+      expect((await resolvedAudits()).map((a) => a.metadata?.candidateId)).toEqual(['cust-a']);
+      expect(vi.mocked(capture.capture).mock.calls.map((c) => c[0].selectedEntityId)).toEqual(['cust-a']);
+    },
+  );
+
+  it.each(PATHS)(
+    '$path: an edit that commits between the locked read and the write refuses the pick; the edit is kept',
+    async ({ extra, redraft }) => {
+      await repo.create(clarification(extra));
+      afterLockedRead(() =>
+        editProposal(repo, TENANT, PROPOSAL, OWNER, 'owner', { transcript: EDITED_TRANSCRIPT }, auditRepo),
+      );
+      const capture = aliasCapture();
+
+      const err = await pick('cust-b', redraft, capture).catch((e: unknown) => e);
+
+      expect(err).toBeInstanceOf(ConflictError);
+      expect((err as ConflictError).message).toBe(PICK_CHANGED);
+      const stored = (await repo.findById(TENANT, PROPOSAL))!;
+      expect(stored.proposalType).toBe('voice_clarification');
+      expect(stored.status).toBe('draft');
+      const payload = stored.payload as Record<string, unknown>;
+      expect(payload.transcript).toBe(EDITED_TRANSCRIPT);
+      expect(payload.entityReference).toBe('Bob');
+      expect(payload.customerId).toBeUndefined();
+      expect((stored.sourceContext as Record<string, unknown>).resolvedEntities).toBeUndefined();
+      expect(await resolvedAudits()).toEqual([]);
+      expect(capture.capture).not.toHaveBeenCalled();
+
+      // A retry reads the row as it is now and goes through, on top of the edit.
+      const retried = await pick('cust-b', redraft);
+      expect((retried.sourceContext as Record<string, unknown>).resolvedEntities).toMatchObject([{ id: 'cust-b' }]);
+    },
+  );
 });

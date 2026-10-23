@@ -48,6 +48,15 @@
  *    pick that landed after the pick's read is kept rather than overwritten;
  *    the re-draft, built across its LLM call, is refused (409) if the row
  *    moved at all.
+ *  - Compare-and-write (A4-6): each path's proposal write goes through
+ *    `updateIfUnchanged` against that locked row (`writeFromLockedRow`). Under
+ *    the Pg row lock the row cannot have moved, so the compare always passes
+ *    there. Without a pool the in-memory "locked" read is a plain copy and
+ *    InMemoryTransactionRunner locks nothing unless asked through
+ *    `scope.lock`, so another pick, an edit or a line pick can land between
+ *    the read and the write; the pick is then refused with the "try again"
+ *    409 and writes nothing, rather than putting back a payload and
+ *    sourceContext that erase that change.
  *
  * P8/U-multi (multi-ambiguity chain): a single utterance can carry MORE than
  * one ambiguous reference ("invoice Bob for the Rodriguez job" where both
@@ -253,6 +262,25 @@ async function lockOpenForPick(
   }
   assertOpenForPick(locked.status);
   return locked;
+}
+
+type ProposalPatch = Parameters<ProposalRepository['update']>[2];
+
+/**
+ * A4-6 — write a patch built from `locked` (the row `lockOpenForPick`
+ * returned) only while the row is still `locked`, in one compare-and-write
+ * (see the module doc). A miss is the "try again" 409 with nothing written: the
+ * question is still open, and a retry builds on the row as it is now. Any
+ * status move and the audit row come after it, so they only follow a write
+ * that landed.
+ */
+async function writeFromLockedRow(
+  deps: ResolveEntityDeps,
+  locked: Proposal,
+  patch: ProposalPatch,
+): Promise<void> {
+  const written = await deps.proposalRepo.updateIfUnchanged(locked.tenantId, locked.id, locked, patch);
+  if (!written) throw pickRaced(locked.status);
 }
 
 /** The structured original-intent context the producer stamps for re-draft. */
@@ -748,7 +776,7 @@ async function annotateResolvedProposal(
     const stillGated = remainingMissingFields !== undefined && remainingMissingFields.length > 0;
     const movedToReview = row.status === 'draft' && !stillGated;
 
-    await deps.proposalRepo.update(tenantId, proposalId, {
+    await writeFromLockedRow(deps, row, {
       payload: nextPayload,
       sourceContext: nextSourceContext,
       targetEntityId: chosen.id,
@@ -950,7 +978,7 @@ async function redraftResolvedProposal(
       throw pickRaced(row.status);
     }
 
-    await deps.proposalRepo.update(tenantId, proposalId, {
+    await writeFromLockedRow(deps, row, {
       proposalType: drafted.proposalType,
       payload: drafted.payload,
       summary: drafted.summary,
@@ -1112,7 +1140,7 @@ async function advanceToNextAmbiguity(
     nextSourceContext.resolvedEntities = resolvedEntities;
     nextSourceContext.resolvedEntity = resolvedEntities[resolvedEntities.length - 1];
 
-    await deps.proposalRepo.update(tenantId, proposalId, {
+    await writeFromLockedRow(deps, row, {
       payload: nextPayload,
       summary,
       explanation,
