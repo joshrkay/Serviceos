@@ -169,7 +169,11 @@ deliberate cross-tenant sweep, a platform-constant write) add an entry:
   / `withTenantConnection`, and pin it: another connection sees each step's
   row before the next step, the rows survive the request's ROLLBACK, the
   request client runs none of the statements
-  (`test/integration/send-claim-ledger-tenant-context.test.ts`).
+  (`test/integration/send-claim-ledger-tenant-context.test.ts`; the
+  lifecycle_emails claim/release ledger, batch 3, P2.4, the same way in
+  `test/integration/lifecycle-email-tenant-context.test.ts`). The same holds
+  for a write the owner has not yet decided should join the request: the
+  `/api/me/mode` switch (P2.1) keeps its own session.
 - An INSERT has no `tenant_id = $n` pin to widen; its backstop is the
   policy's WITH CHECK. Probe it by re-stamping the VALUES tenant with the
   other tenant (`restampClaims` in the same suite): refused under the role,

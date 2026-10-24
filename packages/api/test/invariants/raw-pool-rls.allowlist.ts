@@ -168,7 +168,7 @@ export const TABLES_WITHOUT_MIGRATION: ReadonlyArray<{ readonly table: string; r
  * The `tenant_filtered_no_rls` debt, frozen. Migrating one means deleting its
  * entry and LOWERING this number; adding one means raising it, in review.
  */
-export const TFNR_CEILING = 16;
+export const TFNR_CEILING = 14;
 
 export const RAW_PG_SITES: readonly RawPgSite[] = [
   // ── ai/ ────────────────────────────────────────────────────────────────
@@ -530,18 +530,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/middleware/tenant-context.ts', fn: 'recoverTenantFromUsersRow', access: 'pool.query', count: 1,
     category: 'pre_tenant_lookup', tables: ['users'],
     why: "Runs before any tenant is known for a JWT without tenant_id, keyed by the verified Clerk subject; returns only that subject's own rows. Under rls_app_runtime it would see zero rows, so it must stay on the principal.",
-  },
-
-  // ── notifications/ ─────────────────────────────────────────────────────
-  {
-    file: 'src/notifications/lifecycle-email.ts', fn: 'claimLifecycleEmail', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['lifecycle_emails'], migrateBy: 'audit 2026-10-23 §4 P2.4',
-    why: 'Raw INSERT into FORCE-RLS lifecycle_emails stamping tenant_id = $1 from a server-derived id (queue payload or sweep row); WITH CHECK is not enforced for the principal.',
-  },
-  {
-    file: 'src/notifications/lifecycle-email.ts', fn: 'releaseLifecycleEmail', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['lifecycle_emails'], migrateBy: 'audit 2026-10-23 §4 P2.4',
-    why: 'Transport-failure release: DELETE FROM lifecycle_emails WHERE tenant_id = $1 AND kind = $2 for the tenant that just claimed it, as the principal.',
   },
 
   // ── onboarding/ ────────────────────────────────────────────────────────
