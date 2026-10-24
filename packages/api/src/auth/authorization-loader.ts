@@ -11,9 +11,10 @@
  *
  * Isolation: the query filters on `tenant_id` explicitly, which is what isolates
  * tenants (RLS is a runtime no-op unless RLS_RUNTIME_ROLE is enabled; the
- * predicate is authoritative either way). This mirrors the existing
- * `userModeService.getUser` seam, which reads the same table with a plain
- * `pool.query` and an explicit `tenant_id` predicate.
+ * predicate is authoritative either way). It reads the same row as the mode
+ * loader's `getUser` (users/pg-user-mode-service.ts), but earlier: this runs
+ * before the request transaction exists, while `getUser` runs inside it under
+ * the tenant role.
  *
  * Errors are DELIBERATELY allowed to propagate: `resolveAuthorization` must fail
  * closed on a DB error, so this loader must NOT swallow one into a null (which

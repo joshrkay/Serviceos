@@ -28,6 +28,7 @@ import { SendService } from '../../src/notifications/send-service';
 import { MessageDeliveryFeedbackDispatcher } from '../../src/feedback/dispatcher';
 import { TwilioDelayNotificationService } from '../../src/notifications/twilio-delay-notification-service';
 import { sendLifecycleEmail } from '../../src/notifications/lifecycle-email';
+import { fakeTenantPool } from '../helpers/fake-tenant-pool';
 import { sendCustomerMessage } from '../../src/notifications/customer-message-delivery';
 import { withOutbound } from '../helpers/outbound-messaging';
 
@@ -369,7 +370,8 @@ describe("production config: TELEPHONY_ENABLED=false + EMAIL_ENABLED=false", () 
     [
       "lifecycle email worker (sendLifecycleEmail)",
       async (g) => {
-        const pool: any = { query: async () => ({ rowCount: 1, rows: [{ tenant_id: TENANT }] }) };
+        // The lifecycle_emails claim is a tenant session (connect, BEGIN, context, INSERT, COMMIT).
+        const { pool } = fakeTenantPool(() => ({ rowCount: 1, rows: [{ tenant_id: TENANT }] }));
         return sendLifecycleEmail(
           { pool, delivery: g, logger } as any,
           {
