@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import { withTenantClient } from '../db/tenant-transaction';
 
 /**
  * Phase 12 — supervisor-presence query.
@@ -18,10 +19,9 @@ import type { Pool } from 'pg';
  * the last supervisor leaves, which is acceptable for week-one (single
  * dyno) and documented in the multi-instance follow-up.
  *
- * The query uses `pool.query` directly (no tenant context / RLS) because
- * we need to read the cross-user row presence from a system context;
- * the tenant_id WHERE clause is the only scope. This mirrors the
- * supervisor-presence pattern called out in the addendum risk note.
+ * The query reads every user row of ONE tenant, so it runs under that
+ * tenant's context (`rls_app_runtime`, raw-pg audit §4 P1.4): the users
+ * policy bounds it, and the tenant_id WHERE clause stays as defense in depth.
  */
 
 export const SUPERVISOR_PRESENCE_TTL_MS = 30_000;
@@ -62,23 +62,25 @@ export function setSupervisorPresenceLoader(
 }
 
 /**
- * Build the default Pg-backed loader. The query reads users.current_mode
- * directly; RLS isn't applied because the call is system-level (a worker
- * deciding routing policy). The single tenant_id WHERE clause is the
- * scope.
+ * Build the default Pg-backed loader. It reads users.current_mode for one
+ * tenant under that tenant's context: the request client when the caller is
+ * inside a request scoped to the same tenant (the assistant / auto-approve
+ * paths), otherwise a short tenant transaction of its own (the voice worker).
  */
 export function pgSupervisorPresenceLoader(
   pool: Pool,
 ): SupervisorPresenceLoader {
   return async (tenantId: string): Promise<boolean> => {
-    const result = await pool.query<{ present: boolean }>(
-      `SELECT EXISTS (
-         SELECT 1
-         FROM users
-         WHERE tenant_id = $1
-           AND current_mode IN ('supervisor', 'both')
-       ) AS present`,
-      [tenantId],
+    const result = await withTenantClient(pool, tenantId, (client) =>
+      client.query<{ present: boolean }>(
+        `SELECT EXISTS (
+           SELECT 1
+           FROM users
+           WHERE tenant_id = $1
+             AND current_mode IN ('supervisor', 'both')
+         ) AS present`,
+        [tenantId],
+      ),
     );
     return result.rows[0]?.present === true;
   };

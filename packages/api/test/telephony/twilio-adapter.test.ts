@@ -43,6 +43,7 @@ import { InMemoryPushDeliveryProvider } from '../../src/notifications/push-deliv
 import { InMemoryDeviceTokenRepository } from '../../src/push/device-token-service';
 import { setOwnerNotifications } from '../../src/notifications/owner-notifications-instance';
 import type { Pool } from 'pg';
+import { fakeTenantPool } from '../helpers/fake-tenant-pool';
 import { InMemoryConsentEventRepository } from '../../src/compliance/consent-events';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -88,15 +89,16 @@ function makeAdapter(opts: {
   return { adapter, store, gateway, leadRepo, auditRepo };
 }
 
-/** Fake pool whose only query — identifyCaller's customers lookup — returns one
- *  matched customer, so handleInbound takes the known-caller branch. */
+/** identifyCaller runs under applyTenantContext, which requires a uuid tenant. */
+const KNOWN_CALLER_TENANT = '00000000-0000-4000-8000-0000000ca11e';
+
+/** Fake pool whose only lookup — identifyCaller's customers read, in its tenant
+ *  transaction — returns one matched customer, so handleInbound takes the
+ *  known-caller branch. */
 function matchedCallerPool(customerId: string, displayName: string): Pool {
-  return {
-    query: async (sql: string) =>
-      typeof sql === 'string' && sql.includes('FROM customers')
-        ? { rows: [{ id: customerId, display_name: displayName }] }
-        : { rows: [] },
-  } as unknown as Pool;
+  return fakeTenantPool((sql) =>
+    sql.includes('FROM customers') ? { rows: [{ id: customerId, display_name: displayName }] } : undefined,
+  ).pool;
 }
 
 // ─── xmlEscape ───────────────────────────────────────────────────────────────
@@ -330,12 +332,12 @@ describe('TwilioGatherAdapter.handleInbound', () => {
       callSid: 'CA-known',
       from: '+15125550100',
       to: '+15125550999',
-      tenantId: 'tenant-abc',
+      tenantId: KNOWN_CALLER_TENANT,
     });
 
-    const threads = await conversationRepo.findByEntity('tenant-abc', 'customer', 'cust-known');
+    const threads = await conversationRepo.findByEntity(KNOWN_CALLER_TENANT, 'customer', 'cust-known');
     expect(threads).toHaveLength(1);
-    const msgs = await conversationRepo.getMessages('tenant-abc', threads[0].id);
+    const msgs = await conversationRepo.getMessages(KNOWN_CALLER_TENANT, threads[0].id);
     const callLog = msgs.find((m) => m.source === 'inbound_call');
     expect(callLog).toBeTruthy();
     expect(callLog!.metadata).toMatchObject({ direction: 'inbound', channel: 'call', callSid: 'CA-known' });
@@ -739,7 +741,7 @@ describe('WS16c — inbound establishment convergence (Media Streams ↔ Gather)
     const repo = new InMemoryDeviceTokenRepository();
     const provider = new InMemoryPushDeliveryProvider();
     await repo.register({
-      tenantId: 'tenant-abc',
+      tenantId: KNOWN_CALLER_TENANT,
       userId: 'owner-1',
       expoPushToken: 'ExponentPushToken[a]',
       platform: 'ios',
@@ -751,9 +753,9 @@ describe('WS16c — inbound establishment convergence (Media Streams ↔ Gather)
       await adapter.handleInboundForStream({
         callSid: 'CA-stream-push',
         from: '+15125550100',
-        tenantId: 'tenant-abc',
+        tenantId: KNOWN_CALLER_TENANT,
       });
-      await adapter.initializeStreamSession({ callSid: 'CA-stream-push', tenantId: 'tenant-abc' });
+      await adapter.initializeStreamSession({ callSid: 'CA-stream-push', tenantId: KNOWN_CALLER_TENANT });
 
       // Exactly one owner push — realtime callers used to get NONE.
       expect(provider.sent).toHaveLength(1);
@@ -774,13 +776,13 @@ describe('WS16c — inbound establishment convergence (Media Streams ↔ Gather)
     await adapter.handleInboundForStream({
       callSid: 'CA-stream-log',
       from: '+15125550100',
-      tenantId: 'tenant-abc',
+      tenantId: KNOWN_CALLER_TENANT,
     });
-    await adapter.initializeStreamSession({ callSid: 'CA-stream-log', tenantId: 'tenant-abc' });
+    await adapter.initializeStreamSession({ callSid: 'CA-stream-log', tenantId: KNOWN_CALLER_TENANT });
 
-    const threads = await conversationRepo.findByEntity('tenant-abc', 'customer', 'cust-known');
+    const threads = await conversationRepo.findByEntity(KNOWN_CALLER_TENANT, 'customer', 'cust-known');
     expect(threads).toHaveLength(1);
-    const msgs = await conversationRepo.getMessages('tenant-abc', threads[0].id);
+    const msgs = await conversationRepo.getMessages(KNOWN_CALLER_TENANT, threads[0].id);
     const callLog = msgs.find((m) => m.source === 'inbound_call');
     expect(callLog).toBeTruthy();
     expect(callLog!.metadata).toMatchObject({
@@ -829,9 +831,9 @@ describe('WS16c — inbound establishment convergence (Media Streams ↔ Gather)
     await adapter.handleInboundForStream({
       callSid: 'CA-stream-known',
       from: '+15125550100',
-      tenantId: 'tenant-abc',
+      tenantId: KNOWN_CALLER_TENANT,
     });
-    await adapter.initializeStreamSession({ callSid: 'CA-stream-known', tenantId: 'tenant-abc' });
+    await adapter.initializeStreamSession({ callSid: 'CA-stream-known', tenantId: KNOWN_CALLER_TENANT });
 
     const session = store.findByCallSid('CA-stream-known');
     expect(session?.customerId).toBe('cust-known');

@@ -168,20 +168,10 @@ export const TABLES_WITHOUT_MIGRATION: ReadonlyArray<{ readonly table: string; r
  * The `tenant_filtered_no_rls` debt, frozen. Migrating one means deleting its
  * entry and LOWERING this number; adding one means raising it, in review.
  */
-export const TFNR_CEILING = 41;
+export const TFNR_CEILING = 39;
 
 export const RAW_PG_SITES: readonly RawPgSite[] = [
   // ── ai/ ────────────────────────────────────────────────────────────────
-  {
-    file: 'src/ai/skills/identify-caller.ts', fn: 'identifyCaller', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['customers'], migrateBy: 'audit 2026-10-23 §4 P1.4',
-    why: 'Call establishment looks up the caller in customers on the raw input.pool, as the principal. The tenant is the dialled-number tenant of a Twilio-signed webhook (resolveInboundTenantId); WHERE tenant_id = $1 is the only boundary.',
-  },
-  {
-    file: 'src/ai/supervisor-presence.ts', fn: 'pgSupervisorPresenceLoader', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['users'], migrateBy: 'audit 2026-10-23 §4 P1.4',
-    why: 'Emergency-escalation presence check: EXISTS(users WHERE tenant_id = $1 AND current_mode …) on the raw pool, by design per the file header. The tenant comes from the voice session; the WHERE clause is the only scope.',
-  },
   {
     file: 'src/ai/training/knowledge-chunks.ts', fn: 'PgKnowledgeChunkRepository.insert', access: 'withClient', count: 1,
     category: 'platform_constant_exception', tables: ['knowledge_chunks'],
