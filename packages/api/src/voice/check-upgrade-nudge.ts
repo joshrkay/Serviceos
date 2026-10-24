@@ -1,8 +1,9 @@
 import type { Pool } from 'pg';
 import { recordFunnelEvent } from '../analytics/posthog';
-import { PgCallUsageRepository } from '../billing/call-usage-events';
+import { sumTrialBillableSecondsOn } from '../billing/call-usage-events';
 import { TRIAL_MINUTE_LIMITS } from './trial-limits';
 import { readTenantBillingState } from '../billing/tenant-billing-state';
+import { withTenantClient } from '../db/tenant-transaction';
 import { loadConfig } from '../shared/config';
 
 /**
@@ -38,6 +39,11 @@ export interface CheckAndFireUpgradeNudgeDeps {
  *
  * Designed to be safe to call after every inbound-call end — short
  * read-only path until the threshold is actually crossed.
+ *
+ * The tenants billing read (no RLS) decides "trialing"; the prompt-shown
+ * read, the trial-minutes sum and the check-and-set then run in ONE tenant
+ * transaction (`rls_app_runtime`, raw-pg audit 2026-10-23 §4 P1.5),
+ * committed before the funnel event and the email.
  */
 export async function checkAndFireUpgradeNudge(
   deps: CheckAndFireUpgradeNudgeDeps,
@@ -48,27 +54,30 @@ export async function checkAndFireUpgradeNudge(
   const tenant = await readTenantBillingState(pool, tenantId);
   if (!tenant || tenant.status !== 'trialing') return { fired: false };
 
-  const settingsRes = await pool.query<{ onboarding_upgrade_prompt_shown_at: Date | null }>(
-    `SELECT onboarding_upgrade_prompt_shown_at FROM tenant_settings WHERE tenant_id = $1`,
-    [tenantId],
-  );
-  if (settingsRes.rows[0]?.onboarding_upgrade_prompt_shown_at) return { fired: false };
+  const billableSeconds = await withTenantClient(pool, tenantId, async (client) => {
+    const settingsRes = await client.query<{ onboarding_upgrade_prompt_shown_at: Date | null }>(
+      `SELECT onboarding_upgrade_prompt_shown_at FROM tenant_settings WHERE tenant_id = $1`,
+      [tenantId],
+    );
+    if (settingsRes.rows[0]?.onboarding_upgrade_prompt_shown_at) return null;
 
-  // Billable AI minutes across the trial — the owner's own test calls and
-  // in-app voice never count (see call-usage-events classifyCall).
-  const billableSeconds = await new PgCallUsageRepository(pool).sumTrialBillableSeconds(tenantId);
-  if (billableSeconds < TRIAL_MINUTE_LIMITS.UPGRADE_NUDGE_SECONDS) return { fired: false };
+    // Billable AI minutes across the trial — the owner's own test calls and
+    // in-app voice never count (see call-usage-events classifyCall).
+    const seconds = await sumTrialBillableSecondsOn(client, tenantId);
+    if (seconds < TRIAL_MINUTE_LIMITS.UPGRADE_NUDGE_SECONDS) return null;
 
-  // Cross the threshold atomically — guard against a second concurrent
-  // call also writing the timestamp. The WHERE on the existing column
-  // makes this a check-and-set.
-  const updateRes = await pool.query(
-    `UPDATE tenant_settings
-       SET onboarding_upgrade_prompt_shown_at = now()
-     WHERE tenant_id = $1 AND onboarding_upgrade_prompt_shown_at IS NULL`,
-    [tenantId],
-  );
-  if ((updateRes.rowCount ?? 0) === 0) return { fired: false };
+    // Cross the threshold atomically — guard against a second concurrent
+    // call also writing the timestamp. The WHERE on the existing column
+    // makes this a check-and-set.
+    const updateRes = await client.query(
+      `UPDATE tenant_settings
+         SET onboarding_upgrade_prompt_shown_at = now()
+       WHERE tenant_id = $1 AND onboarding_upgrade_prompt_shown_at IS NULL`,
+      [tenantId],
+    );
+    return (updateRes.rowCount ?? 0) === 0 ? null : seconds;
+  });
+  if (billableSeconds === null) return { fired: false };
 
   recordFunnelEvent({
     distinctId: tenant.ownerId ?? tenantId,

@@ -46,6 +46,7 @@ import { discloseRecording } from '../ai/skills/disclose-recording';
 import { buildAiDisclosureText, discloseAiIdentity } from '../ai/skills/disclose-ai-identity';
 import { t, type Language } from '../ai/i18n/i18n';
 import { identifyCaller } from '../ai/skills/identify-caller';
+import { detectLanguage } from '../ai/orchestration/language-detector';
 import { findOrCreateLeadByPhone } from '../ai/skills/find-or-create-lead';
 import type { ConversationRepository } from '../conversations/conversation-service';
 import { logInboundCallOnCustomerTimeline } from './inbound-call-log';
@@ -1062,6 +1063,51 @@ export class TwilioGatherAdapter {
   }
 
   /**
+   * UB-C1 — the language a Media Streams call OPENS in, resolved by the
+   * stream adapter's `initialLanguageResolver` before the Deepgram socket is
+   * created: the identified caller's preferredLanguage > tenant default, both
+   * gated by the tenant's supported_languages opt-in (detectLanguage applies
+   * the gate internally). Failure-soft: any error falls back to the tenant
+   * default / English rather than blocking audio.
+   *
+   * The caller identification it needs is the one the greeting bootstrap
+   * needs too, and both are awaited before the caller hears anything; so the
+   * answer is parked on the session (`streamStartCallerIdentity`) and the
+   * bootstrap takes it — one identifyCaller per stream call.
+   */
+  async resolveStreamOpeningLanguage(
+    tenantId: string,
+    ctx: { callSid: string; sessionId: string },
+  ): Promise<Language> {
+    const settings = this.deps.settingsRepo
+      ? await this.deps.settingsRepo.findByTenant(tenantId).catch(() => null)
+      : null;
+    let customerPreferred: Language | null = null;
+    const callerPhone = this.getCallerPhone(ctx.sessionId);
+    if (this.deps.pool && callerPhone) {
+      try {
+        const identified = await identifyCaller({ tenantId, fromPhone: callerPhone, pool: this.deps.pool });
+        const session = this.deps.store.get(ctx.sessionId);
+        if (session && session.tenantId === tenantId) {
+          session.streamStartCallerIdentity = { tenantId, fromPhone: callerPhone, result: identified };
+        }
+        if (identified.status === 'matched' && this.deps.customerRepo) {
+          const customer = await this.deps.customerRepo.findById(tenantId, identified.customerId);
+          const pref = customer?.preferredLanguage;
+          if (pref === 'en' || pref === 'es') customerPreferred = pref;
+        }
+      } catch {
+        /* failure-soft — fall through to the tenant default */
+      }
+    }
+    return detectLanguage({
+      customerPreferredLanguage: customerPreferred,
+      tenantDefaultLanguage: settings?.defaultLanguage === 'es' ? 'es' : 'en',
+      supportedLanguages: settings?.supportedLanguages ?? ['en'],
+    });
+  }
+
+  /**
    * P11-002 — resolve the spoken language + TTS voice for a new call from
    * the tenant settings (default_language + tts_voice_en/es). Customer-level
    * overrides for voice are a follow-up; the greeting/STT use the tenant
@@ -1343,15 +1389,23 @@ export class TwilioGatherAdapter {
     // now require `pool && from`. Previously Gather ran identifyCaller even on a
     // blocked/empty From (it always came back unmatched → unknown_caller), which
     // was a wasted lookup; skipping it reaches the identical FSM outcome.
+    // Media Streams: the opening-language resolver identified this caller
+    // moments ago (resolveStreamOpeningLanguage); take its answer instead of a
+    // second identical lookup. Taken once — a later bootstrap reads again.
+    const parked = session.streamStartCallerIdentity;
+    delete session.streamStartCallerIdentity;
     let callerKnown: { customerId: string; customerName: string } | null = null;
     let identifyFailed = false;
     if (this.deps.pool && from) {
       try {
-        const result = await identifyCaller({
-          tenantId: opts.tenantId,
-          fromPhone: from,
-          pool: this.deps.pool,
-        });
+        const result =
+          parked && parked.tenantId === opts.tenantId && parked.fromPhone === from
+            ? parked.result
+            : await identifyCaller({
+                tenantId: opts.tenantId,
+                fromPhone: from,
+                pool: this.deps.pool,
+              });
         if (result.status === 'matched') {
           callerKnown = { customerId: result.customerId, customerName: result.customerName };
         }

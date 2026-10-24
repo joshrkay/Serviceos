@@ -53,13 +53,11 @@ describe('rls-runtime-role helper (U3)', () => {
       expect(calls.some((c) => /SET ROLE/i.test(c.sql))).toBe(false);
     });
 
-    it('transactional mode emits set_config and no SET LOCAL ROLE', async () => {
+    it('transactional mode emits only the tenant set_config, byte-for-byte as before, and no role', async () => {
       const { client, calls } = fakeClient();
       await applyTenantContext(client, TENANT, { transactional: true });
-      expect(calls).toHaveLength(1);
-      expect(calls[0].sql).toContain('set_config');
-      expect(calls[0].params).toEqual([TENANT]);
-      expect(calls.some((c) => /SET (LOCAL )?ROLE/i.test(c.sql))).toBe(false);
+      expect(calls).toEqual([{ sql: "SELECT set_config('app.current_tenant_id', $1, true)", params: [TENANT] }]);
+      expect(calls.some((c) => /SET (LOCAL )?ROLE|'role'/i.test(c.sql))).toBe(false);
     });
   });
 
@@ -76,12 +74,17 @@ describe('rls-runtime-role helper (U3)', () => {
       expect(calls[1].sql).toBe('SET ROLE rls_app_runtime');
     });
 
-    it('transactional mode emits SET LOCAL ROLE rls_app_runtime', async () => {
+    it('transactional mode sets the tenant GUC and the role in ONE statement, both transaction-local', async () => {
       const { client, calls } = fakeClient();
       await applyTenantContext(client, TENANT, { transactional: true });
-      expect(calls).toHaveLength(2);
-      expect(calls[0].sql).toContain('set_config');
-      expect(calls[1].sql).toBe('SET LOCAL ROLE rls_app_runtime');
+      // One round trip, not two: set_config(..., true) is SET LOCAL for both
+      // settings, so COMMIT/ROLLBACK resets them exactly as SET LOCAL ROLE did.
+      expect(calls).toEqual([
+        {
+          sql: "SELECT set_config('app.current_tenant_id', $1, true), set_config('role', 'rls_app_runtime', true)",
+          params: [TENANT],
+        },
+      ]);
     });
   });
 
@@ -96,6 +99,15 @@ describe('rls-runtime-role helper (U3)', () => {
       const { client, calls } = fakeClient();
       await expect(
         applyTenantContext(client, 'not-a-uuid', { transactional: true }),
+      ).rejects.toThrow(/Invalid tenant ID/);
+      expect(calls).toHaveLength(0);
+    });
+
+    it('transactional path validates with the role flag on too, before the one statement', async () => {
+      process.env.RLS_RUNTIME_ROLE = 'true';
+      const { client, calls } = fakeClient();
+      await expect(
+        applyTenantContext(client, "x', true), set_config('role', 'postgres", { transactional: true }),
       ).rejects.toThrow(/Invalid tenant ID/);
       expect(calls).toHaveLength(0);
     });

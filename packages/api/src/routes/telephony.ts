@@ -52,7 +52,8 @@ import {
 } from '../integrations/twilio/phone-number-repository';
 import { getSentryClient, type SentryClient } from '../monitoring/sentry';
 import { buildVoicemailTwiml } from '../telephony/voicemail-fallback';
-import { isTenantAfterHours } from '../telephony/business-hours-loader';
+import { isAfterHours, isTenantAfterHours } from '../telephony/business-hours-loader';
+import type { BusinessHoursConfig } from '../compliance/business-hours';
 import {
   createVoicemailStatusRouter,
   type VoicemailStatusHandlerOptions,
@@ -255,6 +256,8 @@ export interface TelephonyRouterDeps {
     reason?: GateReason;
     /** Usage caps: ring this owner phone (null → voicemail). */
     forwardTo?: string | null;
+    /** An answer's business hours, from the settings row the gate read (VoiceGateResult). */
+    businessHours?: BusinessHoursConfig | null;
   }>;
   /**
    * Optional health snapshot factory. When set, mounts a public
@@ -569,6 +572,9 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
 
     // §10 voice gates — subscription, go-live, usage caps. Voicemail on a
     // setup block; usage caps ring the owner first (forwardToOwnerTwiml).
+    // An answer carries the business hours from the tenant_settings row the
+    // gate already read in its tenant session, for the after-hours fork below.
+    let gateBusinessHours: BusinessHoursConfig | null | undefined;
     if (deps.voiceGate) {
       // Point at /recording, NOT /voicemail-status. Only /recording actually
       // persists: it downloads RecordingUrl, uploads to storage and inserts
@@ -596,6 +602,7 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
             );
           return;
         }
+        gateBusinessHours = gate.businessHours;
       } catch (err) {
         logger.error('telephony/voice: voiceGate failed closed', {
           callSid,
@@ -612,7 +619,14 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     const shopName = deps.businessName ?? 'our team';
     if (deps.pool && deps.settingsRepo) {
       try {
-        const afterHours = await isTenantAfterHours(deps.pool, tenantId);
+        // Raw-pg audit §4 P1.3 — one tenant session per inbound call: reuse
+        // the gate's read (every createVoiceGate answer, dunning grace
+        // included, carries the hours); only no gate wired, or a gate whose
+        // answer carries none, reads the hours here.
+        const afterHours =
+          gateBusinessHours !== undefined
+            ? isAfterHours(gateBusinessHours)
+            : await isTenantAfterHours(deps.pool, tenantId);
         if (afterHours) {
           const settings = await deps.settingsRepo.findByTenant(tenantId);
           const esc = resolveEscalationSettings(settings);

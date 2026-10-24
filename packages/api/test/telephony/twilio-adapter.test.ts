@@ -43,6 +43,7 @@ import { InMemoryPushDeliveryProvider } from '../../src/notifications/push-deliv
 import { InMemoryDeviceTokenRepository } from '../../src/push/device-token-service';
 import { setOwnerNotifications } from '../../src/notifications/owner-notifications-instance';
 import type { Pool } from 'pg';
+import { fakeTenantPool } from '../helpers/fake-tenant-pool';
 import { InMemoryConsentEventRepository } from '../../src/compliance/consent-events';
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -88,15 +89,16 @@ function makeAdapter(opts: {
   return { adapter, store, gateway, leadRepo, auditRepo };
 }
 
-/** Fake pool whose only query — identifyCaller's customers lookup — returns one
- *  matched customer, so handleInbound takes the known-caller branch. */
+/** identifyCaller runs under applyTenantContext, which requires a uuid tenant. */
+const KNOWN_CALLER_TENANT = '00000000-0000-4000-8000-0000000ca11e';
+
+/** Fake pool whose only lookup — identifyCaller's customers read, in its tenant
+ *  transaction — returns one matched customer, so handleInbound takes the
+ *  known-caller branch. */
 function matchedCallerPool(customerId: string, displayName: string): Pool {
-  return {
-    query: async (sql: string) =>
-      typeof sql === 'string' && sql.includes('FROM customers')
-        ? { rows: [{ id: customerId, display_name: displayName }] }
-        : { rows: [] },
-  } as unknown as Pool;
+  return fakeTenantPool((sql) =>
+    sql.includes('FROM customers') ? { rows: [{ id: customerId, display_name: displayName }] } : undefined,
+  ).pool;
 }
 
 // ─── xmlEscape ───────────────────────────────────────────────────────────────
@@ -330,12 +332,12 @@ describe('TwilioGatherAdapter.handleInbound', () => {
       callSid: 'CA-known',
       from: '+15125550100',
       to: '+15125550999',
-      tenantId: 'tenant-abc',
+      tenantId: KNOWN_CALLER_TENANT,
     });
 
-    const threads = await conversationRepo.findByEntity('tenant-abc', 'customer', 'cust-known');
+    const threads = await conversationRepo.findByEntity(KNOWN_CALLER_TENANT, 'customer', 'cust-known');
     expect(threads).toHaveLength(1);
-    const msgs = await conversationRepo.getMessages('tenant-abc', threads[0].id);
+    const msgs = await conversationRepo.getMessages(KNOWN_CALLER_TENANT, threads[0].id);
     const callLog = msgs.find((m) => m.source === 'inbound_call');
     expect(callLog).toBeTruthy();
     expect(callLog!.metadata).toMatchObject({ direction: 'inbound', channel: 'call', callSid: 'CA-known' });
@@ -739,7 +741,7 @@ describe('WS16c — inbound establishment convergence (Media Streams ↔ Gather)
     const repo = new InMemoryDeviceTokenRepository();
     const provider = new InMemoryPushDeliveryProvider();
     await repo.register({
-      tenantId: 'tenant-abc',
+      tenantId: KNOWN_CALLER_TENANT,
       userId: 'owner-1',
       expoPushToken: 'ExponentPushToken[a]',
       platform: 'ios',
@@ -751,9 +753,9 @@ describe('WS16c — inbound establishment convergence (Media Streams ↔ Gather)
       await adapter.handleInboundForStream({
         callSid: 'CA-stream-push',
         from: '+15125550100',
-        tenantId: 'tenant-abc',
+        tenantId: KNOWN_CALLER_TENANT,
       });
-      await adapter.initializeStreamSession({ callSid: 'CA-stream-push', tenantId: 'tenant-abc' });
+      await adapter.initializeStreamSession({ callSid: 'CA-stream-push', tenantId: KNOWN_CALLER_TENANT });
 
       // Exactly one owner push — realtime callers used to get NONE.
       expect(provider.sent).toHaveLength(1);
@@ -774,13 +776,13 @@ describe('WS16c — inbound establishment convergence (Media Streams ↔ Gather)
     await adapter.handleInboundForStream({
       callSid: 'CA-stream-log',
       from: '+15125550100',
-      tenantId: 'tenant-abc',
+      tenantId: KNOWN_CALLER_TENANT,
     });
-    await adapter.initializeStreamSession({ callSid: 'CA-stream-log', tenantId: 'tenant-abc' });
+    await adapter.initializeStreamSession({ callSid: 'CA-stream-log', tenantId: KNOWN_CALLER_TENANT });
 
-    const threads = await conversationRepo.findByEntity('tenant-abc', 'customer', 'cust-known');
+    const threads = await conversationRepo.findByEntity(KNOWN_CALLER_TENANT, 'customer', 'cust-known');
     expect(threads).toHaveLength(1);
-    const msgs = await conversationRepo.getMessages('tenant-abc', threads[0].id);
+    const msgs = await conversationRepo.getMessages(KNOWN_CALLER_TENANT, threads[0].id);
     const callLog = msgs.find((m) => m.source === 'inbound_call');
     expect(callLog).toBeTruthy();
     expect(callLog!.metadata).toMatchObject({
@@ -829,14 +831,153 @@ describe('WS16c — inbound establishment convergence (Media Streams ↔ Gather)
     await adapter.handleInboundForStream({
       callSid: 'CA-stream-known',
       from: '+15125550100',
-      tenantId: 'tenant-abc',
+      tenantId: KNOWN_CALLER_TENANT,
     });
-    await adapter.initializeStreamSession({ callSid: 'CA-stream-known', tenantId: 'tenant-abc' });
+    await adapter.initializeStreamSession({ callSid: 'CA-stream-known', tenantId: KNOWN_CALLER_TENANT });
 
     const session = store.findByCallSid('CA-stream-known');
     expect(session?.customerId).toBe('cust-known');
     // WS16c #2 — callerPhone is now pinned on the stream session too.
     expect(session?.callerPhone).toBe('+15125550100');
+  });
+});
+
+// ─── Media Streams stream start: one identifyCaller per call ────────────────
+//
+// The stream adapter awaits two hooks before the caller hears the greeting:
+// initialLanguageResolver (resolveStreamOpeningLanguage, before Deepgram
+// opens) and initializeSession (initializeStreamSession → the bootstrap).
+// Both need the caller's identity; identifyCaller is a tenant session of its
+// own, so the bootstrap takes the resolver's answer instead of reading again.
+
+describe('Media Streams stream start — identifyCaller once per call', () => {
+  const STREAM_TENANT = KNOWN_CALLER_TENANT;
+  const FROM = '+15125550100';
+
+  async function streamAdapter(opts: {
+    respond: Parameters<typeof fakeTenantPool>[0];
+    preferredLanguage?: 'en' | 'es';
+    tenantDefault?: 'en' | 'es';
+    supported?: Array<'en' | 'es'>;
+    withSettings?: boolean;
+  }) {
+    const fake = fakeTenantPool(opts.respond);
+    const settingsRepo = new InMemorySettingsRepository();
+    if (opts.withSettings !== false) {
+      const now = new Date();
+      await settingsRepo.create({
+        id: 's-stream',
+        tenantId: STREAM_TENANT,
+        businessName: 'Acme Plumbing',
+        timezone: 'America/Chicago',
+        estimatePrefix: 'EST-',
+        invoicePrefix: 'INV-',
+        nextEstimateNumber: 1,
+        nextInvoiceNumber: 1,
+        defaultPaymentTermDays: 30,
+        defaultLanguage: opts.tenantDefault ?? 'en',
+        supportedLanguages: opts.supported ?? ['en', 'es'],
+        autoDetectLanguage: true,
+        createdAt: now,
+        updatedAt: now,
+      } as TenantSettings);
+    }
+    const customerRepo = {
+      findById: vi.fn(async (_t: string, id: string) => ({ id, preferredLanguage: opts.preferredLanguage })),
+    };
+    const store = new VoiceSessionStore();
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}'),
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      pool: fake.pool,
+      settingsRepo,
+      customerRepo: customerRepo as never,
+    });
+    const identifyReads = () => fake.statements.filter((s) => s.sql.includes('FROM customers')).length;
+    return { adapter, store, fake, customerRepo, identifyReads };
+  }
+
+  /** What the media-stream adapter does at `start`: resolve + pin the language, then bootstrap. */
+  async function startStream(adapter: TwilioGatherAdapter, store: VoiceSessionStore, callSid: string) {
+    await adapter.handleInboundForStream({ callSid, from: FROM, tenantId: STREAM_TENANT });
+    const session = store.findByCallSid(callSid)!;
+    const language = await adapter.resolveStreamOpeningLanguage(STREAM_TENANT, { callSid, sessionId: session.id });
+    session.language = language;
+    const effects = await adapter.initializeStreamSession({ callSid, tenantId: STREAM_TENANT });
+    return { session, language, effects };
+  }
+
+  const matched = (sql: string) =>
+    sql.includes('FROM customers') ? { rows: [{ id: 'cust-known', display_name: 'Jane Smith' }] } : undefined;
+
+  it('a known caller: the resolver identifies once and the bootstrap reuses it (one customers read, one checkout)', async () => {
+    const { adapter, store, fake, identifyReads } = await streamAdapter({ respond: matched, preferredLanguage: 'es' });
+
+    const { session, language } = await startStream(adapter, store, 'CA-once-known');
+
+    expect(language).toBe('es');
+    // The bootstrap still took the known-caller branch, from the reused answer.
+    expect(session.customerId).toBe('cust-known');
+    expect(identifyReads()).toBe(1);
+    expect(fake.checkouts()).toBe(1);
+  });
+
+  it('an unknown caller: one read, the tenant default, the unknown-caller branch', async () => {
+    const { adapter, store, identifyReads } = await streamAdapter({ respond: () => undefined, tenantDefault: 'es' });
+
+    const { session, language } = await startStream(adapter, store, 'CA-once-unknown');
+
+    expect(language).toBe('es');
+    expect(session.customerId).toBeUndefined();
+    expect(identifyReads()).toBe(1);
+  });
+
+  it('a resolver lookup that failed is not reused: the bootstrap identifies the caller itself', async () => {
+    let calls = 0;
+    const { adapter, store, identifyReads } = await streamAdapter({
+      respond: (sql) => {
+        if (!sql.includes('FROM customers')) return undefined;
+        calls += 1;
+        if (calls === 1) throw new Error('connection reset');
+        return { rows: [{ id: 'cust-known', display_name: 'Jane Smith' }] };
+      },
+      preferredLanguage: 'es',
+    });
+
+    const { session, language } = await startStream(adapter, store, 'CA-once-retry');
+
+    // Failure-soft opening language, then the bootstrap's own lookup succeeds.
+    expect(language).toBe('en');
+    expect(session.customerId).toBe('cust-known');
+    expect(identifyReads()).toBe(2);
+  });
+
+  it('the parked answer is taken once: a second bootstrap of the same call identifies again', async () => {
+    const { adapter, store, identifyReads } = await streamAdapter({ respond: matched });
+
+    await startStream(adapter, store, 'CA-once-twice');
+    await adapter.initializeStreamSession({ callSid: 'CA-once-twice', tenantId: STREAM_TENANT });
+
+    expect(identifyReads()).toBe(2);
+  });
+
+  it('Gather is unchanged: no resolver runs, the bootstrap identifies the caller (one read)', async () => {
+    const { adapter, store, identifyReads } = await streamAdapter({ respond: matched });
+
+    await adapter.handleInbound({ callSid: 'CA-once-gather', from: FROM, to: '+15125550999', tenantId: STREAM_TENANT });
+
+    expect(store.findByCallSid('CA-once-gather')?.customerId).toBe('cust-known');
+    expect(identifyReads()).toBe(1);
+  });
+
+  it('the opening language: a Spanish-preferring caller on an English-only tenant opens in English; no settings row opens in English', async () => {
+    const englishOnly = await streamAdapter({ respond: matched, preferredLanguage: 'es', supported: ['en'] });
+    expect((await startStream(englishOnly.adapter, englishOnly.store, 'CA-lang-gate')).language).toBe('en');
+
+    const noSettings = await streamAdapter({ respond: matched, preferredLanguage: 'es', withSettings: false });
+    expect((await startStream(noSettings.adapter, noSettings.store, 'CA-lang-none')).language).toBe('en');
   });
 });
 

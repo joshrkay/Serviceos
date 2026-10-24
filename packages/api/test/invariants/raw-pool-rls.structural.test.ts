@@ -465,7 +465,11 @@ const PLANT_SUPPORT: Record<string, string> = {
   'src/db/rls-runtime-role.ts': [
     "import type { PoolClient } from 'pg';",
     'export async function applyTenantContext(client: PoolClient, tenantId: string, _o: { transactional?: boolean } = {}): Promise<void> {',
-    "  await client.query(\"SELECT set_config('app.current_tenant_id', $1, true)\", [tenantId]);",
+    "  if (process.env.RLS_RUNTIME_ROLE === 'true') {",
+    "    await client.query(\"SELECT set_config('app.current_tenant_id', $1, true), set_config('role', 'rls_app_runtime', true)\", [tenantId]);",
+    '  } else {',
+    "    await client.query(\"SELECT set_config('app.current_tenant_id', $1, true)\", [tenantId]);",
+    '  }',
     '}',
     'export async function applyCrossTenantRole(client: PoolClient, _o: { transactional?: boolean } = {}): Promise<void> {',
     "  await client.query('SET LOCAL ROLE rls_cross_tenant');",

@@ -36,14 +36,17 @@
  * verified — the mismatch is the attack signature, and refusing on it names the
  * failure instead of letting it read as a corrupt HMAC.
  *
- * The two lookups here are cross-tenant by construction (an inbound webhook
- * arrives with no tenant context — finding the tenant is the whole point), so
- * they run under the `app.system_lookup = 'true'` GUC that migration 074's
- * permissive read policy on `tenant_integrations` gates on, set LOCAL inside a
- * short transaction so it cannot leak onto the next pool checkout.
+ * The DID and subaccount lookups are cross-tenant by construction (an inbound
+ * webhook arrives with no tenant context — finding the tenant is the whole
+ * point), so they run under the `app.system_lookup = 'true'` GUC that
+ * migration 074's permissive read policy on `tenant_integrations` gates on,
+ * set LOCAL inside a short transaction so it cannot leak onto the next pool
+ * checkout. The tenant-keyed lookup (step 1) already knows its tenant, so it
+ * reads under that tenant's own context (`rls_app_runtime`) instead.
  */
 
 import type { Pool, PoolClient } from 'pg';
+import { withTenantClient } from '../db/tenant-transaction';
 import { createLogger } from '../logging/logger';
 import { normalizeE164 } from '../integrations/twilio/phone-number-repository';
 import type {
@@ -152,8 +155,13 @@ async function findByPhoneNumber(pool: Pool, to: string): Promise<IntegrationRow
   });
 }
 
+/**
+ * Step 1: the tenant comes from trusted in-process state, so this is a tenant
+ * read, not a cross-tenant lookup — the tenant's own context and the RLS
+ * runtime role, not the system_lookup escape (raw-pg audit §4 P1.7).
+ */
 async function findByTenant(pool: Pool, tenantId: string): Promise<IntegrationRow | null> {
-  return systemLookup(pool, async (client) => {
+  return withTenantClient(pool, tenantId, async (client) => {
     const { rows } = await client.query<IntegrationRow>(
       `SELECT tenant_id, subaccount_sid, auth_token_primary_enc, auth_token_secondary_enc
          FROM tenant_integrations

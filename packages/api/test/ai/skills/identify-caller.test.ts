@@ -1,25 +1,34 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { Pool, QueryResult } from 'pg';
+import { describe, it, expect, vi } from 'vitest';
+import type { Pool, PoolClient } from 'pg';
 import { identifyCaller, normalizePhone } from '../../../src/ai/skills/identify-caller';
 import type { IdentifyCallerInput } from '../../../src/ai/skills/identify-caller';
 import { isNanpKey } from '../../../src/shared/phone';
+import { tenantContextStore } from '../../../src/middleware/tenant-context';
+import { fakeTenantPool, type FakeTenantPool } from '../../helpers/fake-tenant-pool';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
+/** identifyCaller runs under applyTenantContext, which requires a uuid. */
+const TENANT_ID = '00000000-0000-4000-8000-00000000ca11';
+
 function makeRow(id: string, displayName: string): { id: string; display_name: string } {
   return { id, display_name: displayName };
 }
 
+/** A pool whose customers lookup answers `rows`; every other statement is empty. */
+function makeFake(rows: { id: string; display_name: string }[]): FakeTenantPool {
+  return fakeTenantPool((sql) => (sql.includes('FROM customers') ? { rows } : undefined));
+}
+
 function makePool(rows: { id: string; display_name: string }[]): Pool {
-  const query = vi.fn().mockResolvedValue({ rows } as unknown as QueryResult);
-  return { query } as unknown as Pool;
+  return makeFake(rows).pool;
 }
 
 function makeInput(overrides: Partial<Omit<IdentifyCallerInput, 'pool'>> & { pool?: Pool }): IdentifyCallerInput {
   return {
-    tenantId: 'tenant-abc',
+    tenantId: TENANT_ID,
     fromPhone: '+15125550100',
     pool: makePool([]),
     ...overrides,
@@ -204,21 +213,19 @@ describe('identifyCaller — unknown', () => {
   });
 
   it('empty phone string → unknown with no query', async () => {
-    const queryFn = vi.fn();
-    const pool = { query: queryFn } as unknown as Pool;
-    const result = await identifyCaller(makeInput({ fromPhone: '', pool }));
+    const fake = makeFake([]);
+    const result = await identifyCaller(makeInput({ fromPhone: '', pool: fake.pool }));
 
     expect(result).toEqual({ status: 'unknown' });
-    expect(queryFn).not.toHaveBeenCalled();
+    expect(fake.checkouts()).toBe(0);
   });
 
   it('null-ish phone (whitespace only) → unknown with no query', async () => {
-    const queryFn = vi.fn();
-    const pool = { query: queryFn } as unknown as Pool;
-    const result = await identifyCaller(makeInput({ fromPhone: '   ', pool }));
+    const fake = makeFake([]);
+    const result = await identifyCaller(makeInput({ fromPhone: '   ', pool: fake.pool }));
 
     expect(result).toEqual({ status: 'unknown' });
-    expect(queryFn).not.toHaveBeenCalled();
+    expect(fake.checkouts()).toBe(0);
   });
 });
 
@@ -234,13 +241,12 @@ describe('identifyCaller — unknown', () => {
 describe('identifyCaller — NANP guard (wrong-customer safety)', () => {
   it('non-NANP international caller → unknown with NO tail probe (even if a US customer would collide)', async () => {
     // Pool would return a US customer if queried — proves we never query.
-    const queryFn = vi.fn().mockResolvedValue({ rows: [makeRow('us-cust', 'Unrelated US')] } as unknown as QueryResult);
-    const pool = { query: queryFn } as unknown as Pool;
+    const fake = makeFake([makeRow('us-cust', 'Unrelated US')]);
 
-    const result = await identifyCaller(makeInput({ fromPhone: '+445551112222', pool }));
+    const result = await identifyCaller(makeInput({ fromPhone: '+445551112222', pool: fake.pool }));
 
     expect(result).toEqual({ status: 'unknown' });
-    expect(queryFn).not.toHaveBeenCalled();
+    expect(fake.checkouts()).toBe(0);
   });
 
   it('a valid +1 E.164 caller still matches (guard does not break the reconciliation fix)', async () => {
@@ -260,14 +266,13 @@ describe('identifyCaller — NANP guard (wrong-customer safety)', () => {
   });
 
   it('a number whose area/exchange starts with 0/1 is not a NANP key → unknown, no query', async () => {
-    const queryFn = vi.fn().mockResolvedValue({ rows: [makeRow('x', 'X')] } as unknown as QueryResult);
-    const pool = { query: queryFn } as unknown as Pool;
+    const fake = makeFake([makeRow('x', 'X')]);
 
     // Area code 155 is fine, but exchange starting with 1 (1551...) is invalid NANP.
-    const result = await identifyCaller(makeInput({ fromPhone: '5551551234', pool }));
+    const result = await identifyCaller(makeInput({ fromPhone: '5551551234', pool: fake.pool }));
 
     expect(result).toEqual({ status: 'unknown' });
-    expect(queryFn).not.toHaveBeenCalled();
+    expect(fake.checkouts()).toBe(0);
   });
 });
 
@@ -276,49 +281,76 @@ describe('identifyCaller — NANP guard (wrong-customer safety)', () => {
 // ---------------------------------------------------------------------------
 
 describe('identifyCaller — tenant isolation', () => {
+  const OTHER_TENANT = '00000000-0000-4000-8000-00000000ca12';
+
+  function lookupOf(fake: FakeTenantPool) {
+    const lookups = fake.work();
+    expect(lookups).toHaveLength(1);
+    return lookups[0];
+  }
+
   it('query always includes tenant_id as first parameter', async () => {
-    const queryFn = vi.fn().mockResolvedValue({ rows: [] } as unknown as QueryResult);
-    const pool = { query: queryFn } as unknown as Pool;
+    const fake = makeFake([]);
 
-    await identifyCaller({ tenantId: 'tenant-xyz', fromPhone: '+15125550100', pool });
+    await identifyCaller({ tenantId: TENANT_ID, fromPhone: '+15125550100', pool: fake.pool });
 
-    expect(queryFn).toHaveBeenCalledOnce();
-    const [_sql, params] = queryFn.mock.calls[0] as [string, unknown[]];
-    expect(params[0]).toBe('tenant-xyz');
+    expect(lookupOf(fake).values?.[0]).toBe(TENANT_ID);
   });
 
   it('query uses phone_normalized column', async () => {
-    const queryFn = vi.fn().mockResolvedValue({ rows: [] } as unknown as QueryResult);
-    const pool = { query: queryFn } as unknown as Pool;
+    const fake = makeFake([]);
 
-    await identifyCaller({ tenantId: 'tenant-xyz', fromPhone: '+15125550100', pool });
+    await identifyCaller({ tenantId: TENANT_ID, fromPhone: '+15125550100', pool: fake.pool });
 
-    const [sql] = queryFn.mock.calls[0] as [string, unknown[]];
-    expect(sql).toContain('phone_normalized');
+    expect(lookupOf(fake).sql).toContain('phone_normalized');
   });
 
   it('uses the index-friendly IN(...) form, not right()/LIKE (perf: no full tenant scan)', async () => {
-    const queryFn = vi.fn().mockResolvedValue({ rows: [] } as unknown as QueryResult);
-    const pool = { query: queryFn } as unknown as Pool;
+    const fake = makeFake([]);
 
-    await identifyCaller({ tenantId: 'tenant-xyz', fromPhone: '+15125550100', pool });
+    await identifyCaller({ tenantId: TENANT_ID, fromPhone: '+15125550100', pool: fake.pool });
 
-    const [sql, params] = queryFn.mock.calls[0] as [string, unknown[]];
+    const { sql, values } = lookupOf(fake);
     expect(sql).toContain("phone_normalized IN ($2, '1' || $2)");
     expect(sql).not.toMatch(/right\s*\(/i);
     expect(sql).not.toMatch(/LIKE/i);
     // $2 is the 10-digit bare tail (no leading 1).
-    expect(params[1]).toBe('5125550100');
+    expect(values?.[1]).toBe('5125550100');
   });
 
   it('different tenants are isolated — query scoped to provided tenantId', async () => {
-    const queryFn = vi.fn().mockResolvedValue({ rows: [] } as unknown as QueryResult);
-    const pool = { query: queryFn } as unknown as Pool;
+    const fake = makeFake([]);
 
-    await identifyCaller({ tenantId: 'tenant-A', fromPhone: '+15125550100', pool });
+    await identifyCaller({ tenantId: OTHER_TENANT, fromPhone: '+15125550100', pool: fake.pool });
 
-    const [_sql, params] = queryFn.mock.calls[0] as [string, unknown[]];
-    expect(params[0]).toBe('tenant-A');
-    expect(params[0]).not.toBe('tenant-B');
+    expect(lookupOf(fake).values?.[0]).toBe(OTHER_TENANT);
+  });
+
+  it('runs the lookup in a tenant transaction on one checkout: BEGIN, the tenant GUC, SELECT, COMMIT', async () => {
+    const fake = makeFake([makeRow('cust-1', 'Alice Smith')]);
+
+    await identifyCaller({ tenantId: TENANT_ID, fromPhone: '+15125550100', pool: fake.pool });
+
+    expect(fake.checkouts()).toBe(1);
+    expect(fake.open()).toBe(0);
+    expect(fake.statements.map((s) => s.sql.trim().split(/\s+/)[0])).toEqual(['BEGIN', 'SELECT', 'SELECT', 'COMMIT']);
+    expect(fake.statements[1]).toMatchObject({
+      sql: expect.stringContaining("set_config('app.current_tenant_id'"),
+      values: [TENANT_ID],
+    });
+  });
+
+  it("inside a request scoped to the same tenant, runs on the request's client and takes no checkout", async () => {
+    const fake = makeFake([]);
+    const requestQuery = vi.fn(async () => ({ rows: [makeRow('cust-req', 'Req Client')] }));
+    const client = { query: requestQuery } as unknown as PoolClient;
+
+    const result = await tenantContextStore.run({ client, tenantId: TENANT_ID }, () =>
+      identifyCaller({ tenantId: TENANT_ID, fromPhone: '+15125550100', pool: fake.pool }),
+    );
+
+    expect(result).toMatchObject({ status: 'matched', customerId: 'cust-req' });
+    expect(fake.checkouts()).toBe(0);
+    expect(requestQuery).toHaveBeenCalledOnce();
   });
 });

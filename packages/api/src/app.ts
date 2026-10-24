@@ -505,11 +505,6 @@ import type { RetrieveAdapter } from './ai/orchestration/context-builder';
 // future channel adapters) can resolve a session's language from the
 // customer override + tenant default + STT hint.
 export { detectLanguage } from './ai/orchestration/language-detector';
-// UB-C1 — the media-stream adapter's initialLanguageResolver composes the
-// identified caller's preferredLanguage with the tenant's language settings
-// through detectLanguage (which applies the supported_languages gate).
-import { detectLanguage as detectInitialCallLanguage } from './ai/orchestration/language-detector';
-import { identifyCaller } from './ai/skills/identify-caller';
 import { PgCallSummaryRepository } from './ai/skills/pg-call-summary';
 import type { EmbeddingProvider } from './ai/providers/openai-compatible';
 import {
@@ -5282,40 +5277,11 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             ...(sharedTtsProvider ? { ttsProvider: sharedTtsProvider } : {}),
             terminologyProvider,
             // UB-C1 — resolve the language the call OPENS in, before the
-            // Deepgram socket is created: identified caller's
-            // preferredLanguage > tenant default, both gated by the
-            // tenant's supported_languages opt-in (detectLanguage applies
-            // the gate internally). Failure-soft: any error falls back to
-            // the tenant default / English rather than blocking audio.
-            initialLanguageResolver: async (
-              tenantId: string,
-              ctx: { callSid: string; sessionId: string },
-            ) => {
-              const settings = await settingsRepo.findByTenant(tenantId).catch(() => null);
-              let customerPreferred: 'en' | 'es' | null = null;
-              const callerPhone = twilioAdapter.getCallerPhone(ctx.sessionId);
-              if (pool && callerPhone) {
-                try {
-                  const identified = await identifyCaller({
-                    tenantId,
-                    fromPhone: callerPhone,
-                    pool,
-                  });
-                  if (identified.status === 'matched') {
-                    const customer = await customerRepo.findById(tenantId, identified.customerId);
-                    const pref = customer?.preferredLanguage;
-                    if (pref === 'en' || pref === 'es') customerPreferred = pref;
-                  }
-                } catch {
-                  /* failure-soft — fall through to the tenant default */
-                }
-              }
-              return detectInitialCallLanguage({
-                customerPreferredLanguage: customerPreferred,
-                tenantDefaultLanguage: settings?.defaultLanguage === 'es' ? 'es' : 'en',
-                supportedLanguages: settings?.supportedLanguages ?? ['en'],
-              });
-            },
+            // Deepgram socket is created (the identified caller's
+            // preferredLanguage > tenant default, gated by supported_languages;
+            // failure-soft). See TwilioGatherAdapter.resolveStreamOpeningLanguage.
+            initialLanguageResolver: (tenantId: string, ctx: { callSid: string; sessionId: string }) =>
+              twilioAdapter.resolveStreamOpeningLanguage(tenantId, ctx),
             fillerEngine,
             fillerCache,
             // U5 — absolute per-call duration cap: one timer per leg, armed

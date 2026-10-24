@@ -1,10 +1,14 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
+import type { PoolClient } from 'pg';
 import {
   isSupervisorPresent,
+  pgSupervisorPresenceLoader,
   setSupervisorPresenceLoader,
   _resetSupervisorPresenceCache,
   SUPERVISOR_PRESENCE_TTL_MS,
 } from '../../src/ai/supervisor-presence';
+import { tenantContextStore } from '../../src/middleware/tenant-context';
+import { fakeTenantPool } from '../helpers/fake-tenant-pool';
 
 describe('P12-004 — isSupervisorPresent', () => {
   beforeEach(() => {
@@ -74,5 +78,45 @@ describe('P12-004 — isSupervisorPresent', () => {
     const result = await isSupervisorPresent('tenant-A');
     expect(result).toBe(true);
     expect(loader).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('pgSupervisorPresenceLoader — tenant context (raw-pg audit §4 P1.4)', () => {
+  const TENANT = '00000000-0000-4000-8000-0000000005e1';
+
+  it('reads users in a tenant transaction on one checkout: BEGIN, the tenant GUC, the EXISTS, COMMIT', async () => {
+    const fake = fakeTenantPool((sql) => (sql.includes('FROM users') ? { rows: [{ present: true }] } : undefined));
+
+    expect(await pgSupervisorPresenceLoader(fake.pool)(TENANT)).toBe(true);
+
+    expect(fake.checkouts()).toBe(1);
+    expect(fake.open()).toBe(0);
+    expect(fake.statements.map((s) => s.sql.trim().split(/\s+/)[0])).toEqual(['BEGIN', 'SELECT', 'SELECT', 'COMMIT']);
+    expect(fake.statements[1]).toMatchObject({
+      sql: expect.stringContaining("set_config('app.current_tenant_id'"),
+      values: [TENANT],
+    });
+    expect(fake.work()).toEqual([
+      expect.objectContaining({ sql: expect.stringContaining('WHERE tenant_id = $1'), values: [TENANT] }),
+    ]);
+  });
+
+  it('answers false when the EXISTS finds no supervisor', async () => {
+    const fake = fakeTenantPool((sql) => (sql.includes('FROM users') ? { rows: [{ present: false }] } : undefined));
+    expect(await pgSupervisorPresenceLoader(fake.pool)(TENANT)).toBe(false);
+  });
+
+  it("inside a request scoped to the same tenant, reads on the request's client and takes no checkout", async () => {
+    const fake = fakeTenantPool();
+    const requestQuery = vi.fn(async () => ({ rows: [{ present: true }] }));
+    const client = { query: requestQuery } as unknown as PoolClient;
+
+    const present = await tenantContextStore.run({ client, tenantId: TENANT }, () =>
+      pgSupervisorPresenceLoader(fake.pool)(TENANT),
+    );
+
+    expect(present).toBe(true);
+    expect(fake.checkouts()).toBe(0);
+    expect(requestQuery).toHaveBeenCalledOnce();
   });
 });

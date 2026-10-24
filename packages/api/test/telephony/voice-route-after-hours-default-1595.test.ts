@@ -20,6 +20,7 @@ import express from 'express';
 import request from 'supertest';
 import twilio from 'twilio';
 import { createTelephonyRouter } from '../../src/routes/telephony';
+import { fakeTenantPool } from '../helpers/fake-tenant-pool';
 
 const AUTH_TOKEN = 'test-tw-after-hours-token';
 const PUBLIC_BASE_URL = 'https://api.test';
@@ -41,11 +42,13 @@ function makeApp(opts: {
   voiceGate?: RouterDeps['voiceGate'];
 }) {
   const handleInbound = vi.fn().mockResolvedValue('<Response><Gather/></Response>');
-  const pool = {
-    query: vi.fn(async () => ({
-      rows: [{ business_hours: ALWAYS_CLOSED, timezone: 'UTC' }],
-    })),
-  };
+  // The after-hours read runs in its own tenant transaction (raw-pg audit
+  // §4 P1.3): every statement but the business-hours SELECT is empty.
+  const fake = fakeTenantPool((sql) =>
+    sql.includes('FROM tenant_settings')
+      ? { rows: [{ business_hours: ALWAYS_CLOSED, timezone: 'UTC' }] }
+      : undefined,
+  );
   const settingsRepo = {
     findByTenant: async () => ({
       tenantId: TENANT_ID,
@@ -65,12 +68,12 @@ function makeApp(opts: {
       publicBaseUrl: PUBLIC_BASE_URL,
       resolveTenantId: () => TENANT_ID,
       businessName: 'Acme Plumbing',
-      pool: pool as never,
+      pool: fake.pool,
       settingsRepo: settingsRepo as never,
       ...(opts.voiceGate ? { voiceGate: opts.voiceGate } : {}),
     }),
   );
-  return { app, handleInbound };
+  return { app, handleInbound, fake };
 }
 
 function signedVoicePost(app: express.Application, callSid: string) {
@@ -123,5 +126,35 @@ describe('#1595 — POST /api/telephony/voice after hours', () => {
     expect(res.text).toContain('<Record');
     expect(res.text).toContain('/api/telephony/recording');
     expect(handleInbound).not.toHaveBeenCalled();
+  });
+
+  // Raw-pg audit §4 P1.3 — one tenant session per inbound call: the gate
+  // already read this tenant's settings row, so the fork uses its hours.
+  it("(d) the fork uses the business hours the gate read with its decision, and reads tenant_settings no second time", async () => {
+    const { app, handleInbound, fake } = makeApp({
+      escalationSettings: { after_hours_voice_mode: 'voicemail' },
+      voiceGate: async () => ({
+        allowed: true,
+        businessHours: { timezone: 'UTC', schedule: [{ dayOfWeek: 1, openTime: '00:00', closeTime: '00:00' }] },
+      }),
+    });
+
+    const res = await signedVoicePost(app, 'CA-1595-gate-hours');
+
+    expect(res.text).toContain('<Record');
+    expect(handleInbound).not.toHaveBeenCalled();
+    expect(fake.checkouts()).toBe(0);
+  });
+
+  it('(e) a gate answer that carries no hours (a gate that reads no settings) leaves the fork to read them itself', async () => {
+    const { app, fake } = makeApp({
+      escalationSettings: { after_hours_voice_mode: 'voicemail' },
+      voiceGate: async () => ({ allowed: true }),
+    });
+
+    const res = await signedVoicePost(app, 'CA-1595-fork-reads');
+
+    expect(res.text).toContain('<Record');
+    expect(fake.work().filter((s) => s.sql.includes('FROM tenant_settings'))).toHaveLength(1);
   });
 });
