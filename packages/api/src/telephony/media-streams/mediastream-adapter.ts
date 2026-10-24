@@ -192,6 +192,14 @@ export type SpeechTurnHandler = (args: {
    * finals do not append in arrival order.
    */
   callerTiming?: CallerTurnTiming;
+  /**
+   * PRIV-3 — the host tells the adapter the text the turn was read on as once
+   * it appended the caller line: a final that completes a card number the
+   * caller split across turns carries the marker for its part. The adapter's
+   * own reads of the final after the turn (the LLM sentiment check, the
+   * vulnerability triage grade) send that, never the final as heard.
+   */
+  onCallerText?: (text: string) => void;
 }) => Promise<SideEffect[]>;
 
 export interface MediaStreamAdapterDeps {
@@ -2292,6 +2300,8 @@ export class TwilioMediaStreamAdapter {
     const releaseE1Turn = (): void => {
       if (e1Turn) this.state.e1TurnsInFlight -= 1;
     };
+    // PRIV-3 — the final as the turn read it on (see SpeechTurnHandler).
+    let callerText = event.transcript;
     try {
       sideEffects = await this.deps
         .store.withSessionLock(session.id, () =>
@@ -2301,6 +2311,9 @@ export class TwilioMediaStreamAdapter {
             callSid,
             tenantId,
             callerTiming,
+            onCallerText: (text) => {
+              callerText = text;
+            },
           }),
         );
       releaseE1Turn();
@@ -2368,7 +2381,7 @@ export class TwilioMediaStreamAdapter {
     )?.intentType;
     if (classifiedIntent === 'language_switch') {
       const target =
-        detectLanguageSwitchIntent(event.transcript) ??
+        detectLanguageSwitchIntent(callerText) ??
         (this.state.language === 'es' ? 'en' : 'es');
       if (isLanguageSupported(target, session.supportedLanguages ?? null)) {
         await this.switchLanguage(target, 'classified_intent');
@@ -2394,7 +2407,7 @@ export class TwilioMediaStreamAdapter {
     ) {
       void this.runSentimentCheckAndMaybeEscalate(
         session,
-        event.transcript,
+        callerText,
         sideEffects,
         activeEscalationSettings,
       ).catch(
@@ -2417,7 +2430,7 @@ export class TwilioMediaStreamAdapter {
       void this.deps
         .vulnerabilityTriageHook({
           session,
-          transcript: event.transcript,
+          transcript: callerText,
           priorTurns: this.extractPriorTurns(session, 4),
           tenantId,
         })

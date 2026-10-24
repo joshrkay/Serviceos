@@ -11,6 +11,7 @@ export { EXISTING_CUSTOMER_SIGNUP_COPY } from './existing-customer-signup';
 export {
   appendAgentTts,
   callerTranscriptText,
+  callerTurnTextAfterAppend,
   REDACTED_CHALLENGE_TEXT,
   type AppendTranscriptStore,
   type ChallengeAwareSession,

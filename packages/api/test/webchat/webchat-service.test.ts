@@ -403,4 +403,15 @@ describe('#1737 — hand-off and escalation', () => {
     expect(h.gateway.complete).not.toHaveBeenCalled();
     expect(h.notify).toHaveBeenCalledWith(TENANT, 'escalation', expect.objectContaining({ reason: expect.stringContaining('Web chat') }));
   });
+
+  // PRIV-3 — the ask for a person is stored before any model call, on its
+  // own path: it is the visitor's turn like any other, card number scrubbed.
+  it('stores an ask for a person with any card number in it replaced, as every other turn', async () => {
+    const h = await harness();
+    const { sessionId } = await h.start();
+    await h.say(sessionId, 'Can I talk to a real person? my card is 4111 1111 1111 1111');
+    const session = h.store.get(sessionId)!;
+    expect(session.transcript).toContain('caller: Can I talk to a real person? my card is [card number]');
+    expect(JSON.stringify(session.transcript)).not.toMatch(/4111/);
+  });
 });

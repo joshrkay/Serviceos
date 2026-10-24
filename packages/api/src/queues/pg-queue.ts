@@ -286,6 +286,35 @@ export class PgQueue extends PgBaseRepository implements Queue {
   }
 
   /**
+   * PRIV-3 — the messages of `type` still in the queue (delayed, visible, or
+   * claimed and not yet done) whose payload holds every field of `match`
+   * (JSONB containment), oldest first. Read-only: nothing is claimed. The
+   * recording hook reads the card-number rewrites still queued for a call
+   * with it (voice/card-number-rewrite-retry.ts).
+   */
+  async findPending<T>(type: string, match: Record<string, string>): Promise<QueueMessage<T>[]> {
+    return this.withClient(async (client) => {
+      await this.ensureTable(client);
+      const { rows } = await client.query(
+        `SELECT id, type, payload, attempts, max_attempts, idempotency_key, created_at
+           FROM _queue_messages
+          WHERE type = $1 AND payload @> $2::jsonb
+          ORDER BY created_at, id`,
+        [type, JSON.stringify(match)],
+      );
+      return rows.map((row) => ({
+        id: row.id as string,
+        type: row.type as string,
+        payload: row.payload as T,
+        attempts: row.attempts as number,
+        maxAttempts: row.max_attempts as number,
+        idempotencyKey: row.idempotency_key as string,
+        createdAt: (row.created_at as Date).toISOString(),
+      }));
+    });
+  }
+
+  /**
    * T4-F10 — persist the real handler failure onto the still-retrying row,
    * so `_queue_dlq.error` (populated from this same value at exhaustion) is
    * the actual thrown message/stack, not a hardcoded 'max attempts exceeded'.

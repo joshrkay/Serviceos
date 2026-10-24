@@ -262,6 +262,17 @@ const configSchema = z.object({
   // ~38 saturated tenants and could never fire. Pinned in
   // test/workers/failure-rate-monitor.test.ts; raise it as tenants grow.
   FAILURE_MONITOR_SPEND_MAX_CENTS: z.coerce.number().int().min(0).default(200),
+  // #1813 follow-up — days a `shadow_comparisons` row (PII-scrubbed primary and
+  // shadow LLM replies, written while SHADOW_LLM_ENABLED is on) is kept before
+  // the hourly retention sweep deletes it (workers/shadow-comparison-retention-
+  // worker.ts). Default 365 = the platform default of
+  // tenant_settings.recording_retention_days, the horizon past which the
+  // recording-retention sweep purges ai_runs prompt and reply content (PRIV-1).
+  // A non-positive or fractional value fails boot: there is no "keep forever".
+  // Nor is there one by another name: more than 36500 days (100 years) fails
+  // boot too (a window of 1e9 days would put the sweep's horizon outside
+  // Postgres's timestamp range and fail every sweep).
+  SHADOW_COMPARISON_RETENTION_DAYS: z.coerce.number().int().positive().max(36500).default(365),
   // QUALITY-2026-07-12 WS5 — Microsoft Presidio PII redaction backend for
   // training-asset ingestion. Two separate REST services (matching Presidio's
   // standard deployment): the Analyzer detects PII spans, the Anonymizer

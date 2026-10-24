@@ -48,6 +48,7 @@ describe('Postgres integration — A2P 10DLC registration store (#1564)', () => 
       queue: new InMemoryQueue(),
       auditRepo: new InMemoryAuditRepository(),
       encryptionKey: KEY,
+      pool,
     });
   }
 

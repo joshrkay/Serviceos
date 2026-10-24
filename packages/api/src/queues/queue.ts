@@ -352,6 +352,21 @@ export class InMemoryQueue implements Queue {
     return { pending: this.messages.length, deadLetter: this.dlq.length };
   }
 
+  /**
+   * PRIV-3 — mirror of PgQueue.findPending: the messages of `type` still
+   * queued whose payload holds every field of `match`, oldest first (a
+   * received message has left the in-memory queue).
+   */
+  async findPending<T>(type: string, match: Record<string, string>): Promise<QueueMessage<T>[]> {
+    return this.messages
+      .filter(
+        (m) =>
+          m.type === type &&
+          Object.entries(match).every(([k, v]) => (m.payload as Record<string, unknown> | null)?.[k] === v),
+      )
+      .map(({ visibleAt: _visibleAt, ...message }) => message as QueueMessage<T>);
+  }
+
   /** WS15 — mirror of PgQueue.stalePendingCount (due-and-unclaimed age). */
   async stalePendingCount(olderThanSeconds: number): Promise<number> {
     const cutoff = Date.now() - Math.max(0, olderThanSeconds) * 1000;
@@ -362,6 +377,13 @@ export class InMemoryQueue implements Queue {
 export interface WorkerHandler<T = unknown> {
   type: string;
   handle(message: QueueMessage<T>, logger: Logger): Promise<void>;
+  /**
+   * What `processMessage` logs of a message's payload on every attempt, in
+   * place of its redacted snapshot (`redactForSink`, which keeps an excerpt
+   * of each text field): for a job whose payload is a caller's words, its ids
+   * only.
+   */
+  describePayload?(payload: T): Record<string, unknown>;
 }
 
 /** T4-F10 — processMessage's outcome, carrying the real failure reason. */
@@ -391,10 +413,9 @@ export async function processMessage<T>(
     };
   }
 
+  const payload = handler.describePayload ? handler.describePayload(message.payload) : redactForSink(message.payload, 'worker');
   try {
-    log.info('Processing message', {
-      payload: redactForSink(message.payload, 'worker'),
-    });
+    log.info('Processing message', { payload });
     await handler.handle(message, log);
     log.info('Message processed successfully');
     return { success: true };
@@ -403,7 +424,7 @@ export async function processMessage<T>(
     log.error('Message processing failed', {
       error: error.message,
       canRetry: message.attempts < message.maxAttempts,
-      payload: redactForSink(message.payload, 'worker'),
+      payload,
     });
 
     if (message.attempts >= message.maxAttempts) {

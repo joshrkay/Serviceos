@@ -128,6 +128,9 @@ import {
 } from '../telephony/twilio-recording-deleter';
 
 /** Default rows purged per sweep — bounds S3 round-trips under a backlog. */
+/** The PRIV-1 phase's audit event, one per tenant batch of purged AI-run content. */
+export const AI_RUN_CONTENT_PURGED_EVENT = 'ai_run.content_purged';
+
 export const RECORDING_RETENTION_SWEEP_BATCH = 50;
 
 /**
@@ -1368,7 +1371,7 @@ async function purgeAiRunContent(
           tenantId,
           actorId: RETENTION_ACTOR,
           actorRole: 'system',
-          eventType: 'ai_run.content_purged',
+          eventType: AI_RUN_CONTENT_PURGED_EVENT,
           entityType: 'tenant',
           entityId: tenantId,
           metadata: summarizePurgedAiRuns(purgedRuns),

@@ -472,6 +472,7 @@ import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
 import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker, voicemailJobContextFromPersisted } from './workers/transcription';
 import { createPinLockAlertRetryWorker, createPinLockAlertRetryScheduler } from './workers/pin-lock-alert-retry';
+import { createCardNumberRewriteRetryWorker, pendingCardNumberRewrites } from './voice/card-number-rewrite-retry';
 import { createTranscriptionRouterHandoff } from './workers/transcription-router-handoff';
 import { createMemoCreatorModeLoader } from './workers/memo-creator-mode';
 // U9 — voicemail router gate: owner/approver caller-ID check (same identity
@@ -493,6 +494,10 @@ import {
   runRecordingRetentionSweep,
   PgRecordingRetentionRepository,
 } from './workers/recording-retention-worker';
+import {
+  runShadowComparisonRetentionSweep,
+  PgShadowComparisonRetentionRepository,
+} from './workers/shadow-comparison-retention-worker';
 import { createRetrieveAdapter } from './ai/orchestration/retrieve-adapter';
 import { FrancLanguageDetector } from './voice/language-detector';
 import type { RetrieveAdapter } from './ai/orchestration/context-builder';
@@ -2682,6 +2687,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     dripCampaigns: 590036,
     // #1770 — connected-domain verification sweep. DISTINCT key.
     customDomains: 590044,
+    // #1813 follow-up — shadow_comparisons retention sweep. DISTINCT key.
+    shadowComparisonRetention: 590047,
   } as const;
   // #1090 — every leader-gated sweep run is registered here so `runShutdown`
   // can wait for the tick that is ALREADY RUNNING before it closes the pool.
@@ -3901,10 +3908,19 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // U8 (R8): every appended Twilio turn is also persisted to
   // call_transcript_turns keyed by CallSid + session id, so the recording
   // webhook can recover the transcript after a restart / reap.
+  // PRIV-3 — every cross-turn card-number rewrite of those rows goes to the
+  // durable queue before its live write, for the retry worker registered
+  // below and the recording hook.
   const voiceSessionStore = new VoiceSessionStore({
     transport: voiceEventTransport,
     callTranscriptTurnRepo,
+    cardRewriteRetryQueue: queue,
   });
+  const cardNumberRewriteRetryWorker = createCardNumberRewriteRetryWorker({ callTranscriptTurnRepo, auditRepo });
+  workerRegistry.set(
+    cardNumberRewriteRetryWorker.type,
+    cardNumberRewriteRetryWorker as import('./queues/queue').WorkerHandler<unknown>,
+  );
   // LCR-04 — voicemail recording callbacks that arrive while the database is
   // down are re-POSTed (exactly as Twilio signed them) until acknowledged:
   // Twilio itself never redelivers a 5xx recording callback.
@@ -4796,6 +4812,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             voiceRepo,
             auditRepo,
             ...(embeddingProvider ? { queue } : {}),
+            // PRIV-3 — a split card's rewrites still queued for the call: after
+            // a restart (or on another replica) no session knows of them.
+            pendingCardNumberRewrites: pendingCardNumberRewrites(queue),
             logger: createLogger({
               service: 'recording-transcript-hook',
               environment: process.env.NODE_ENV || 'development',
@@ -5303,13 +5322,14 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             // at start() and never re-armed by media frames (the audio-idle
             // timer is, so it never fires on a live call).
             maxCallDurationMs: config.VOICE_MAX_CALL_DURATION_MS,
-            speechTurn: async ({ session, speechResult, callSid, tenantId, callerTiming }) =>
+            speechTurn: async ({ session, speechResult, callSid, tenantId, callerTiming, onCallerText }) =>
               twilioAdapter.processCallerUtterance({
                 sessionId: session.id,
                 callSid,
                 speechResult,
                 tenantId,
                 ...(callerTiming ? { callerTiming } : {}),
+                ...(onCallerText ? { onCallerText } : {}),
               }),
             // RV-130 (CRITICAL) — greeting + recording-disclosure bootstrap
             // once Deepgram opens. initializeStreamSession speaks the
@@ -6633,6 +6653,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
               queue,
               auditRepo,
               encryptionKey: a2pKey,
+              pool,
             })
           : null,
       }),
@@ -7225,6 +7246,33 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         });
       }).catch((err) => {
         recordingRetentionLogger.error('Recording-retention sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, 60 * 60_000));
+  }
+
+  // Shadow-comparison retention (#1813 follow-up). Hourly; pool-gated like the
+  // recording retention purge above (the Pg repository is the only one). NOT
+  // gated on SHADOW_LLM_ENABLED: rows written while the flag was on must still
+  // age out after it is turned off. The repository writes each batch's audit
+  // row in the DELETE's own transaction, so the sweep takes no audit
+  // repository. WS2: worker-only.
+  if (pool && shouldRunWorkers) {
+    const shadowComparisonRetentionLogger = createLogger({
+      service: 'shadow-comparison-retention-worker',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    const shadowComparisonRetentionRepo = new PgShadowComparisonRetentionRepository(pool);
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.shadowComparisonRetention, async () => {
+        await runShadowComparisonRetentionSweep({
+          repo: shadowComparisonRetentionRepo,
+          logger: shadowComparisonRetentionLogger,
+          retentionDays: config.SHADOW_COMPARISON_RETENTION_DAYS,
+        });
+      }).catch((err) => {
+        shadowComparisonRetentionLogger.error('Shadow-comparison retention sweep failed', {
           error: err instanceof Error ? err.message : String(err),
         });
       });

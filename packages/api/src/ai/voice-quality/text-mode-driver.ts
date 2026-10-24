@@ -68,7 +68,7 @@ import {
   createVoiceTurnProcessor,
   type VoiceTurnProcessor,
 } from '../voice-turn/create-voice-turn-processor';
-import { callerTranscriptText } from '../voice-turn/transcript-append';
+import { callerTranscriptText, callerTurnTextAfterAppend } from '../voice-turn/transcript-append';
 import {
   lookupExecutedEvent,
   sessionTerminatedEvent,
@@ -527,11 +527,14 @@ export class TextModeDriver implements AgentDriver {
 
     // The caller's words go on the transcript before anything reads them
     // (the Gather loop appends, then scans, then dispatches).
-    this.deps.voiceSessionStore.appendTranscript(sessionId, {
+    const stored = callerTranscriptText(session, callerTranscript);
+    const appended = this.deps.voiceSessionStore.appendTranscript(sessionId, {
       speaker: 'caller',
-      text: callerTranscriptText(session, callerTranscript),
+      text: stored,
       ts: Date.now(),
     });
+    // PRIV-3 — read on as the store kept it, as the Gather loop does.
+    callerTranscript = callerTurnTextAfterAppend(callerTranscript, stored, appended);
 
     const proposalsBefore = session.proposalIds.length;
     let effects = await this.runEmergencyScan(session, callerTranscript, tenantId);

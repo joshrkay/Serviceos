@@ -72,6 +72,29 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
     expect(block).toContain('writeGeocodeOutcome(pool, loc, outcome)');
   });
 
+  it('the shadow-comparison retention sweep runs beside the recording retention sweep, under its own leader lock, worker roles only, whatever SHADOW_LLM_ENABLED says', () => {
+    // #1813 follow-up — "built but never wired" guard. Pool-gated like the
+    // recording retention purge (the Pg repository is the only one), and NOT
+    // gated on SHADOW_LLM_ENABLED: rows written while the flag was on must
+    // still age out after it is turned off.
+    expect(src).toMatch(/shadowComparisonRetention:\s*590047/);
+    const segment = src.slice(src.indexOf('// RV-132 — recording retention purge. Hourly;'));
+    const recording = segment.slice(0, segment.indexOf('// Shadow-comparison retention'));
+    expect(recording).toMatch(/runAsLeader\(SWEEP_LOCK\.recordingRetention/);
+    const rest = segment.slice(segment.indexOf('// Shadow-comparison retention'));
+    const block = rest.slice(0, rest.indexOf('// Voice-parity (Feature 7)'));
+    expect(block).toContain('if (pool && shouldRunWorkers) {');
+    expect(block).not.toContain('SHADOW_LLM_ENABLED ===');
+    expect(block).toContain('new PgShadowComparisonRetentionRepository(');
+    expect(block).toMatch(/runAsLeader\(SWEEP_LOCK\.shadowComparisonRetention,/);
+    expect(block).toContain('runShadowComparisonRetentionSweep({');
+    expect(block).toContain('retentionDays: config.SHADOW_COMPARISON_RETENTION_DAYS');
+    // The audit row is written in the purge's own transaction by the
+    // repository, never as a separate best-effort write after it.
+    expect(block).not.toContain('auditRepo');
+    expect(block).toMatch(/registerInterval\(setInterval\(/);
+  });
+
   it('exactly one digest path remains; SWEEP_LOCK has no duplicate keys (U5)', () => {
     // U5 — the redundant P5-020 hourly digest worker was deleted; only the
     // RV-063 daily digest sweep remains.
@@ -245,6 +268,24 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
     const from = src.slice(src.indexOf('createOneTapApproveRouter({'));
     expect(from.slice(0, from.indexOf('});'))).toMatch(
       /resolveBackupApprover: \(tenantId: string\) =>\s*resolveBackupSupervisorApprover\(\{ settingsRepo, userRepo \}, tenantId\)/,
+    );
+  });
+
+  it('PRIV-3 — a failed live card-number rewrite is queued, and the retry worker that writes it is registered', () => {
+    // Without the queue the rewrite lives only in the session's memory (lost
+    // on a restart); without the worker the job is never consumed.
+    const store = src.slice(src.indexOf('const voiceSessionStore = new VoiceSessionStore({'));
+    expect(store.slice(0, store.indexOf('});'))).toContain('cardRewriteRetryQueue: queue,');
+    expect(src).toMatch(/createCardNumberRewriteRetryWorker\(\{ callTranscriptTurnRepo, auditRepo \}\)/);
+    expect(src).toMatch(/workerRegistry\.set\(\s*cardNumberRewriteRetryWorker\.type,/);
+  });
+
+  it('PRIV-3 — the recording hook writes the card-number rewrites still queued for the call before ingesting it', () => {
+    // Without it, a restart between a failed live rewrite and the recording
+    // callback (or a callback on another replica) ingests the fragments.
+    const hook = src.slice(src.indexOf('onPersisted: createRecordingTranscriptHook({'));
+    expect(hook.slice(0, hook.indexOf('logger: createLogger('))).toContain(
+      'pendingCardNumberRewrites: pendingCardNumberRewrites(queue),',
     );
   });
 });

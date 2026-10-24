@@ -68,6 +68,18 @@ export class CallingAgentStateMachine {
   }
 
   /**
+   * PRIV-3 — pass every piece of the caller's words the context holds
+   * (`lastUtterance`, the classifier's extracted entities, a pending
+   * reference) through `rewrite`. Called when a later turn shows an earlier
+   * one held part of a card number the caller split across turns: the request
+   * parked from that turn would otherwise put the fragment in the proposal it
+   * drafts. Ids (`id`, `…Id`, `…Ids`, `…Sid` keys) are never rewritten.
+   */
+  rewriteCapturedText(rewrite: (text: string) => string): void {
+    this.context = rewriteStrings(this.context, rewrite);
+  }
+
+  /**
    * P8-016 — vulnerability triage PRE-FILTER, run at the escalation site
    * BEFORE the existing escalate-to-human call. Given the extracted
    * vulnerability score and the call's urgency tier, returns the triage
@@ -84,4 +96,31 @@ export class CallingAgentStateMachine {
   evaluateTriage(score: VulnerabilityScore, urgency: UrgencyTier): TriageDecision {
     return triageDecision(score, urgency);
   }
+}
+
+/** Keys whose values are ids, never caller words. */
+const ID_KEY = /^(?:id|.*(?:Id|Ids|Sid))$/;
+
+/**
+ * PRIV-3 — `value` with every string under a non-id key rewritten (ids:
+ * `id`, `…Id`, `…Ids`, `…Sid` keys); unchanged objects are returned as they
+ * were. Also used for the caller's words a held request keeps outside the
+ * context (`VoiceSession.rebookOffer.entities`).
+ */
+export function rewriteStrings<T>(value: T, rewrite: (text: string) => string, key = ''): T {
+  if (typeof value === 'string') return (ID_KEY.test(key) ? value : rewrite(value)) as T;
+  if (Array.isArray(value)) {
+    const next = value.map((item) => rewriteStrings(item, rewrite, key));
+    return (next.some((item, i) => item !== value[i]) ? next : value) as T;
+  }
+  if (value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype) {
+    let changed = false;
+    const next: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(value)) {
+      next[k] = rewriteStrings(v, rewrite, k);
+      if (next[k] !== v) changed = true;
+    }
+    return (changed ? next : value) as T;
+  }
+  return value;
 }

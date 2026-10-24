@@ -22,7 +22,7 @@
  * Deps are injectable so the unit + integration tests can substitute a spy
  * without mocking the module graph; they default to the real functions.
  */
-import type { AuditEvent, AuditRepository } from './audit';
+import type { AuditEvent, AuditRepository, RecentAuditEventsOptions } from './audit';
 import {
   auditEventToProductEvent,
   type ProductEvent,
@@ -102,6 +102,6 @@ export class ForwardingAuditRepository implements AuditRepository {
   // decorator advertises the same optional capability as what it wraps.
   findRecentByTenant?: (
     tenantId: string,
-    opts?: { limit?: number },
+    opts?: RecentAuditEventsOptions,
   ) => Promise<AuditEvent[]>;
 }

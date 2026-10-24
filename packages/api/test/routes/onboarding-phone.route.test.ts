@@ -1,8 +1,9 @@
 import request from 'supertest';
 import express, { Request, Response, NextFunction } from 'express';
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import { createOnboardingRouter } from '../../src/routes/onboarding';
+import { tenantContextStore } from '../../src/middleware/tenant-context';
 import { InMemorySettingsRepository } from '../../src/settings/settings';
 import { InMemoryPackActivationRepository } from '../../src/settings/pack-activation';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
@@ -49,6 +50,15 @@ function buildApp(
     };
     next();
   });
+  // Every /api route runs inside withTenantTransaction in the app; stand in
+  // for it with the fake pool as the request client, so the routes'
+  // withTenantClient reuses it instead of checking out a connection.
+  if (deps.pool) {
+    const client = deps.pool as unknown as PoolClient;
+    app.use((_req: Request, _res: Response, next: NextFunction) => {
+      tenantContextStore.run({ client, tenantId: TENANT_ID }, () => next());
+    });
+  }
   const auditRepo = deps.auditRepo ?? new InMemoryAuditRepository();
   app.use(
     '/api/onboarding',
@@ -362,5 +372,46 @@ describe('POST /api/onboarding/phone/change', () => {
     expect(res.status).toBe(409);
     expect(res.body.error).toBe('PHONE_BILLING_REQUIRED');
     expect(await queue.receive()).toBeNull();
+  });
+});
+
+// The audit row is written before the provisioning job, so a failed audit
+// write never leaves a job behind (the job's row also joins the request
+// transaction — test/integration/onboarding-phone-request-tx.test.ts).
+describe('phone routes write their audit row before their provisioning job', () => {
+  it.each([
+    ['/phone/change', 'full_readiness', { phoneNumber: '+15125550123' }, 'tenant.phone_number_change_requested'],
+    ['/phone/claim', 't0_requested', { phoneNumber: '+15125550123' }, 'tenant.phone_number_claimed'],
+    ['/phone/retry', 'failed', {}, 'tenant.phone_provisioning_retry'],
+  ])('%s enqueues nothing when its audit write fails', async (path, status, body, eventType) => {
+    const queue = new InMemoryQueue();
+    const auditRepo = new InMemoryAuditRepository();
+    const create = vi.spyOn(auditRepo, 'create').mockRejectedValue(new Error('audit store unavailable'));
+    const { app } = buildApp({ pool: fakePool(status), queue, auditRepo });
+
+    const res = await request(app).post(`/api/onboarding${path}`).send(body);
+
+    expect(res.status).toBe(500);
+    expect(create).toHaveBeenCalledWith(expect.objectContaining({ eventType }));
+    expect(await queue.receive()).toBeNull();
+  });
+
+  it('/phone/change enqueues the change job and audits it', async () => {
+    const queue = new InMemoryQueue();
+    const auditRepo = new InMemoryAuditRepository();
+    const create = vi.spyOn(auditRepo, 'create');
+    const { app } = buildApp({ pool: fakePool('full_readiness'), queue, auditRepo });
+
+    const res = await request(app).post('/api/onboarding/phone/change').send({ phoneNumber: '+15125550123' });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, enqueued: true, phoneNumber: '+15125550123' });
+    const msg = await queue.receive<{ changeTo?: string }>();
+    expect(msg?.type).toBe(PROVISION_TWILIO_JOB_TYPE);
+    expect(msg?.payload.changeTo).toBe('+15125550123');
+    expect(msg?.idempotencyKey).toBe(`provision-twilio-change-${TENANT_ID}-15125550123`);
+    expect(create).toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: 'tenant.phone_number_change_requested' }),
+    );
   });
 });

@@ -364,6 +364,22 @@ export const voiceReplyStampLostTotal = new Counter({
   registers: [metricsRegistry],
 });
 
+/**
+ * PRIV-3 — a cross-turn card-number rewrite of the stored call rows that did
+ * not land, by where: `live` (the store's own write failed; the job queued
+ * before it, and the session's memory, still hold it for the retry worker and
+ * the recording hook), `enqueue` (the queue refused the job: a live write that
+ * fails too leaves only the session's memory holding it) and
+ * `retry_exhausted` (the worker's last attempt failed: the call's rows still
+ * hold part of a card). Alert on any `enqueue` or `retry_exhausted`.
+ */
+export const cardNumberRewriteFailedTotal = new Counter({
+  name: 'voice_card_number_rewrite_failed_total',
+  help: 'Cross-turn card-number rewrites of stored call rows that did not land, by stage (live, enqueue, retry_exhausted).',
+  labelNames: ['stage'] as const,
+  registers: [metricsRegistry],
+});
+
 // ---------- Platform SLOs (WS15 — operational resilience) ----------
 
 /**
@@ -482,6 +498,17 @@ export const knowledgeChunkDedupeCollisionsTotal = new Counter({
   name: 'knowledge_chunk_dedupe_collisions_total',
   help: "Knowledge-chunk inserts refused on the tenant-blind dedupe index because another tenant holds the source tuple",
   labelNames: ['source_type'],
+  registers: [metricsRegistry],
+});
+
+/**
+ * `shadow_comparisons` rows the retention sweep deleted past
+ * SHADOW_COMPARISON_RETENTION_DAYS (workers/shadow-comparison-retention-worker.ts).
+ * Flat while SHADOW_LLM_ENABLED has been off for longer than the window.
+ */
+export const shadowComparisonsPurgedTotal = new Counter({
+  name: 'shadow_comparisons_purged_total',
+  help: 'shadow_comparisons rows deleted by the retention sweep past SHADOW_COMPARISON_RETENTION_DAYS',
   registers: [metricsRegistry],
 });
 

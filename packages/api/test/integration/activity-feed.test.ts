@@ -76,6 +76,36 @@ describe('Postgres integration — audit activity feed', () => {
     expect(events.some((e) => e.eventType === 'invoice.created')).toBe(false);
   });
 
+  it('excludes the given event types in SQL, so the limit counts only the rows kept', async () => {
+    const purge = createAuditEvent({
+      tenantId: tenant.tenantId,
+      actorId: 'shadow-comparison-retention-worker',
+      actorRole: 'system',
+      eventType: 'shadow_comparison.purged',
+      entityType: 'tenant',
+      entityId: tenant.tenantId,
+    });
+    purge.createdAt = new Date('2026-06-05T10:00:00Z');
+    await repo.create(purge);
+    try {
+      expect((await repo.findRecentByTenant(tenant.tenantId, { limit: 1 }))[0].eventType).toBe(
+        'shadow_comparison.purged',
+      );
+      const kept = await repo.findRecentByTenant(tenant.tenantId, {
+        limit: 2,
+        excludeEventTypes: ['shadow_comparison.purged'],
+      });
+      expect(kept.map((e) => e.eventType)).toEqual(['appointment.booked', 'emergency_immediate_dial']);
+
+      // The owner's feed leaves it out.
+      const feed = await new RepoBackedActivityFeedReporter(repo).query(tenant.tenantId, { limit: 50 });
+      expect(feed.map((f) => f.eventType)).not.toContain('shadow_comparison.purged');
+      expect(feed).toHaveLength(3);
+    } finally {
+      await pool.query('DELETE FROM audit_events WHERE id = $1', [purge.id]);
+    }
+  });
+
   it('maps through the reporter into flagged, deep-linkable feed items', async () => {
     const reporter = new RepoBackedActivityFeedReporter(repo);
     const feed = await reporter.query(tenant.tenantId, { limit: 50 });
