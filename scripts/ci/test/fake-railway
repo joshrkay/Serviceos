@@ -6,9 +6,15 @@
 #
 # `railway up ... --json --detach`:
 #   FAKE_UP_EXIT_CODE   — exit code to return (default 0)
-#   FAKE_UP_STDOUT      — raw stdout to print (default: a well-formed single
+#   FAKE_UP_STDOUT      — raw stdout to print when set, even to the empty
+#                         string (default when unset: a well-formed single
 #                         JSON line using FAKE_UP_DEPLOYMENT_ID)
 #   FAKE_UP_DEPLOYMENT_ID — deploymentId to embed in the default stdout
+#   FAKE_UP_STDERR      — raw text written to stderr first, verbatim (no
+#                         trailing newline added), e.g. a CLI error message
+#   FAKE_UP_SLEEP       — seconds to sleep AFTER writing FAKE_UP_STDERR,
+#                         modelling a CLI that prints something then hangs
+#                         (FAKE_RAILWAY_SLEEP instead hangs before any output)
 #
 # `railway deployment list ... --json --limit N`:
 #   FAKE_LIST_SEQUENCE_DIR — directory of NN.json fixture files (0.json,
@@ -25,14 +31,11 @@ if [ -n "${FAKE_RAILWAY_SLEEP:-}" ]; then sleep "$FAKE_RAILWAY_SLEEP"; fi
 cmd="${1:-}"
 sub="${2:-}"
 
-case "$cmd $sub" in
-  "up ")
-    ;;
-esac
-
 if [ "$cmd" = "up" ]; then
   exit_code="${FAKE_UP_EXIT_CODE:-0}"
-  if [ -n "${FAKE_UP_STDOUT:-}" ]; then
+  if [ -n "${FAKE_UP_STDERR:-}" ]; then printf '%s' "$FAKE_UP_STDERR" >&2; fi
+  if [ -n "${FAKE_UP_SLEEP:-}" ]; then sleep "$FAKE_UP_SLEEP"; fi
+  if [ -n "${FAKE_UP_STDOUT+set}" ]; then
     printf '%s' "$FAKE_UP_STDOUT"
   else
     dep_id="${FAKE_UP_DEPLOYMENT_ID:-dep-target-1}"
