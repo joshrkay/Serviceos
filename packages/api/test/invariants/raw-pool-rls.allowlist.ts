@@ -168,7 +168,7 @@ export const TABLES_WITHOUT_MIGRATION: ReadonlyArray<{ readonly table: string; r
  * The `tenant_filtered_no_rls` debt, frozen. Migrating one means deleting its
  * entry and LOWERING this number; adding one means raising it, in review.
  */
-export const TFNR_CEILING = 14;
+export const TFNR_CEILING = 12;
 
 export const RAW_PG_SITES: readonly RawPgSite[] = [
   // ── ai/ ────────────────────────────────────────────────────────────────
@@ -933,16 +933,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/webhooks/routes.ts', fn: 'resolveTenantConnectAccountId', access: 'pool.query', count: 1,
     category: 'global_table', tables: ['tenants'],
     why: 'Fallback read of tenants.stripe_connect_account_id (isValidTenantId-gated) for the #1102 event.account binding check; an unknown tenant fails closed.',
-  },
-  {
-    file: 'src/webhooks/routes.ts', fn: 'POST /clerk', access: 'pool.connect', count: 2,
-    category: 'tenant_filtered_no_rls', tables: ['users'], migrateBy: 'audit 2026-10-23 §4 P2.2',
-    why: "user.created invitee join and owner membership: each opens a client, BEGIN + set_config GUC (no role) and INSERTs into users with tenant_id = the invitation row's / bootstrap tenant, so WITH CHECK is not enforced. Swap set_config for applyTenantContext.",
-  },
-  {
-    file: 'src/webhooks/routes.ts', fn: 'POST /clerk', access: 'guc-only', count: 2,
-    category: 'tenant_filtered_no_rls', tables: ['users'], migrateBy: 'audit 2026-10-23 §4 P2.2',
-    why: "The two set_config('app.current_tenant_id', $1, true) lines of the Clerk users inserts: GUC without the runtime role, so the comment's 'fails the RLS policy without it' does not hold.",
   },
   {
     file: 'src/webhooks/routes.ts', fn: 'POST /clerk', access: 'pool.query', count: 1,

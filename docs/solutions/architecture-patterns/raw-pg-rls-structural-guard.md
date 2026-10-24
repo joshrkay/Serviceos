@@ -213,6 +213,14 @@ deliberate cross-tenant sweep, a platform-constant write) add an entry:
   (`test/integration/user-mode-tenant-context.test.ts`; resolveOwnerEmail's
   three billing callers, P2.3, in
   `test/integration/resolve-owner-email-tenant-context.test.ts`).
+- A hand-rolled `BEGIN` + GUC-only `set_config` block (a `pool.connect`
+  entry plus a `guc-only` one) becomes `withTenantSession`: the same four
+  round trips (the context is one statement, #1823) and now the role, so the
+  policy's WITH CHECK applies to the INSERT. Probe a guard subquery such as
+  `WHERE NOT EXISTS (… tenant_id = $1 …)` by widening it: as the principal it
+  sees the subject's membership in another tenant and silently skips the
+  insert (the Clerk owner row, P2.2,
+  `test/integration/clerk-webhook-tenant-context.test.ts`).
 
 ### Checkouts and callbacks: who gets the client
 
