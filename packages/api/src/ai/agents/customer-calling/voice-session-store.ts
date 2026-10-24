@@ -531,6 +531,20 @@ export interface VoiceSession {
    */
   ownerLineThisTurn?: { approver: ResolvedApprover | null };
   /**
+   * Media Streams — the caller identification the stream's opening-language
+   * resolver (`resolveStreamOpeningLanguage`) ran before Deepgram opened,
+   * parked for the greeting bootstrap that follows it moments later
+   * (`bootstrapCallEstablishment`), which takes (clears) it instead of running
+   * identifyCaller — a tenant session of its own — a second time. Keyed by the
+   * tenant and caller-ID it answered for; a bootstrap for anything else
+   * identifies the caller itself. A failed lookup parks nothing.
+   */
+  streamStartCallerIdentity?: {
+    tenantId: string;
+    fromPhone: string;
+    result: import('../../skills/identify-caller').IdentifyCallerResult;
+  };
+  /**
    * True once the recording disclosure has actually been emitted to the caller
    * on this call (set by `bootstrapCallEstablishment`, which is the only
    * caller of `discloseRecording`). Any path that resumes or re-arms audio

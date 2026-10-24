@@ -842,6 +842,145 @@ describe('WS16c — inbound establishment convergence (Media Streams ↔ Gather)
   });
 });
 
+// ─── Media Streams stream start: one identifyCaller per call ────────────────
+//
+// The stream adapter awaits two hooks before the caller hears the greeting:
+// initialLanguageResolver (resolveStreamOpeningLanguage, before Deepgram
+// opens) and initializeSession (initializeStreamSession → the bootstrap).
+// Both need the caller's identity; identifyCaller is a tenant session of its
+// own, so the bootstrap takes the resolver's answer instead of reading again.
+
+describe('Media Streams stream start — identifyCaller once per call', () => {
+  const STREAM_TENANT = KNOWN_CALLER_TENANT;
+  const FROM = '+15125550100';
+
+  async function streamAdapter(opts: {
+    respond: Parameters<typeof fakeTenantPool>[0];
+    preferredLanguage?: 'en' | 'es';
+    tenantDefault?: 'en' | 'es';
+    supported?: Array<'en' | 'es'>;
+    withSettings?: boolean;
+  }) {
+    const fake = fakeTenantPool(opts.respond);
+    const settingsRepo = new InMemorySettingsRepository();
+    if (opts.withSettings !== false) {
+      const now = new Date();
+      await settingsRepo.create({
+        id: 's-stream',
+        tenantId: STREAM_TENANT,
+        businessName: 'Acme Plumbing',
+        timezone: 'America/Chicago',
+        estimatePrefix: 'EST-',
+        invoicePrefix: 'INV-',
+        nextEstimateNumber: 1,
+        nextInvoiceNumber: 1,
+        defaultPaymentTermDays: 30,
+        defaultLanguage: opts.tenantDefault ?? 'en',
+        supportedLanguages: opts.supported ?? ['en', 'es'],
+        autoDetectLanguage: true,
+        createdAt: now,
+        updatedAt: now,
+      } as TenantSettings);
+    }
+    const customerRepo = {
+      findById: vi.fn(async (_t: string, id: string) => ({ id, preferredLanguage: opts.preferredLanguage })),
+    };
+    const store = new VoiceSessionStore();
+    const adapter = new TwilioGatherAdapter({
+      store,
+      gateway: makeGatewayReturning('{"intentType":"unknown","confidence":0,"reasoning":"x"}'),
+      businessName: 'Acme Plumbing',
+      publicBaseUrl: 'https://example.com',
+      pool: fake.pool,
+      settingsRepo,
+      customerRepo: customerRepo as never,
+    });
+    const identifyReads = () => fake.statements.filter((s) => s.sql.includes('FROM customers')).length;
+    return { adapter, store, fake, customerRepo, identifyReads };
+  }
+
+  /** What the media-stream adapter does at `start`: resolve + pin the language, then bootstrap. */
+  async function startStream(adapter: TwilioGatherAdapter, store: VoiceSessionStore, callSid: string) {
+    await adapter.handleInboundForStream({ callSid, from: FROM, tenantId: STREAM_TENANT });
+    const session = store.findByCallSid(callSid)!;
+    const language = await adapter.resolveStreamOpeningLanguage(STREAM_TENANT, { callSid, sessionId: session.id });
+    session.language = language;
+    const effects = await adapter.initializeStreamSession({ callSid, tenantId: STREAM_TENANT });
+    return { session, language, effects };
+  }
+
+  const matched = (sql: string) =>
+    sql.includes('FROM customers') ? { rows: [{ id: 'cust-known', display_name: 'Jane Smith' }] } : undefined;
+
+  it('a known caller: the resolver identifies once and the bootstrap reuses it (one customers read, one checkout)', async () => {
+    const { adapter, store, fake, identifyReads } = await streamAdapter({ respond: matched, preferredLanguage: 'es' });
+
+    const { session, language } = await startStream(adapter, store, 'CA-once-known');
+
+    expect(language).toBe('es');
+    // The bootstrap still took the known-caller branch, from the reused answer.
+    expect(session.customerId).toBe('cust-known');
+    expect(identifyReads()).toBe(1);
+    expect(fake.checkouts()).toBe(1);
+  });
+
+  it('an unknown caller: one read, the tenant default, the unknown-caller branch', async () => {
+    const { adapter, store, identifyReads } = await streamAdapter({ respond: () => undefined, tenantDefault: 'es' });
+
+    const { session, language } = await startStream(adapter, store, 'CA-once-unknown');
+
+    expect(language).toBe('es');
+    expect(session.customerId).toBeUndefined();
+    expect(identifyReads()).toBe(1);
+  });
+
+  it('a resolver lookup that failed is not reused: the bootstrap identifies the caller itself', async () => {
+    let calls = 0;
+    const { adapter, store, identifyReads } = await streamAdapter({
+      respond: (sql) => {
+        if (!sql.includes('FROM customers')) return undefined;
+        calls += 1;
+        if (calls === 1) throw new Error('connection reset');
+        return { rows: [{ id: 'cust-known', display_name: 'Jane Smith' }] };
+      },
+      preferredLanguage: 'es',
+    });
+
+    const { session, language } = await startStream(adapter, store, 'CA-once-retry');
+
+    // Failure-soft opening language, then the bootstrap's own lookup succeeds.
+    expect(language).toBe('en');
+    expect(session.customerId).toBe('cust-known');
+    expect(identifyReads()).toBe(2);
+  });
+
+  it('the parked answer is taken once: a second bootstrap of the same call identifies again', async () => {
+    const { adapter, store, identifyReads } = await streamAdapter({ respond: matched });
+
+    await startStream(adapter, store, 'CA-once-twice');
+    await adapter.initializeStreamSession({ callSid: 'CA-once-twice', tenantId: STREAM_TENANT });
+
+    expect(identifyReads()).toBe(2);
+  });
+
+  it('Gather is unchanged: no resolver runs, the bootstrap identifies the caller (one read)', async () => {
+    const { adapter, store, identifyReads } = await streamAdapter({ respond: matched });
+
+    await adapter.handleInbound({ callSid: 'CA-once-gather', from: FROM, to: '+15125550999', tenantId: STREAM_TENANT });
+
+    expect(store.findByCallSid('CA-once-gather')?.customerId).toBe('cust-known');
+    expect(identifyReads()).toBe(1);
+  });
+
+  it('the opening language: a Spanish-preferring caller on an English-only tenant opens in English; no settings row opens in English', async () => {
+    const englishOnly = await streamAdapter({ respond: matched, preferredLanguage: 'es', supported: ['en'] });
+    expect((await startStream(englishOnly.adapter, englishOnly.store, 'CA-lang-gate')).language).toBe('en');
+
+    const noSettings = await streamAdapter({ respond: matched, preferredLanguage: 'es', withSettings: false });
+    expect((await startStream(noSettings.adapter, noSettings.store, 'CA-lang-none')).language).toBe('en');
+  });
+});
+
 // ─── handleGather ────────────────────────────────────────────────────────────
 
 // ─── P8-013 escalate-to-human telephony branch ───────────────────────────────
