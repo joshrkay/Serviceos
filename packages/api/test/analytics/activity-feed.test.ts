@@ -128,6 +128,25 @@ describe('RepoBackedActivityFeedReporter', () => {
     expect(feed.map((f) => f.id)).toEqual([visible.id]);
   });
 
+  it('leaves the AI-run content purge out too, so the owner never sees "Ai run content purged"', async () => {
+    const repo = new InMemoryAuditRepository();
+    const visible = createAuditEvent({
+      tenantId: 't1', actorId: 'u1', actorRole: 'owner',
+      eventType: 'customer.created', entityType: 'customer', entityId: 'c1',
+    });
+    visible.createdAt = new Date('2026-06-01T10:00:00.000Z');
+    await repo.create(visible);
+    const purge = createAuditEvent({
+      tenantId: 't1', actorId: 'recording-retention-worker', actorRole: 'system',
+      eventType: 'ai_run.content_purged', entityType: 'tenant', entityId: 't1',
+    });
+    purge.createdAt = new Date('2026-06-02T10:00:00.000Z');
+    await repo.create(purge);
+
+    const feed = await new RepoBackedActivityFeedReporter(repo).query('t1', { limit: 1 });
+    expect(feed.map((f) => f.id)).toEqual([visible.id]);
+  });
+
   it('throws when the repo cannot do tenant-wide reads', async () => {
     const repo = {
       create: async (e: AuditEvent) => e,
