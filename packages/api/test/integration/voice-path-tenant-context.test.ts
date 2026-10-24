@@ -55,7 +55,9 @@ let pool: Pool;
 const tenantIds: string[] = [];
 
 interface VoiceTenantOpts {
-  status?: 'trialing' | 'active' | null;
+  status?: 'trialing' | 'active' | 'past_due' | null;
+  /** past_due_grace_until (dunning grace). */
+  graceUntil?: Date;
   live?: boolean;
   activated?: boolean;
   testCallSkipped?: boolean;
@@ -72,8 +74,8 @@ async function seedVoiceTenant(opts: VoiceTenantOpts = {}): Promise<string> {
   tenantIds.push(tenantId);
   await pool.query(
     `UPDATE tenants SET subscription_status = $2, plan_id = 'starter',
-            current_period_start = $3, current_period_end = $4 WHERE id = $1`,
-    [tenantId, opts.status === undefined ? 'trialing' : opts.status, PERIOD_START, PERIOD_END],
+            current_period_start = $3, current_period_end = $4, past_due_grace_until = $5 WHERE id = $1`,
+    [tenantId, opts.status === undefined ? 'trialing' : opts.status, PERIOD_START, PERIOD_END, opts.graceUntil ?? null],
   );
   await pool.query(
     `INSERT INTO tenant_settings
@@ -226,6 +228,26 @@ describe('createVoiceGate — one tenant session per decision under the RLS runt
     // Decided on the tenants read alone, as before: (1) + the audit write (6).
     expect(await measure(noBilling)).toEqual({ allowed: false, checkouts: 2, statements: 7, maxOpen: 1 });
   });
+
+  it("a dunning-grace answer carries its own tenant's business hours, read as rls_app_runtime", async () => {
+    const hours = { mon: { open: '08:00', close: '17:00' } };
+    const tenantId = await seedVoiceTenant({ status: 'past_due', graceUntil: new Date(Date.now() + 86_400_000), live: false, businessHours: hours });
+    const other = await seedVoiceTenant({ businessHours: { tue: { open: '09:00', close: '10:00' } } });
+    const probe = probeStatementRoles(pool, TENANT_TABLES);
+
+    const result = await gateFor(probe.pool)({ tenantId, callSid: 'CA-gate-grace' });
+
+    expect(result).toEqual({
+      allowed: true,
+      businessHours: { timezone: 'America/Chicago', schedule: [{ dayOfWeek: 1, openTime: '08:00', closeTime: '17:00' }] },
+    });
+    expect(probe.seen).toHaveLength(1);
+    expectAllUnderTenant(probe.seen, tenantId);
+    // With the tenant pin widened to both tenants, RLS still hands back only the caller's row.
+    const widened = widenTenantPredicates(pool, { target: TENANT_TABLES, tenants: [tenantId, other] });
+    expect(await gateFor(widened.pool)({ tenantId, callSid: 'CA-gate-grace-widened' })).toEqual(result);
+    expect(widened.rewritten).toHaveLength(1);
+  });
 });
 
 describe('POST /api/telephony/voice — gate and after-hours fork share the one tenant session (real Postgres)', () => {
@@ -270,6 +292,56 @@ describe('POST /api/telephony/voice — gate and after-hours fork share the one 
     expect({ checkouts: traffic.checkouts(), statements: traffic.statements().length, maxOpen: traffic.maxOpen() }).toEqual({
       checkouts: 2,
       statements: 7,
+      maxOpen: 1,
+    });
+  });
+
+  it('a dunning-grace call: the gate reads the hours in its session and the after-hours fork reads nothing itself', async () => {
+    // Base (raw pool reads): the tenants read + the fork's business-hours read = 2 checkouts / 2.
+    const closedAllWeek = Object.fromEntries(
+      ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'].map((d) => [d, { open: '00:00', close: '00:01' }]),
+    );
+    const tenantId = await seedVoiceTenant({ status: 'past_due', graceUntil: new Date(Date.now() + 86_400_000), businessHours: closedAllWeek });
+    const traffic = countPoolTraffic(pool);
+    let answered = 0;
+    const app = express();
+    app.use(
+      '/api/telephony',
+      createTelephonyRouter({
+        adapter: {
+          handleInbound: async () => {
+            answered += 1;
+            return '<Response><Gather/></Response>';
+          },
+          handleInboundForStream: async () => '<Response/>',
+          handleGather: async () => '<Response/>',
+        } as never,
+        authTokenGetter: () => AUTH_TOKEN,
+        publicBaseUrl: BASE,
+        resolveTenantId: () => tenantId,
+        voiceGate: createVoiceGate({ pool: traffic.pool, auditRepo: new PgAuditRepository(traffic.pool) }),
+        pool: traffic.pool,
+        // After hours sends the call to voicemail: proof the fork used the gate's hours.
+        settingsRepo: { findByTenant: async () => ({ escalationSettings: { after_hours_voice_mode: 'voicemail' } }) } as never,
+      }),
+    );
+    const params = { CallSid: 'CA-voice-route-grace', From: '+15125550123', To: '+15125550999' };
+    const sig = twilio.getExpectedTwilioSignature(AUTH_TOKEN, `${BASE}/api/telephony/voice`, params);
+
+    const res = await request(app).post('/api/telephony/voice').set('X-Twilio-Signature', sig).type('form').send(params);
+
+    expect(res.status).toBe(200);
+    expect(answered).toBe(0);
+    expect(res.text).toContain('<Record');
+    // The one tenant_settings read is the gate's decision row, inside its tenant session.
+    const statements = traffic.statements().map((s) => s.replace(/\s+/g, ' ').trim());
+    expect(statements.filter((s) => /FROM tenant_settings/.test(s))).toEqual([
+      expect.stringMatching(/^SELECT voice_agent_live_at, owner_phone/),
+    ]);
+    // tenants read (1) + BEGIN, GUC+role, settings, COMMIT (4).
+    expect({ checkouts: traffic.checkouts(), statements: statements.length, maxOpen: traffic.maxOpen() }).toEqual({
+      checkouts: 2,
+      statements: 5,
       maxOpen: 1,
     });
   });

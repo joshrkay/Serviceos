@@ -22,6 +22,10 @@ interface MockOpts {
   openCalls?: number;
   billableSeconds?: number;
   period?: boolean;
+  /** No tenant_settings row at all. */
+  noSettingsRow?: boolean;
+  /** The tenant_settings read throws (a database error). */
+  settingsReadFails?: boolean;
 }
 
 function mockFake(opts: MockOpts): FakeTenantPool {
@@ -41,6 +45,8 @@ function mockFake(opts: MockOpts): FakeTenantPool {
       };
     }
     if (sql.includes('FROM tenant_settings')) {
+      if (opts.settingsReadFails) throw new Error('connection reset');
+      if (opts.noSettingsRow) return { rows: [] };
       return {
         rows: [
           {
@@ -346,18 +352,57 @@ describe('createVoiceGate — one tenant session per decision', () => {
     });
   });
 
-  it('no usable schedule → businessHours null; the dunning-grace answer never read settings → absent', async () => {
+  it('no usable schedule → businessHours null', async () => {
     const noSchedule = await createVoiceGate({ pool: mockPool({ subscriptionStatus: 'active' }), auditRepo: mockAudit() })({
       tenantId: T1,
       callSid: 'CA1',
     });
     expect(noSchedule).toEqual({ allowed: true, businessHours: null });
+  });
 
-    const grace = await createVoiceGate({
-      pool: mockPool({ subscriptionStatus: 'past_due', pastDueGraceUntil: new Date(Date.now() + 60_000) }),
-      auditRepo: mockAudit(),
-    })({ tenantId: T1, callSid: 'CA1' });
-    expect(grace).toEqual({ allowed: true });
+  describe('dunning grace answers with the business hours too, so /voice reads nothing itself', () => {
+    const inGrace = (extra: Partial<MockOpts> = {}) =>
+      mockFake({ subscriptionStatus: 'past_due', pastDueGraceUntil: new Date(Date.now() + 60_000), ...extra });
+
+    it('the hours come from the settings row, read in one tenant session (no go-live or usage reads)', async () => {
+      const fake = inGrace({ businessHours: { mon: { open: '08:00', close: '17:00' } }, voiceAgentLiveAt: null });
+      const audit = mockAudit();
+
+      const result = await createVoiceGate({ pool: fake.pool, auditRepo: audit })({ tenantId: T1, callSid: 'CA1' });
+
+      // Grace answers regardless of go-live (voice_agent_live_at is null here), as before.
+      expect(result).toEqual({
+        allowed: true,
+        businessHours: { timezone: 'America/Chicago', schedule: [{ dayOfWeek: 1, openTime: '08:00', closeTime: '17:00' }] },
+      });
+      expect(audit.create).not.toHaveBeenCalled();
+      expect(fake.checkouts()).toBe(2);
+      expect(fake.open()).toBe(0);
+      expect(fake.work().map((s) => [s.checkout, s.sql.match(/FROM (\w+)/)?.[1]])).toEqual([
+        [0, 'tenants'],
+        [1, 'tenant_settings'],
+      ]);
+      const session = statementKinds(fake, 1);
+      expect(session[0]).toBe('BEGIN');
+      expect(session[1]).toContain("set_config('app.current_tenant_id'");
+      expect(session.at(-1)).toBe('COMMIT');
+    });
+
+    it('no settings row → businessHours null (never after hours), still answered', async () => {
+      const result = await createVoiceGate({ pool: inGrace({ noSettingsRow: true }).pool, auditRepo: mockAudit() })({
+        tenantId: T1,
+        callSid: 'CA1',
+      });
+      expect(result).toEqual({ allowed: true, businessHours: null });
+    });
+
+    it('a failed settings read still answers (grace fails open, as before) and leaves the hours to the route', async () => {
+      const fake = inGrace({ settingsReadFails: true });
+      const result = await createVoiceGate({ pool: fake.pool, auditRepo: mockAudit() })({ tenantId: T1, callSid: 'CA1' });
+
+      expect(result).toEqual({ allowed: true });
+      expect(fake.open()).toBe(0);
+    });
   });
 
   it('the #1605 owner bypass compares From with the same settings row (no second read)', async () => {

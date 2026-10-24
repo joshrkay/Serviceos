@@ -45,11 +45,12 @@ export interface VoiceGateResult {
    */
   forwardTo?: string | null;
   /**
-   * On an answer decided from the tenant_settings row: that row's business
-   * hours (null = no usable schedule), so the /voice after-hours fork does not
-   * read the row a second time (raw-pg audit 2026-10-23 §4 P1.3: one tenant
-   * session per inbound call). Absent when the decision never read the row
-   * (dunning grace): the route then reads the hours itself.
+   * On an answer: the tenant_settings row's business hours (null = no usable
+   * schedule), so the /voice after-hours fork does not read the row a second
+   * time (raw-pg audit 2026-10-23 §4 P1.3: one tenant session per inbound
+   * call). Dunning grace reads that row too, for this alone. Absent only when
+   * a grace answer's settings read failed: the route then reads the hours
+   * itself (grace still answers).
    */
   businessHours?: BusinessHoursConfig | null;
 }
@@ -73,8 +74,9 @@ export interface VoiceGateDeps {
  * own; everything else is ONE tenant session (`withTenantClient`, so
  * `rls_app_runtime` and the RLS policies bound it) reading one tenant_settings
  * row for go-live, the owner numbers, forward-to, the overage cap and business
- * hours, plus the open-call count and the usage ledger. A block's audit row is
- * written after that session has released its connection.
+ * hours, plus the open-call count and the usage ledger. A dunning-grace answer
+ * reads only that row, for its business hours. A block's audit row is written
+ * after that session has released its connection.
  */
 export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
   return async ({ tenantId, callSid, from, stirVerstat }) => {
@@ -89,7 +91,7 @@ export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
     // account stays flagged past_due in subscription_status the whole time,
     // and once the grace lapses the gate below blocks as before.
     if (status === 'past_due' && isPastDueGraceActive(tenant?.pastDueGraceUntil ?? null)) {
-      return { allowed: true };
+      return answerInGrace(deps, tenantId);
     }
 
     if (status !== 'trialing' && status !== 'active') {
@@ -120,6 +122,33 @@ interface GateSettingsRow {
   ai_overage_uncapped: boolean | null;
 }
 
+/** The one tenant_settings read behind every answer (the decision's row). */
+async function readGateSettings(client: PoolClient, tenantId: string): Promise<GateSettingsRow | undefined> {
+  const res = await client.query<GateSettingsRow>(
+    `SELECT voice_agent_live_at, owner_phone, business_phone, business_hours, timezone,
+            ai_overage_cap_cents, ai_overage_uncapped
+       FROM tenant_settings WHERE tenant_id = $1`,
+    [tenantId],
+  );
+  return res.rows[0];
+}
+
+/**
+ * Dunning grace answers without the go-live and usage questions, but /voice
+ * still forks on business hours: read them from the same settings row, in
+ * the same one-tenant-session shape, so the route reads nothing itself. A
+ * failed read still answers — grace failed open on the hours before, when the
+ * route read them — and leaves the hours to the route's own read.
+ */
+async function answerInGrace(deps: VoiceGateDeps, tenantId: string): Promise<VoiceGateResult> {
+  try {
+    const settings = await withTenantClient(deps.pool, tenantId, (client) => readGateSettings(client, tenantId));
+    return { allowed: true, businessHours: settings ? businessHoursFromSettings(settings) : null };
+  } catch {
+    return { allowed: true };
+  }
+}
+
 type TenantDecision =
   | { answer: VoiceGateResult; blocked?: undefined }
   | {
@@ -143,13 +172,7 @@ async function decideForTenant(
   },
 ): Promise<TenantDecision> {
   const { tenantId, status, tenant } = input;
-  const settingsRes = await client.query<GateSettingsRow>(
-    `SELECT voice_agent_live_at, owner_phone, business_phone, business_hours, timezone,
-            ai_overage_cap_cents, ai_overage_uncapped
-       FROM tenant_settings WHERE tenant_id = $1`,
-    [tenantId],
-  );
-  const settings = settingsRes.rows[0];
+  const settings = await readGateSettings(client, tenantId);
   const answer: VoiceGateResult = {
     allowed: true,
     businessHours: settings ? businessHoursFromSettings(settings) : null,
