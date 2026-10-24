@@ -228,23 +228,14 @@ second checkout in one of them is a count failure, a removed one is stale, and
 
 A Pool that reaches a `.query`/`.connect` the typed rule cannot classify is a
 `pool-escape` site: an `as unknown as …` cast at the receiver, a local
-`const db: Queryable = pool`, or a Pool passed into a function whose parameter,
-or a property path on one (`deps.db`, `deps['db']`, `deps.inner.db`, or
-destructured: `{ db }` in the parameter list or `const { db } = deps` in the
-body), is structurally typed (`{ query }`, a local interface, `ClientBase`) and
-queried — as `db.query(…)`, `db['query'](…)` or `db[K](…)` with `K` typed as
-one literal, or that member run through Function.prototype
-(`db['query'].call(db, sql)`, `db.query.apply(db, [sql])`,
-`db.query.bind(db)(sql)`). The callers that matter are matched through
-object-literal arguments (`read({ db: pool })`) and pass-through parameters,
-passed on whole (`read(db)`) or in a property, longhand or shorthand
-(`read({ db: db })`, `read({ db })`, `readNested({ a })`).
-The escaped SQL is the site's SQL: for `.call` and `.bind(db, sql)` the
-argument after `this`, for `.apply` the first element of an array-literal
-argument list, for `.bind(db)` the argument of the call made in place; any
-other `.apply` / `.bind` reads as SQL that is not readable (`dynamicSql`).
-Today's five (`routes/onboarding.ts` passing `db` to `isBillingLive` /
-`markPickPending`) are listed.
+`const db: Queryable = pool`, or a Pool passed into a function whose parameter
+(or a property of it, through object-literal arguments and pass-through
+parameters) is structurally typed (`{ query }`, a local interface,
+`ClientBase`) and queried. The escaped SQL is the site's SQL. None is listed
+today: the five there were (`routes/onboarding.ts`'s phone routes passing their
+`currentTenantContext()?.client ?? pool` to `isBillingLive` /
+`markPickPending`) went when those routes moved onto `withTenantClient` to
+enqueue their provisioning job on the request client.
 
 ## Known limits
 

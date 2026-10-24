@@ -6633,6 +6633,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
               queue,
               auditRepo,
               encryptionKey: a2pKey,
+              pool,
             })
           : null,
       }),
