@@ -168,7 +168,7 @@ export const TABLES_WITHOUT_MIGRATION: ReadonlyArray<{ readonly table: string; r
  * The `tenant_filtered_no_rls` debt, frozen. Migrating one means deleting its
  * entry and LOWERING this number; adding one means raising it, in review.
  */
-export const TFNR_CEILING = 24;
+export const TFNR_CEILING = 23;
 
 export const RAW_PG_SITES: readonly RawPgSite[] = [
   // ── ai/ ────────────────────────────────────────────────────────────────
@@ -1074,10 +1074,5 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/workers/trial-reminder-sweep.ts', fn: 'runTrialReminderSweep', access: 'pool.query', count: 1,
     category: 'global_table', tables: ['tenants'],
     why: "Trial-ending scan of the tenants registry (no RLS); each email goes to that tenant's own owner_email.",
-  },
-  {
-    file: 'src/workers/verify-ai.ts', fn: 'createVerifyAiWorker.handle', access: 'pool.query', count: 5,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P1.9',
-    why: 'The LLM verification worker reads and updates tenant_settings WHERE tenant_id = $1 with the server-set payload tenant (Stripe-resolved or req.auth retry), on the raw pool. One withTenantSession per stage.',
   },
 ];
