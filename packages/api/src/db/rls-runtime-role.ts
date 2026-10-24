@@ -37,9 +37,12 @@ export function isRlsRuntimeRoleEnabled(): boolean {
  * Establish tenant context on a client: set `app.current_tenant_id` and, when
  * enabled, drop to the RLS runtime role.
  *
- * - `transactional: true` — uses `SET LOCAL` (config + role), which Postgres
+ * - `transactional: true` — transaction-local settings (`set_config(…, true)`,
+ *   i.e. `SET LOCAL`) for the GUC and, when enabled, the role, which Postgres
  *   auto-resets at COMMIT/ROLLBACK. The caller MUST already be inside a
- *   transaction. No `clearTenantContext` needed.
+ *   transaction. No `clearTenantContext` needed. With the role on, both are
+ *   set in ONE statement: every tenant session pays a single round trip for
+ *   its context.
  * - `transactional: false` (default) — session-level `SET`. The caller MUST
  *   call `clearTenantContext(client)` before returning the connection to the
  *   pool, or the role/GUC leaks to the next checkout (a privileged sweep would
@@ -59,9 +62,18 @@ export async function applyTenantContext(
     if (!isValidTenantId(tenantId)) {
       throw new Error('Invalid tenant ID format: must be a valid UUID');
     }
-    await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
     if (roleEnabled) {
-      await client.query(`SET LOCAL ROLE ${RLS_ROLE}`);
+      // `set_config('role', r, true)` IS `SET LOCAL ROLE r`: the same GUC with
+      // the same membership check, the same failure (it aborts the
+      // transaction), reset at COMMIT/ROLLBACK and on ROLLBACK TO a savepoint
+      // taken before it. One statement instead of two on every tenant session
+      // (test/integration/tenant-context-one-statement.test.ts).
+      await client.query(
+        `SELECT set_config('app.current_tenant_id', $1, true), set_config('role', '${RLS_ROLE}', true)`,
+        [tenantId],
+      );
+    } else {
+      await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
     }
   } else {
     // setTenantContext validates the UUID and returns `SET app.current_tenant_id = '<uuid>'`.

@@ -117,8 +117,8 @@ export const SANCTIONED_HELPERS: readonly SanctionedHelper[] = [
     why: 'The attributed cross-tenant sweep: BEGIN + applyCrossTenantRole (rls_cross_tenant) before fn(client); clearTenantContext resets the role before release.',
   },
   {
-    file: 'src/db/rls-runtime-role.ts', fn: 'applyTenantContext', access: 'guc-only', count: 1,
-    why: "applyTenantContext's transactional set_config('app.current_tenant_id', $1, true), followed by SET LOCAL ROLE rls_app_runtime: the context helper itself.",
+    file: 'src/db/rls-runtime-role.ts', fn: 'applyTenantContext', access: 'guc-only', count: 2,
+    why: "applyTenantContext's transactional context, the helper itself: with RLS_RUNTIME_ROLE on, ONE statement sets the tenant GUC and the role (set_config('app.current_tenant_id', $1, true), set_config('role', 'rls_app_runtime', true)); off, the GUC-only set_config as before.",
   },
   {
     file: 'src/db/rls-runtime-role.ts', fn: 'withTenantSession', access: 'pool.connect', count: 1,

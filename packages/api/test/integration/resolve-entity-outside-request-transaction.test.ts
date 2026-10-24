@@ -28,7 +28,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import express from 'express';
 import { createServer, type Server } from 'node:http';
 import type { Pool, PoolClient } from 'pg';
-import { closeSharedTestDb, createTestTenant, getSharedTestDb } from './shared';
+import { closeSharedTestDb, createTestTenant, getSharedTestDb, TENANT_CONTEXT_WITH_ROLE_SQL } from './shared';
 import { createPool } from '../../src/db/pool';
 import { currentTenantContext, withTenantTransaction } from '../../src/middleware/tenant-context';
 import { PgTenantTransactionRunner } from '../../src/db/tenant-transaction';
@@ -373,7 +373,7 @@ describe('A1 — resolve-entity holds no connection across its LLM call and comm
     const commit = after.indexOf('COMMIT', begin);
     const tx = after.slice(begin, commit + 1);
     expect(log[releasedAt + begin + 1].params[0]).toBe(tenantA.tenantId);
-    expect(tx).toContain('SET LOCAL ROLE rls_app_runtime');
+    expect(tx).toContain(TENANT_CONTEXT_WITH_ROLE_SQL);
     const payloadWrite = tx.findIndex((s) => s.startsWith('UPDATE proposals SET updated_at = NOW(), proposal_type'));
     const statusWrite = tx.findIndex((s) => s.startsWith('UPDATE proposals SET status'));
     const auditWrite = tx.findIndex((s) => s.startsWith('INSERT INTO audit_events'));
@@ -474,7 +474,7 @@ describe('A1 — resolve-entity holds no connection across its LLM call and comm
     const lock = after.findIndex((s) => LOCK_ROW.test(s));
     expect(begin).toBeGreaterThanOrEqual(0);
     expect(lock).toBeGreaterThan(begin);
-    expect(after.slice(begin, lock)).toContain('SET LOCAL ROLE rls_app_runtime');
+    expect(after.slice(begin, lock)).toContain(TENANT_CONTEXT_WITH_ROLE_SQL);
     expect(after[lock + 1]).toBe('ROLLBACK');
     expect(after.some((s) => s.startsWith('UPDATE proposals'))).toBe(false);
     expect(after.some((s) => s.startsWith('INSERT INTO audit_events'))).toBe(false);

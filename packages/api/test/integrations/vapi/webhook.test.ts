@@ -296,9 +296,9 @@ describe('handleVapiCallEvent', () => {
       const sqls = txnClient.query.mock.calls.map((call) => String(call[0]).trim());
       const firstSessionStatement = sqls.findIndex((sql) => /voice_sessions/.test(sql));
       expect(sqls[0]).toBe('BEGIN');
+      // The tenant GUC and the role, both transaction-local, in one statement.
       expect(sqls.slice(1, firstSessionStatement)).toEqual([
-        "SELECT set_config('app.current_tenant_id', $1, true)",
-        'SET LOCAL ROLE rls_app_runtime',
+        "SELECT set_config('app.current_tenant_id', $1, true), set_config('role', 'rls_app_runtime', true)",
       ]);
       expect(sqls[sqls.length - 1]).toBe('COMMIT');
     } finally {

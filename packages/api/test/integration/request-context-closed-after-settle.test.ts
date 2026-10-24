@@ -25,7 +25,7 @@ import express from 'express';
 import { createServer, type Server } from 'node:http';
 import type { Pool, PoolClient } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
-import { closeSharedTestDb, createTestTenant, getSharedTestDb } from './shared';
+import { closeSharedTestDb, createTestTenant, getSharedTestDb, TENANT_CONTEXT_WITH_ROLE_SQL } from './shared';
 import { createPool } from '../../src/db/pool';
 import { currentTenantContext, withTenantTransaction } from '../../src/middleware/tenant-context';
 import { PgAiRunRepository } from '../../src/ai/pg-ai-run';
@@ -259,7 +259,7 @@ describe('TI-01 — a late background write after the response gets its own tena
     expect(lateTransaction[0]).toBe('BEGIN');
     expect(log[bCommit + 2].sql).toContain("set_config('app.current_tenant_id'");
     expect(log[bCommit + 2].params[0]).toBe(tenantA);
-    expect(lateTransaction).toContain('SET LOCAL ROLE rls_app_runtime');
+    expect(lateTransaction).toContain(TENANT_CONTEXT_WITH_ROLE_SQL);
     expect(sqls.slice(update + 1)).toContain('COMMIT');
   });
 });

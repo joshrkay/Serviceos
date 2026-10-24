@@ -13,9 +13,11 @@ related:
 ## Context
 
 The app connects to Postgres as a privileged principal, so RLS enforces only on
-a client that went through `applyTenantContext` (`SET LOCAL ROLE
-rls_app_runtime` when `RLS_RUNTIME_ROLE=true`). Anything else — a `pool.query`,
-a raw `pool.connect()`, `PgBaseRepository.withClient`, a
+a client that went through `applyTenantContext` (inside the tenant
+transaction, one `SELECT set_config('app.current_tenant_id', $1, true),
+set_config('role', 'rls_app_runtime', true)` when `RLS_RUNTIME_ROLE=true` —
+`set_config('role', …, true)` is `SET LOCAL ROLE`). Anything else — a
+`pool.query`, a raw `pool.connect()`, `PgBaseRepository.withClient`, a
 `currentTenantContext()?.client ?? pool` fallback, or a hand-set
 `set_config('app.current_tenant_id', …)` without the role — runs as the
 principal, where tenant isolation is only whatever `WHERE` clause the SQL
@@ -155,9 +157,9 @@ deliberate cross-tenant sweep, a platform-constant write) add an entry:
   other tenant; `runtimeRoleGrantsMissingAfter219` replays migration 219 in a
   rolled-back transaction, because the suite's setup re-grants the role on
   every table. On a per-call path, pin the cost with `countPoolTraffic`: the
-  helpers add BEGIN, the GUC, the role and COMMIT (four round trips) to a
-  lone read, so fold neighbouring reads into the one tenant session instead
-  of wrapping each.
+  helpers add BEGIN, the GUC + role statement and COMMIT (three round trips)
+  to a lone read, so fold neighbouring reads into the one tenant session
+  instead of wrapping each.
 - `why` is ≥ 40 characters and says why it is acceptable *today*.
 
 ### Checkouts and callbacks: who gets the client

@@ -25,7 +25,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import express from 'express';
 import { createServer, type Server } from 'node:http';
 import type { Pool, PoolClient } from 'pg';
-import { closeSharedTestDb, createTestTenant, getSharedTestDb } from './shared';
+import { closeSharedTestDb, createTestTenant, getSharedTestDb, TENANT_CONTEXT_WITH_ROLE_SQL } from './shared';
 import { createPool } from '../../src/db/pool';
 import { currentTenantContext, withTenantTransaction } from '../../src/middleware/tenant-context';
 import { PgTenantTransactionRunner } from '../../src/db/tenant-transaction';
@@ -365,7 +365,7 @@ describe('tenant-site about draft — no connection held across the LLM call, po
     const commit = after.indexOf('COMMIT', lock);
     const tx = after.slice(begin, commit + 1);
     expect(log[begin + 1].params[0]).toBe(tenantC.tenantId);
-    expect(tx).toContain('SET LOCAL ROLE rls_app_runtime');
+    expect(tx).toContain(TENANT_CONTEXT_WITH_ROLE_SQL);
     const statusWrite = tx.findIndex((s) => s.startsWith('UPDATE proposals SET status'));
     const insert = tx.findIndex((s) => s.startsWith('INSERT INTO proposals'));
     const audits = tx.flatMap((s, i) => (s.startsWith('INSERT INTO audit_events') ? [i] : []));

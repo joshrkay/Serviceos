@@ -5,8 +5,8 @@
  * `applyTenantContext` *session* path enforces RLS. This file closes the
  * remaining gap: it drives a real `PgBaseRepository.withTenant(...)` call —
  * the exact code path every request and worker uses, which routes through
- * `withTenantTransaction` and issues a transaction-local `SET LOCAL ROLE
- * rls_app_runtime` when `RLS_RUNTIME_ROLE=true` — and proves that a query
+ * `withTenantTransaction` and switches to `rls_app_runtime` transaction-locally
+ * (the same statement that sets the tenant GUC) when `RLS_RUNTIME_ROLE=true` — and proves that a query
  * that OMITS its app-layer `WHERE tenant_id = $1` filter STILL cannot read
  * another tenant's rows. That is the whole point of the backstop: a forgotten
  * filter can no longer cross tenants once the flag is on.
@@ -97,8 +97,8 @@ describe('RLS runtime backstop via PgBaseRepository.withTenant (real Postgres)',
     const a = await seedTenantWithCustomer();
     const b = await seedTenantWithCustomer();
 
-    // withTenant(b) runs SET LOCAL ROLE rls_app_runtime + SET LOCAL
-    // app.current_tenant_id = b, so the filter-less SELECT is scoped by RLS.
+    // withTenant(b) sets app.current_tenant_id = b and the rls_app_runtime role,
+    // both transaction-local, so the filter-less SELECT is scoped by RLS.
     const tenantIds = await repo.filterlessCustomerTenantIds(b.tenantId);
     expect(tenantIds.length).toBeGreaterThan(0);
     expect(tenantIds.every((t) => t === b.tenantId)).toBe(true);

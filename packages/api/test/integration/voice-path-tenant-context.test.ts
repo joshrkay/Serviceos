@@ -217,14 +217,14 @@ describe('createVoiceGate — one tenant session per decision under the RLS runt
       return { allowed: result.allowed, checkouts: traffic.checkouts(), statements: traffic.statements().length, maxOpen: traffic.maxOpen() };
     };
 
-    // tenants read (1) + BEGIN, GUC, role, settings, open calls, minutes, COMMIT (7).
-    expect(await measure(trial)).toEqual({ allowed: true, checkouts: 2, statements: 8, maxOpen: 1 });
-    // tenants read (1) + BEGIN, GUC, role, settings, period minutes, COMMIT (6).
-    expect(await measure(paid)).toEqual({ allowed: true, checkouts: 2, statements: 7, maxOpen: 1 });
-    // tenants read (1) + BEGIN, GUC, role, settings, COMMIT (5) + the audit write's own transaction (7).
-    expect(await measure(notLive)).toEqual({ allowed: false, checkouts: 3, statements: 13, maxOpen: 1 });
-    // Decided on the tenants read alone, as before: (1) + the audit write (7).
-    expect(await measure(noBilling)).toEqual({ allowed: false, checkouts: 2, statements: 8, maxOpen: 1 });
+    // tenants read (1) + BEGIN, GUC+role, settings, open calls, minutes, COMMIT (6).
+    expect(await measure(trial)).toEqual({ allowed: true, checkouts: 2, statements: 7, maxOpen: 1 });
+    // tenants read (1) + BEGIN, GUC+role, settings, period minutes, COMMIT (5).
+    expect(await measure(paid)).toEqual({ allowed: true, checkouts: 2, statements: 6, maxOpen: 1 });
+    // tenants read (1) + BEGIN, GUC+role, settings, COMMIT (4) + the audit write's own transaction (6).
+    expect(await measure(notLive)).toEqual({ allowed: false, checkouts: 3, statements: 11, maxOpen: 1 });
+    // Decided on the tenants read alone, as before: (1) + the audit write (6).
+    expect(await measure(noBilling)).toEqual({ allowed: false, checkouts: 2, statements: 7, maxOpen: 1 });
   });
 });
 
@@ -269,7 +269,7 @@ describe('POST /api/telephony/voice — gate and after-hours fork share the one 
     expect(traffic.statements().filter((s) => /FROM tenant_settings/.test(s))).toHaveLength(1);
     expect({ checkouts: traffic.checkouts(), statements: traffic.statements().length, maxOpen: traffic.maxOpen() }).toEqual({
       checkouts: 2,
-      statements: 8,
+      statements: 7,
       maxOpen: 1,
     });
   });
