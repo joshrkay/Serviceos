@@ -168,7 +168,7 @@ export const TABLES_WITHOUT_MIGRATION: ReadonlyArray<{ readonly table: string; r
  * The `tenant_filtered_no_rls` debt, frozen. Migrating one means deleting its
  * entry and LOWERING this number; adding one means raising it, in review.
  */
-export const TFNR_CEILING = 23;
+export const TFNR_CEILING = 22;
 
 export const RAW_PG_SITES: readonly RawPgSite[] = [
   // ── ai/ ────────────────────────────────────────────────────────────────
@@ -994,9 +994,9 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     why: "user.deleted soft-deletes every membership row of the Svix-verified Clerk user id across tenants (UPDATE users … WHERE clerk_user_id = $1). Intentional, but unattributed; under rls_app_runtime it would match 0 rows.",
   },
   {
-    file: 'src/webhooks/routes.ts', fn: 'POST /stripe', access: 'pool.query', count: 5,
-    category: 'tenant_filtered_no_rls', tables: ['tenants', 'tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P1.10',
-    why: 'Signed Stripe events: four tenants-registry lookups/updates by session or customer id (no RLS) plus the AI-model seed UPDATE tenant_settings WHERE tenant_id = $1 (FORCE RLS) as the principal; that one is the debt.',
+    file: 'src/webhooks/routes.ts', fn: 'POST /stripe', access: 'pool.query', count: 4,
+    category: 'global_table', tables: ['tenants'],
+    why: "Signed Stripe events: the tenants-registry reads and writes keyed by the event's own ids (no RLS): the expired checkout's pending-session clear, and the customer-id lookups for usage settlement, the AI-model seed / self-check and the deprovision enqueue. The seed UPDATE itself runs in a withTenantSession (P1.10).",
   },
   {
     file: 'src/webhooks/routes.ts', fn: 'POST /stripe', access: 'pool.connect', count: 1,

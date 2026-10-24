@@ -182,6 +182,10 @@ deliberate cross-tenant sweep, a platform-constant write) add an entry:
   per stage around the call (the verify-ai worker, P1.9) and pin that no
   checkout is open when the gateway is called
   (`test/integration/verify-ai-tenant-context.test.ts`).
+- One entry can hold statements of different categories. Migrate the tenant
+  ones and re-categorise what is left: POST /stripe's remaining four
+  `pool.query` calls touch only the tenants registry, so after the AI-model
+  seed moved into a session (P1.10) the entry is `global_table`, not debt.
 
 ### Checkouts and callbacks: who gets the client
 
