@@ -7,7 +7,12 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import type { PoolClient } from 'pg';
-import { isTenantAfterHours, loadTenantBusinessHours } from '../../src/telephony/business-hours-loader';
+import {
+  businessHoursFromSettings,
+  isAfterHours,
+  isTenantAfterHours,
+  loadTenantBusinessHours,
+} from '../../src/telephony/business-hours-loader';
 import { tenantContextStore } from '../../src/middleware/tenant-context';
 import { fakeTenantPool } from '../helpers/fake-tenant-pool';
 
@@ -64,5 +69,23 @@ describe('loadTenantBusinessHours', () => {
     const sunday = new Date('2026-10-25T18:00:00Z');
     expect(await isTenantAfterHours(settingsPool([ROW]).pool, TENANT, sunday)).toBe(true);
     expect(await isTenantAfterHours(settingsPool([]).pool, TENANT, sunday)).toBe(false);
+  });
+});
+
+describe('businessHoursFromSettings / isAfterHours (the gate reads the row itself)', () => {
+  it('maps one tenant_settings row the same way the loader does', () => {
+    expect(businessHoursFromSettings(ROW)).toEqual({
+      timezone: 'America/Chicago',
+      schedule: [{ dayOfWeek: 1, openTime: '08:00', closeTime: '17:00' }],
+    });
+    expect(businessHoursFromSettings({ business_hours: {}, timezone: 'UTC' })).toBeNull();
+    expect(businessHoursFromSettings({ ...ROW, timezone: null })?.timezone).toBe('America/New_York');
+  });
+
+  it('isAfterHours: outside the schedule is after hours; no schedule never is', () => {
+    const config = businessHoursFromSettings(ROW);
+    expect(isAfterHours(config, new Date('2026-10-25T18:00:00Z'))).toBe(true); // a Sunday
+    expect(isAfterHours(config, new Date('2026-10-26T15:00:00Z'))).toBe(false); // Monday 10:00 Chicago
+    expect(isAfterHours(null, new Date())).toBe(false);
   });
 });

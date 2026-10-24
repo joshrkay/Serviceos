@@ -7,8 +7,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AiUsageReader } from '../../src/billing/ai-usage';
 import { checkUsageAlerts } from '../../src/billing/usage-alerts';
-import { PgOverageCapStore } from '../../src/billing/overage-cap';
-import { PgCallUsageRepository } from '../../src/billing/call-usage-events';
+import { overageCapFromSettings, PgOverageCapStore } from '../../src/billing/overage-cap';
+import { PgCallUsageRepository, sumBillableSecondsOn, sumTrialBillableSecondsOn } from '../../src/billing/call-usage-events';
+import type { PoolClient } from 'pg';
 import { planIncludesQuickBooks, quickBooksUpgradeRequired, readTenantPlanId } from '../../src/billing/plan-features';
 import { fakePool } from './fake-pool';
 
@@ -146,5 +147,24 @@ describe('plan features (unit)', () => {
     expect(quickBooksUpgradeRequired()).toMatchObject({ code: 'PLAN_UPGRADE_REQUIRED', statusCode: 403 });
     expect(await readTenantPlanId(world({ planId: 'growth' }).pool, TENANT)).toBe('growth');
     expect(await readTenantPlanId(fakePool(() => ({ rows: [] })), TENANT)).toBeNull();
+  });
+});
+
+describe('client-level reads the voice gate shares one tenant session with (unit)', () => {
+  it('overageCapFromSettings: uncapped → null, a stored cap → cents, otherwise the plan-price default', () => {
+    expect(overageCapFromSettings({ ai_overage_cap_cents: 20_000, ai_overage_uncapped: true })).toBeNull();
+    expect(overageCapFromSettings({ ai_overage_cap_cents: 20_000, ai_overage_uncapped: false })).toBe(20_000);
+    expect(overageCapFromSettings({ ai_overage_cap_cents: null, ai_overage_uncapped: false })).toBeUndefined();
+    expect(overageCapFromSettings(undefined)).toBeUndefined();
+  });
+
+  it('sumBillableSecondsOn / sumTrialBillableSecondsOn run on the client they are handed', async () => {
+    const query = vi.fn(async () => ({ rows: [{ seconds: '150' }] }));
+    const client = { query } as unknown as PoolClient;
+
+    expect(await sumBillableSecondsOn(client, TENANT, START, END)).toBe(150);
+    expect(await sumTrialBillableSecondsOn(client, TENANT)).toBe(150);
+    expect(query).toHaveBeenNthCalledWith(1, expect.stringContaining('WHERE tenant_id = $1 AND billable'), [TENANT, START, END]);
+    expect(query).toHaveBeenNthCalledWith(2, expect.any(String), [TENANT, new Date(0), new Date(8.64e15)]);
   });
 });

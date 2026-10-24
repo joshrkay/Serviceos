@@ -19,6 +19,9 @@
  *
  * Compose with `probeStatementRoles`: pass its `pool` as `real` here and the
  * role probe sees the rewritten statement, after the control's RESET ROLE.
+ *
+ * Also here: `runtimeRoleGrantsMissingAfter219` (the production grants) and
+ * `countPoolTraffic` (checkouts and statements, for the per-call cost pins).
  */
 import type { Pool, PoolClient, QueryResult } from 'pg';
 import { MIGRATIONS } from '../../src/db/schema';
@@ -127,4 +130,67 @@ export async function runtimeRoleGrantsMissingAfter219(
     await client.query('ROLLBACK').catch(() => undefined);
     client.release();
   }
+}
+
+export interface PoolTraffic {
+  /** Pass this to the code under test in place of the real pool. */
+  pool: Pool;
+  /** Clients handed out: connect() calls plus one per one-shot pool.query. */
+  checkouts(): number;
+  /** Every statement, in execution order. */
+  statements(): string[];
+  /** The most clients this pool had out at once (2+ = a checkout nested inside another). */
+  maxOpen(): number;
+}
+
+/**
+ * Count what the code under test costs the pool — checkouts and statements
+ * (each one a round trip) — for the "no added round trips on the live call
+ * path" measurements.
+ */
+export function countPoolTraffic(real: Pool): PoolTraffic {
+  let checkouts = 0;
+  let open = 0;
+  let maxOpen = 0;
+  const statements: string[] = [];
+  const opened = () => {
+    checkouts += 1;
+    open += 1;
+    maxOpen = Math.max(maxOpen, open);
+  };
+
+  const connect = async (): Promise<PoolClient> => {
+    const client = await real.connect();
+    opened();
+    const inner = client.query as unknown as QueryFn;
+    (client as unknown as { query: QueryFn }).query = (text, values) => {
+      statements.push(typeof text === 'string' ? text : String((text as { text?: string })?.text ?? ''));
+      return inner.call(client, text, values);
+    };
+    const innerRelease = client.release;
+    client.release = (err?: Error | boolean) => {
+      open -= 1;
+      delete (client as unknown as { query?: QueryFn }).query;
+      return innerRelease(err);
+    };
+    return client;
+  };
+  const query = async (text: unknown, values?: unknown): Promise<QueryResult> => {
+    const client = await connect();
+    try {
+      return await (client.query as unknown as QueryFn)(text, values);
+    } finally {
+      client.release();
+    }
+  };
+
+  const pool = new Proxy(real, {
+    get(target_, prop) {
+      if (prop === 'connect') return connect;
+      if (prop === 'query') return query;
+      const value = Reflect.get(target_, prop, target_);
+      return typeof value === 'function' ? value.bind(target_) : value;
+    },
+  });
+  return { pool, checkouts: () => checkouts, statements: () => [...statements], maxOpen: () => maxOpen };
 }

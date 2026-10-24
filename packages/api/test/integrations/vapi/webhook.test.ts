@@ -28,14 +28,43 @@ interface RecordReceiptResult {
   record?: { processedAt?: Date | null };
 }
 
+type ActivationState = Required<PoolState>;
+
 /**
- * `txnClient.query` mock used by `recordInboundSession`: answers the
- * pre-insert existence check with "not found" by default (rowCount 0) so
- * the INSERT branch runs, unless `sessionExists` says otherwise. When
- * `failInsert` is armed, the INSERT itself throws once (simulating the
- * transient DB blip VOX-04 is about) and disarms itself.
+ * The activation's statements (tenants, tenant_settings, the check-and-set),
+ * which maybeFireActivationForInboundCall runs in its own tenant transaction
+ * on a checked-out client (raw-pg audit §4 P1.2).
  */
-function makeTxnClient(opts: { failInsert?: { armed: boolean }; sessionExists?: boolean } = {}) {
+function activationAnswers(s: ActivationState) {
+  return (sql: string): { rows: unknown[]; rowCount?: number } | undefined => {
+    if (/UPDATE\s+tenant_settings/i.test(sql) && /activated_at\s*=\s*now\(\)/i.test(sql)) {
+      return { rows: [], rowCount: s.updateRowCount };
+    }
+    if (/FROM\s+tenants/i.test(sql)) {
+      return { rows: [{ owner_id: 'clerk_owner', owner_email: 'o@x.com', subscription_status: s.subscription }] };
+    }
+    if (/FROM\s+tenant_settings/i.test(sql)) {
+      return { rows: [{ owner_phone: s.ownerPhone, business_phone: s.businessPhone, activated_at: s.activatedAt }] };
+    }
+    return undefined;
+  };
+}
+
+/**
+ * `txnClient.query` mock behind every `pool.connect()`: `recordInboundSession`
+ * and the activation's tenant transaction. Answers the pre-insert existence
+ * check with "not found" by default (rowCount 0) so the INSERT branch runs,
+ * unless `sessionExists` says otherwise; the activation's statements from
+ * `answer`. When `failInsert` is armed, the INSERT itself throws once
+ * (simulating the transient DB blip VOX-04 is about) and disarms itself.
+ */
+function makeTxnClient(
+  opts: {
+    failInsert?: { armed: boolean };
+    sessionExists?: boolean;
+    answer?: (sql: string) => { rows: unknown[]; rowCount?: number } | undefined;
+  } = {},
+) {
   return {
     query: vi.fn(async (sql: string) => {
       if (/INSERT INTO voice_sessions/i.test(sql) && opts.failInsert?.armed) {
@@ -45,39 +74,22 @@ function makeTxnClient(opts: { failInsert?: { armed: boolean }; sessionExists?: 
       if (/SELECT 1 FROM voice_sessions/i.test(sql)) {
         return { rows: opts.sessionExists ? [{ '?column?': 1 }] : [], rowCount: opts.sessionExists ? 1 : 0 };
       }
-      return { rows: [], rowCount: 1 };
+      return opts.answer?.(sql) ?? { rows: [], rowCount: 1 };
     }),
     release: vi.fn(),
   };
 }
 
-function makeDeps(
-  state: PoolState = {},
-  recordReceiptResult: RecordReceiptResult = { inserted: true },
-  txnClient = makeTxnClient(),
-) {
-  const s = {
+function makeDeps(state: PoolState = {}, recordReceiptResult: RecordReceiptResult = { inserted: true }) {
+  const s: ActivationState = {
     ownerPhone: state.ownerPhone ?? '+15125551111',
     businessPhone: state.businessPhone ?? '+15125559999',
     activatedAt: state.activatedAt ?? null,
     subscription: state.subscription ?? 'trialing',
     updateRowCount: state.updateRowCount ?? 1,
   };
-  const pool = {
-    connect: vi.fn(async () => txnClient),
-    query: vi.fn(async (sql: string) => {
-      if (/UPDATE\s+tenant_settings/i.test(sql) && /activated_at\s*=\s*now\(\)/i.test(sql)) {
-        return { rows: [], rowCount: s.updateRowCount };
-      }
-      if (/FROM\s+tenants/i.test(sql)) {
-        return { rows: [{ owner_id: 'clerk_owner', owner_email: 'o@x.com', subscription_status: s.subscription }] };
-      }
-      if (/FROM\s+tenant_settings/i.test(sql)) {
-        return { rows: [{ owner_phone: s.ownerPhone, business_phone: s.businessPhone, activated_at: s.activatedAt }] };
-      }
-      return { rows: [] };
-    }),
-  };
+  const txnClient = makeTxnClient({ answer: activationAnswers(s) });
+  const pool = { connect: vi.fn(async () => txnClient) };
   const webhookRepo = {
     recordReceipt: vi.fn(async () => recordReceiptResult),
     markProcessed: vi.fn(async () => undefined),
@@ -232,23 +244,15 @@ describe('handleVapiCallEvent', () => {
   it('VOX-04: a retry after recordInboundSession throws on first delivery successfully records the session', async () => {
     const webhookRepo = makeStatefulWebhookRepo();
     const failInsert = { armed: true };
-    const txnClient = makeTxnClient({ failInsert });
-    const s = { ownerPhone: '+15125551111', businessPhone: '+15125559999', activatedAt: null as Date | null, subscription: 'trialing' };
-    const pool = {
-      connect: vi.fn(async () => txnClient),
-      query: vi.fn(async (sql: string) => {
-        if (/UPDATE\s+tenant_settings/i.test(sql) && /activated_at\s*=\s*now\(\)/i.test(sql)) {
-          return { rows: [], rowCount: 1 };
-        }
-        if (/FROM\s+tenants/i.test(sql)) {
-          return { rows: [{ owner_id: 'clerk_owner', owner_email: 'o@x.com', subscription_status: s.subscription }] };
-        }
-        if (/FROM\s+tenant_settings/i.test(sql)) {
-          return { rows: [{ owner_phone: s.ownerPhone, business_phone: s.businessPhone, activated_at: s.activatedAt }] };
-        }
-        return { rows: [] };
-      }),
+    const s: ActivationState = {
+      ownerPhone: '+15125551111',
+      businessPhone: '+15125559999',
+      activatedAt: null,
+      subscription: 'trialing',
+      updateRowCount: 1,
     };
+    const txnClient = makeTxnClient({ failInsert, answer: activationAnswers(s) });
+    const pool = { connect: vi.fn(async () => txnClient) };
     const auditRepo = { create: vi.fn(async () => undefined) } as never;
     const deps = { pool: pool as never, auditRepo, webhookRepo, secret: SECRET };
     const body = endedBody('call_retry', '+15125557777');

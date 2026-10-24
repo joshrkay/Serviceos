@@ -168,7 +168,7 @@ export const TABLES_WITHOUT_MIGRATION: ReadonlyArray<{ readonly table: string; r
  * The `tenant_filtered_no_rls` debt, frozen. Migrating one means deleting its
  * entry and LOWERING this number; adding one means raising it, in review.
  */
-export const TFNR_CEILING = 37;
+export const TFNR_CEILING = 29;
 
 export const RAW_PG_SITES: readonly RawPgSite[] = [
   // ── ai/ ────────────────────────────────────────────────────────────────
@@ -912,39 +912,9 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
 
   // ── voice/ ─────────────────────────────────────────────────────────────
   {
-    file: 'src/voice/activation.ts', fn: 'maybeFireFirstRealCallActivation', access: 'pool.query', count: 4,
-    category: 'tenant_filtered_no_rls', tables: ['tenants', 'tenant_settings', 'voice_sessions'], migrateBy: 'audit 2026-10-23 §4 P1.5',
-    why: 'Voice session-end hook on the raw pool at call teardown: a tenants read plus tenant_settings/voice_sessions reads and an UPDATE, each WHERE tenant_id = $1 with the server-side session tenant, as the principal.',
-  },
-  {
-    file: 'src/voice/activation.ts', fn: 'maybeFireActivationForInboundCall', access: 'pool.query', count: 3,
-    category: 'tenant_filtered_no_rls', tables: ['tenants', 'tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P1.2',
-    why: 'Verified Vapi webhook activation: tenants read plus a tenant_settings read and UPDATE WHERE tenant_id = $1 on the raw pool, the tenant being the HMAC-authenticated /vapi/:tenantId path.',
-  },
-  {
-    file: 'src/voice/check-upgrade-nudge.ts', fn: 'checkAndFireUpgradeNudge', access: 'pool.query', count: 2,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P1.5',
-    why: 'Voice session-end hook: SELECT then check-and-set UPDATE of tenant_settings WHERE tenant_id = $1 with the session tenant fixed at inbound session creation, on the raw pool.',
-  },
-  {
-    file: 'src/voice/go-live.ts', fn: 'loadVoiceAgentLiveAt', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P1.3',
-    why: 'Reads tenant_settings.voice_agent_live_at WHERE tenant_id = $1 on the raw pool: the /voice gate (signature-verified dialled-number tenant) and the go-live paths.',
-  },
-  {
     file: 'src/voice/go-live.ts', fn: 'subscriptionAllowsVoice', access: 'pool.query', count: 1,
     category: 'global_table', tables: ['tenants'],
     why: 'SELECT subscription_status FROM tenants WHERE id = $1 (req.auth tenant or session tenant). tenants has no RLS.',
-  },
-  {
-    file: 'src/voice/go-live.ts', fn: 'enableVoiceAgentLive', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P1.5',
-    why: 'POST /go-live and the session-end auto go-live: UPDATE tenant_settings WHERE tenant_id = $1 AND voice_agent_live_at IS NULL on the raw pool (req.auth or session tenant).',
-  },
-  {
-    file: 'src/voice/go-live.ts', fn: 'pauseVoiceAgentLive', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P1.5',
-    why: 'POST /pause: UPDATE tenant_settings WHERE tenant_id = $1 (req.auth tenant) on the raw pool instead of the request client.',
   },
   {
     file: 'src/voice/outbound-consent.ts', fn: 'checkOutboundConsent', access: 'pool.connect', count: 1,
@@ -965,16 +935,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/voice/voice-config.ts', fn: 'refreshVapiFirstMessage', access: 'pool.query', count: 1,
     category: 'tenant_context_applied', tables: ['tenant_settings'],
     why: "Its one caller, the PATCH /api/settings/language after-commit re-push (routes/settings.ts), passes { query } wrapping tenantQuery(pool, tenantId, …), so the tenant_settings read runs under rls_app_runtime for that tenant. (scripts/backfill-vapi-assistant-notice.ts runs the same read through tenantQuery itself and does not call this.) The Pick<Pool, 'query'> parameter is a latent trap for a future raw caller.",
-  },
-  {
-    file: 'src/voice/voice-gate.ts', fn: 'createVoiceGate', access: 'pool.query', count: 2,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_settings', 'voice_sessions'], migrateBy: 'audit 2026-10-23 §4 P1.3',
-    why: 'The inbound /voice gate reads owner_phone and the live-call count for the dialled-number tenant on the raw pool; WHERE tenant_id = $1 is the only boundary. One withTenantSession per decision is the fix.',
-  },
-  {
-    file: 'src/voice/voice-gate.ts', fn: 'isOwnersOwnNumber', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P1.3',
-    why: "The #1605 owner test-call bypass compares From with the dialled tenant's owner/business phone FROM tenant_settings WHERE tenant_id = $1 on the raw pool; returns a boolean only.",
   },
   {
     file: 'src/voice/voice-service.ts', fn: 'recordInboundCall', access: 'pool.connect', count: 1,

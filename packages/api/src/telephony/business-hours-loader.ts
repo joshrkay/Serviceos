@@ -34,6 +34,20 @@ export function parseOnboardingBusinessHours(
   return { timezone, schedule };
 }
 
+/** One tenant_settings row's business hours (null: no usable schedule). */
+export function businessHoursFromSettings(row: {
+  business_hours: unknown;
+  timezone: string | null;
+}): BusinessHoursConfig | null {
+  return parseOnboardingBusinessHours(row.business_hours, row.timezone || 'America/New_York');
+}
+
+/** Outside the schedule; a tenant with no schedule is never after hours. */
+export function isAfterHours(config: BusinessHoursConfig | null, now = new Date()): boolean {
+  if (!config) return false;
+  return !checkBusinessHours(config, now).isOpen;
+}
+
 /**
  * The tenant's business hours, read under that tenant's context
  * (`rls_app_runtime`, raw-pg audit §4 P1.3): the request client when one is
@@ -51,11 +65,7 @@ export async function loadTenantBusinessHours(
     ),
   );
   if (result.rows.length === 0) return null;
-  const row = result.rows[0];
-  return parseOnboardingBusinessHours(
-    row.business_hours,
-    row.timezone || 'America/New_York',
-  );
+  return businessHoursFromSettings(result.rows[0]);
 }
 
 export async function isTenantAfterHours(
@@ -63,8 +73,5 @@ export async function isTenantAfterHours(
   tenantId: string,
   now = new Date(),
 ): Promise<boolean> {
-  const config = await loadTenantBusinessHours(pool, tenantId);
-  if (!config) return false;
-  const { isOpen } = checkBusinessHours(config, now);
-  return !isOpen;
+  return isAfterHours(await loadTenantBusinessHours(pool, tenantId), now);
 }
