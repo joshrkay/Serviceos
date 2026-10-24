@@ -735,36 +735,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     why: "Request-client read of the tenant's twilio tenant_integrations row under the /api withTenantTransaction middleware. The pool fallback is latent only.",
   },
   {
-    file: 'src/routes/onboarding.ts', fn: 'POST /phone/retry', access: 'ambient-or-pool', count: 1,
-    category: 'tenant_context_applied', tables: ['tenant_integrations'],
-    why: 'Request-client status read under the /api middleware, WHERE tenant_id = req.auth.tenantId. The pool fallback is latent only; db also goes to isBillingLive and markPickPending (the pool-escape entry below).',
-  },
-  {
-    file: 'src/routes/onboarding.ts', fn: 'POST /phone/retry', access: 'pool-escape', count: 2,
-    category: 'tenant_context_applied', tables: ['tenants', 'tenant_integrations'],
-    why: "db (request client, ?? pool) goes into isBillingLive (SELECT subscription_status FROM tenants WHERE id = $1) and markPickPending (tenant_integrations upsert for the auth tenant), whose { query } parameters the typed rule cannot classify.",
-  },
-  {
-    file: 'src/routes/onboarding.ts', fn: 'POST /phone/claim', access: 'ambient-or-pool', count: 1,
-    category: 'tenant_context_applied', tables: ['tenant_integrations'],
-    why: 'Owner-only request-client status read under the /api middleware, WHERE tenant_id = req.auth.tenantId. The pool fallback is latent only; db also goes to isBillingLive and markPickPending (pool-escape below).',
-  },
-  {
-    file: 'src/routes/onboarding.ts', fn: 'POST /phone/claim', access: 'pool-escape', count: 2,
-    category: 'tenant_context_applied', tables: ['tenants', 'tenant_integrations'],
-    why: "db (request client, ?? pool) goes into isBillingLive (tenants registry read) and markPickPending (tenant_integrations upsert for the auth tenant) through structural { query } parameters, under the /api middleware.",
-  },
-  {
-    file: 'src/routes/onboarding.ts', fn: 'POST /phone/change', access: 'ambient-or-pool', count: 2,
-    category: 'tenant_context_applied', tables: ['tenant_integrations'],
-    why: 'Owner-only request-client read of the twilio row plus a compare-and-set UPDATE (pendingChange) under the /api middleware, both WHERE tenant_id = req.auth.tenantId; db also goes to isBillingLive (pool-escape below).',
-  },
-  {
-    file: 'src/routes/onboarding.ts', fn: 'POST /phone/change', access: 'pool-escape', count: 1,
-    category: 'global_table', tables: ['tenants'],
-    why: "db (request client, ?? pool) goes into isBillingLive's structural { query } parameter: SELECT subscription_status FROM tenants WHERE id = $1 for the auth tenant. tenants has no RLS.",
-  },
-  {
     file: 'src/routes/onboarding.ts', fn: 'POST /calendar/choose', access: 'ambient-or-pool', count: 1,
     category: 'tenant_context_applied', tables: ['tenant_settings'],
     why: 'Owner-only request-client UPDATE of calendar_provider under the /api withTenantTransaction middleware, tenant from req.auth.tenantId. The pool fallback is latent only.',

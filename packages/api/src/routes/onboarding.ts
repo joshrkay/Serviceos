@@ -93,11 +93,24 @@ async function markPickPending(
   );
 }
 
-function billingRequired(res: Response, verb: 'provisioning' | 'claiming'): void {
-  res.status(409).json({
-    error: 'PHONE_BILLING_REQUIRED',
-    message: `Complete trial checkout before ${verb} a phone number.`,
-  });
+/** What a phone route answers, decided inside its tenant transaction. */
+interface PhoneReply {
+  status: number;
+  body: Record<string, unknown>;
+}
+
+function billingRequired(verb: 'provisioning' | 'claiming'): PhoneReply {
+  return {
+    status: 409,
+    body: {
+      error: 'PHONE_BILLING_REQUIRED',
+      message: `Complete trial checkout before ${verb} a phone number.`,
+    },
+  };
+}
+
+function provisioningCallbackBaseUrl(): string {
+  return process.env.PUBLIC_API_URL ?? process.env.APP_PUBLIC_URL ?? 'http://localhost:3000';
 }
 
 export interface OnboardingRouterDeps {
@@ -638,61 +651,60 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           return;
         }
         const tenantId = req.auth!.tenantId;
-        const db = currentTenantContext()?.client ?? pool;
-        const integ = await db.query<{ status: string }>(
-          `SELECT status FROM tenant_integrations
-           WHERE tenant_id = $1 AND provider = 'twilio' LIMIT 1`,
-          [tenantId],
-        );
-        const status = integ.rows[0]?.status;
-        if (status === 'full_readiness') {
-          res.json({ ok: true, skipped: true, reason: 'already_active' });
-          return;
-        }
-        if (status && status !== 't0_requested' && status !== 'failed') {
-          res.status(409).json({
-            error: 'PHONE_RETRY_NOT_ALLOWED',
-            message: `Cannot retry from status ${status}`,
-          });
-          return;
-        }
-        // Trial-checkout gating: never enqueue a number purchase before the
-        // tenant has a card on file.
-        if (!(await isBillingLive(db, tenantId))) {
-          billingRequired(res, 'provisioning');
-          return;
-        }
-        const callbackBaseUrl =
-          process.env.PUBLIC_API_URL ??
-          process.env.APP_PUBLIC_URL ??
-          'http://localhost:3000';
-        // #1563 — "Pick one for me": an explicit buy. The checkout job only
-        // sets up the subaccount + Messaging Service; this job also buys a
-        // number (business-address area code first, then any US local). Its
-        // own key, so it never collapses into a pending checkout job.
-        const payload: ProvisionTwilioPayload = {
-          tenantId,
-          region: null,
-          baseUrl: callbackBaseUrl,
-          autoPick: true,
-        };
-        await markPickPending(db, tenantId, AUTO_PICK);
-        await queue.send(
-          PROVISION_TWILIO_JOB_TYPE,
-          payload,
-          `provision-twilio-autopick-${tenantId}`,
-        );
-        await auditRepo.create(
-          createAuditEvent({
+        // One tenant transaction (the request's): the gate reads, the
+        // pending-pick marker, its audit row and then its job.
+        const reply = await withTenantClient(pool, tenantId, async (db): Promise<PhoneReply> => {
+          const integ = await db.query<{ status: string }>(
+            `SELECT status FROM tenant_integrations
+             WHERE tenant_id = $1 AND provider = 'twilio' LIMIT 1`,
+            [tenantId],
+          );
+          const status = integ.rows[0]?.status;
+          if (status === 'full_readiness') {
+            return { status: 200, body: { ok: true, skipped: true, reason: 'already_active' } };
+          }
+          if (status && status !== 't0_requested' && status !== 'failed') {
+            return {
+              status: 409,
+              body: { error: 'PHONE_RETRY_NOT_ALLOWED', message: `Cannot retry from status ${status}` },
+            };
+          }
+          // Trial-checkout gating: never enqueue a number purchase before the
+          // tenant has a card on file.
+          if (!(await isBillingLive(db, tenantId))) return billingRequired('provisioning');
+          // #1563 — "Pick one for me": an explicit buy. The checkout job only
+          // sets up the subaccount + Messaging Service; this job also buys a
+          // number (business-address area code first, then any US local). Its
+          // own key, so it never collapses into a pending checkout job.
+          const payload: ProvisionTwilioPayload = {
             tenantId,
-            actorId: req.auth!.userId,
-            actorRole: 'owner',
-            eventType: 'tenant.phone_provisioning_retry',
-            entityType: 'tenant_integrations',
-            entityId: tenantId,
-          }),
-        );
-        res.json({ ok: true, enqueued: true });
+            region: null,
+            baseUrl: provisioningCallbackBaseUrl(),
+            autoPick: true,
+          };
+          await markPickPending(db, tenantId, AUTO_PICK);
+          // The audit row, then the job on `db` (`sendOn`, P0-009) — the same
+          // tail as /phone/claim and /phone/change. Inside a request `db` is
+          // the request transaction, which the audit write joins too, so the
+          // marker, the audit row and the job commit or roll back together,
+          // and the worker cannot claim the job before the marker it reads has
+          // committed. `queue.send` committed the job on its own connection
+          // before the audit write, so a request that then failed still bought
+          // (or swapped) a number, with no audit row for it.
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: req.auth!.userId,
+              actorRole: 'owner',
+              eventType: 'tenant.phone_provisioning_retry',
+              entityType: 'tenant_integrations',
+              entityId: tenantId,
+            }),
+          );
+          await queue.sendOn(db, PROVISION_TWILIO_JOB_TYPE, payload, `provision-twilio-autopick-${tenantId}`);
+          return { status: 200, body: { ok: true, enqueued: true } };
+        });
+        res.status(reply.status).json(reply.body);
       } catch (error: unknown) {
         res.status(500).json({
           error: 'PHONE_RETRY_FAILED',
@@ -775,68 +787,66 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
           return;
         }
         const tenantId = req.auth!.tenantId;
-        const db = currentTenantContext()?.client ?? pool;
-        const integ = await db.query<{ status: string }>(
-          `SELECT status FROM tenant_integrations
-           WHERE tenant_id = $1 AND provider = 'twilio' LIMIT 1`,
-          [tenantId],
-        );
-        const status = integ.rows[0]?.status;
-        if (status === 'full_readiness') {
-          res.json({ ok: true, skipped: true, reason: 'already_active' });
-          return;
-        }
-        if (status && status !== 't0_requested' && status !== 'failed') {
-          res.status(409).json({
-            error: 'PHONE_CLAIM_NOT_ALLOWED',
-            message: `Cannot claim from status ${status}`,
-          });
-          return;
-        }
-        // Trial-checkout gating: never enqueue a number purchase before the
-        // tenant has a card on file.
-        if (!(await isBillingLive(db, tenantId))) {
-          billingRequired(res, 'claiming');
-          return;
-        }
-        const callbackBaseUrl =
-          process.env.PUBLIC_API_URL ??
-          process.env.APP_PUBLIC_URL ??
-          'http://localhost:3000';
-        const payload: ProvisionTwilioPayload = {
-          tenantId,
-          region: null,
-          baseUrl: callbackBaseUrl,
-          phoneNumber: parsed.data.phoneNumber,
-        };
-        // #1563 — a claim gets its OWN idempotency key, one per (tenant,
-        // number) intent. It used to share the trial-checkout job's key, so
-        // a pick made while that job was pending/in flight was silently
-        // dropped by PgQueue's ON CONFLICT DO NOTHING while this route still
-        // answered {enqueued:true}. Double-provisioning is prevented in the
-        // worker instead: every provisioning job for a tenant runs under one
-        // per-tenant advisory lock, and the number step is idempotent (an
-        // already-active tenant or an already-owned number is never re-bought).
-        // Re-claiming the same number while that claim is still pending
-        // collapses onto it — the same intent, honestly reported as enqueued.
-        await markPickPending(db, tenantId, parsed.data.phoneNumber);
-        await queue.send(
-          PROVISION_TWILIO_JOB_TYPE,
-          payload,
-          `provision-twilio-claim-${tenantId}-${parsed.data.phoneNumber.replace(/\D/g, '')}`,
-        );
-        await auditRepo.create(
-          createAuditEvent({
+        const pick = parsed.data.phoneNumber;
+        // One tenant transaction (the request's): the gate reads, the
+        // pending-pick marker, its audit row and then its job.
+        const reply = await withTenantClient(pool, tenantId, async (db): Promise<PhoneReply> => {
+          const integ = await db.query<{ status: string }>(
+            `SELECT status FROM tenant_integrations
+             WHERE tenant_id = $1 AND provider = 'twilio' LIMIT 1`,
+            [tenantId],
+          );
+          const status = integ.rows[0]?.status;
+          if (status === 'full_readiness') {
+            return { status: 200, body: { ok: true, skipped: true, reason: 'already_active' } };
+          }
+          if (status && status !== 't0_requested' && status !== 'failed') {
+            return {
+              status: 409,
+              body: { error: 'PHONE_CLAIM_NOT_ALLOWED', message: `Cannot claim from status ${status}` },
+            };
+          }
+          // Trial-checkout gating: never enqueue a number purchase before the
+          // tenant has a card on file.
+          if (!(await isBillingLive(db, tenantId))) return billingRequired('claiming');
+          const payload: ProvisionTwilioPayload = {
             tenantId,
-            actorId: req.auth!.userId,
-            actorRole: 'owner',
-            eventType: 'tenant.phone_number_claimed',
-            entityType: 'tenant_integrations',
-            entityId: tenantId,
-            metadata: { phoneNumber: parsed.data.phoneNumber },
-          }),
-        );
-        res.json({ ok: true, enqueued: true, phoneNumber: parsed.data.phoneNumber });
+            region: null,
+            baseUrl: provisioningCallbackBaseUrl(),
+            phoneNumber: pick,
+          };
+          // #1563 — a claim gets its OWN idempotency key, one per (tenant,
+          // number) intent. It used to share the trial-checkout job's key, so
+          // a pick made while that job was pending/in flight was silently
+          // dropped by PgQueue's ON CONFLICT DO NOTHING while this route still
+          // answered {enqueued:true}. Double-provisioning is prevented in the
+          // worker instead: every provisioning job for a tenant runs under one
+          // per-tenant advisory lock, and the number step is idempotent (an
+          // already-active tenant or an already-owned number is never re-bought).
+          // Re-claiming the same number while that claim is still pending
+          // collapses onto it — the same intent, honestly reported as enqueued.
+          await markPickPending(db, tenantId, pick);
+          // The audit row, then the job on `db` (why: /phone/retry).
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: req.auth!.userId,
+              actorRole: 'owner',
+              eventType: 'tenant.phone_number_claimed',
+              entityType: 'tenant_integrations',
+              entityId: tenantId,
+              metadata: { phoneNumber: pick },
+            }),
+          );
+          await queue.sendOn(
+            db,
+            PROVISION_TWILIO_JOB_TYPE,
+            payload,
+            `provision-twilio-claim-${tenantId}-${pick.replace(/\D/g, '')}`,
+          );
+          return { status: 200, body: { ok: true, enqueued: true, phoneNumber: pick } };
+        });
+        res.status(reply.status).json(reply.body);
       } catch (error: unknown) {
         res.status(500).json({
           error: 'PHONE_CLAIM_FAILED',
@@ -875,74 +885,76 @@ export function createOnboardingRouter(deps: OnboardingRouterDeps): Router {
         }
         const newNumber = parsed.data.phoneNumber;
         const tenantId = req.auth!.tenantId;
-        const db = currentTenantContext()?.client ?? pool;
-        const integ = await db.query<TwilioIntegrationRow>(
-          `SELECT status, last_error, provider_data FROM tenant_integrations
-           WHERE tenant_id = $1 AND provider = 'twilio' LIMIT 1`,
-          [tenantId],
-        );
-        const line = toPhoneLineView(integ.rows[0]);
-        if (line.state !== 'active') {
-          res.status(409).json({
-            error: 'PHONE_CHANGE_NOT_ALLOWED',
-            message: 'You can change your number once your current number is active.',
-          });
-          return;
-        }
-        if (line.phoneNumber === newNumber) {
-          res.status(409).json({
-            error: 'PHONE_ALREADY_YOURS',
-            message: 'That is already your business number.',
-          });
-          return;
-        }
-        if (!(await isBillingLive(db, tenantId))) {
-          billingRequired(res, 'claiming');
-          return;
-        }
-        // Compare-and-set: at most one change in flight per tenant, so two
-        // quick taps can never buy two replacement numbers.
-        const marked = await db.query(
-          `UPDATE tenant_integrations
-           SET provider_data = (provider_data - 'changeError') || $2::jsonb, updated_at = NOW()
-           WHERE tenant_id = $1 AND provider = 'twilio' AND status = 'full_readiness'
-             AND NOT (provider_data ? 'pendingChange')`,
-          [tenantId, JSON.stringify({ pendingChange: newNumber })],
-        );
-        if ((marked as { rowCount?: number | null }).rowCount === 0) {
-          res.status(409).json({
-            error: 'PHONE_CHANGE_IN_PROGRESS',
-            message: `Already switching to ${line.changingTo ?? 'a new number'} — give it a moment.`,
-          });
-          return;
-        }
-        const callbackBaseUrl =
-          process.env.PUBLIC_API_URL ??
-          process.env.APP_PUBLIC_URL ??
-          'http://localhost:3000';
-        const payload: ProvisionTwilioPayload = {
-          tenantId,
-          region: null,
-          baseUrl: callbackBaseUrl,
-          changeTo: newNumber,
-        };
-        await queue.send(
-          PROVISION_TWILIO_JOB_TYPE,
-          payload,
-          `provision-twilio-change-${tenantId}-${newNumber.replace(/\D/g, '')}`,
-        );
-        await auditRepo.create(
-          createAuditEvent({
+        // One tenant transaction (the request's): the gate reads, the
+        // pendingChange compare-and-set, its audit row and then its job.
+        const reply = await withTenantClient(pool, tenantId, async (db): Promise<PhoneReply> => {
+          const integ = await db.query<TwilioIntegrationRow>(
+            `SELECT status, last_error, provider_data FROM tenant_integrations
+             WHERE tenant_id = $1 AND provider = 'twilio' LIMIT 1`,
+            [tenantId],
+          );
+          const line = toPhoneLineView(integ.rows[0]);
+          if (line.state !== 'active') {
+            return {
+              status: 409,
+              body: {
+                error: 'PHONE_CHANGE_NOT_ALLOWED',
+                message: 'You can change your number once your current number is active.',
+              },
+            };
+          }
+          if (line.phoneNumber === newNumber) {
+            return {
+              status: 409,
+              body: { error: 'PHONE_ALREADY_YOURS', message: 'That is already your business number.' },
+            };
+          }
+          if (!(await isBillingLive(db, tenantId))) return billingRequired('claiming');
+          // Compare-and-set: at most one change in flight per tenant, so two
+          // quick taps can never buy two replacement numbers.
+          const marked = await db.query(
+            `UPDATE tenant_integrations
+             SET provider_data = (provider_data - 'changeError') || $2::jsonb, updated_at = NOW()
+             WHERE tenant_id = $1 AND provider = 'twilio' AND status = 'full_readiness'
+               AND NOT (provider_data ? 'pendingChange')`,
+            [tenantId, JSON.stringify({ pendingChange: newNumber })],
+          );
+          if (marked.rowCount === 0) {
+            return {
+              status: 409,
+              body: {
+                error: 'PHONE_CHANGE_IN_PROGRESS',
+                message: `Already switching to ${line.changingTo ?? 'a new number'} — give it a moment.`,
+              },
+            };
+          }
+          const payload: ProvisionTwilioPayload = {
             tenantId,
-            actorId: req.auth!.userId,
-            actorRole: 'owner',
-            eventType: 'tenant.phone_number_change_requested',
-            entityType: 'tenant_integrations',
-            entityId: tenantId,
-            metadata: { from: line.phoneNumber, to: newNumber },
-          }),
-        );
-        res.json({ ok: true, enqueued: true, phoneNumber: newNumber });
+            region: null,
+            baseUrl: provisioningCallbackBaseUrl(),
+            changeTo: newNumber,
+          };
+          // The audit row, then the job on `db` (why: /phone/retry).
+          await auditRepo.create(
+            createAuditEvent({
+              tenantId,
+              actorId: req.auth!.userId,
+              actorRole: 'owner',
+              eventType: 'tenant.phone_number_change_requested',
+              entityType: 'tenant_integrations',
+              entityId: tenantId,
+              metadata: { from: line.phoneNumber, to: newNumber },
+            }),
+          );
+          await queue.sendOn(
+            db,
+            PROVISION_TWILIO_JOB_TYPE,
+            payload,
+            `provision-twilio-change-${tenantId}-${newNumber.replace(/\D/g, '')}`,
+          );
+          return { status: 200, body: { ok: true, enqueued: true, phoneNumber: newNumber } };
+        });
+        res.status(reply.status).json(reply.body);
       } catch (error: unknown) {
         res.status(500).json({
           error: 'PHONE_CHANGE_FAILED',
