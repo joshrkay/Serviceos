@@ -2,7 +2,9 @@
 // business details (EIN encrypted before it is stored), queue the async
 // worker, and project the status the Settings → Phone panel shows.
 
+import type { Pool } from 'pg';
 import { encrypt } from '../../crypto';
+import { withTenantClient } from '../../../db/tenant-transaction';
 import type { Queue } from '../../../queues/queue';
 import { AuditRepository, createAuditEvent } from '../../../audit/audit';
 import { ConflictError } from '../../../shared/errors';
@@ -42,6 +44,16 @@ export function createA2pRegistrationService(deps: {
   queue: Queue;
   auditRepo: AuditRepository;
   encryptionKey: string;
+  /**
+   * The database, so the worker's job row goes in on the tenant client
+   * (`withTenantClient` → `queue.sendOn`, P0-009): inside a request that is the
+   * request transaction, which the store and the audit write join too.
+   * Required, with no `queue.send` fallback: a service built without it would
+   * commit the job on the queue's own connection again, and a submission that
+   * then rolled back would still go to the carriers. Tests over the in-memory
+   * store pass a stand-in (InMemoryQueue.sendOn ignores the client).
+   */
+  pool: Pool;
 }) {
   async function view(tenantId: string): Promise<A2pRegistrationView> {
     const row = await deps.store.get(tenantId);
@@ -84,12 +96,6 @@ export function createA2pRegistrationService(deps: {
       einEnc: encrypt(ein, deps.encryptionKey),
       einLast4: ein.slice(-4),
     });
-    const payload: A2pRegistrationJobPayload = { tenantId, poll: 0 };
-    await deps.queue.send(
-      A2P_REGISTRATION_JOB_TYPE,
-      payload,
-      `a2p-10dlc-${tenantId}-${saved.submittedAt.getTime()}-0`,
-    );
     await deps.auditRepo.create(
       createAuditEvent({
         tenantId,
@@ -101,6 +107,15 @@ export function createA2pRegistrationService(deps: {
         // Deliberately no EIN (not even last four) and no contact PII.
         metadata: { resubmission: existing !== null, businessType: details.businessType },
       }),
+    );
+    // After the audit row, and on the submission's transaction: `queue.send`
+    // committed the job on its own connection before the audit write, so a
+    // submission that then rolled back still went to the carriers, and the
+    // owner's retry (a new submission time, a new key) enqueued a second job.
+    const payload: A2pRegistrationJobPayload = { tenantId, poll: 0 };
+    const key = `a2p-10dlc-${tenantId}-${saved.submittedAt.getTime()}-0`;
+    await withTenantClient(deps.pool, tenantId, (client) =>
+      deps.queue.sendOn(client, A2P_REGISTRATION_JOB_TYPE, payload, key),
     );
     return view(tenantId);
   }

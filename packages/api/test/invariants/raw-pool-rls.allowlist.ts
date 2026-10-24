@@ -53,7 +53,12 @@ export interface RawPgSite {
   readonly category: RawPgCategory;
   /** Tables the function's SQL touches. The guard checks the SQL against this list. */
   readonly tables: readonly string[];
-  /** The SQL names its table through a template substitution (`FROM "<table>"`); the why must say so. */
+  /**
+   * The SQL's tables cannot be read statically: it names a table through a
+   * template substitution (`FROM "<table>"`), or its text is not a literal (a
+   * caller-supplied `sql`, a string a function builds). `tables` is then by
+   * review, and the why must say the SQL is dynamic.
+   */
   readonly dynamicSql?: true;
   /** Why this is acceptable today (>= 40 chars). */
   readonly why: string;
@@ -61,8 +66,10 @@ export interface RawPgSite {
   readonly migrateBy?: string;
   /**
    * Checkouts and helper calls: every function (by the callee's text, e.g.
-   * `watchSessionLease`, `this.ensureTable`) the client is handed to, and any
-   * other escape (`<alias x>`, `<object>`, `<return>`, `callback <text>`).
+   * `watchSessionLease`, `this.ensureTable`) the client is handed to, where
+   * each such function hands it on (`runSteps > tryConsumeOn`), and any other
+   * escape (`<alias x>`, `<object>`, `<return>`, `<closure>` for a function
+   * over the client that is passed, returned or stored, `callback <text>`).
    * Exact: a new handoff and a stale one both fail.
    */
   readonly handsOffTo?: readonly string[];
@@ -88,8 +95,12 @@ export interface SanctionedHelper {
 export const SANCTIONED_HELPERS: readonly SanctionedHelper[] = [
   {
     file: 'src/db/migrate.ts', fn: 'runMigrations', access: 'pool.connect', count: 1,
-    handsOffTo: ['runMigrationsOnClient', 'verifyCriticalConstraints'],
-    why: 'The migrator runs DDL as the privileged owner by design (it creates the roles and the policies) on a direct-pool client handed to runMigrationsOnClient and, on the duplicate-policy recovery path, verifyCriticalConstraints. It never reads tenant rows.',
+    handsOffTo: [
+      'runMigrationsOnClient', 'runMigrationsOnClient > <closure>', 'runMigrationsOnClient > applyMigrations',
+      'runMigrationsOnClient > withMigrationAdvisoryLock', 'verifyCriticalConstraints',
+      'verifyCriticalConstraints > findMissingCriticalConstraints',
+    ],
+    why: 'The migrator runs DDL as the privileged owner by design (it creates the roles and the policies) on a direct-pool client handed to runMigrationsOnClient (withMigrationAdvisoryLock(client, () => applyMigrations(client))) and, on the duplicate-policy recovery path, verifyCriticalConstraints (its findMissingCriticalConstraints catalog read). It never reads tenant rows.',
   },
   {
     file: 'src/db/pg-base.ts', fn: 'PgBaseRepository.withTenantTransaction', access: 'pool.connect', count: 1,
@@ -130,13 +141,13 @@ export const SANCTIONED_HELPERS: readonly SanctionedHelper[] = [
   },
   {
     file: 'src/db/tenant-transaction.ts', fn: 'PgTenantTransactionRunner.run', access: 'pool.connect', count: 1,
-    contextFirst: true, handsOffTo: ['<object>'],
-    why: 'The savepoint/advisory-lock unit of work: BEGIN + applyTenantContext, then the client goes into the TenantContext object published to tenantContextStore for the repositories inside fn.',
+    contextFirst: true, handsOffTo: ['<closure>', '<object>'],
+    why: "The savepoint/advisory-lock unit of work: BEGIN + applyTenantContext, then the client goes into the TenantContext object published to tenantContextStore for the repositories inside fn, and the TransactionScope's lock/savepoint closures run their SQL on it inside fn.",
   },
   {
     file: 'src/middleware/tenant-context.ts', fn: 'withTenantTransaction', access: 'pool.connect', count: 1,
-    contextFirst: true, handsOffTo: ['<object>'],
-    why: 'The /api request middleware: checks out the request client, BEGIN + applyTenantContext, then publishes it in the TenantContext object to tenantContextStore. The same file also holds a listed pre-tenant lookup.',
+    contextFirst: true, handsOffTo: ['<closure>', '<object>'],
+    why: "The /api request middleware: checks out the request client, BEGIN + applyTenantContext, then publishes it in the TenantContext object to tenantContextStore; the COMMIT/ROLLBACK + release closures (cleanup, releaseOnce) run from res.end and the response's finish/close listeners. The same file also holds a listed pre-tenant lookup.",
   },
   {
     file: 'src/workers/tenant-query.ts', fn: 'tenantQuery', access: 'pool.connect', count: 1,
@@ -366,7 +377,8 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
   {
     file: 'src/demo/reset.ts', fn: 'claimLease', access: 'checkout-callback', count: 1,
     category: 'platform_constant_exception', tables: ['demo_tenant_leases', 'audit_events'], handsOffTo: ['writePlatformAudit'],
-    why: "The reset claim on inPlatformTransaction's client: the claimSql UPDATE of the RLS-exempt lease row (by server-held lease id) and writePlatformAudit's audit_events row pinned to DEMO_PLATFORM_TENANT_ID.",
+    dynamicSql: true,
+    why: "The reset claim on inPlatformTransaction's client: the claimSql UPDATE of the RLS-exempt lease row (by server-held lease id) and writePlatformAudit's audit_events row pinned to DEMO_PLATFORM_TENANT_ID. The SQL is dynamic only in that claimSql(source) returns it: a fixed UPDATE demo_tenant_leases plus a source-chosen literal predicate (tables by review).",
   },
   {
     file: 'src/demo/reset.ts', fn: 'takeOverStaleReset', access: 'checkout-callback', count: 1,
@@ -433,13 +445,16 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
   {
     file: 'src/demo/service.ts', fn: 'settle', access: 'checkout-callback', count: 1,
     category: 'platform_constant_exception', tables: ['demo_tenant_leases', 'demo_calls', 'demo_call_budget', 'audit_events'],
-    handsOffTo: ['releaseNoCall', 'writePlatformAudit'],
-    why: "Settles a public demo call on inPlatformTransaction's client: lease/demo_calls/demo_call_budget updates by server-held ids and writePlatformAudit rows pinned to DEMO_PLATFORM_TENANT_ID. The visitor never supplies a tenant id.",
+    handsOffTo: ['releaseNoCall', 'releaseNoCall > releaseOn', 'releaseNoCall > writePlatformAudit', 'writePlatformAudit'],
+    why: "Settles a public demo call on inPlatformTransaction's client: lease/demo_calls/demo_call_budget updates by server-held ids (releaseNoCall's releaseOn returns the allowance) and writePlatformAudit rows pinned to DEMO_PLATFORM_TENANT_ID. The visitor never supplies a tenant id.",
   },
   {
     file: 'src/demo/start-transaction.ts', fn: 'runStartTransaction', access: 'pool.connect', count: 1,
     category: 'platform_constant_exception', tables: ['phone_rate_limits', 'leads', 'audit_events', 'tenants', 'demo_tenant_leases', 'demo_call_budget', 'demo_calls'],
-    handsOffTo: ['runSteps', 'setPlatformTenantContext'],
+    handsOffTo: [
+      'runSteps', 'runSteps > captureVisitorLead', 'runSteps > reserve', 'runSteps > tryConsumeOn',
+      'runSteps > writePlatformAudit', 'setPlatformTenantContext',
+    ],
     why: "The demo-call start transaction runs as the principal with the platform tenant's GUC and no role (the runtime role has no grant on the lease table). runSteps writes the allowance, lead, budget and demo_calls rows pinned to DEMO_PLATFORM_TENANT_ID and hands takeLease to the caller's steps (startDemoCall's entry).",
   },
 
@@ -641,8 +656,8 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
   },
   {
     file: 'src/proposals/execution/idempotency-lock.ts', fn: 'PgIdempotencyLockProvider.withLock', access: 'pool.connect', count: 1,
-    category: 'global_table', tables: [], handsOffTo: ['watchSessionLease'],
-    why: "Raw-checkout helper: a session advisory lock keyed by sha256(tenantId\\0idempotencyKey) on a directPool checkout (no table), watchSessionLease on the client's error/end, then fn(client, lease) — the caller's callback, listed per caller (IdempotencyGuard.checkAndExecute).",
+    category: 'global_table', tables: [], handsOffTo: ['<closure>', 'watchSessionLease', 'watchSessionLease > <closure>'],
+    why: "Raw-checkout helper: a session advisory lock keyed by sha256(tenantId\\0idempotencyKey) on a directPool checkout (no table), watchSessionLease on the client's error/end (its stopWatching closure detaches them), then runWithSessionLease(lease, () => fn(client, lease)) — the caller's callback, listed per caller (IdempotencyGuard.checkAndExecute).",
   },
   {
     file: 'src/public-intake/public-business-info.ts', fn: 'resolvePublicBusinessPhone', access: 'pool.query', count: 1,
@@ -740,36 +755,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     why: "Request-client read of the tenant's twilio tenant_integrations row under the /api withTenantTransaction middleware. The pool fallback is latent only.",
   },
   {
-    file: 'src/routes/onboarding.ts', fn: 'POST /phone/retry', access: 'ambient-or-pool', count: 1,
-    category: 'tenant_context_applied', tables: ['tenant_integrations'],
-    why: 'Request-client status read under the /api middleware, WHERE tenant_id = req.auth.tenantId. The pool fallback is latent only; db also goes to isBillingLive and markPickPending (the pool-escape entry below).',
-  },
-  {
-    file: 'src/routes/onboarding.ts', fn: 'POST /phone/retry', access: 'pool-escape', count: 2,
-    category: 'tenant_context_applied', tables: ['tenants', 'tenant_integrations'],
-    why: "db (request client, ?? pool) goes into isBillingLive (SELECT subscription_status FROM tenants WHERE id = $1) and markPickPending (tenant_integrations upsert for the auth tenant), whose { query } parameters the typed rule cannot classify.",
-  },
-  {
-    file: 'src/routes/onboarding.ts', fn: 'POST /phone/claim', access: 'ambient-or-pool', count: 1,
-    category: 'tenant_context_applied', tables: ['tenant_integrations'],
-    why: 'Owner-only request-client status read under the /api middleware, WHERE tenant_id = req.auth.tenantId. The pool fallback is latent only; db also goes to isBillingLive and markPickPending (pool-escape below).',
-  },
-  {
-    file: 'src/routes/onboarding.ts', fn: 'POST /phone/claim', access: 'pool-escape', count: 2,
-    category: 'tenant_context_applied', tables: ['tenants', 'tenant_integrations'],
-    why: "db (request client, ?? pool) goes into isBillingLive (tenants registry read) and markPickPending (tenant_integrations upsert for the auth tenant) through structural { query } parameters, under the /api middleware.",
-  },
-  {
-    file: 'src/routes/onboarding.ts', fn: 'POST /phone/change', access: 'ambient-or-pool', count: 2,
-    category: 'tenant_context_applied', tables: ['tenant_integrations'],
-    why: 'Owner-only request-client read of the twilio row plus a compare-and-set UPDATE (pendingChange) under the /api middleware, both WHERE tenant_id = req.auth.tenantId; db also goes to isBillingLive (pool-escape below).',
-  },
-  {
-    file: 'src/routes/onboarding.ts', fn: 'POST /phone/change', access: 'pool-escape', count: 1,
-    category: 'global_table', tables: ['tenants'],
-    why: "db (request client, ?? pool) goes into isBillingLive's structural { query } parameter: SELECT subscription_status FROM tenants WHERE id = $1 for the auth tenant. tenants has no RLS.",
-  },
-  {
     file: 'src/routes/onboarding.ts', fn: 'POST /calendar/choose', access: 'ambient-or-pool', count: 1,
     category: 'tenant_context_applied', tables: ['tenant_settings'],
     why: 'Owner-only request-client UPDATE of calendar_provider under the /api withTenantTransaction middleware, tenant from req.auth.tenantId. The pool fallback is latent only.',
@@ -838,8 +823,8 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
   },
   {
     file: 'src/shared/pg-vertical-pack-registry.ts', fn: 'PgVerticalPackRegistry.update', access: 'withClient', count: 1,
-    category: 'global_table', tables: ['vertical_packs'],
-    why: 'Updates a global pack-catalog row by id. Its only callers (activatePackStatus/deprecatePack) have no callers themselves; a global mutation that must stay platform-admin-gated if ever wired.',
+    category: 'global_table', tables: ['vertical_packs'], dynamicSql: true,
+    why: 'Updates a global pack-catalog row by id. The SQL is dynamic: UPDATE vertical_packs SET <setClauses joined> is built from column = $n literals for the fields present, so its tables are by review (vertical_packs only). Its only callers (activatePackStatus/deprecatePack) have no callers themselves; a global mutation that must stay platform-admin-gated if ever wired.',
   },
 
   // ── telephony/ ─────────────────────────────────────────────────────────
@@ -892,7 +877,8 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
   },
   {
     file: 'src/tenants/deprovision.ts', fn: 'deprovisionTenant', access: 'pool.connect', count: 1,
-    category: 'cross_tenant_intentional', tables: ['files', 'tenants'], dynamicSql: true, handsOffTo: ['purgeTenantRows'],
+    category: 'cross_tenant_intentional', tables: ['files', 'tenants'], dynamicSql: true,
+    handsOffTo: ['purgeTenantRows', 'purgeTenantRows > deleteBatch', 'purgeTenantRows > isPool', 'purgeTenantRows > listTenantTables'],
     migrateBy: 'audit 2026-10-23 §4 P3.3',
     why: 'Privileged single-tenant purge: BEGIN; SET LOCAL session_replication_role = replica (needs a superuser-class principal, so it cannot run as rls_app_runtime), files harvest, purgeTenantRows (dynamic DELETE FROM "<table>" WHERE tenant_id = $1 per tenant_id table) and the tenants delete, all keyed on one UUID-validated tenant. Attribution (applyCrossTenantRole) is P3.3.',
   },
@@ -993,12 +979,12 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
   {
     file: 'src/voice/voice-config.ts', fn: 'saveVoiceConfig', access: 'pool.query', count: 2,
     category: 'tenant_context_applied', tables: ['tenant_settings'],
-    why: "Its only caller (PUT /api/onboarding/voice) passes currentTenantContext()?.client cast to Pool, so both tenant_settings statements run on the request client. The Pool-typed parameter is a latent trap for a future raw caller.",
+    why: "Its only caller (PUT /api/onboarding/voice) passes db = currentTenantContext()?.client ?? pool, cast to Pool. The route is under the /api withTenantTransaction middleware and on neither skip list, so in a served request db is the request client and both tenant_settings statements run under applyTenantContext. With no tenant context active (the route moved onto a skip list, the middleware not mounted) it falls back to the raw principal pool, where WHERE tenant_id = $1 is the only boundary: latent, like the other onboarding ?? pool entries. A second caller passing a real Pool would be the same, and is not a site of its own.",
   },
   {
     file: 'src/voice/voice-config.ts', fn: 'refreshVapiFirstMessage', access: 'pool.query', count: 1,
     category: 'tenant_context_applied', tables: ['tenant_settings'],
-    why: "Both callers (PATCH /api/settings/language after commit, and scripts/backfill-vapi-assistant-notice.ts) pass { query } wrapping tenantQuery(pool, tenantId, …), so the tenant_settings read runs under rls_app_runtime for that tenant. The Pick<Pool, 'query'> parameter is a latent trap for a future raw caller.",
+    why: "Its one caller, the PATCH /api/settings/language after-commit re-push (routes/settings.ts), passes { query } wrapping tenantQuery(pool, tenantId, …), so the tenant_settings read runs under rls_app_runtime for that tenant. (scripts/backfill-vapi-assistant-notice.ts runs the same read through tenantQuery itself and does not call this.) The Pick<Pool, 'query'> parameter is a latent trap for a future raw caller.",
   },
   {
     file: 'src/voice/voice-gate.ts', fn: 'createVoiceGate', access: 'pool.query', count: 2,
@@ -1131,8 +1117,8 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
   },
   {
     file: 'src/workers/leader-tick.ts', fn: 'runLeaderGatedTick', access: 'pool.connect', count: 1,
-    category: 'global_table', tables: [], handsOffTo: ['watchSessionLease'],
-    why: "Dedicated lockPool client for the leader pg_try_advisory_lock / pg_advisory_unlock only (watchSessionLease listens on its error/end); no table. The work itself runs separately.",
+    category: 'global_table', tables: [], handsOffTo: ['watchSessionLease', 'watchSessionLease > <closure>'],
+    why: "Dedicated lockPool client for the leader pg_try_advisory_lock / pg_advisory_unlock only (watchSessionLease listens on its error/end; its stopWatching closure detaches them); no table. The work itself runs separately.",
   },
   {
     file: 'src/workers/overage-settlement-reconciliation.ts', fn: 'listStaleSettlements', access: 'pool.query', count: 1,
