@@ -3,7 +3,7 @@
  * independent email channel, the per-channel idempotency keys, and (T4-F01)
  * the claim-before-send gate + the no-longer-silent failure path (R5).
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import type { Pool, QueryResult } from 'pg';
 import { sendCustomerMessage } from '../../src/notifications/customer-message-delivery';
 import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
@@ -13,8 +13,9 @@ import { InMemoryDispatchRepository } from '../../src/notifications/dispatch-rep
 import { InMemoryDncRepository, normalizePhone } from '../../src/compliance/dnc';
 import { Customer } from '../../src/customers/customer';
 import type { Logger } from '../../src/logging/logger';
+import { fakeTenantPool } from '../helpers/fake-tenant-pool';
 
-const TENANT = 'tenant-1';
+const TENANT = '0f0e0d0c-0000-4000-8000-00000000000c';
 
 function makeCustomer(overrides: Partial<Customer> = {}): Customer {
   return {
@@ -125,7 +126,7 @@ function claimAwarePool(claims: Map<string, ClaimRow> = new Map()): { pool: Pool
     }
     return { rows: [], rowCount: 0 } as unknown as QueryResult;
   });
-  return { pool: { query } as unknown as Pool, claims };
+  return { pool: fakeTenantPool(query).pool, claims };
 }
 
 const baseInput = {

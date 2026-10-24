@@ -17,8 +17,9 @@ import { Estimate, InMemoryEstimateRepository } from '../../src/estimates/estima
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { buildLineItem, calculateDocumentTotals, LineItem } from '../../src/shared/billing-engine';
 import type { SendService } from '../../src/notifications/send-service';
+import { fakeTenantPool } from '../helpers/fake-tenant-pool';
 
-const TENANT = 't-1';
+const TENANT = '0f0e0d0c-0000-4000-8000-00000000000b';
 const ESTIMATE_ID = '3f9d1f2e-1111-4222-8333-444455556666';
 const NOW = new Date('2026-06-10T18:00:00Z');
 
@@ -92,7 +93,7 @@ function claimAwarePool(claims: Map<string, ClaimRow> = new Map()): { pool: Pool
     }
     return { rows: [], rowCount: 0 } as unknown as QueryResult;
   });
-  return { pool: { query } as unknown as Pool, claims };
+  return { pool: fakeTenantPool(query).pool, claims };
 }
 
 function makeSendService(): Pick<SendService, 'sendEstimate'> & {

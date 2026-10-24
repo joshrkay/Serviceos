@@ -161,6 +161,19 @@ deliberate cross-tenant sweep, a platform-constant write) add an entry:
   to a lone read, so fold neighbouring reads into the one tenant session
   instead of wrapping each.
 - `why` is ≥ 40 characters and says why it is acceptable *today*.
+- Keep the commit point the raw statement had. A bare `pool.query` commits on
+  a connection of its own, even inside a request; `withTenantClient` would
+  move it into the request transaction. Where that matters — the send-claim
+  ledger (batch 2, P1.6): a claim stands if the request rolls back, and
+  `'sending'` is durable before the provider call — use `withTenantSession`
+  / `withTenantConnection`, and pin it: another connection sees each step's
+  row before the next step, the rows survive the request's ROLLBACK, the
+  request client runs none of the statements
+  (`test/integration/send-claim-ledger-tenant-context.test.ts`).
+- An INSERT has no `tenant_id = $n` pin to widen; its backstop is the
+  policy's WITH CHECK. Probe it by re-stamping the VALUES tenant with the
+  other tenant (`restampClaims` in the same suite): refused under the role,
+  landed as the principal (the control).
 
 ### Checkouts and callbacks: who gets the client
 

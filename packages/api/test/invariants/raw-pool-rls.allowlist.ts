@@ -168,7 +168,7 @@ export const TABLES_WITHOUT_MIGRATION: ReadonlyArray<{ readonly table: string; r
  * The `tenant_filtered_no_rls` debt, frozen. Migrating one means deleting its
  * entry and LOWERING this number; adding one means raising it, in review.
  */
-export const TFNR_CEILING = 29;
+export const TFNR_CEILING = 24;
 
 export const RAW_PG_SITES: readonly RawPgSite[] = [
   // ── ai/ ────────────────────────────────────────────────────────────────
@@ -567,36 +567,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/notifications/lifecycle-email.ts', fn: 'releaseLifecycleEmail', access: 'pool.query', count: 1,
     category: 'tenant_filtered_no_rls', tables: ['lifecycle_emails'], migrateBy: 'audit 2026-10-23 §4 P2.4',
     why: 'Transport-failure release: DELETE FROM lifecycle_emails WHERE tenant_id = $1 AND kind = $2 for the tenant that just claimed it, as the principal.',
-  },
-  {
-    file: 'src/notifications/send-claim-ledger.ts', fn: 'claimSend', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['send_claims'], migrateBy: 'audit 2026-10-23 §4 P1.6',
-    why: 'The SMS send-claim ledger under every proposal-execution, drip, thank-you and transactional send: a bare pool.query keyed by (tenant_id, claim_key) with a server-derived tenant. It commits independently of the request on purpose (P1.6 decision pending).',
-  },
-  {
-    file: 'src/notifications/send-claim-ledger.ts', fn: 'markSendClaimSending', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['send_claims'], migrateBy: 'audit 2026-10-23 §4 P1.6',
-    why: 'Send-claim state flip WHERE tenant_id = $1 AND claim_key = $2 on FORCE-RLS send_claims, as the principal, with the same server-derived tenant as claimSend.',
-  },
-  {
-    file: 'src/notifications/send-claim-ledger.ts', fn: 'markSendClaimComplete', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['send_claims'], migrateBy: 'audit 2026-10-23 §4 P1.6',
-    why: 'Marks a send claim complete, tenant-filtered by the internal tenantId (withSendClaim, outbound-messaging), outside RLS.',
-  },
-  {
-    file: 'src/notifications/send-claim-ledger.ts', fn: 'releaseSendClaim', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['send_claims'], migrateBy: 'audit 2026-10-23 §4 P1.6',
-    why: 'Tenant-filtered DELETE of a send claim from withSendClaim on failure, as the principal (FORCE-RLS send_claims).',
-  },
-  {
-    file: 'src/notifications/send-claim-ledger.ts', fn: 'findStuckSendClaims', access: 'pool.query', count: 1,
-    category: 'cross_tenant_intentional', tables: ['send_claims'], migrateBy: 'audit 2026-10-23 §4 P3.4',
-    why: 'Operator-monitor sweep across all tenants with deliberately no tenant filter. It has no production caller (tests only): delete it, or wire it under withCrossTenantSweep (P3.4).',
-  },
-  {
-    file: 'src/notifications/send-claim-ledger.ts', fn: 'readSendClaimStatus', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['send_claims'], migrateBy: 'audit 2026-10-23 §4 P1.6',
-    why: 'Reads a send claim WHERE tenant_id = $1 AND claim_key = $2 with an internal tenantId (sendText, duplicateOutcome), as the principal.',
   },
 
   // ── onboarding/ ────────────────────────────────────────────────────────
