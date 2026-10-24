@@ -168,7 +168,7 @@ export const TABLES_WITHOUT_MIGRATION: ReadonlyArray<{ readonly table: string; r
  * The `tenant_filtered_no_rls` debt, frozen. Migrating one means deleting its
  * entry and LOWERING this number; adding one means raising it, in review.
  */
-export const TFNR_CEILING = 39;
+export const TFNR_CEILING = 37;
 
 export const RAW_PG_SITES: readonly RawPgSite[] = [
   // ── ai/ ────────────────────────────────────────────────────────────────
@@ -819,29 +819,19 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
 
   // ── telephony/ ─────────────────────────────────────────────────────────
   {
-    file: 'src/telephony/business-hours-loader.ts', fn: 'loadTenantBusinessHours', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P1.3',
-    why: 'business_hours/timezone FROM tenant_settings WHERE tenant_id = $1 on a (pool: Pool) helper: the inbound voice after-hours check (dialled-number tenant) and /api/analytics/voice-roi (JWT tenant, on a second connection).',
-  },
-  {
     file: 'src/telephony/twilio-webhook-credential.ts', fn: 'systemLookup', access: 'pool.connect', count: 1,
     category: 'global_table', tables: [],
-    why: 'Raw-checkout helper: BEGIN, the system_lookup GUC, then run(client) and COMMIT on a principal client. It reads no table itself; each caller is a checkout-callback entry with its own category (two pre-tenant lookups and findByTenant).',
+    why: 'Raw-checkout helper: BEGIN, the system_lookup GUC, then run(client) and COMMIT on a principal client. It reads no table itself; each caller is a checkout-callback entry with its own category (the two pre-tenant lookups; findByTenant reads under tenant context).',
   },
   {
     file: 'src/telephony/twilio-webhook-credential.ts', fn: 'systemLookup', access: 'guc-only', count: 1,
     category: 'pre_tenant_lookup', tables: ['tenant_integrations'],
-    why: "set_config('app.system_lookup','true',true) inside systemLookup's own transaction: the escape-hatch GUC for migration 074's permissive read policy. Transaction-local; moot on a BYPASSRLS principal. findByTenant runs under it too (P1.7).",
+    why: "set_config('app.system_lookup','true',true) inside systemLookup's own transaction: the escape-hatch GUC for migration 074's permissive read policy, for the two pre-tenant lookups only. Transaction-local; moot on a BYPASSRLS principal.",
   },
   {
     file: 'src/telephony/twilio-webhook-credential.ts', fn: 'findByPhoneNumber', access: 'checkout-callback', count: 1,
     category: 'pre_tenant_lookup', tables: ['tenant_integrations'],
     why: "Inbound Twilio webhook before HMAC verification: the dialled DID (normalised E.164) picks the twilio tenant_integrations row whose token verifies the signature; DIDs are unique across tenants (#1061). The tokens never leave the verifier.",
-  },
-  {
-    file: 'src/telephony/twilio-webhook-credential.ts', fn: 'findByTenant', access: 'checkout-callback', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_integrations'], migrateBy: 'audit 2026-10-23 §4 P1.7',
-    why: "The tenant is already known (a trusted voice-session tenant), yet the read runs on systemLookup's principal client under system_lookup: WHERE provider = 'twilio' AND tenant_id = $1 is the only boundary. Should use tenant context instead.",
   },
   {
     file: 'src/telephony/twilio-webhook-credential.ts', fn: 'findBySubaccount', access: 'checkout-callback', count: 1,

@@ -8,6 +8,7 @@ import express from 'express';
 import request from 'supertest';
 import twilio from 'twilio';
 import { createTelephonyRouter } from '../../src/routes/telephony';
+import { fakeTenantPool } from '../helpers/fake-tenant-pool';
 
 const AUTH_TOKEN = 'test-tw-stir-token';
 const PUBLIC_BASE_URL = 'https://api.test';
@@ -81,11 +82,12 @@ describe('#1223 — after-hours voicemail carries StirVerstat onto the signed ca
   it('threads the /voice verdict into the voicemail TwiML', async () => {
     const handleInbound = vi.fn();
     // Tenant hours: a one-minute window, so "now" is (almost surely) closed.
-    const pool = {
-      query: vi.fn(async () => ({
-        rows: [{ business_hours: { mon: { open: '00:00', close: '00:01' } }, timezone: 'UTC' }],
-      })),
-    };
+    // The read runs in its own tenant transaction (raw-pg audit §4 P1.3).
+    const { pool } = fakeTenantPool((sql) =>
+      sql.includes('FROM tenant_settings')
+        ? { rows: [{ business_hours: { mon: { open: '00:00', close: '00:01' } }, timezone: 'UTC' }] }
+        : undefined,
+    );
     const app = express();
     app.use(
       '/api/telephony',
@@ -95,7 +97,8 @@ describe('#1223 — after-hours voicemail carries StirVerstat onto the signed ca
         >[0]['adapter'],
         authTokenGetter: () => AUTH_TOKEN,
         publicBaseUrl: PUBLIC_BASE_URL,
-        resolveTenantId: () => 'tenant-1',
+        // A uuid: the after-hours read applies tenant context, which validates it.
+        resolveTenantId: () => '00000000-0000-4000-8000-000000001223',
         pool: pool as never,
         // #1595 / D-040 — AI answering is now the after-hours default, so the
         // voicemail branch this test exercises needs the explicit opt-out.

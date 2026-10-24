@@ -20,6 +20,7 @@ import express from 'express';
 import request from 'supertest';
 import twilio from 'twilio';
 import { createTelephonyRouter } from '../../src/routes/telephony';
+import { fakeTenantPool } from '../helpers/fake-tenant-pool';
 
 const AUTH_TOKEN = 'test-tw-after-hours-token';
 const PUBLIC_BASE_URL = 'https://api.test';
@@ -41,11 +42,13 @@ function makeApp(opts: {
   voiceGate?: RouterDeps['voiceGate'];
 }) {
   const handleInbound = vi.fn().mockResolvedValue('<Response><Gather/></Response>');
-  const pool = {
-    query: vi.fn(async () => ({
-      rows: [{ business_hours: ALWAYS_CLOSED, timezone: 'UTC' }],
-    })),
-  };
+  // The after-hours read runs in its own tenant transaction (raw-pg audit
+  // §4 P1.3): every statement but the business-hours SELECT is empty.
+  const { pool } = fakeTenantPool((sql) =>
+    sql.includes('FROM tenant_settings')
+      ? { rows: [{ business_hours: ALWAYS_CLOSED, timezone: 'UTC' }] }
+      : undefined,
+  );
   const settingsRepo = {
     findByTenant: async () => ({
       tenantId: TENANT_ID,
