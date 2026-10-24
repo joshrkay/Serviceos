@@ -206,7 +206,9 @@ deliberate cross-tenant sweep, a platform-constant write) add an entry:
   local (the mode loader, P2.1, swallows its errors into the supervisor
   default; the request then fails on its next statement). Pin both shapes
   with an express harness in the /api order
-  (`test/integration/user-mode-tenant-context.test.ts`).
+  (`test/integration/user-mode-tenant-context.test.ts`; resolveOwnerEmail's
+  three billing callers, P2.3, in
+  `test/integration/resolve-owner-email-tenant-context.test.ts`).
 
 ### Checkouts and callbacks: who gets the client
 

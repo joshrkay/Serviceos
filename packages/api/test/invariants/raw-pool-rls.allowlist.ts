@@ -168,7 +168,7 @@ export const TABLES_WITHOUT_MIGRATION: ReadonlyArray<{ readonly table: string; r
  * The `tenant_filtered_no_rls` debt, frozen. Migrating one means deleting its
  * entry and LOWERING this number; adding one means raising it, in review.
  */
-export const TFNR_CEILING = 17;
+export const TFNR_CEILING = 16;
 
 export const RAW_PG_SITES: readonly RawPgSite[] = [
   // ── ai/ ────────────────────────────────────────────────────────────────
@@ -230,11 +230,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/auth/platform-admin.ts', fn: 'revokePlatformAdmin', access: 'pool.connect', count: 1,
     category: 'global_table', tables: ['platform_admins'],
     why: 'Revoke from the global platform_admins table. No caller outside tests (audit §1.3 dead-code candidate, P4.2); no tenant data either way.',
-  },
-  {
-    file: 'src/auth/resolve-owner-email.ts', fn: 'resolveOwnerEmail', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['users', 'tenants'], migrateBy: 'audit 2026-10-23 §4 P2.3',
-    why: "Billing checkout/portal email lookup on a second pooled connection as the principal: users WHERE tenant_id = $1 AND clerk_user_id = $2, tenants WHERE id = $1, $1 = req.auth tenant. Should prefer the ambient request client.",
   },
 
   // ── availability/ ──────────────────────────────────────────────────────
