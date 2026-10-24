@@ -12,6 +12,7 @@ import { fakeTenantPool, type FakeTenantPool } from '../helpers/fake-tenant-pool
 const T1 = '00000000-0000-4000-8000-0000000ca7e1';
 
 interface MockOpts {
+  /** null with `noTenantRow` unset: a tenants row before checkout. */
   subscriptionStatus: string | null;
   voiceAgentLiveAt?: Date | null;
   pastDueGraceUntil?: Date | null;
@@ -22,45 +23,65 @@ interface MockOpts {
   openCalls?: number;
   billableSeconds?: number;
   period?: boolean;
+  /** No tenants row at all (an id the registry does not know). */
+  noTenantRow?: boolean;
   /** No tenant_settings row at all. */
   noSettingsRow?: boolean;
-  /** The tenant_settings read throws (a database error). */
+  /** Any statement that reads tenant_settings throws (a database error). */
   settingsReadFails?: boolean;
 }
 
+/**
+ * Answers the gate's statements. The decision's row is the tenants registry
+ * row joined to the tenant_settings row (`FROM tenants t LEFT JOIN
+ * tenant_settings s`); a separate `FROM tenant_settings` read gets the same
+ * settings columns, so a test that pins the statement shape fails on the
+ * shape, not on a missing answer.
+ */
 function mockFake(opts: MockOpts): FakeTenantPool {
   const liveAt = opts.voiceAgentLiveAt === undefined ? new Date() : opts.voiceAgentLiveAt;
+  const tenantCols = {
+    subscription_status: opts.subscriptionStatus,
+    plan_id: 'starter',
+    current_period_start: opts.period ? new Date('2026-10-01T00:00:00Z') : null,
+    current_period_end: opts.period ? new Date('2099-01-01T00:00:00Z') : null,
+    owner_id: null,
+    owner_email: null,
+    past_due_grace_until: opts.pastDueGraceUntil ?? null,
+  };
+  const settingsCols = opts.noSettingsRow
+    ? null
+    : {
+        voice_agent_live_at: liveAt,
+        owner_phone: opts.ownerPhone ?? null,
+        business_phone: opts.businessPhone ?? null,
+        business_hours: opts.businessHours ?? {},
+        timezone: opts.timezone === undefined ? 'America/Chicago' : opts.timezone,
+        ai_overage_cap_cents: null,
+        ai_overage_uncapped: false,
+      };
   return fakeTenantPool((sql) => {
+    if (opts.settingsReadFails && sql.includes('tenant_settings')) throw new Error('connection reset');
     if (sql.includes('FROM tenants')) {
+      if (opts.noTenantRow) return { rows: [] };
       return {
         rows: [
           {
-            subscription_status: opts.subscriptionStatus,
-            plan_id: 'starter',
-            current_period_start: opts.period ? new Date('2026-10-01T00:00:00Z') : null,
-            current_period_end: opts.period ? new Date('2099-01-01T00:00:00Z') : null,
-            past_due_grace_until: opts.pastDueGraceUntil ?? null,
-          },
-        ],
-      };
-    }
-    if (sql.includes('FROM tenant_settings')) {
-      if (opts.settingsReadFails) throw new Error('connection reset');
-      if (opts.noSettingsRow) return { rows: [] };
-      return {
-        rows: [
-          {
-            voice_agent_live_at: liveAt,
-            owner_phone: opts.ownerPhone ?? null,
-            business_phone: opts.businessPhone ?? null,
-            business_hours: opts.businessHours ?? {},
-            timezone: opts.timezone === undefined ? 'America/Chicago' : opts.timezone,
+            ...tenantCols,
+            has_settings: settingsCols !== null,
+            voice_agent_live_at: null,
+            owner_phone: null,
+            business_phone: null,
+            business_hours: null,
+            timezone: null,
             ai_overage_cap_cents: null,
-            ai_overage_uncapped: false,
+            ai_overage_uncapped: null,
+            ...(settingsCols ?? {}),
           },
         ],
       };
     }
+    if (sql.includes('FROM tenant_settings')) return { rows: settingsCols ? [settingsCols] : [] };
     if (sql.includes('FROM voice_sessions')) return { rows: [{ concurrent: opts.openCalls ?? 0 }] };
     if (sql.includes('FROM call_usage_events')) return { rows: [{ seconds: String(opts.billableSeconds ?? 0) }] };
     return undefined;
@@ -277,32 +298,34 @@ describe('createVoiceGate', () => {
 });
 
 /**
- * Raw-pg audit 2026-10-23 §4 P1.3 — the gate runs on every inbound call. The
- * tenants registry read decides billing on its own; every tenant-table read
- * the rest of the decision needs shares ONE tenant transaction (one
- * tenant_settings row for go-live, owner numbers, forward-to, the overage cap
- * and business hours), and the block audit is written only after that
- * transaction has released its connection.
+ * Raw-pg audit 2026-10-23 §4 P1.3 — the gate runs on every inbound call, so
+ * the whole decision is ONE tenant session: its first statement reads the
+ * tenants registry row (billing state) joined to the tenant_settings row
+ * (go-live, owner numbers, forward-to, the overage cap and business hours),
+ * the usage reads follow on the same client, and the block audit is written
+ * only after that session has released its connection.
  */
 describe('createVoiceGate — one tenant session per decision', () => {
-  const statementKinds = (fake: FakeTenantPool, checkout: number) =>
-    fake.statements.filter((s) => s.checkout === checkout).map((s) => s.sql.replace(/\s+/g, ' ').trim());
+  const statementsOf = (fake: FakeTenantPool) => fake.statements.map((s) => s.sql.replace(/\s+/g, ' ').trim());
+  const tablesRead = (fake: FakeTenantPool) => fake.work().map((s) => s.sql.match(/FROM (\w+)/)?.[1]);
+  const GATE_ROW = /FROM tenants t LEFT JOIN tenant_settings s ON s\.tenant_id = \$1 WHERE t\.id = \$1$/;
 
-  it('a live trial answer: the tenants read, then ONE checkout for settings, open calls and minutes', async () => {
+  it('a live trial answer: ONE checkout — the billing+settings row, then open calls and minutes', async () => {
     const fake = mockFake({ subscriptionStatus: 'trialing' });
     const result = await createVoiceGate({ pool: fake.pool, auditRepo: mockAudit() })({ tenantId: T1, callSid: 'CA1' });
 
     expect(result.allowed).toBe(true);
-    expect(fake.checkouts()).toBe(2);
+    expect(fake.checkouts()).toBe(1);
     expect(fake.open()).toBe(0);
-    expect(fake.work().map((s) => s.checkout)).toEqual([0, 1, 1, 1]);
-    expect(fake.work().filter((s) => s.sql.includes('FROM tenant_settings'))).toHaveLength(1);
-    const session = statementKinds(fake, 1);
-    expect(session[0]).toBe('BEGIN');
-    expect(session[1]).toContain("set_config('app.current_tenant_id'");
-    expect(session.at(-1)).toBe('COMMIT');
-    for (const s of fake.work().filter((w) => w.checkout === 1)) {
-      expect(s.sql).toContain('WHERE tenant_id = $1');
+    expect(tablesRead(fake)).toEqual(['tenants', 'voice_sessions', 'call_usage_events']);
+    const statements = statementsOf(fake);
+    expect(statements[0]).toBe('BEGIN');
+    expect(statements[1]).toContain("set_config('app.current_tenant_id'");
+    expect(statements[2]).toMatch(GATE_ROW);
+    expect(statements.at(-1)).toBe('COMMIT');
+    expect(statements).toHaveLength(6);
+    for (const s of fake.work()) {
+      expect(s.sql).toContain('tenant_id = $1');
       expect(s.values?.[0]).toBe(T1);
     }
   });
@@ -312,16 +335,49 @@ describe('createVoiceGate — one tenant session per decision', () => {
     const result = await createVoiceGate({ pool: fake.pool, auditRepo: mockAudit() })({ tenantId: T1, callSid: 'CA1' });
 
     expect(result.allowed).toBe(true);
-    expect(fake.checkouts()).toBe(2);
-    expect(fake.work().map((s) => s.sql.match(/FROM (\w+)/)?.[1])).toEqual(['tenants', 'tenant_settings', 'call_usage_events']);
+    expect(fake.checkouts()).toBe(1);
+    expect(tablesRead(fake)).toEqual(['tenants', 'call_usage_events']);
   });
 
-  it('no_billing is decided on the tenants read alone: no tenant session', async () => {
+  it('a paid answer without a mirrored period has nothing to measure: the row alone', async () => {
+    const fake = mockFake({ subscriptionStatus: 'active' });
+    const result = await createVoiceGate({ pool: fake.pool, auditRepo: mockAudit() })({ tenantId: T1, callSid: 'CA1' });
+
+    expect(result.allowed).toBe(true);
+    expect(tablesRead(fake)).toEqual(['tenants']);
+  });
+
+  it('no_billing is decided on the row alone; the audit follows the session', async () => {
     const fake = mockFake({ subscriptionStatus: null });
     const result = await createVoiceGate({ pool: fake.pool, auditRepo: mockAudit() })({ tenantId: T1, callSid: 'CA1' });
 
-    expect(result.reason).toBe('no_billing');
+    expect(result).toEqual({ allowed: false, reason: 'no_billing' });
     expect(fake.checkouts()).toBe(1);
+    expect(tablesRead(fake)).toEqual(['tenants']);
+  });
+
+  it('an id the tenants registry does not know is no_billing', async () => {
+    const audit = mockAudit();
+    const fake = mockFake({ subscriptionStatus: 'active', noTenantRow: true });
+    const result = await createVoiceGate({ pool: fake.pool, auditRepo: audit })({ tenantId: T1, callSid: 'CA1' });
+
+    expect(result).toEqual({ allowed: false, reason: 'no_billing' });
+    expect(audit.create).toHaveBeenCalledWith(
+      expect.objectContaining({ eventType: 'voice_blocked_no_billing', metadata: { reason: 'no_billing', subscriptionStatus: null } }),
+    );
+  });
+
+  it('a trialing tenant with no tenant_settings row is not live (no hours, no owner numbers)', async () => {
+    const fake = mockFake({ subscriptionStatus: 'trialing', noSettingsRow: true });
+    const result = await createVoiceGate({ pool: fake.pool, auditRepo: mockAudit() })({
+      tenantId: T1,
+      callSid: 'CA1',
+      from: '+14805550100',
+      stirVerstat: 'TN-Validation-Passed-A',
+    });
+
+    expect(result).toEqual({ allowed: false, reason: 'not_live' });
+    expect(tablesRead(fake)).toEqual(['tenants']);
   });
 
   it('the block audit is written after the tenant session has released its connection', async () => {
@@ -364,7 +420,7 @@ describe('createVoiceGate — one tenant session per decision', () => {
     const inGrace = (extra: Partial<MockOpts> = {}) =>
       mockFake({ subscriptionStatus: 'past_due', pastDueGraceUntil: new Date(Date.now() + 60_000), ...extra });
 
-    it('the hours come from the settings row, read in one tenant session (no go-live or usage reads)', async () => {
+    it('the hours come from the same row as the billing state: one statement, one session (no go-live or usage reads)', async () => {
       const fake = inGrace({ businessHours: { mon: { open: '08:00', close: '17:00' } }, voiceAgentLiveAt: null });
       const audit = mockAudit();
 
@@ -376,16 +432,14 @@ describe('createVoiceGate — one tenant session per decision', () => {
         businessHours: { timezone: 'America/Chicago', schedule: [{ dayOfWeek: 1, openTime: '08:00', closeTime: '17:00' }] },
       });
       expect(audit.create).not.toHaveBeenCalled();
-      expect(fake.checkouts()).toBe(2);
+      expect(fake.checkouts()).toBe(1);
       expect(fake.open()).toBe(0);
-      expect(fake.work().map((s) => [s.checkout, s.sql.match(/FROM (\w+)/)?.[1]])).toEqual([
-        [0, 'tenants'],
-        [1, 'tenant_settings'],
-      ]);
-      const session = statementKinds(fake, 1);
-      expect(session[0]).toBe('BEGIN');
-      expect(session[1]).toContain("set_config('app.current_tenant_id'");
-      expect(session.at(-1)).toBe('COMMIT');
+      const statements = statementsOf(fake);
+      expect(statements).toHaveLength(4);
+      expect(statements[0]).toBe('BEGIN');
+      expect(statements[1]).toContain("set_config('app.current_tenant_id'");
+      expect(statements[2]).toMatch(GATE_ROW);
+      expect(statements[3]).toBe('COMMIT');
     });
 
     it('no settings row → businessHours null (never after hours), still answered', async () => {
@@ -396,16 +450,20 @@ describe('createVoiceGate — one tenant session per decision', () => {
       expect(result).toEqual({ allowed: true, businessHours: null });
     });
 
-    it('a failed settings read still answers (grace fails open, as before) and leaves the hours to the route', async () => {
+    it('a failed read fails the gate closed (it throws; /voice sends voicemail), as a failed tenants read always did', async () => {
       const fake = inGrace({ settingsReadFails: true });
-      const result = await createVoiceGate({ pool: fake.pool, auditRepo: mockAudit() })({ tenantId: T1, callSid: 'CA1' });
+      const audit = mockAudit();
 
-      expect(result).toEqual({ allowed: true });
+      await expect(createVoiceGate({ pool: fake.pool, auditRepo: audit })({ tenantId: T1, callSid: 'CA1' })).rejects.toThrow(
+        'connection reset',
+      );
+      expect(statementsOf(fake).at(-1)).toBe('ROLLBACK');
       expect(fake.open()).toBe(0);
+      expect(audit.create).not.toHaveBeenCalled();
     });
   });
 
-  it('the #1605 owner bypass compares From with the same settings row (no second read)', async () => {
+  it('the #1605 owner bypass compares From with the same row: one statement, one session', async () => {
     const fake = mockFake({ subscriptionStatus: 'trialing', voiceAgentLiveAt: null, ownerPhone: '+14805550100' });
     const result = await createVoiceGate({ pool: fake.pool, auditRepo: mockAudit() })({
       tenantId: T1,
@@ -415,6 +473,19 @@ describe('createVoiceGate — one tenant session per decision', () => {
     });
 
     expect(result.allowed).toBe(true);
-    expect(fake.work().filter((s) => s.sql.includes('FROM tenant_settings'))).toHaveLength(1);
+    expect(fake.checkouts()).toBe(1);
+    expect(statementsOf(fake)).toHaveLength(4);
+    expect(tablesRead(fake)).toEqual(['tenants']);
+  });
+
+  it('not_live for any other caller: the session, then the audit', async () => {
+    const fake = mockFake({ subscriptionStatus: 'trialing', voiceAgentLiveAt: null, ownerPhone: '+14805550100' });
+    const audit = mockAudit();
+    const result = await createVoiceGate({ pool: fake.pool, auditRepo: audit })({ tenantId: T1, callSid: 'CA1', from: '+19995550111' });
+
+    expect(result).toEqual({ allowed: false, reason: 'not_live' });
+    expect(fake.checkouts()).toBe(1);
+    expect(tablesRead(fake)).toEqual(['tenants']);
+    expect(audit.create).toHaveBeenCalledOnce();
   });
 });

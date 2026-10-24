@@ -6,7 +6,11 @@ import { decideTrialCall, type GateReason, type SubscriptionStatus } from './tri
 import { sumBillableSecondsOn, sumTrialBillableSecondsOn } from '../billing/call-usage-events';
 import { overageCapFromSettings } from '../billing/overage-cap';
 import { isOverageCapReached } from '../billing/call-usage-pricing';
-import { readTenantBillingState, type TenantBillingState } from '../billing/tenant-billing-state';
+import {
+  tenantBillingStateFromRow,
+  type TenantBillingRow,
+  type TenantBillingState,
+} from '../billing/tenant-billing-state';
 import type { BusinessHoursConfig } from '../compliance/business-hours';
 import { withTenantClient } from '../db/tenant-transaction';
 import { businessHoursFromSettings } from '../telephony/business-hours-loader';
@@ -46,11 +50,11 @@ export interface VoiceGateResult {
   forwardTo?: string | null;
   /**
    * On an answer: the tenant_settings row's business hours (null = no usable
-   * schedule), so the /voice after-hours fork does not read the row a second
-   * time (raw-pg audit 2026-10-23 §4 P1.3: one tenant session per inbound
-   * call). Dunning grace reads that row too, for this alone. Absent only when
-   * a grace answer's settings read failed: the route then reads the hours
-   * itself (grace still answers).
+   * schedule, or no row), so the /voice after-hours fork does not read the row
+   * a second time (raw-pg audit 2026-10-23 §4 P1.3: one tenant session per
+   * inbound call). Every answer from createVoiceGate carries it, dunning grace
+   * included; optional for a gate that does not read settings, whose answer
+   * leaves the route to read the hours itself.
    */
   businessHours?: BusinessHoursConfig | null;
 }
@@ -70,45 +74,21 @@ export interface VoiceGateDeps {
  * owner (see VoiceGateResult.forwardTo).
  *
  * Cost per decision (raw-pg audit 2026-10-23 §4 P1.3 — this runs on every
- * inbound call): the tenants registry read (no RLS) decides billing on its
- * own; everything else is ONE tenant session (`withTenantClient`, so
- * `rls_app_runtime` and the RLS policies bound it) reading one tenant_settings
- * row for go-live, the owner numbers, forward-to, the overage cap and business
- * hours, plus the open-call count and the usage ledger. A dunning-grace answer
- * reads only that row, for its business hours. A block's audit row is written
- * after that session has released its connection.
+ * inbound call): ONE tenant session (`withTenantClient`, so `rls_app_runtime`
+ * and the RLS policies bound it). Its first statement reads the tenants
+ * registry row (billing state and dunning grace) joined to the tenant_settings
+ * row (go-live, the owner numbers, forward-to, the overage cap and business
+ * hours); a trialing or active decision then reads the open-call count and the
+ * usage ledger on the same client. Dunning grace, no_billing and not_live are
+ * decided on that one row. A failed read fails the gate (the route sends the
+ * call to voicemail), as a failed tenants read always did. A block's audit row
+ * is written after that session has released its connection.
  */
 export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
-  return async ({ tenantId, callSid, from, stirVerstat }) => {
-    const tenant = await readTenantBillingState(deps.pool, tenantId);
-    const rawStatus = tenant?.status ?? null;
-    const status = normalizeStatus(rawStatus);
-
-    // Billing resilience — dunning grace (Part A). A card that fails at
-    // trial end flips the mirrored status to past_due; instead of
-    // hard-blocking to voicemail immediately, we answer while the grace
-    // window stamped by invoice.payment_failed is still in the future. The
-    // account stays flagged past_due in subscription_status the whole time,
-    // and once the grace lapses the gate below blocks as before.
-    if (status === 'past_due' && isPastDueGraceActive(tenant?.pastDueGraceUntil ?? null)) {
-      return answerInGrace(deps, tenantId);
-    }
-
-    if (status !== 'trialing' && status !== 'active') {
-      return block(deps, {
-        tenantId,
-        callSid,
-        reason: 'no_billing',
-        rawStatus,
-        usage: null,
-      });
-    }
-
-    const decision = await withTenantClient(deps.pool, tenantId, (client) =>
-      decideForTenant(client, { tenantId, status, tenant, from, stirVerstat }),
-    );
+  return async (input) => {
+    const decision = await withTenantClient(deps.pool, input.tenantId, (client) => decideForTenant(client, input));
     if (decision.answer) return decision.answer;
-    return block(deps, { tenantId, callSid, rawStatus, ...decision.blocked });
+    return block(deps, { tenantId: input.tenantId, callSid: input.callSid, ...decision.blocked });
   };
 }
 
@@ -122,61 +102,87 @@ interface GateSettingsRow {
   ai_overage_uncapped: boolean | null;
 }
 
-/** The one tenant_settings read behind every answer (the decision's row). */
-async function readGateSettings(client: PoolClient, tenantId: string): Promise<GateSettingsRow | undefined> {
-  const res = await client.query<GateSettingsRow>(
-    `SELECT voice_agent_live_at, owner_phone, business_phone, business_hours, timezone,
-            ai_overage_cap_cents, ai_overage_uncapped
-       FROM tenant_settings WHERE tenant_id = $1`,
-    [tenantId],
-  );
-  return res.rows[0];
-}
+/** The decision's row: the tenants columns, and the settings columns (null without a settings row). */
+type GateRow = TenantBillingRow & GateSettingsRow & { has_settings: boolean };
 
 /**
- * Dunning grace answers without the go-live and usage questions, but /voice
- * still forks on business hours: read them from the same settings row, in
- * the same one-tenant-session shape, so the route reads nothing itself. A
- * failed read still answers — grace failed open on the hours before, when the
- * route read them — and leaves the hours to the route's own read.
+ * The one read behind every decision. tenants has no RLS (rls_app_runtime
+ * holds SELECT on it); the settings join pins tenant_id to the parameter like
+ * every other tenant-table read, with the tenant_settings policy under it.
  */
-async function answerInGrace(deps: VoiceGateDeps, tenantId: string): Promise<VoiceGateResult> {
-  try {
-    const settings = await withTenantClient(deps.pool, tenantId, (client) => readGateSettings(client, tenantId));
-    return { allowed: true, businessHours: settings ? businessHoursFromSettings(settings) : null };
-  } catch {
-    return { allowed: true };
-  }
+async function readGateRow(
+  client: PoolClient,
+  tenantId: string,
+): Promise<{ tenant: TenantBillingState | null; settings: GateSettingsRow | undefined }> {
+  const res = await client.query<GateRow>(
+    `SELECT t.subscription_status, t.plan_id, t.current_period_start, t.current_period_end,
+            t.owner_id, t.owner_email, t.past_due_grace_until,
+            s.tenant_id IS NOT NULL AS has_settings,
+            s.voice_agent_live_at, s.owner_phone, s.business_phone, s.business_hours, s.timezone,
+            s.ai_overage_cap_cents, s.ai_overage_uncapped
+       FROM tenants t
+       LEFT JOIN tenant_settings s ON s.tenant_id = $1
+      WHERE t.id = $1`,
+    [tenantId],
+  );
+  const row = res.rows.at(0);
+  if (!row) return { tenant: null, settings: undefined };
+  return {
+    tenant: tenantBillingStateFromRow(row),
+    settings: row.has_settings
+      ? {
+          voice_agent_live_at: row.voice_agent_live_at,
+          owner_phone: row.owner_phone,
+          business_phone: row.business_phone,
+          business_hours: row.business_hours,
+          timezone: row.timezone,
+          ai_overage_cap_cents: row.ai_overage_cap_cents,
+          ai_overage_uncapped: row.ai_overage_uncapped,
+        }
+      : undefined,
+  };
 }
 
 type TenantDecision =
   | { answer: VoiceGateResult; blocked?: undefined }
   | {
       answer?: undefined;
-      blocked: { reason: GateReason; usage: Record<string, number> | null; forwardTo?: string | null };
+      blocked: {
+        reason: GateReason;
+        rawStatus: string | null;
+        usage: Record<string, number> | null;
+        forwardTo?: string | null;
+      };
     };
 
 /**
- * Every tenant-table read behind a trialing/active decision, on the one
- * tenant-scoped client. Reads only — the block audit is the caller's, after
- * this transaction commits.
+ * Every read behind a decision, on the one tenant-scoped client. Reads only —
+ * the block audit is the caller's, after this transaction commits.
  */
-async function decideForTenant(
-  client: PoolClient,
-  input: {
-    tenantId: string;
-    status: 'trialing' | 'active';
-    tenant: TenantBillingState | null;
-    from?: string | null;
-    stirVerstat?: string | null;
-  },
-): Promise<TenantDecision> {
-  const { tenantId, status, tenant } = input;
-  const settings = await readGateSettings(client, tenantId);
+async function decideForTenant(client: PoolClient, input: VoiceGateInput): Promise<TenantDecision> {
+  const { tenantId } = input;
+  const { tenant, settings } = await readGateRow(client, tenantId);
+  const rawStatus = tenant?.status ?? null;
+  const status = normalizeStatus(rawStatus);
   const answer: VoiceGateResult = {
     allowed: true,
     businessHours: settings ? businessHoursFromSettings(settings) : null,
   };
+
+  // Billing resilience — dunning grace (Part A). A card that fails at
+  // trial end flips the mirrored status to past_due; instead of
+  // hard-blocking to voicemail immediately, we answer while the grace
+  // window stamped by invoice.payment_failed is still in the future. The
+  // account stays flagged past_due in subscription_status the whole time,
+  // and once the grace lapses the gate below blocks as before. Grace answers
+  // without the go-live and usage questions; its hours come from the row.
+  if (status === 'past_due' && isPastDueGraceActive(tenant?.pastDueGraceUntil ?? null)) {
+    return { answer };
+  }
+
+  if (status !== 'trialing' && status !== 'active') {
+    return { blocked: { reason: 'no_billing', rawStatus, usage: null } };
+  }
 
   if (!settings?.voice_agent_live_at) {
     // #1605 — the onboarding test-call step can only complete when a
@@ -203,7 +209,7 @@ async function decideForTenant(
     if (isOwnerLineAttested(input.stirVerstat) && isOwnersOwnNumber(input.from, settings)) {
       return { answer };
     }
-    return { blocked: { reason: 'not_live', usage: null } };
+    return { blocked: { reason: 'not_live', rawStatus, usage: null } };
   }
 
   // #1386 / O-2 (owner, 2026-09-26) — a missing reviewed E1 script is NOT a
@@ -229,7 +235,7 @@ async function decideForTenant(
       concurrentCalls: concurrentRes.rows[0]?.concurrent ?? 0,
     });
     if (decision.action === 'answer') return { answer };
-    return { blocked: { reason: decision.reason, usage: { billableSecondsUsed }, forwardTo } };
+    return { blocked: { reason: decision.reason, rawStatus, usage: { billableSecondsUsed }, forwardTo } };
   }
 
   // Paid: forward once this period's overage has reached the owner's cap
@@ -241,7 +247,7 @@ async function decideForTenant(
     const planId = tenant?.planId ?? 'starter';
     const billableSeconds = await sumBillableSecondsOn(client, tenantId, period.start, period.end);
     if (isOverageCapReached({ planId, billableSeconds, overageCapCents: cap })) {
-      return { blocked: { reason: 'overage_cap', usage: { billableSeconds }, forwardTo } };
+      return { blocked: { reason: 'overage_cap', rawStatus, usage: { billableSeconds }, forwardTo } };
     }
   }
   return { answer };
@@ -319,7 +325,7 @@ function normalizeStatus(raw: string | null): SubscriptionStatus {
 /**
  * Billing resilience — dunning grace (Part A). True while the
  * past_due_grace_until stamped by invoice.payment_failed is in the future.
- * (readTenantBillingState normalizes the column to Date | null.)
+ * (tenantBillingStateFromRow normalizes the column to Date | null.)
  */
 function isPastDueGraceActive(graceUntil: Date | null): boolean {
   return graceUntil !== null && graceUntil.getTime() > Date.now();

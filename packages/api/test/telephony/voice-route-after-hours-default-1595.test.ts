@@ -146,7 +146,7 @@ describe('#1595 — POST /api/telephony/voice after hours', () => {
     expect(fake.checkouts()).toBe(0);
   });
 
-  it('(e) a gate answer that did not read settings (dunning grace) leaves the fork to read the hours itself', async () => {
+  it('(e) a gate answer that carries no hours (a gate that reads no settings) leaves the fork to read them itself', async () => {
     const { app, fake } = makeApp({
       escalationSettings: { after_hours_voice_mode: 'voicemail' },
       voiceGate: async () => ({ allowed: true }),

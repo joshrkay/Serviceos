@@ -620,9 +620,9 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     if (deps.pool && deps.settingsRepo) {
       try {
         // Raw-pg audit §4 P1.3 — one tenant session per inbound call: reuse
-        // the gate's read (every answer, dunning grace included, carries the
-        // hours); only no gate wired, or a grace answer whose settings read
-        // failed, reads the hours here.
+        // the gate's read (every createVoiceGate answer, dunning grace
+        // included, carries the hours); only no gate wired, or a gate whose
+        // answer carries none, reads the hours here.
         const afterHours =
           gateBusinessHours !== undefined
             ? isAfterHours(gateBusinessHours)

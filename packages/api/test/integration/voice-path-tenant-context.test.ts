@@ -19,7 +19,9 @@
  * to both seeded tenants RLS alone keeps the other tenant out (reads) and
  * untouched (check-and-set UPDATEs); control: the widened statements as the
  * principal reach it. The gate's cost per decision (checkouts, statements,
- * connections held at once) is pinned against what it was.
+ * connections held at once) is pinned against what it was: one tenant
+ * session, whose first statement reads the tenants registry row joined to the
+ * tenant_settings row.
  */
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import crypto from 'node:crypto';
@@ -48,8 +50,16 @@ const OWNER_PHONE = '+14805550100';
 const PERIOD_START = new Date(Date.UTC(2026, 9, 1));
 const PERIOD_END = new Date(Date.UTC(2099, 0, 1));
 const FULL_ATTESTATION = 'TN-Validation-Passed-A';
-/** Every tenant-table statement these functions run. `FROM tenants\b` is the registry read. */
+/**
+ * Every tenant-table statement these functions run. The gate's tenants
+ * registry read is joined to its tenant_settings row, so it matches too.
+ */
 const TENANT_TABLES = /tenant_settings|voice_sessions|call_usage_events/;
+/** The gate's decision row, whitespace collapsed. */
+const GATE_ROW = /^SELECT t\.subscription_status, .* FROM tenants t LEFT JOIN tenant_settings s ON s\.tenant_id = \$1 WHERE t\.id = \$1$/;
+/** The widening probe's target for the decision row (matched against the SQL as sent). */
+const GATE_ROW_TARGET = /FROM tenants t\s+LEFT JOIN tenant_settings s\b/;
+const oneLine = (sql: string) => sql.replace(/\s+/g, ' ').trim();
 
 let pool: Pool;
 const tenantIds: string[] = [];
@@ -161,13 +171,18 @@ afterAll(async () => {
 describe('createVoiceGate — one tenant session per decision under the RLS runtime role (real Postgres)', () => {
   const gateFor = (p: Pool) => createVoiceGate({ pool: p, auditRepo: new PgAuditRepository(pool) });
 
-  it("answers a live trial call from its own tenant's rows, every tenant-table read as rls_app_runtime", async () => {
+  it("answers a live trial call from its own tenant's rows, every read — the tenants row included — as rls_app_runtime", async () => {
     const tenantId = await seedVoiceTenant({ businessHours: { mon: { open: '08:00', close: '17:00' } } });
-    const probe = probeStatementRoles(pool, TENANT_TABLES);
+    const probe = probeStatementRoles(pool, /FROM tenants\b|tenant_settings|voice_sessions|call_usage_events/);
 
     const result = await gateFor(probe.pool)({ tenantId, callSid: 'CA-gate-own' });
 
     expect(result).toMatchObject({ allowed: true });
+    expect(probe.seen.map((s) => oneLine(s.sql))).toEqual([
+      expect.stringMatching(GATE_ROW),
+      expect.stringMatching(/FROM voice_sessions/),
+      expect.stringMatching(/FROM call_usage_events/),
+    ]);
     expectAllUnderTenant(probe.seen, tenantId);
   });
 
@@ -198,35 +213,46 @@ describe('createVoiceGate — one tenant session per decision under the RLS runt
 
     const widened = widenTenantPredicates(pool, { target: TENANT_TABLES, tenants: [caller, other] });
     expect(await gateFor(widened.pool)(call)).toMatchObject({ allowed: false, reason: 'not_live' });
+    // The decision's only statement is its row: the settings join is what was widened.
+    expect(widened.rewritten.map(oneLine)).toEqual([expect.stringMatching(/LEFT JOIN tenant_settings s ON \(s\.tenant_id = ANY\(/)]);
 
     const probe = probeStatementRoles(pool, TENANT_TABLES);
     expect(await gateFor(probe.pool)({ ...call, tenantId: other })).toMatchObject({ allowed: true });
     expectAllUnderTenant(probe.seen, other);
   });
 
-  it('a decision costs one tenant session after the tenants read, and never holds two connections', async () => {
+  it('a decision costs one tenant session, the tenants read included, and never holds two connections', async () => {
     // Before (one pool read per question): live trial 5 checkouts / 11
     // statements; paid with a period 5 / 17; not_live 2 / 2 + the audit.
     const trial = await seedVoiceTenant();
     const paid = await seedVoiceTenant({ status: 'active' });
+    const grace = await seedVoiceTenant({ status: 'past_due', graceUntil: new Date(Date.now() + 86_400_000) });
     const notLive = await seedVoiceTenant({ live: false });
     const noBilling = await seedVoiceTenant({ status: null });
 
-    const measure = async (tenantId: string) => {
+    const measure = async (tenantId: string, call: { from?: string; stirVerstat?: string } = {}) => {
       const traffic = countPoolTraffic(pool);
       const gate = createVoiceGate({ pool: traffic.pool, auditRepo: new PgAuditRepository(traffic.pool) });
-      const result = await gate({ tenantId, callSid: `CA-gate-cost-${tenantId.slice(0, 8)}` });
+      const result = await gate({ tenantId, callSid: `CA-gate-cost-${tenantId.slice(0, 8)}`, ...call });
       return { allowed: result.allowed, checkouts: traffic.checkouts(), statements: traffic.statements().length, maxOpen: traffic.maxOpen() };
     };
 
-    // tenants read (1) + BEGIN, GUC+role, settings, open calls, minutes, COMMIT (6).
-    expect(await measure(trial)).toEqual({ allowed: true, checkouts: 2, statements: 7, maxOpen: 1 });
-    // tenants read (1) + BEGIN, GUC+role, settings, period minutes, COMMIT (5).
-    expect(await measure(paid)).toEqual({ allowed: true, checkouts: 2, statements: 6, maxOpen: 1 });
-    // tenants read (1) + BEGIN, GUC+role, settings, COMMIT (4) + the audit write's own transaction (6).
-    expect(await measure(notLive)).toEqual({ allowed: false, checkouts: 3, statements: 11, maxOpen: 1 });
-    // Decided on the tenants read alone, as before: (1) + the audit write (6).
-    expect(await measure(noBilling)).toEqual({ allowed: false, checkouts: 2, statements: 7, maxOpen: 1 });
+    // BEGIN, GUC+role, the tenants+settings row, open calls, minutes, COMMIT (6).
+    expect(await measure(trial)).toEqual({ allowed: true, checkouts: 1, statements: 6, maxOpen: 1 });
+    // BEGIN, GUC+role, the row, period minutes, COMMIT (5).
+    expect(await measure(paid)).toEqual({ allowed: true, checkouts: 1, statements: 5, maxOpen: 1 });
+    // Dunning grace: BEGIN, GUC+role, the row, COMMIT (4).
+    expect(await measure(grace)).toEqual({ allowed: true, checkouts: 1, statements: 4, maxOpen: 1 });
+    // The #1605 owner test call while not_live: the same 4.
+    expect(await measure(notLive, { from: OWNER_PHONE, stirVerstat: FULL_ATTESTATION })).toEqual({
+      allowed: true,
+      checkouts: 1,
+      statements: 4,
+      maxOpen: 1,
+    });
+    // Voicemail blocks: the 4 + the audit write's own transaction (6).
+    expect(await measure(notLive)).toEqual({ allowed: false, checkouts: 2, statements: 10, maxOpen: 1 });
+    expect(await measure(noBilling)).toEqual({ allowed: false, checkouts: 2, statements: 10, maxOpen: 1 });
   });
 
   it("a dunning-grace answer carries its own tenant's business hours, read as rls_app_runtime", async () => {
@@ -241,12 +267,12 @@ describe('createVoiceGate — one tenant session per decision under the RLS runt
       allowed: true,
       businessHours: { timezone: 'America/Chicago', schedule: [{ dayOfWeek: 1, openTime: '08:00', closeTime: '17:00' }] },
     });
-    expect(probe.seen).toHaveLength(1);
+    expect(probe.seen.map((s) => oneLine(s.sql))).toEqual([expect.stringMatching(GATE_ROW)]);
     expectAllUnderTenant(probe.seen, tenantId);
-    // With the tenant pin widened to both tenants, RLS still hands back only the caller's row.
-    const widened = widenTenantPredicates(pool, { target: TENANT_TABLES, tenants: [tenantId, other] });
+    // With the settings join's tenant pin widened to both tenants, RLS still hands back only the caller's row.
+    const widened = widenTenantPredicates(pool, { target: GATE_ROW_TARGET, tenants: [tenantId, other] });
     expect(await gateFor(widened.pool)({ tenantId, callSid: 'CA-gate-grace-widened' })).toEqual(result);
-    expect(widened.rewritten).toHaveLength(1);
+    expect(widened.rewritten.map(oneLine)).toEqual([expect.stringMatching(/LEFT JOIN tenant_settings s ON \(s\.tenant_id = ANY\(/)]);
   });
 });
 
@@ -288,10 +314,11 @@ describe('POST /api/telephony/voice — gate and after-hours fork share the one 
 
     expect(res.status).toBe(200);
     expect(answered).toBe(1);
-    expect(traffic.statements().filter((s) => /FROM tenant_settings/.test(s))).toHaveLength(1);
+    expect(traffic.statements().filter((s) => /tenant_settings/.test(s)).map(oneLine)).toEqual([expect.stringMatching(GATE_ROW)]);
+    // One checkout: the gate's session (BEGIN, GUC+role, the row, open calls, minutes, COMMIT).
     expect({ checkouts: traffic.checkouts(), statements: traffic.statements().length, maxOpen: traffic.maxOpen() }).toEqual({
-      checkouts: 2,
-      statements: 7,
+      checkouts: 1,
+      statements: 6,
       maxOpen: 1,
     });
   });
@@ -334,14 +361,13 @@ describe('POST /api/telephony/voice — gate and after-hours fork share the one 
     expect(answered).toBe(0);
     expect(res.text).toContain('<Record');
     // The one tenant_settings read is the gate's decision row, inside its tenant session.
-    const statements = traffic.statements().map((s) => s.replace(/\s+/g, ' ').trim());
-    expect(statements.filter((s) => /FROM tenant_settings/.test(s))).toEqual([
-      expect.stringMatching(/^SELECT voice_agent_live_at, owner_phone/),
-    ]);
-    // tenants read (1) + BEGIN, GUC+role, settings, COMMIT (4).
+    const statements = traffic.statements().map(oneLine);
+    expect(statements.filter((s) => /tenant_settings/.test(s))).toEqual([expect.stringMatching(GATE_ROW)]);
+    // BEGIN, GUC+role, the row, COMMIT (4). Base (raw pool reads) was 2 / 2:
+    // the RLS floor for a tenant_settings read is the 4 statements of a session.
     expect({ checkouts: traffic.checkouts(), statements: statements.length, maxOpen: traffic.maxOpen() }).toEqual({
-      checkouts: 2,
-      statements: 5,
+      checkouts: 1,
+      statements: 4,
       maxOpen: 1,
     });
   });

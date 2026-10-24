@@ -45,16 +45,19 @@ function makeGateway(): LLMGateway {
   return { complete: vi.fn().mockResolvedValue(response) } as unknown as LLMGateway;
 }
 
-/** A not_live, trialing tenant whose owner_phone/business_phone are on file. */
+/**
+ * A not_live, trialing tenant whose owner_phone/business_phone are on file:
+ * the gate's one row (the tenants registry row joined to tenant_settings).
+ */
 function mockPool(opts: { ownerPhone?: string | null; businessPhone?: string | null } = {}): Pool {
   return fakeTenantPool((sql) => {
-    if (sql.includes('FROM tenants')) {
-      return { rows: [{ subscription_status: 'trialing', past_due_grace_until: null }] };
-    }
-    if (sql.includes('FROM tenant_settings')) {
+    if (sql.includes('FROM tenants t')) {
       return {
         rows: [
           {
+            subscription_status: 'trialing',
+            past_due_grace_until: null,
+            has_settings: true,
             voice_agent_live_at: null,
             owner_phone: opts.ownerPhone ?? OWNER_PHONE,
             business_phone: opts.businessPhone ?? null,
