@@ -168,7 +168,7 @@ export const TABLES_WITHOUT_MIGRATION: ReadonlyArray<{ readonly table: string; r
  * The `tenant_filtered_no_rls` debt, frozen. Migrating one means deleting its
  * entry and LOWERING this number; adding one means raising it, in review.
  */
-export const TFNR_CEILING = 22;
+export const TFNR_CEILING = 21;
 
 export const RAW_PG_SITES: readonly RawPgSite[] = [
   // ── ai/ ────────────────────────────────────────────────────────────────
@@ -584,13 +584,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/onboarding/choices/price-tiers.ts', fn: 'PgRegionalPriceTierRepository.upsert', access: 'pool.query', count: 1,
     category: 'global_table', tables: ['regional_price_tiers'],
     why: 'Admin write path into the platform regional_price_tiers table (no tenant_id, no RLS). No src or script caller, only integration tests (P4.2 dead-code candidate).',
-  },
-  {
-    file: 'src/onboarding/load-facts.ts', fn: 'loadOnboardingFacts', access: 'ambient-or-pool', count: 7,
-    category: 'tenant_filtered_no_rls',
-    tables: ['tenant_integrations', 'tenants', 'voice_sessions', 'tenant_settings', 'pack_activations', 'onboarding_drafts', 'proposals'],
-    migrateBy: 'audit 2026-10-23 §4 P1.11',
-    why: 'db = currentTenantContext()?.client ?? pool: requests get the RLS request client, but the setup-reminder sweep has no context and falls back to the raw pool, so its seven reads rest only on WHERE tenant_id = $1 for a sweep-row tenant.',
   },
 
   // ── portal/ proposals/ public-intake/ push/ ────────────────────────────

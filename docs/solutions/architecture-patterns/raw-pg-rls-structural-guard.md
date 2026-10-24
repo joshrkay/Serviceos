@@ -186,6 +186,14 @@ deliberate cross-tenant sweep, a platform-constant write) add an entry:
   ones and re-categorise what is left: POST /stripe's remaining four
   `pool.query` calls touch only the tenants registry, so after the AI-model
   seed moved into a session (P1.10) the entry is `global_table`, not debt.
+- A `currentTenantContext()?.client ?? pool` fallback becomes
+  `withTenantClient(pool, tenantId, fn)`: the request client when the
+  request's tenant matches (it did not check that), one tenant session
+  otherwise. Run a repository read the function also makes before the
+  session, not beside it in a `Promise.all`, so off-request it never holds
+  two connections; and await the session's own reads one after another: a
+  pg client runs one query at a time, so a `Promise.all` on it gains nothing
+  and pg 8 deprecates it (loadOnboardingFacts, P1.11).
 
 ### Checkouts and callbacks: who gets the client
 
