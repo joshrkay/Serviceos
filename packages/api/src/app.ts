@@ -493,6 +493,10 @@ import {
   runRecordingRetentionSweep,
   PgRecordingRetentionRepository,
 } from './workers/recording-retention-worker';
+import {
+  runShadowComparisonRetentionSweep,
+  PgShadowComparisonRetentionRepository,
+} from './workers/shadow-comparison-retention-worker';
 import { createRetrieveAdapter } from './ai/orchestration/retrieve-adapter';
 import { FrancLanguageDetector } from './voice/language-detector';
 import type { RetrieveAdapter } from './ai/orchestration/context-builder';
@@ -2682,6 +2686,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     dripCampaigns: 590036,
     // #1770 — connected-domain verification sweep. DISTINCT key.
     customDomains: 590044,
+    // #1813 follow-up — shadow_comparisons retention sweep. DISTINCT key.
+    shadowComparisonRetention: 590047,
   } as const;
   // #1090 — every leader-gated sweep run is registered here so `runShutdown`
   // can wait for the tick that is ALREADY RUNNING before it closes the pool.
@@ -7226,6 +7232,33 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         });
       }).catch((err) => {
         recordingRetentionLogger.error('Recording-retention sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, 60 * 60_000));
+  }
+
+  // Shadow-comparison retention (#1813 follow-up). Hourly; pool-gated like the
+  // recording retention purge above (the Pg repository is the only one). NOT
+  // gated on SHADOW_LLM_ENABLED: rows written while the flag was on must still
+  // age out after it is turned off. The repository writes each batch's audit
+  // row in the DELETE's own transaction, so the sweep takes no audit
+  // repository. WS2: worker-only.
+  if (pool && shouldRunWorkers) {
+    const shadowComparisonRetentionLogger = createLogger({
+      service: 'shadow-comparison-retention-worker',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    const shadowComparisonRetentionRepo = new PgShadowComparisonRetentionRepository(pool);
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.shadowComparisonRetention, async () => {
+        await runShadowComparisonRetentionSweep({
+          repo: shadowComparisonRetentionRepo,
+          logger: shadowComparisonRetentionLogger,
+          retentionDays: config.SHADOW_COMPARISON_RETENTION_DAYS,
+        });
+      }).catch((err) => {
+        shadowComparisonRetentionLogger.error('Shadow-comparison retention sweep failed', {
           error: err instanceof Error ? err.message : String(err),
         });
       });

@@ -1,6 +1,11 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
-import { AuditEvent, AuditRepository, VOICE_APPROVAL_PIN_LOCK_EVENT_TYPES } from './audit';
+import {
+  AuditEvent,
+  AuditRepository,
+  RecentAuditEventsOptions,
+  VOICE_APPROVAL_PIN_LOCK_EVENT_TYPES,
+} from './audit';
 
 /**
  * #1051 follow-up / #1233 review — the tenant-wide voice PIN lock lookup:
@@ -91,13 +96,17 @@ export class PgAuditRepository extends PgBaseRepository implements AuditReposito
 
   async findRecentByTenant(
     tenantId: string,
-    opts: { limit?: number } = {},
+    opts: RecentAuditEventsOptions = {},
   ): Promise<AuditEvent[]> {
     const limit = Math.min(Math.max(opts.limit ?? 50, 1), 200);
     return this.withTenant(tenantId, async (client) => {
+      // The exclusion is in SQL, before the LIMIT, so `limit` counts the
+      // rows returned. `<> ALL('{}')` is true: no exclusions, no filter.
       const result = await client.query(
-        `SELECT * FROM audit_events WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT $2`,
-        [tenantId, limit]
+        `SELECT * FROM audit_events
+          WHERE tenant_id = $1 AND event_type <> ALL($3::text[])
+          ORDER BY created_at DESC LIMIT $2`,
+        [tenantId, limit, [...(opts.excludeEventTypes ?? [])]]
       );
       return result.rows.map(mapRow);
     });

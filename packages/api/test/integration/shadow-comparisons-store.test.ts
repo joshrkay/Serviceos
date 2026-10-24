@@ -31,7 +31,7 @@ import express, { NextFunction, Request, Response } from 'express';
 import request from 'supertest';
 import type { Pool } from 'pg';
 import { closeSharedTestDb, createTestTenant, getSharedTestDb } from './shared';
-import { PgShadowComparisonStore } from '../../src/ai/evaluation/pg-shadow-comparison';
+import { PgShadowComparisonStore, PLACEHOLDER_TENANT_ID } from '../../src/ai/evaluation/pg-shadow-comparison';
 import {
   ShadowComparisonGateway,
   type ShadowComparisonResult,
@@ -44,7 +44,6 @@ import { tenantContextStore, withTenantTransaction } from '../../src/middleware/
 import type { AuthenticatedRequest } from '../../src/auth/clerk';
 
 const ORIGINAL_FLAG = process.env.RLS_RUNTIME_ROLE;
-const PLACEHOLDER_TENANT = '00000000-0000-0000-0000-000000000000';
 
 let pool: Pool;
 let store: ObservedStore;
@@ -127,7 +126,7 @@ afterAll(async () => {
   setFlag(ORIGINAL_FLAG as 'true' | undefined);
   for (const taskType of placeholderTaskTypes) {
     await pool
-      .query('DELETE FROM shadow_comparisons WHERE tenant_id = $1 AND task_type = $2', [PLACEHOLDER_TENANT, taskType])
+      .query('DELETE FROM shadow_comparisons WHERE tenant_id = $1 AND task_type = $2', [PLACEHOLDER_TENANT_ID, taskType])
       .catch(() => undefined);
   }
   for (const tenantId of createdTenantIds) {
@@ -184,10 +183,10 @@ describe('PgShadowComparisonStore (real Postgres)', () => {
         'SELECT tenant_id FROM shadow_comparisons WHERE task_type = $1',
         [taskType],
       );
-      expect(rows).toEqual([{ tenant_id: PLACEHOLDER_TENANT }]);
+      expect(rows).toEqual([{ tenant_id: PLACEHOLDER_TENANT_ID }]);
       const viaSystem = await store.listForTenant(SYSTEM_TENANT_ID, { taskType });
       expect(viaSystem.comparisons).toHaveLength(1);
-      expect(viaSystem.comparisons[0].tenantId).toBe(PLACEHOLDER_TENANT);
+      expect(viaSystem.comparisons[0].tenantId).toBe(PLACEHOLDER_TENANT_ID);
     });
 
     it(`${label}: a tenant reads only its own comparisons`, async () => {
