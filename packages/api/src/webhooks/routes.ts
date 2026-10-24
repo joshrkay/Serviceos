@@ -9,6 +9,7 @@ import {
 } from './webhook-handler';
 import { createLogger } from '../logging/logger';
 import { isValidTenantId } from '../db/schema';
+import { withTenantSession } from '../db/rls-runtime-role';
 import { bootstrapTenant, TenantRepository } from '../auth/clerk';
 import {
   writeClerkUserMetadata,
@@ -2676,7 +2677,10 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           // Once billing reaches a live state, seed the tenant's AI model from
           // the platform default and enqueue the onboarding AI self-check.
           // Idempotent: the worker skips if already passed and the COALESCE
-          // never clobbers a model already chosen for the tenant.
+          // never clobbers a model already chosen for the tenant. The tenant
+          // comes from the registry by the signed event's customer; the seed
+          // itself is a tenant session of its own (rls_app_runtime, raw-pg
+          // audit 2026-10-23 §4 P1.10), committed before the job is enqueued.
           //
           // Trial-checkout is also the trigger for Twilio SETUP: now that the
           // tenant has a card on file the worker creates the subaccount +
@@ -2694,11 +2698,13 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             const tenantId = tenantRes.rows[0]?.id;
             if (tenantId) {
               if (config.AI_DEFAULT_MODEL) {
-                await deps.pool.query(
-                  `UPDATE tenant_settings
-                      SET ai_model = COALESCE(ai_model, $2), updated_at = NOW()
-                    WHERE tenant_id = $1`,
-                  [tenantId, config.AI_DEFAULT_MODEL],
+                await withTenantSession(deps.pool, tenantId, (client) =>
+                  client.query(
+                    `UPDATE tenant_settings
+                        SET ai_model = COALESCE(ai_model, $2), updated_at = NOW()
+                      WHERE tenant_id = $1`,
+                    [tenantId, config.AI_DEFAULT_MODEL],
+                  ),
                 );
               }
               const verifyPayload: VerifyAiPayload = { tenantId };
