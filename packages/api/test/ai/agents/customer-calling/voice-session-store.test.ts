@@ -1,5 +1,8 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { VoiceSessionStore } from '../../../../src/ai/agents/customer-calling/voice-session-store';
+import { InMemoryQueue } from '../../../../src/queues/queue';
+import { InMemoryCallTranscriptTurnRepository } from '../../../../src/voice/call-transcript-turn';
+import { createCardNumberRewriteRetryWorker } from '../../../../src/voice/card-number-rewrite-retry';
 
 describe('VoiceSessionStore', () => {
   const stores: VoiceSessionStore[] = [];
@@ -79,7 +82,8 @@ describe('VoiceSessionStore', () => {
         return input as never;
       });
       const markReplyAudio = vi.fn(async () => 1);
-      return { repo: { recordTurn, markReplyAudio }, recordTurn };
+      const redactCardNumberTurns = vi.fn(async () => 0);
+      return { repo: { recordTurn, markReplyAudio, redactCardNumberTurns }, recordTurn };
     }
 
     it('persists each appended turn keyed by tenant + callSid + sessionId with the append-time index', async () => {
@@ -199,7 +203,8 @@ describe('VoiceSessionStore', () => {
         order.push('markReplyAudio');
         return opts.markResult ?? 1;
       });
-      return { repo: { recordTurn, markReplyAudio }, recordTurn, markReplyAudio, order };
+      const redactCardNumberTurns = vi.fn(async () => 0);
+      return { repo: { recordTurn, markReplyAudio, redactCardNumberTurns }, recordTurn, markReplyAudio, order };
     }
 
     it('stamps the timing carried on a CALLER append only, computing endpointDelayMs', async () => {
@@ -382,7 +387,9 @@ describe('VoiceSessionStore', () => {
     it('markReplyAudio stamps by the row id recordTurn returned, not the (possibly renumbered) index', async () => {
       const recordTurn = vi.fn(async (input: unknown) => ({ ...(input as object), id: 'row-uuid-1' }) as never);
       const markReplyAudio = vi.fn(async (_input: unknown) => 1);
-      const store = newStore({ callTranscriptTurnRepo: { recordTurn, markReplyAudio } });
+      const store = newStore({
+        callTranscriptTurnRepo: { recordTurn, markReplyAudio, redactCardNumberTurns: vi.fn(async () => 0) },
+      });
       const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
       appendKeyed(store, session.id, 'k0');
 
@@ -592,6 +599,760 @@ describe('VoiceSessionStore', () => {
       store.delete(session.id);
       expect(map.size).toBe(0);
       await settle();
+    });
+  });
+
+  // ── PRIV-3: a card number split across caller turns ───────────────────────
+
+  describe('a card number split across caller turns (PRIV-3)', () => {
+    const CALL_SID = 'CA00000000000000000000000000000009';
+    const MARKER = '[card number]';
+    const AGENT_ON_CARD = "Sorry, I can't take card numbers over the phone.";
+    const settle = () =>
+      new Promise<void>((resolve) => {
+        setImmediate(resolve);
+      });
+
+    function splitRepo() {
+      const recordTurn = vi.fn(async (input: { turnIndex: number }) => ({ id: `row-${input.turnIndex}` }) as never);
+      const markReplyAudio = vi.fn(async () => 1);
+      const redactCardNumberTurns = vi.fn(async (input: { turns: ReadonlyArray<unknown> }) => input.turns.length);
+      return { repo: { recordTurn, markReplyAudio, redactCardNumberTurns }, recordTurn, redactCardNumberTurns };
+    }
+
+    it('rewrites all three caller turns when the third completes a card, in memory at once and in one repository call', async () => {
+      const { repo, recordTurn, redactCardNumberTurns } = splitRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+
+      store.appendTranscript(session.id, { speaker: 'agent', text: 'how can I help' });
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'my card is 4111 1111' });
+      store.appendTranscript(session.id, { speaker: 'agent', text: 'go on' });
+      store.appendTranscript(session.id, { speaker: 'caller', text: '1111' });
+      store.appendTranscript(session.id, { speaker: 'agent', text: 'and the rest?' });
+      store.appendTranscript(session.id, { speaker: 'caller', text: '1111 thanks' });
+
+      // Synchronously: the next prompt built from the transcript never sees it.
+      expect(session.transcript).toEqual([
+        'agent: how can I help',
+        `caller: my card is ${MARKER}`,
+        'agent: go on',
+        `caller: ${MARKER}`,
+        'agent: and the rest?',
+        `caller: ${MARKER} thanks`,
+      ]);
+
+      await session.cardRedactionWrites;
+      // The completing turn's row is inserted already rewritten.
+      expect(recordTurn.mock.calls.at(-1)![0]).toMatchObject({ turnIndex: 5, text: `${MARKER} thanks` });
+      expect(redactCardNumberTurns).toHaveBeenCalledTimes(1);
+      expect(redactCardNumberTurns).toHaveBeenCalledWith({
+        tenantId: 'tenant-a',
+        callSid: CALL_SID,
+        sessionId: session.id,
+        actorId: 'voice-session-store',
+        turns: [
+          { id: 'row-1', turnIndex: 1, text: `my card is ${MARKER}` },
+          { id: 'row-3', turnIndex: 3, text: MARKER },
+          { id: 'row-5', turnIndex: 5, text: `${MARKER} thanks` },
+        ],
+      });
+    });
+
+    it('returns the text each turn was stored as, and the earlier turns a completing turn rewrote', () => {
+      const store = newStore();
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      expect(store.appendTranscript(session.id, { speaker: 'agent', text: 'how can I help' })).toEqual({
+        text: 'how can I help',
+        rewrittenTurnIndexes: [],
+      });
+      expect(store.appendTranscript(session.id, { speaker: 'caller', text: 'my card is 4111 1111' })).toEqual({
+        text: 'my card is 4111 1111',
+        rewrittenTurnIndexes: [],
+      });
+      store.appendTranscript(session.id, { speaker: 'agent', text: 'go on' });
+      expect(store.appendTranscript(session.id, { speaker: 'caller', text: '1111 1111 thanks' })).toEqual({
+        text: `${MARKER} thanks`,
+        rewrittenTurnIndexes: [1],
+      });
+      // An unknown session stores nothing and rewrites nothing.
+      expect(store.appendTranscript('no-such-session', { speaker: 'caller', text: '1111' })).toEqual({
+        text: '1111',
+        rewrittenTurnIndexes: [],
+      });
+    });
+
+    it("rewrites the caller's words an earlier turn already handed on: the FSM context and the held requests", () => {
+      const store = newStore();
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      const first = 'book a visit, my card is 4111 1111 1111';
+      store.appendTranscript(session.id, { speaker: 'caller', text: first });
+      // What the first turn handed on before anything could tell it held part
+      // of a card: the classified request, its entities, and a held request.
+      session.machine.dispatch({ type: 'incoming_call', callSid: CALL_SID, from: '+15125550100', to: '+15125550999', tenantId: 'tenant-a' });
+      session.machine.dispatch({ type: 'greeted_ok' });
+      session.machine.dispatch({ type: 'caller_known', customerId: 'cust-41111111' });
+      session.machine.dispatch({
+        type: 'intent_classified',
+        intentType: 'create_appointment',
+        entities: { notes: 'card 4111 1111 1111 on file', serviceType: 'tune-up', jobId: 'job-1111' },
+        confidence: 0.95,
+        utterance: first,
+      });
+      session.serviceAreaCheck = { heldUtterance: first, reasks: 0 };
+      session.callerIdentityCheck = { heldUtterance: first, accountName: 'Dana Reyes', reasks: 0 };
+      session.rebookOffer = { heldUtterance: first, cancelledAppointmentId: 'appt-1', entities: {}, confidence: 0.9 };
+
+      store.appendTranscript(session.id, { speaker: 'caller', text: '1111' });
+
+      const rewrittenFirst = `book a visit, my card is ${MARKER}`;
+      const context = session.machine.currentContext;
+      expect(context.lastUtterance).toBe(rewrittenFirst);
+      expect(context.extractedEntities).toEqual({
+        notes: `card ${MARKER} on file`,
+        serviceType: 'tune-up',
+        // Ids are never rewritten, whatever digits they hold.
+        jobId: 'job-1111',
+      });
+      expect(context.customerId).toBe('cust-41111111');
+      expect(session.serviceAreaCheck.heldUtterance).toBe(rewrittenFirst);
+      expect(session.callerIdentityCheck.heldUtterance).toBe(rewrittenFirst);
+      expect(session.rebookOffer.heldUtterance).toBe(rewrittenFirst);
+    });
+
+    // The agent's confirm readback renders what the classifier took from the
+    // first turn: once the next turn shows those digits were part of a card,
+    // the readback holds them too, in the transcript every later prompt is
+    // built from and in its stored row.
+    it("rewrites the agent's readback of a part of the card, in memory at once and in the same repository call", async () => {
+      const { repo, redactCardNumberTurns } = splitRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'add a note, the card on file is 4111 1111 1111' });
+      store.appendTranscript(session.id, {
+        speaker: 'agent',
+        text: 'Just to confirm: a note, the card on file is 4111-1111-1111. Is that right?',
+      });
+      expect(store.appendTranscript(session.id, { speaker: 'caller', text: "1111. Yes, that's right." })).toEqual({
+        text: `${MARKER}. Yes, that's right.`,
+        rewrittenTurnIndexes: [0, 1],
+      });
+      store.appendTranscript(session.id, { speaker: 'agent', text: 'Done.' });
+      expect(session.transcript).toEqual([
+        `caller: add a note, the card on file is ${MARKER}`,
+        `agent: Just to confirm: a note, the card on file is ${MARKER}. Is that right?`,
+        `caller: ${MARKER}. Yes, that's right.`,
+        'agent: Done.',
+      ]);
+      await session.cardRedactionWrites;
+      expect(redactCardNumberTurns).toHaveBeenCalledTimes(1);
+      expect(redactCardNumberTurns).toHaveBeenCalledWith(
+        expect.objectContaining({
+          turns: [
+            { id: 'row-0', turnIndex: 0, text: `add a note, the card on file is ${MARKER}` },
+            {
+              id: 'row-1',
+              turnIndex: 1,
+              speaker: 'agent',
+              text: `Just to confirm: a note, the card on file is ${MARKER}. Is that right?`,
+            },
+            { id: 'row-2', turnIndex: 2, text: `${MARKER}. Yes, that's right.` },
+          ],
+        }),
+      );
+    });
+
+    // A caller turn that was nothing but "4111" is replaced wherever its
+    // digits are read as one number, never inside another one ("84111").
+    it('rewrites only whole numbers in the captured words, the held rebook entities and the last spoken line included', () => {
+      const store = newStore();
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(session.id, { speaker: 'agent', text: AGENT_ON_CARD });
+      store.appendTranscript(session.id, { speaker: 'caller', text: '4111' });
+      session.machine.dispatch({ type: 'incoming_call', callSid: CALL_SID, from: '+15125550100', to: '+15125550999', tenantId: 'tenant-a' });
+      session.machine.dispatch({ type: 'greeted_ok' });
+      session.machine.dispatch({ type: 'caller_known', customerId: 'cust-1' });
+      session.machine.dispatch({
+        type: 'intent_classified',
+        intentType: 'create_appointment',
+        entities: { zip: '84111', callbackPhone: '602 555 4111', notes: 'card 4111' },
+        confidence: 0.95,
+        utterance: '4111',
+      });
+      session.rebookOffer = {
+        heldUtterance: 'rebook it, the card is 4111',
+        cancelledAppointmentId: 'appt-1',
+        entities: { zip: '84111', notes: 'paid with 4111' },
+        confidence: 0.9,
+      };
+      session.lastOperatorTurn = {
+        normalizedText: '4111',
+        at: 0,
+        stateBefore: 'intent_classify',
+        stateAfter: 'intent_confirm',
+        lastSpoken: 'You said 4111?',
+      };
+      for (const text of ['1111', '1111', '1111']) store.appendTranscript(session.id, { speaker: 'caller', text });
+      expect(session.transcript.slice(1)).toEqual(Array(4).fill(`caller: ${MARKER}`));
+
+      const context = session.machine.currentContext;
+      expect(context.lastUtterance).toBe(MARKER);
+      expect(context.extractedEntities).toEqual({ zip: '84111', callbackPhone: '602 555 4111', notes: `card ${MARKER}` });
+      expect(session.rebookOffer.heldUtterance).toBe(`rebook it, the card is ${MARKER}`);
+      expect(session.rebookOffer.entities).toEqual({ zip: '84111', notes: `paid with ${MARKER}` });
+      expect(session.lastOperatorTurn.normalizedText).toBe(MARKER);
+      expect(session.lastOperatorTurn.lastSpoken).toBe(`You said ${MARKER}?`);
+    });
+
+    it('leaves the captured words alone when no earlier turn is rewritten', () => {
+      const store = newStore();
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'gate code 4111' });
+      session.serviceAreaCheck = { heldUtterance: 'gate code 4111', reasks: 0 };
+      const contextBefore = session.machine.currentContext;
+      store.appendTranscript(session.id, { speaker: 'caller', text: '1111' });
+      expect(session.serviceAreaCheck.heldUtterance).toBe('gate code 4111');
+      expect(session.machine.currentContext).toBe(contextBefore);
+    });
+
+    it('waits for the earlier rows to be inserted before rewriting them', async () => {
+      const inserts: Array<() => void> = [];
+      const recordTurn = vi.fn(
+        (input: { turnIndex: number }) =>
+          new Promise((resolve) => {
+            inserts.push(() => resolve({ id: `row-${input.turnIndex}` }));
+          }) as never,
+      );
+      const redactCardNumberTurns = vi.fn(async () => 2);
+      const store = newStore({
+        callTranscriptTurnRepo: { recordTurn, markReplyAudio: vi.fn(async () => 1), redactCardNumberTurns },
+      });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(session.id, { speaker: 'caller', text: '4111 1111' });
+      store.appendTranscript(session.id, { speaker: 'caller', text: '1111 1111' });
+      await settle();
+      expect(redactCardNumberTurns).not.toHaveBeenCalled();
+      for (const insert of inserts) insert();
+      await session.cardRedactionWrites;
+      expect(redactCardNumberTurns).toHaveBeenCalledWith(
+        expect.objectContaining({
+          turns: [
+            { id: 'row-0', turnIndex: 0, text: MARKER },
+            { id: 'row-1', turnIndex: 1, text: MARKER },
+          ],
+        }),
+      );
+    });
+
+    it('never lets an agent turn join the window, nor rewrites one that repeats no part of the card', async () => {
+      const { repo, redactCardNumberTurns } = splitRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      // With the agent's read-back joined this would be 4111 1111 1111 1111 1111.
+      store.appendTranscript(session.id, { speaker: 'caller', text: '4111 1111' });
+      store.appendTranscript(session.id, { speaker: 'agent', text: '1111 1111' });
+      store.appendTranscript(session.id, { speaker: 'caller', text: '1111' });
+      await session.cardRedactionWrites;
+      expect(session.transcript).toEqual(['caller: 4111 1111', 'agent: 1111 1111', 'caller: 1111']);
+      expect(redactCardNumberTurns).not.toHaveBeenCalled();
+
+      // Caller turns on either side of an agent turn still join; the agent line stays.
+      const other = store.create('tenant-a', 'telephony', { callSid: 'CA00000000000000000000000000000010' });
+      store.appendTranscript(other.id, { speaker: 'caller', text: '4111 1111' });
+      store.appendTranscript(other.id, { speaker: 'agent', text: 'go on, 1234' });
+      store.appendTranscript(other.id, { speaker: 'caller', text: '1111 1111' });
+      expect(other.transcript).toEqual([`caller: ${MARKER}`, 'agent: go on, 1234', `caller: ${MARKER}`]);
+    });
+
+    it("counts only the caller turns that give digits toward the window: an 'okay' after every group still reads on", () => {
+      const store = newStore();
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      const said = ['my card is 4111', 'okay', '1111', 'okay', '1111', 'okay', '1111'];
+      for (const text of said) store.appendTranscript(session.id, { speaker: 'caller', text });
+      expect(session.transcript).toEqual([
+        `caller: my card is ${MARKER}`,
+        'caller: okay',
+        `caller: ${MARKER}`,
+        'caller: okay',
+        `caller: ${MARKER}`,
+        'caller: okay',
+        `caller: ${MARKER}`,
+      ]);
+    });
+
+    it('does not join a caller turn said more than a minute earlier', async () => {
+      const { repo, redactCardNumberTurns } = splitRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(session.id, { speaker: 'caller', text: '4111 1111', ts: 1_000 });
+      store.appendTranscript(session.id, { speaker: 'caller', text: '1111 1111', ts: 62_000 });
+      await session.cardRedactionWrites;
+      expect(session.transcript).toEqual(['caller: 4111 1111', 'caller: 1111 1111']);
+      expect(redactCardNumberTurns).not.toHaveBeenCalled();
+    });
+
+    it('looks back over five caller turns, no further', async () => {
+      const { repo } = splitRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      // The longest card (19 digits, Visa 4000 0000 0000 0000 006) read in its
+      // 4-4-4-4-3 groups is five turns (a group per turn: the agent's line
+      // before them mentions the card).
+      const five = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(five.id, { speaker: 'agent', text: AGENT_ON_CARD });
+      for (const text of ['4000', '0000', '0000', '0000', '006']) {
+        store.appendTranscript(five.id, { speaker: 'caller', text });
+      }
+      expect(five.transcript).toEqual([`agent: ${AGENT_ON_CARD}`, ...Array(5).fill(`caller: ${MARKER}`)]);
+
+      // A card over six turns: its leading 4 has left the window (and no card
+      // read in its groups takes six turns).
+      const six = store.create('tenant-a', 'telephony', { callSid: 'CA00000000000000000000000000000011' });
+      const spoken = ['4', '1', '1', '1', '1111 1111', '1111'];
+      for (const text of spoken) store.appendTranscript(six.id, { speaker: 'caller', text });
+      expect(six.transcript).toEqual(spoken.map((t) => `caller: ${t}`));
+
+      // Nor is a split no card is read in (1-3-4-4-4) stitched within five.
+      const odd = store.create('tenant-a', 'telephony', { callSid: 'CA00000000000000000000000000000013' });
+      const oddSplit = ['4', '111', '1111', '1111', '1111'];
+      for (const text of oddSplit) store.appendTranscript(odd.id, { speaker: 'caller', text });
+      expect(odd.transcript).toEqual(oddSplit.map((t) => `caller: ${t}`));
+    });
+
+    // Gate codes, last-four answers and years given one per turn read exactly
+    // like a card read group by group; only a mention of the card tells them
+    // apart, and the agent's lines around the window are read for it.
+    it("stitches a group of four per caller turn only where the card is mentioned, the agent's lines included", async () => {
+      const { repo, redactCardNumberTurns } = splitRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const groups = ['4111', '1111', '1111', '1111'];
+      const codes = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(codes.id, { speaker: 'agent', text: "I'll text you a payment link. What is the gate code?" });
+      for (const text of groups) store.appendTranscript(codes.id, { speaker: 'caller', text });
+      await codes.cardRedactionWrites;
+      expect(codes.transcript.filter((line) => line.includes(MARKER))).toEqual([]);
+      expect(redactCardNumberTurns).not.toHaveBeenCalled();
+
+      const card = store.create('tenant-a', 'telephony', { callSid: 'CA00000000000000000000000000000014' });
+      store.appendTranscript(card.id, { speaker: 'caller', text: groups[0] });
+      store.appendTranscript(card.id, { speaker: 'agent', text: AGENT_ON_CARD });
+      for (const text of groups.slice(1)) store.appendTranscript(card.id, { speaker: 'caller', text });
+      expect(card.transcript).toEqual([
+        `caller: ${MARKER}`,
+        `agent: ${AGENT_ON_CARD}`,
+        ...Array(3).fill(`caller: ${MARKER}`),
+      ]);
+      await card.cardRedactionWrites;
+      expect(redactCardNumberTurns).toHaveBeenCalledTimes(1);
+    });
+
+    // "my card number is", then "okay" (or the agent's "go ahead with the
+    // card number" answered with "okay"), then the groups: the pause turn
+    // hid the mention, and every shape below has a turn of four digits or
+    // fewer (or ends on a 13-digit card's last four and one), which needs it.
+    it.each([
+      ['Visa 4-4-4-4', ['4111', '1111', '1111', '1111']],
+      ['Amex 4-6-5', ['3782', '822463', '10005']],
+      ['Diners Club 4-6-4', ['3614', '890064', '7913']],
+      ['Visa 4-12', ['4111', '1111 1111 1111']],
+      ['13-digit Visa [8,5]', ['4222 2222', '2222 2']],
+    ] as const)('stitches %s read after a pause turn that follows the mention of the card', async (_name, groups) => {
+      const leads: ReadonlyArray<ReadonlyArray<readonly ['caller' | 'agent', string]>> = [
+        [['caller', 'my card number is'], ['caller', 'okay']],
+        [['caller', 'my card number is'], ['caller', 'um']],
+        [['caller', 'my card number is'], ['agent', 'Sure, go ahead.'], ['caller', 'mm-hmm']],
+        [['agent', 'Go ahead with the card number.'], ['caller', 'okay']],
+        [['agent', 'Go ahead with the card number.'], ['caller', 'okay'], ['agent', 'Go on.']],
+      ];
+      for (const [k, lead] of leads.entries()) {
+        const { repo, redactCardNumberTurns } = splitRepo();
+        const store = newStore({ callTranscriptTurnRepo: repo });
+        const session = store.create('tenant-a', 'telephony', { callSid: `CA0000000000000000000000000000${String(40 + k).padStart(4, '0')}` });
+        let ts = 1_000_000;
+        for (const [speaker, text] of lead) store.appendTranscript(session.id, { speaker, text, ts: (ts += 2000) });
+        groups.forEach((text, g) => {
+          if (g > 0) store.appendTranscript(session.id, { speaker: 'agent', text: 'Go on.', ts: (ts += 2000) });
+          store.appendTranscript(session.id, { speaker: 'caller', text, ts: (ts += 2000) });
+        });
+        const label = lead.map(([, text]) => text).join(' | ');
+        expect(session.transcript.filter((line) => line.startsWith('caller:') && /\d/.test(line)), label).toEqual([]);
+        expect(session.transcript.filter((line) => line === `caller: ${MARKER}`), label).toHaveLength(groups.length);
+        await session.cardRedactionWrites;
+        expect(redactCardNumberTurns, label).toHaveBeenCalledTimes(1);
+      }
+      // With nothing naming the card, the same turns are left alone.
+      const { repo, redactCardNumberTurns } = splitRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      let ts = 1_000_000;
+      for (const text of ['the gate is on the left', 'okay', ...groups]) store.appendTranscript(session.id, { speaker: 'caller', text, ts: (ts += 2000) });
+      expect(session.transcript).toEqual(['the gate is on the left', 'okay', ...groups].map((text) => `caller: ${text}`));
+      await session.cardRedactionWrites;
+      expect(redactCardNumberTurns).not.toHaveBeenCalled();
+    });
+
+    // A pause no turn reads on from ("hold on", "one sec", "un momento") hid
+    // the mention the same way. "One sec" holds a digit word, which counted
+    // it among the five turns that give digits: a 19-digit card read in five
+    // turns after it lost the mention from the window.
+    it.each([
+      ['Hold on.', ['4111', '1111', '1111', '1111']],
+      ['One sec.', ['3782', '822463', '10005']],
+      ['Un momento.', ['4111', '1111', '1111', '1111']],
+      ['One sec.', ['4000', '0000', '0000', '0000', '006']],
+    ] as const)('stitches a card read after "%s" that follows the mention of the card', (pause, groups) => {
+      const store = newStore();
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      let ts = 1_000_000;
+      for (const text of ['my card number is', pause, ...groups]) {
+        store.appendTranscript(session.id, { speaker: 'caller', text, ts: (ts += 2000) });
+      }
+      expect(session.transcript).toEqual(['caller: my card number is', `caller: ${pause}`, ...groups.map(() => `caller: ${MARKER}`)]);
+    });
+
+    // Every caller turn is read with the turns before it, which also finds a
+    // "card" wholly inside the new turn: a mention of the card there counts
+    // only near the digits, as it does for the turn alone.
+    it('leaves a turn alone whose card mention is far from its digits, once earlier caller turns are in the window', async () => {
+      const { repo, redactCardNumberTurns } = splitRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      // 4118 1215 1230 1545 passes the Luhn check: four times read in pairs.
+      const far =
+        'I will pay by card when he comes. and the technician said the unit was old and the filter was dirty and the coil needed ' +
+        'cleaning and he would come back next week to check the pressure again after the part arrives. the times he gave me were ' +
+        'forty-one eighteen, twelve fifteen, twelve thirty, fifteen forty-five';
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'hi' });
+      store.appendTranscript(session.id, { speaker: 'agent', text: 'Go ahead.' });
+      expect(store.appendTranscript(session.id, { speaker: 'caller', text: far })).toEqual({ text: far, rewrittenTurnIndexes: [] });
+      expect(session.transcript).toEqual(['caller: hi', 'agent: Go ahead.', `caller: ${far}`]);
+      await session.cardRedactionWrites;
+      expect(redactCardNumberTurns).not.toHaveBeenCalled();
+    });
+
+    it("never touches another session's turns", () => {
+      const { repo } = splitRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const a = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      const b = store.create('tenant-a', 'telephony', { callSid: 'CA00000000000000000000000000000012' });
+      store.appendTranscript(b.id, { speaker: 'caller', text: '4111 1111' });
+      store.appendTranscript(a.id, { speaker: 'caller', text: '4111 1111' });
+      store.appendTranscript(a.id, { speaker: 'caller', text: '1111 1111' });
+      expect(a.transcript).toEqual([`caller: ${MARKER}`, `caller: ${MARKER}`]);
+      expect(b.transcript).toEqual(['caller: 4111 1111']);
+    });
+
+    it('rewrites an in-app session in memory (its running transcript is persisted from it) with no turn-row write', async () => {
+      const { repo, redactCardNumberTurns } = splitRepo();
+      const store = newStore({ callTranscriptTurnRepo: repo });
+      const session = store.create('tenant-a', 'inapp');
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'cuatro uno uno uno, uno uno uno uno' });
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'uno uno uno uno, uno uno uno uno' });
+      await session.cardRedactionWrites;
+      expect(session.transcript).toEqual([`caller: ${MARKER}`, `caller: ${MARKER}`]);
+      expect(redactCardNumberTurns).not.toHaveBeenCalled();
+    });
+
+    // A restart or deploy between a failed live rewrite and the recording
+    // callback, or a call with no recording, would leave the fragments in
+    // call_transcript_turns: the rewrite that did not land is also handed to
+    // the durable queue (P0-009), already redacted, for the retry worker.
+    it('hands a failed rewrite to the durable retry queue: the rows by turn index and the redacted text, no digits', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const { repo, redactCardNumberTurns } = splitRepo();
+        redactCardNumberTurns.mockRejectedValueOnce(new Error('connection terminated'));
+        const send = vi.fn(async () => 'msg-1');
+        const store = newStore({ callTranscriptTurnRepo: repo, cardRewriteRetryQueue: { send } });
+        const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+        store.appendTranscript(session.id, { speaker: 'caller', text: 'my card is 4111 1111' });
+        store.appendTranscript(session.id, { speaker: 'agent', text: 'go on' });
+        store.appendTranscript(session.id, { speaker: 'caller', text: '1111 1111 thanks' });
+        await session.cardRedactionWrites;
+        expect(send).toHaveBeenCalledTimes(2);
+        const [type, job, key] = send.mock.calls[0] as unknown as [string, unknown, string];
+        expect(type).toBe('voice.card_number_rewrite_retry');
+        // Queued before the rows' inserts had landed: by the mid-call key.
+        expect(job).toEqual({
+          tenantId: 'tenant-a',
+          callSid: CALL_SID,
+          sessionId: session.id,
+          turns: [
+            { turnIndex: 0, text: `my card is ${MARKER}` },
+            { turnIndex: 2, text: `${MARKER} thanks` },
+          ],
+        });
+        // Once the live write failed, again by the rows' ids, which a
+        // recording claiming the rows (and renumbering them) leaves as they are.
+        expect((send.mock.calls[1] as unknown as [string, { turns: unknown }])[1].turns).toEqual([
+          { id: 'row-0', turnIndex: 0, text: `my card is ${MARKER}` },
+          { id: 'row-2', turnIndex: 2, text: `${MARKER} thanks` },
+        ]);
+        expect(JSON.stringify(send.mock.calls.map((call) => (call as unknown as [string, { turns: unknown }])[1].turns))).not.toMatch(/\d{4}/);
+        // Keyed on the session and the rewrite, never on text the key would
+        // carry into an index.
+        expect(key).toMatch(/^card-number-rewrite:tenant-a:/);
+        expect(key).not.toContain('card number');
+        // Kept in memory too: the recording hook, if it runs first in this
+        // process, writes it before ingestion.
+        expect(session.unwrittenCardRedactions).toHaveLength(1);
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    // Durable first: a process that dies after the completing row's insert,
+    // before or during the live write, or a recording callback that lands on
+    // another process, still finds the rewrite in the queue. A live write
+    // that lands leaves the delayed job nothing to do.
+    it('queues the rewrite before writing it live, even when the live write lands', async () => {
+      const order: string[] = [];
+      const { repo, redactCardNumberTurns } = splitRepo();
+      redactCardNumberTurns.mockImplementation(async (input: { turns: ReadonlyArray<unknown> }) => {
+        order.push('live');
+        return input.turns.length;
+      });
+      const send = vi.fn(async () => {
+        order.push('queued');
+        return 'msg-1';
+      });
+      const store = newStore({ callTranscriptTurnRepo: repo, cardRewriteRetryQueue: { send } });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'my card is 4111 1111' });
+      store.appendTranscript(session.id, { speaker: 'caller', text: '1111 1111' });
+      await session.cardRedactionWrites;
+      expect(order).toEqual(['queued', 'live']);
+      expect(send).toHaveBeenCalledWith(
+        'voice.card_number_rewrite_retry',
+        {
+          tenantId: 'tenant-a',
+          callSid: CALL_SID,
+          sessionId: session.id,
+          turns: [
+            { turnIndex: 0, text: `my card is ${MARKER}` },
+            { turnIndex: 1, text: MARKER },
+          ],
+        },
+        expect.stringMatching(/^card-number-rewrite:tenant-a:/),
+        { delaySeconds: 60 },
+      );
+      // The live write names the rows by id, once their inserts have landed.
+      expect(redactCardNumberTurns.mock.calls[0][0]).toMatchObject({
+        turns: [
+          { id: 'row-0', turnIndex: 0, text: `my card is ${MARKER}` },
+          { id: 'row-1', turnIndex: 1, text: MARKER },
+        ],
+      });
+      expect(session.unwrittenCardRedactions).toEqual([]);
+    });
+
+    // The completing row is inserted as the marker at once, so from then on
+    // only the rewrite says what the earlier rows must become: it is queued
+    // in the same tick, not after the earlier rows' inserts (a process that
+    // died while they were in flight left nothing durable).
+    it('queues the rewrite the moment the completing turn is appended, before the inserts it waits on land', async () => {
+      const { repo, recordTurn, redactCardNumberTurns } = splitRepo();
+      let landFirstInsert!: () => void;
+      recordTurn.mockImplementationOnce(
+        (input: { turnIndex: number }) =>
+          new Promise((resolve) => {
+            landFirstInsert = () => resolve({ id: `row-${input.turnIndex}` } as never);
+          }),
+      );
+      const send = vi.fn(async () => 'msg-1');
+      const store = newStore({ callTranscriptTurnRepo: repo, cardRewriteRetryQueue: { send } });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'my card is 4111 1111' });
+      store.appendTranscript(session.id, { speaker: 'caller', text: '1111 1111' });
+      // Synchronously, with the first row's insert still in flight.
+      expect(send).toHaveBeenCalledTimes(1);
+      expect((send.mock.calls[0] as unknown as [string, { turns: unknown }])[1].turns).toEqual([
+        { turnIndex: 0, text: `my card is ${MARKER}` },
+        { turnIndex: 1, text: MARKER },
+      ]);
+      // The live write waits on that insert.
+      await settle();
+      expect(redactCardNumberTurns).not.toHaveBeenCalled();
+      landFirstInsert();
+      await session.cardRedactionWrites;
+      expect(redactCardNumberTurns).toHaveBeenCalledTimes(1);
+    });
+
+    // The completing row is stored as the marker: once it is, the earlier
+    // rows' fragments no longer read as a card and only the rewrite says what
+    // they must become. Its insert therefore waits for the queue's send to
+    // land; sent side by side, a process that died after the insert committed
+    // and before the send did left the fragments with no job.
+    it('inserts the completing row only once the rewrite is durably queued; a process that dies between the two leaves the job, which cleans the rows', async () => {
+      const rows = new InMemoryCallTranscriptTurnRepository();
+      const order: string[] = [];
+      const recordTurn = vi.fn(async (input: Parameters<InMemoryCallTranscriptTurnRepository['recordTurn']>[0]) => {
+        order.push(`insert ${input.turnIndex}`);
+        // The process dies at the completing row's insert: nothing after it runs.
+        if (input.turnIndex === 2) return new Promise<never>(() => undefined);
+        return rows.recordTurn(input);
+      });
+      const repo = {
+        recordTurn,
+        markReplyAudio: vi.fn(async () => 1),
+        redactCardNumberTurns: vi.fn(() => new Promise<number>(() => undefined)),
+      };
+      const queue = new InMemoryQueue();
+      let landSend!: () => void;
+      const send = vi.fn(
+        (...args: Parameters<InMemoryQueue['send']>) =>
+          new Promise<string>((resolve, reject) => {
+            landSend = () => {
+              order.push('queued');
+              queue.send(...args).then(resolve, reject);
+            };
+          }),
+      );
+      const store = newStore({ callTranscriptTurnRepo: repo, cardRewriteRetryQueue: { send } });
+      const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+      store.appendTranscript(session.id, { speaker: 'caller', text: 'my card is 4111 1111' });
+      store.appendTranscript(session.id, { speaker: 'agent', text: 'go on' });
+      await settle();
+      store.appendTranscript(session.id, { speaker: 'caller', text: '1111 1111' });
+      await settle();
+      expect(send).toHaveBeenCalledTimes(1);
+      // Not inserted while the send is in flight.
+      expect(order).toEqual(['insert 0', 'insert 1']);
+      landSend();
+      await settle();
+      expect(order).toEqual(['insert 0', 'insert 1', 'queued', 'insert 2']);
+      // The job alone (delayed, still pending) cleans what was stored.
+      const jobs = await queue.findPending('voice.card_number_rewrite_retry', { tenantId: 'tenant-a', callSid: CALL_SID });
+      expect(jobs).toHaveLength(1);
+      const worker = createCardNumberRewriteRetryWorker({ callTranscriptTurnRepo: rows });
+      await worker.handle(jobs[0] as never, { info: vi.fn(), warn: vi.fn(), error: vi.fn() } as never);
+      expect((await rows.listByCallSid('tenant-a', CALL_SID)).map((r) => r.text)).toEqual([`my card is ${MARKER}`, 'go on']);
+    });
+
+    it('still inserts the completing row when the send fails, or with no retry queue', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        for (const cardRewriteRetryQueue of [{ send: vi.fn(async (): Promise<string> => Promise.reject(new Error('queue down'))) }, undefined]) {
+          const { repo, recordTurn } = splitRepo();
+          const store = newStore({ callTranscriptTurnRepo: repo, ...(cardRewriteRetryQueue ? { cardRewriteRetryQueue } : {}) });
+          const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+          store.appendTranscript(session.id, { speaker: 'caller', text: 'my card is 4111 1111' });
+          store.appendTranscript(session.id, { speaker: 'caller', text: '1111 1111' });
+          await session.cardRedactionWrites;
+          expect(recordTurn.mock.calls.map(([input]) => input)).toEqual([
+            expect.objectContaining({ turnIndex: 0, text: 'my card is 4111 1111' }),
+            expect.objectContaining({ turnIndex: 1, text: MARKER }),
+          ]);
+        }
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('queues it again, by the row ids, when the queue was down and the live write fails too', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const { repo, redactCardNumberTurns } = splitRepo();
+        redactCardNumberTurns.mockRejectedValueOnce(new Error('connection terminated'));
+        const send = vi
+          .fn(async (): Promise<string> => 'msg-2')
+          .mockRejectedValueOnce(new Error('queue insert failed'));
+        const store = newStore({ callTranscriptTurnRepo: repo, cardRewriteRetryQueue: { send } });
+        const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+        store.appendTranscript(session.id, { speaker: 'caller', text: 'my card is 4111 1111' });
+        store.appendTranscript(session.id, { speaker: 'caller', text: '1111 1111' });
+        await session.cardRedactionWrites;
+        expect(send).toHaveBeenCalledTimes(2);
+        expect((send.mock.calls[1] as unknown as [string, { turns: unknown }])[1].turns).toEqual([
+          { id: 'row-0', turnIndex: 0, text: `my card is ${MARKER}` },
+          { id: 'row-1', turnIndex: 1, text: MARKER },
+        ]);
+        expect(session.unwrittenCardRedactions).toHaveLength(1);
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('logs (without text) and keeps the rewrite in memory when the retry queue is down too', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const { repo, redactCardNumberTurns } = splitRepo();
+        redactCardNumberTurns.mockRejectedValueOnce(new Error('connection terminated'));
+        const send = vi.fn(async () => {
+          throw new Error('queue insert failed: my card is [card number]');
+        });
+        const store = newStore({ callTranscriptTurnRepo: repo, cardRewriteRetryQueue: { send } });
+        const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+        store.appendTranscript(session.id, { speaker: 'caller', text: 'my card is 4111 1111' });
+        store.appendTranscript(session.id, { speaker: 'caller', text: '1111 1111' });
+        await expect(session.cardRedactionWrites).resolves.toBeUndefined();
+        expect(errorSpy).toHaveBeenCalledWith(
+          'voice-session-store: card-number rewrite could not be queued for retry',
+          expect.objectContaining({ sessionId: session.id, turnIndexes: [0, 1], error: 'Error' }),
+        );
+        // Tried at once, and again once the live write had failed.
+        expect(send).toHaveBeenCalledTimes(2);
+        expect(JSON.stringify(errorSpy.mock.calls)).not.toMatch(/my card|\[card number\]|4111/);
+        expect(session.unwrittenCardRedactions).toHaveLength(1);
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    // A turn's row holds the caller's words, part of a card among them before
+    // a later turn shows it was one; a database error can quote the row.
+    it('logs a failed insert of a turn by error class, never by message', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const { repo, recordTurn } = splitRepo();
+        recordTurn.mockRejectedValueOnce(
+          Object.assign(new Error('value too long; Failing row contains (my card is 4111 1111)'), { code: '22001' }),
+        );
+        const store = newStore({ callTranscriptTurnRepo: repo });
+        const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+        store.appendTranscript(session.id, { speaker: 'caller', text: 'my card is 4111 1111' });
+        await session.pendingTurnPersist.get(0);
+        expect(errorSpy).toHaveBeenCalledWith('voice-session-store: mid-call transcript persist failed', {
+          sessionId: session.id,
+          callSid: CALL_SID,
+          turnIndex: 0,
+          error: 'Error:22001',
+        });
+        expect(JSON.stringify(errorSpy.mock.calls)).not.toMatch(/my card|4111/);
+      } finally {
+        errorSpy.mockRestore();
+      }
+    });
+
+    it('a failing rewrite never throws into the call path and is logged', async () => {
+      const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      try {
+        const { repo, redactCardNumberTurns } = splitRepo();
+        redactCardNumberTurns.mockRejectedValueOnce(new Error('db down'));
+        const store = newStore({ callTranscriptTurnRepo: repo });
+        const session = store.create('tenant-a', 'telephony', { callSid: CALL_SID });
+        store.appendTranscript(session.id, { speaker: 'caller', text: '4111 1111' });
+        expect(() => store.appendTranscript(session.id, { speaker: 'caller', text: '1111 1111' })).not.toThrow();
+        await session.cardRedactionWrites;
+        // Logged by class, never by message: a database error can quote the
+        // row it failed on, and the row holds part of a card.
+        expect(errorSpy).toHaveBeenCalledWith(
+          'voice-session-store: card-number rewrite of stored turns failed',
+          expect.objectContaining({ turnIndexes: [0, 1], error: 'Error' }),
+        );
+        expect(JSON.stringify(errorSpy.mock.calls)).not.toContain('db down');
+        // The memory side stands regardless.
+        expect(session.transcript).toEqual([`caller: ${MARKER}`, `caller: ${MARKER}`]);
+        // The rewrite that did not land is kept for the recording hook to
+        // write before the call is ingested (rows by id, already redacted).
+        expect(session.unwrittenCardRedactions).toEqual([
+          [
+            { id: 'row-0', turnIndex: 0, text: MARKER },
+            { id: 'row-1', turnIndex: 1, text: MARKER },
+          ],
+        ]);
+      } finally {
+        errorSpy.mockRestore();
+      }
     });
   });
 });

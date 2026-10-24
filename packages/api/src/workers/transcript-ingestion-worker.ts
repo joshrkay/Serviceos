@@ -202,16 +202,23 @@ export function createTranscriptIngestionWorker(
       // Upsert at each turn's CARRIED index. Empty turns are skipped but
       // keep their index reserved, so the rows written mid-call (U8) are
       // updated in place — never renumbered from a filtered array.
+      //
+      // PRIV-3 — the payload is a snapshot the recording hook read; a card
+      // rewrite of a row may have landed since (the retry of a split card's
+      // rewrite). The upsert keeps the stored text where it holds more card
+      // markers, and everything below (chunks, language, provenance) reads
+      // each turn as it was stored, never the snapshot.
       const turns = carriedTurns.filter((t) => t.text.trim().length > 0);
-      for (const turn of turns) {
+      for (const [k, turn] of turns.entries()) {
         try {
-          await deps.callTranscriptTurnRepo.recordTurn({
+          const stored = await deps.callTranscriptTurnRepo.recordTurn({
             tenantId,
             voiceRecordingId,
             turnIndex: turn.index,
             speaker: turn.speaker,
             text: turn.text,
           });
+          if (stored.text !== turn.text) turns[k] = { ...turn, text: stored.text };
         } catch (err) {
           // Per-turn errors are logged but don't poison the whole job;
           // the upsert path makes retry safe.

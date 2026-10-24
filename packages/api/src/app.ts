@@ -472,6 +472,7 @@ import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
 import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker, voicemailJobContextFromPersisted } from './workers/transcription';
 import { createPinLockAlertRetryWorker, createPinLockAlertRetryScheduler } from './workers/pin-lock-alert-retry';
+import { createCardNumberRewriteRetryWorker, pendingCardNumberRewrites } from './voice/card-number-rewrite-retry';
 import { createTranscriptionRouterHandoff } from './workers/transcription-router-handoff';
 import { createMemoCreatorModeLoader } from './workers/memo-creator-mode';
 // U9 — voicemail router gate: owner/approver caller-ID check (same identity
@@ -3907,10 +3908,19 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // U8 (R8): every appended Twilio turn is also persisted to
   // call_transcript_turns keyed by CallSid + session id, so the recording
   // webhook can recover the transcript after a restart / reap.
+  // PRIV-3 — every cross-turn card-number rewrite of those rows goes to the
+  // durable queue before its live write, for the retry worker registered
+  // below and the recording hook.
   const voiceSessionStore = new VoiceSessionStore({
     transport: voiceEventTransport,
     callTranscriptTurnRepo,
+    cardRewriteRetryQueue: queue,
   });
+  const cardNumberRewriteRetryWorker = createCardNumberRewriteRetryWorker({ callTranscriptTurnRepo, auditRepo });
+  workerRegistry.set(
+    cardNumberRewriteRetryWorker.type,
+    cardNumberRewriteRetryWorker as import('./queues/queue').WorkerHandler<unknown>,
+  );
   // LCR-04 — voicemail recording callbacks that arrive while the database is
   // down are re-POSTed (exactly as Twilio signed them) until acknowledged:
   // Twilio itself never redelivers a 5xx recording callback.
@@ -4802,6 +4812,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             voiceRepo,
             auditRepo,
             ...(embeddingProvider ? { queue } : {}),
+            // PRIV-3 — a split card's rewrites still queued for the call: after
+            // a restart (or on another replica) no session knows of them.
+            pendingCardNumberRewrites: pendingCardNumberRewrites(queue),
             logger: createLogger({
               service: 'recording-transcript-hook',
               environment: process.env.NODE_ENV || 'development',
@@ -5309,13 +5322,14 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             // at start() and never re-armed by media frames (the audio-idle
             // timer is, so it never fires on a live call).
             maxCallDurationMs: config.VOICE_MAX_CALL_DURATION_MS,
-            speechTurn: async ({ session, speechResult, callSid, tenantId, callerTiming }) =>
+            speechTurn: async ({ session, speechResult, callSid, tenantId, callerTiming, onCallerText }) =>
               twilioAdapter.processCallerUtterance({
                 sessionId: session.id,
                 callSid,
                 speechResult,
                 tenantId,
                 ...(callerTiming ? { callerTiming } : {}),
+                ...(onCallerText ? { onCallerText } : {}),
               }),
             // RV-130 (CRITICAL) — greeting + recording-disclosure bootstrap
             // once Deepgram opens. initializeStreamSession speaks the

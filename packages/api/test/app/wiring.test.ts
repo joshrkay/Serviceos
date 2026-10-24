@@ -270,4 +270,22 @@ describe('P0-023 — app-wiring (pool ternary coverage)', () => {
       /resolveBackupApprover: \(tenantId: string\) =>\s*resolveBackupSupervisorApprover\(\{ settingsRepo, userRepo \}, tenantId\)/,
     );
   });
+
+  it('PRIV-3 — a failed live card-number rewrite is queued, and the retry worker that writes it is registered', () => {
+    // Without the queue the rewrite lives only in the session's memory (lost
+    // on a restart); without the worker the job is never consumed.
+    const store = src.slice(src.indexOf('const voiceSessionStore = new VoiceSessionStore({'));
+    expect(store.slice(0, store.indexOf('});'))).toContain('cardRewriteRetryQueue: queue,');
+    expect(src).toMatch(/createCardNumberRewriteRetryWorker\(\{ callTranscriptTurnRepo, auditRepo \}\)/);
+    expect(src).toMatch(/workerRegistry\.set\(\s*cardNumberRewriteRetryWorker\.type,/);
+  });
+
+  it('PRIV-3 — the recording hook writes the card-number rewrites still queued for the call before ingesting it', () => {
+    // Without it, a restart between a failed live rewrite and the recording
+    // callback (or a callback on another replica) ingests the fragments.
+    const hook = src.slice(src.indexOf('onPersisted: createRecordingTranscriptHook({'));
+    expect(hook.slice(0, hook.indexOf('logger: createLogger('))).toContain(
+      'pendingCardNumberRewrites: pendingCardNumberRewrites(queue),',
+    );
+  });
 });
