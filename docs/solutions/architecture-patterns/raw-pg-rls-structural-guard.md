@@ -194,6 +194,19 @@ deliberate cross-tenant sweep, a platform-constant write) add an entry:
   two connections; and await the session's own reads one after another: a
   pg client runs one query at a time, so a `Promise.all` on it gains nothing
   and pg 8 deprecates it (loadOnboardingFacts, P1.11).
+- A bare `pool.query` READ on an /api request path is a second connection
+  held next to the request's. Find where it runs relative to the
+  `withTenantTransaction` middleware first: route gates such as
+  `requireTenant` are per-route, inside routers mounted after it, so the
+  request transaction is already open for `req.auth.tenantId` (except on the
+  SSE and long-LLM skip lists). `withTenantClient` then costs the read no
+  checkout and no extra round trip; off the request it is one session. One
+  trade-off to state: a read that fails on the request client aborts the
+  request's transaction, where on its own connection the failure stayed
+  local (the mode loader, P2.1, swallows its errors into the supervisor
+  default; the request then fails on its next statement). Pin both shapes
+  with an express harness in the /api order
+  (`test/integration/user-mode-tenant-context.test.ts`).
 
 ### Checkouts and callbacks: who gets the client
 

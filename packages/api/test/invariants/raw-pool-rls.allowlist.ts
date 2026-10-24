@@ -168,7 +168,7 @@ export const TABLES_WITHOUT_MIGRATION: ReadonlyArray<{ readonly table: string; r
  * The `tenant_filtered_no_rls` debt, frozen. Migrating one means deleting its
  * entry and LOWERING this number; adding one means raising it, in review.
  */
-export const TFNR_CEILING = 21;
+export const TFNR_CEILING = 17;
 
 export const RAW_PG_SITES: readonly RawPgSite[] = [
   // ── ai/ ────────────────────────────────────────────────────────────────
@@ -188,26 +188,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/app.ts', fn: 'createApp.resolveDisplayName', access: 'pool.query', count: 1,
     category: 'global_table', tables: ['tenants'],
     why: 'Terminal router display name: SELECT name FROM tenants WHERE id = $1 with the req.auth tenant. tenants is the registry (no tenant_id column, no RLS).',
-  },
-  {
-    file: 'src/app.ts', fn: 'userModeService.getUser', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['users'], migrateBy: 'audit 2026-10-23 §4 P2.1',
-    why: 'Mode loader read on FORCE-RLS users, run on its own pooled connection outside the request transaction on every requireTenant request (60 s cache). WHERE tenant_id = $1 AND clerk_user_id = $2 with the JWT tenant/user is the only boundary.',
-  },
-  {
-    file: 'src/app.ts', fn: 'userModeService.getTenantSettings', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P2.1',
-    why: 'GET /api/me reads tenant_settings (FORCE RLS) on the raw pool, WHERE tenant_id = $1 with auth.tenantId. settingsRepo already has a withTenant path for the same table.',
-  },
-  {
-    file: 'src/app.ts', fn: 'userModeService.getTenantIntegrationStatuses', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_integrations'], migrateBy: 'audit 2026-10-23 §4 P2.1',
-    why: 'GET /api/me lists provider/status from FORCE-RLS tenant_integrations with no GUC at all; it returns rows only because the principal bypasses RLS. Isolation is WHERE tenant_id = $1 (auth tenant).',
-  },
-  {
-    file: 'src/app.ts', fn: 'userModeService.setMode', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['users'], migrateBy: 'audit 2026-10-23 §4 P2.1',
-    why: 'POST /api/me/mode UPDATEs users (FORCE RLS) outside the request transaction (it does not roll back with the request). Scoped only by WHERE tenant_id = $3 AND clerk_user_id = $4, both from req.auth.',
   },
 
   // ── auth/ ──────────────────────────────────────────────────────────────
