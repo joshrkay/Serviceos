@@ -26,7 +26,8 @@ import type { NewLeadAutoReply } from '../leads/new-lead-auto-reply';
 import { AuditRepository } from '../audit/audit';
 import { TenantRepository } from '../auth/clerk';
 import { attributionSchema, LeadSource } from '../leads/enums';
-import { SettingsRepository } from '../settings/settings';
+import type { SettingsRepository, TenantSettings } from '../settings/settings';
+import { withTenantClient, withTenantScope } from '../db/tenant-transaction';
 import { VerticalPackRegistry } from '../shared/vertical-pack-registry';
 import { formatBusinessHoursSummary } from '../public-intake/format-business-hours';
 import { resolvePublicBusinessPhone, resolvePublicServiceTypes } from '../public-intake/public-business-info';
@@ -131,6 +132,54 @@ function resolveIntakeAddress(p: z.infer<typeof intakeSchema>): {
   return {};
 }
 
+interface PublicHeaderRows {
+  settings: TenantSettings | null;
+  businessPhone: string | null;
+  businessHours: unknown;
+  averageRating?: number;
+  reviewCount?: number;
+}
+
+/**
+ * The URL tenant's own rows the intake header shows. With a pool the caller
+ * runs this inside withTenantScope, so every read — the repository's, the
+ * phone fallback's and the two below — is one statement on that one tenant
+ * transaction, as rls_app_runtime. Without one (in-memory dev) only the
+ * settings repository is read, as before.
+ */
+async function readPublicHeaderRows(
+  settingsRepo: SettingsRepository,
+  tenantId: string,
+  pool: Pool | undefined,
+): Promise<PublicHeaderRows> {
+  const settings = await settingsRepo.findByTenant(tenantId);
+  const businessPhone = await resolvePublicBusinessPhone(settings, tenantId, pool);
+  if (!pool) return { settings, businessPhone, businessHours: null };
+
+  return withTenantClient(pool, tenantId, async (client) => {
+    const tsRow = await client.query<{ business_hours: unknown }>(
+      `SELECT business_hours FROM tenant_settings WHERE tenant_id=$1`,
+      [tenantId],
+    );
+    const rev = await client.query<{ avg: string | null; c: string }>(
+      `SELECT AVG(rating)::float AS avg, COUNT(*)::int AS c
+       FROM google_reviews WHERE tenant_id = $1`,
+      [tenantId],
+    );
+    const rows: PublicHeaderRows = {
+      settings,
+      businessPhone,
+      businessHours: tsRow.rows[0]?.business_hours ?? null,
+    };
+    const count = Number(rev.rows[0]?.c ?? 0);
+    if (count > 0) {
+      rows.reviewCount = count;
+      rows.averageRating = Math.round(Number(rev.rows[0]?.avg ?? 0) * 10) / 10;
+    }
+    return rows;
+  });
+}
+
 export function createPublicIntakeRouter(
   leadRepo: LeadRepository,
   tenantRepo: TenantRepository,
@@ -214,34 +263,16 @@ export function createPublicIntakeRouter(
       return;
     }
 
-    const settings = await settingsRepo.findByTenant(tenantId);
-
+    // Every tenant row this header shows — the settings row, the phone
+    // fallback, business hours, the review summary — is read in ONE tenant
+    // transaction under the RLS runtime role: withTenantScope publishes it, so
+    // the settings repository and resolvePublicBusinessPhone join it too. The
+    // service list comes after it: the pack catalog is a global table read on
+    // a checkout of its own, which must not be held beside the session.
+    const { settings, businessPhone, businessHours, averageRating, reviewCount } = pool
+      ? await withTenantScope(pool, tenantId, () => readPublicHeaderRows(settingsRepo, tenantId, pool))
+      : await readPublicHeaderRows(settingsRepo, tenantId, undefined);
     const serviceTypes = await resolvePublicServiceTypes(settings, packRegistry);
-    const businessPhone = await resolvePublicBusinessPhone(settings, tenantId, pool);
-
-    let businessHours: unknown = null;
-    if (pool) {
-      const tsRow = await pool.query<{ business_hours: unknown }>(
-        `SELECT business_hours FROM tenant_settings WHERE tenant_id=$1`,
-        [tenantId],
-      );
-      businessHours = tsRow.rows[0]?.business_hours ?? null;
-    }
-
-    let averageRating: number | undefined;
-    let reviewCount: number | undefined;
-    if (pool) {
-      const rev = await pool.query<{ avg: string | null; c: string }>(
-        `SELECT AVG(rating)::float AS avg, COUNT(*)::int AS c
-         FROM google_reviews WHERE tenant_id = $1`,
-        [tenantId],
-      );
-      const count = Number(rev.rows[0]?.c ?? 0);
-      if (count > 0) {
-        reviewCount = count;
-        averageRating = Math.round(Number(rev.rows[0]?.avg ?? 0) * 10) / 10;
-      }
-    }
 
     res.status(200).json({
       // #1275 — tenant.name is an internal-only label, never a substitute

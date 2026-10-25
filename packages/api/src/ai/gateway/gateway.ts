@@ -338,7 +338,8 @@ export class LlmCallInTransactionError extends AppError {
  * Under NODE_ENV=test the call throws, so the route's own test fails before
  * the route ships. Anywhere else it logs an error with the call site and
  * counts `gateway_llm_call_in_transaction_total`, and the call goes ahead:
- * the guard must never break production traffic.
+ * the guard must never break production traffic. Any increase of that counter
+ * pages the operator (monitoring/llm-call-in-transaction-alert.ts).
  *
  * A call spawned without `await` from inside an open transaction is flagged
  * too, though it holds nothing: start such work with

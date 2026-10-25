@@ -27,13 +27,20 @@ Stand up the target per `docs/runbooks/scaling.md` → "Provisioning & rollout":
 1. `REDIS_URL` set on the API (+ `VOICE_FANOUT_ENABLED=true`).
 2. PgBouncer (`pool_mode=transaction`) fronting Postgres; `DATABASE_URL` → PgBouncer,
    `DATABASE_DIRECT_URL` → direct Postgres.
-3. `numReplicas` ≥ 2 in `railway.toml` (or service settings) so the shared-state
-   work is actually exercised; autoscale min/max set.
+3. Replicas per step 3 there: every call-answering process (every
+   `PROCESS_ROLE` except `worker`) stays at **one replica** until session state
+   is externalized (LCR-05), so the web service runs one replica, sized up for
+   capacity, and only the worker runs `numReplicas` ≥ 2 (`railway.worker.toml`
+   or its service settings; autoscale min/max set). Set `NUM_REPLICAS` to the
+   real replica count on every service: the boot guard
+   (`validateFeatureRequiredConfig`) refuses `NUM_REPLICAS > 1` on any role but
+   `worker`, and only sees that variable.
 4. Railway stop grace ≥ 35s (so `SHUTDOWN_FORCE_EXIT_MS`/drain isn't SIGKILLed).
 
-Either run against **staging with N replicas**, or stand up the local pooled
-topology on a Docker host: `loadtest/docker-compose.loadtest.yml` (flip on
-PgBouncer + Redis + API×N).
+Either run against **staging** (one web replica, N worker replicas), or stand
+up the local pooled topology on a Docker host:
+`loadtest/docker-compose.loadtest.yml` (flip on PgBouncer + Redis; keep one API
+replica, since a live call needs the replica that answered it).
 
 ## The run
 
@@ -54,7 +61,7 @@ npm run loadtest:http -- --url "$TARGET_URL" --token "$TOKEN" \
   --max 1000 --ramp 120 --hold 600 --out loadtest-http-1000.json
 
 # Terminal B — concurrent voice/WS (raise --max toward the per-instance ceiling
-# × replicas; start where the baseline left off)
+# of the one call-answering replica; start where the baseline left off)
 cd packages/api && npx tsx scripts/voice-load-test.ts \
   --max 200 --ramp 120 --hold 600
 ```
@@ -77,9 +84,11 @@ Prove the tooling first if unsure: `npm run loadtest:http:selfcheck` and
    (replace the `TBD` rows): date, topology, replicas, p95, error rate, RPS,
    limiting factor.
 2. Fill the **Voice** per-instance ceiling table likewise.
-3. State the **replica math**: required replicas for 1000 =
-   `ceil(1000 / per-instance-ceiling)`, with headroom. Record it in
-   `voice-capacity.md` "Scaling guidance".
+3. State the **sizing**: call-answering capacity grows with instance size, not
+   replicas, until session state is externalized (LCR-05). Record whether one
+   web replica at the measured size holds 1000 with headroom (and the size it
+   needs if not), plus the worker replica count, in `voice-capacity.md`
+   "Scaling guidance".
 4. Attach the JSON reports to the PR / capacity report.
 
 A documented pass against R1 + the filled tables **closes Phase 5** and the
@@ -90,9 +99,10 @@ scale-to-1000 plan.
 > Resume the scale-to-1000 effort on branch
 > `claude/cleanup-reorganize-files-pszl4f` (PR #628). Phases 0–4 are shipped.
 > Execute **Phase 5** per `docs/runbooks/phase5-validation-handoff.md`: against
-> the provisioned staging topology (Redis + PgBouncer + N replicas), run the
-> mixed HTTP + voice/WS load at 1000 concurrent, verify p95 < 2s / error < 1% /
-> voice calls complete / no pool or queue saturation, then fill the
-> `docs/runbooks/voice-capacity.md` tables and the replica math, and report the
-> pass/fail against R1. Don't change app code unless the run surfaces a bug — if
-> it does, file it separately. I will provide TARGET_URL + a load-test TOKEN.
+> the provisioned staging topology (Redis + PgBouncer + one web replica + N
+> worker replicas), run the mixed HTTP + voice/WS load at 1000 concurrent,
+> verify p95 < 2s / error < 1% / voice calls complete / no pool or queue
+> saturation, then fill the `docs/runbooks/voice-capacity.md` tables and the
+> sizing, and report the pass/fail against R1. Don't change app code unless the
+> run surfaces a bug — if it does, file it separately. I will provide
+> TARGET_URL + a load-test TOKEN.
