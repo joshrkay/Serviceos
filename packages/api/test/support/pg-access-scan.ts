@@ -73,7 +73,7 @@
  * function's body one hop for SQL (and for parameter callbacks of its own),
  * and reports where THAT body hands the client on as `callee > next`.
  *
- * Plus two rules on the same Program:
+ * Plus three rules on the same Program:
  *
  * - `any-receiver`: `.query`/`.connect` on a receiver typed `any`, which would
  *   otherwise blind the typed rule (`pool as any`, or an unresolved import).
@@ -81,6 +81,19 @@
  *   (`set_config('app.current_tenant_id', …)` in any case, `SET [LOCAL|SESSION]
  *   app.…`, quoted or not, SQL comments read as whitespace). Setting the GUC
  *   without the runtime role looks RLS-safe and is not (audit F4).
+ * - `role-switch` (R-role): a string or template literal that switches or
+ *   resets the role at a statement start (`SET [LOCAL|SESSION] ROLE …`,
+ *   `RESET ROLE`, `set_config('role', …)`, `SET`/`RESET SESSION
+ *   AUTHORIZATION`, `DISCARD ALL`; any case, SQL comments read as
+ *   whitespace), and every call to a helper that switches the role on the
+ *   client it is handed (`ROLE_HELPERS`: `clearTenantContext`,
+ *   `applyCrossTenantRole`), resolved by symbol to `db/rls-runtime-role.ts`.
+ *   Inside a tenant session either takes the client off the runtime role, and
+ *   a session helper's callback is not a site, so nothing else sees it. The
+ *   site carries whether every switch drops to the connection principal
+ *   (`roleDrop`) and, as its SQL, the queries after it in its function
+ *   (`roleSwitchSite`). A role helper referenced without being called is
+ *   `indirect`.
  *
  * ## Pure in its roots
  *
@@ -116,6 +129,12 @@ export type PgAccessKind =
    */
   | 'pool-escape'
   | 'guc-only'
+  /**
+   * A literal that switches or resets the role (`SET LOCAL ROLE NONE`,
+   * `RESET ROLE`, `set_config('role', …)`), or a call to a `ROLE_HELPERS`
+   * helper: inside a tenant session it takes the client off rls_app_runtime.
+   */
+  | 'role-switch'
   /** A pg member (or raw-checkout helper) referenced without being called: `.bind`, an assignment, destructuring. */
   | 'indirect'
   /** `.query`/`.connect` on an `any`-typed receiver. */
@@ -163,6 +182,14 @@ export interface PgAccessSite {
    * cannot open. Sorted, unique.
    */
   readonly handoffs?: readonly string[];
+  /**
+   * On `role-switch`: every switch in the literal returns to the connection
+   * principal (`ROLE NONE`, `TO DEFAULT`, `'none'`, `RESET ROLE`, `SESSION
+   * AUTHORIZATION DEFAULT`, `DISCARD ALL`, a `clearTenantContext` call).
+   * False when one takes a role (an `applyCrossTenantRole` call), or one the
+   * scan cannot read (`SET ROLE ${role}`).
+   */
+  readonly roleDrop?: boolean;
 }
 
 export interface PgAccessScanOptions {
@@ -195,6 +222,20 @@ export const CONTEXT_HELPERS: ReadonlyArray<{ readonly name: string; readonly fi
   { name: 'seedDemoTenantFromFixture', file: 'demo/fixture.ts' },
 ];
 
+/**
+ * R-role: helpers that switch the role on a client they are handed. A call is
+ * a `role-switch` site at the call, as a literal is (its SQL: the queries
+ * after the call). Matched by name AND by the file that declares it, like
+ * `CONTEXT_HELPERS`. `drop`: the switch returns to the connection principal
+ * (`clearTenantContext`'s `RESET ROLE`); `applyCrossTenantRole` takes
+ * rls_cross_tenant. `applyTenantContext` is not one: the role it takes is
+ * rls_app_runtime, the one a tenant session is meant to be on.
+ */
+export const ROLE_HELPERS: ReadonlyArray<{ readonly name: string; readonly file: string; readonly drop: boolean }> = [
+  { name: 'clearTenantContext', file: 'db/rls-runtime-role.ts', drop: true },
+  { name: 'applyCrossTenantRole', file: 'db/rls-runtime-role.ts', drop: false },
+];
+
 const PG_DECL_RE = /[\\/]node_modules[\\/](@types[\\/])?pg[\\/]/;
 const PG_MEMBERS = new Set(['query', 'connect']);
 /** Function.prototype members that run the function they are called on. */
@@ -210,6 +251,55 @@ const POOL_CLIENT_EVENTS: Readonly<Record<string, number>> = { connect: 0, acqui
 const TX_CONTROL_RE =
   /^\s*(BEGIN\b|START\s+TRANSACTION\b|SAVEPOINT\b|RELEASE\s+SAVEPOINT\b|COMMIT\b|ROLLBACK\b|END\b|ABORT\b|SELECT\s+pg_(try_)?advisory_(xact_)?lock(_shared)?\s*\()/i;
 const DYNAMIC_TABLE_RE = /\b(FROM|JOIN|INTO|UPDATE|TABLE|USING|TRUNCATE|COPY)\s+(ONLY\s+)?"?\$\{/i;
+/**
+ * R-role. Where a statement can start: the literal's start, after `;`, after
+ * a quote (dynamic SQL: `EXECUTE 'SET ROLE …'`), a dollar quote, or a
+ * PL/pgSQL BEGIN / THEN / ELSE / LOOP. So the SET of an UPDATE
+ * (`UPDATE users SET role = $1`, `DO UPDATE SET role = …`: a column) is not
+ * a role switch.
+ */
+const STATEMENT_START_SRC = String.raw`(?:^|[;']|\$[A-Za-z0-9_]*\$|\b(?:BEGIN|THEN|ELSE|LOOP)\b)\s*`;
+const ROLE_NAME_SRC = String.raw`(?:"role"|role\b)`;
+/**
+ * `SET [LOCAL|SESSION] ROLE …` (group 1, its value in 3), `SET [LOCAL|SESSION]
+ * SESSION AUTHORIZATION …` (group 2, value in 3), and the resets: `RESET
+ * ROLE`, `RESET SESSION AUTHORIZATION`, `DISCARD ALL` (group 4). `RESET ALL`
+ * is not one: `role` is GUC_NO_RESET_ALL.
+ */
+const ROLE_STATEMENT_RE = new RegExp(
+  `${STATEMENT_START_SRC}(?:SET\\s+(?:(?:LOCAL|SESSION)\\s+)?(?:(${ROLE_NAME_SRC})|(SESSION\\s+AUTHORIZATION)\\b)([^;]*)` +
+    `|(RESET\\s+(?:${ROLE_NAME_SRC}|SESSION\\s+AUTHORIZATION\\b)|DISCARD\\s+ALL\\b))`,
+  'gi',
+);
+/** `set_config('role', <value>, …)`: any case, `"set_config"`, `pg_catalog.`, an `E''` / `U&''` or `"role"` name. */
+const ROLE_SET_CONFIG_RE = /set_config"?\s*\(\s*(?:(?:E|U&)?'"?role"?'|"role")\s*,\s*([^,)]*)/gi;
+/** A `SET … ROLE` value that returns to the connection principal. */
+const ROLE_DROP_VALUE_RE = /^\s*(?:(?:TO|=)\s*)?(?:NONE\b|DEFAULT\b|E?'none'|"none")/i;
+
+/** Each role switch in `t`, as whether it drops back to the connection principal. */
+function readRoleSwitches(t: string): boolean[] {
+  const out: boolean[] = [];
+  for (const m of t.matchAll(ROLE_STATEMENT_RE)) {
+    if (m[4] !== undefined) out.push(true);
+    else if (m[2] !== undefined) out.push(/^\s*DEFAULT\b/i.test(m[3]));
+    else out.push(ROLE_DROP_VALUE_RE.test(m[3]));
+  }
+  for (const m of t.matchAll(ROLE_SET_CONFIG_RE)) out.push(/^\s*E?'none'\s*$/i.test(m[1]));
+  return out;
+}
+
+/**
+ * Whether a SQL literal switches or resets the role, and if so whether every
+ * switch drops back to the connection principal (null: no switch). SQL
+ * comments are whitespace to Postgres, so the text is read with them stripped
+ * and raw too (a `--` inside a string literal cannot hide the rest of its
+ * line); a switch either reading finds counts.
+ */
+function roleSwitchIn(text: string): { readonly drop: boolean } | null {
+  const bare = text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ');
+  const all = [...readRoleSwitches(bare), ...readRoleSwitches(text)];
+  return all.length ? { drop: all.every(Boolean) } : null;
+}
 /** One table reference: an optionally quoted, optionally schema-qualified identifier. */
 const TABLE_NAME_SRC = '"?([a-z_][a-z0-9_]*)"?(?:\\."?([a-z_][a-z0-9_]*)"?)?';
 const TABLE_REF_RE = new RegExp(
@@ -531,7 +621,7 @@ class PgAccessScan {
     });
     const sites: PgAccessSite[] = [];
 
-    // Pass 1: pg members, checkouts, R-any, R-guc; index calls for pass 2.
+    // Pass 1: pg members, checkouts, R-any, R-guc, R-role; index calls for pass 2.
     for (const sf of files) {
       const visit = (node: ts.Node): void => {
         this.visitMember(node, sites);
@@ -554,11 +644,14 @@ class PgAccessScan {
         if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateExpression(node)) {
           const text = literalText(node);
           if (isGucLiteral(text)) sites.push(this.site(node, 'guc-only', 'literal', { sql: [text] }));
+          const role = roleSwitchIn(text);
+          if (role) sites.push(this.roleSwitchSite(node, [text], role.drop, 'literal'));
         }
         ts.forEachChild(node, visit);
       };
       visit(sf);
     }
+    this.roleHelperReferences(files, sites);
 
     // Pass 2: calls to raw-checkout helpers, to a fixpoint (a pass-through
     // wrapper, or a callback that hands the client to its own caller's
@@ -607,7 +700,116 @@ class PgAccessScan {
       opaqueSql: extra.opaqueSql ?? false,
       ...(extra.order ? { order: extra.order } : {}),
       ...(extra.handoffs ? { handoffs: extra.handoffs } : {}),
+      ...(extra.roleDrop !== undefined ? { roleDrop: extra.roleDrop } : {}),
     };
+  }
+
+  /**
+   * R-role: a role switch (a literal, or a role helper's call) carries, as its
+   * SQL, every query after it in the function that holds it (positional; from
+   * the start of the outermost loop around it, since a loop runs its earlier
+   * statements again): what runs on the role it leaves. A switch outside any
+   * function (a module-level const) has no "after" to read, so its SQL is
+   * opaque.
+   */
+  private roleSwitchSite(node: ts.Node, head: readonly string[], drop: boolean, owner: string): PgAccessSite {
+    const region = enclosingFunctionLike(node);
+    const sql = [...head];
+    let opaque = false;
+    if (ts.isSourceFile(region)) {
+      opaque = true;
+    } else {
+      let from = node.getEnd();
+      for (let p = node.parent; p !== region; p = p.parent) {
+        if (ts.isIterationStatement(p, false)) from = p.getStart();
+      }
+      const visit = (n: ts.Node): void => {
+        if (ts.isCallExpression(n) && n.getStart() >= from && this.memberNameOf(n.expression) === 'query') {
+          sql.push(...this.queryArgSql(n));
+          if (!this.sqlArgReadable(n)) opaque = true;
+        }
+        ts.forEachChild(n, visit);
+      };
+      visit(region);
+    }
+    return this.site(node, 'role-switch', owner, { sql, opaqueSql: opaque, roleDrop: drop });
+  }
+
+  /**
+   * R-role through the helpers: every reference that resolves (by symbol,
+   * through an import alias, a namespace import, a literal key or a
+   * destructuring) to a `ROLE_HELPERS` helper declared in its file. Called,
+   * it is a role-switch site at the call. Not called (`const f =
+   * clearTenantContext`, `.call`, a callback argument, a shorthand property),
+   * it is `indirect`: what runs after it cannot be read.
+   */
+  private roleHelperReferences(files: readonly ts.SourceFile[], sites: PgAccessSite[]): void {
+    const own = new Set(ROLE_HELPERS.map((h) => h.name));
+    const helperOf = (symbol: ts.Symbol | undefined): (typeof ROLE_HELPERS)[number] | undefined => {
+      const s = resolveDeclared(symbol, this.checker);
+      return s ? ROLE_HELPERS.find((h) => h.name === s.getName() && declaredIn(s, h.file)) : undefined;
+    };
+    // The names a call can spell a helper with: its own, any import of it
+    // (renamed, or through a re-export), and a destructuring of its name.
+    const names = new Set(own);
+    for (const local of this.importLocals) if (helperOf(this.checker.getSymbolAtLocation(local))) names.add(local.text);
+    for (const sf of files) {
+      const collect = (n: ts.Node): void => {
+        if (ts.isBindingElement(n) && ts.isObjectBindingPattern(n.parent) && ts.isIdentifier(n.name)) {
+          const prop = n.propertyName ?? n.name;
+          if ((ts.isIdentifier(prop) || ts.isStringLiteralLike(prop)) && own.has(prop.text)) names.add(n.name.text);
+        }
+        ts.forEachChild(n, collect);
+      };
+      collect(sf);
+    }
+    const report = (ref: ts.Expression, helper: (typeof ROLE_HELPERS)[number]): void => {
+      let e: ts.Node = ref;
+      while (e.parent && isWrapper(e.parent)) e = e.parent;
+      if (ts.isCallExpression(e.parent) && e.parent.expression === e) {
+        sites.push(this.roleSwitchSite(e.parent, [], helper.drop, helper.name));
+      } else {
+        sites.push(this.site(ref, 'indirect', helper.name));
+      }
+    };
+    for (const sf of files) {
+      const visit = (n: ts.Node): void => {
+        const p = n.parent;
+        if (
+          ts.isIdentifier(n) &&
+          names.has(n.text) &&
+          !isDeclarationName(n) &&
+          !inTypePosition(n) &&
+          !(ts.isBindingElement(p) && p.propertyName === n)
+        ) {
+          if (ts.isPropertyAccessExpression(p) && p.name === n) {
+            const h = helperOf(this.checker.getSymbolAtLocation(n));
+            if (h) report(p, h);
+          } else {
+            const symbol = ts.isShorthandPropertyAssignment(p)
+              ? this.checker.getShorthandAssignmentValueSymbol(p)
+              : this.checker.getSymbolAtLocation(n);
+            const h = helperOf(symbol);
+            if (h) report(n, h);
+          }
+        } else if (ts.isElementAccessExpression(n)) {
+          const keys = this.literalNames(n.argumentExpression) ?? [];
+          for (const key of keys.filter((k) => own.has(k))) {
+            const h = helperOf(
+              (ts.isStringLiteralLike(n.argumentExpression) ? this.checker.getSymbolAtLocation(n.argumentExpression) : undefined) ??
+                this.checker.getNonNullableType(this.checker.getTypeAtLocation(n.expression)).getProperty(key),
+            );
+            if (!h) continue;
+            // A key of several names (`rls[k]`, `k: 'clearTenantContext' | 'other'`) may be either: indirect.
+            if (keys.length > 1) sites.push(this.site(n, 'indirect', h.name));
+            else report(n, h);
+            break;
+          }
+        }
+        ts.forEachChild(n, visit);
+      };
+      visit(sf);
+    }
   }
 
   // ── pg member references ──────────────────────────────────────────────
