@@ -31,6 +31,10 @@ import { InMemoryServiceCreditRepository } from '../../src/reputation/service-cr
 import type { BuildReviewResponseProposalDeps } from '../../src/reputation/build-proposal';
 import { createLogger } from '../../src/logging/logger';
 import { classifyIntent } from '../../src/ai/orchestration/intent-classifier';
+import { createLlmEditInterpreter } from '../../src/proposals/edit-interpreter';
+import { PgProposalSmsEventRepository, createProposalSmsEvent } from '../../src/proposals/sms/sms-event';
+import { handleProposalSmsReply } from '../../src/proposals/sms/reply-handler';
+import type { SettingsRepository } from '../../src/settings/settings';
 
 describe('OBS-2 — proposals.ai_run_id → the drafting run, keyed to the conversation (Postgres)', () => {
   let pool: Pool;
@@ -342,5 +346,87 @@ describe('OBS-2 — proposals.ai_run_id → the drafting run, keyed to the conve
       { id: classification.aiRunId, task_type: 'classify_intent' },
       { id: proposal.aiRunId, task_type: 'draft_estimate' },
     ]);
+  });
+
+  // OBS-2 — a texted EDIT rewrites the payload with the edit run's output
+  // merged over the draft; the row then joins to THAT run (re-pointed in the
+  // same conditional write as the payload, under the FK), while the draft run
+  // stays reachable by the conversation it was keyed to.
+  it('a texted edit re-points ai_run_id to the run that interpreted it', async () => {
+    const OWNER_PHONE = '+15125550100';
+    const repo = new PgProposalRepository(pool);
+    const smsEventRepo = new PgProposalSmsEventRepository(pool);
+    const conversationId = crypto.randomUUID();
+    const { proposal } = await new EstimateTaskHandler(gateway()).handle({
+      tenantId: tenant.tenantId,
+      userId: tenant.userId,
+      message: 'Quote a capacitor replacement',
+      conversationId,
+      customerId: crypto.randomUUID(),
+    });
+    expect(proposal.aiRunId).toBeDefined();
+    await repo.create(proposal);
+    await repo.updateStatus(tenant.tenantId, proposal.id, 'ready_for_review');
+    await smsEventRepo.create(
+      createProposalSmsEvent({
+        tenantId: tenant.tenantId,
+        proposalId: proposal.id,
+        direction: 'outbound',
+        kind: 'proposal_rendered',
+        body: 'Estimate: capacitor replacement. Reply Y to approve, N to reject, EDIT to change.',
+      }),
+    );
+
+    const editProvider: LLMProvider = {
+      name: 'stub',
+      isAvailable: async () => true,
+      complete: async (): Promise<LLMResponse> => ({
+        content: JSON.stringify({
+          lineItems: [{ description: 'Capacitor replacement', quantity: 2, unitPrice: 18900 }],
+        }),
+        model: 'stub-model',
+        provider: 'stub',
+        tokenUsage: { input: 10, output: 5, total: 15 },
+        latencyMs: 1,
+      }),
+    };
+    const editGateway = new LLMGateway(
+      { defaultProvider: 'stub' },
+      new Map([['stub', editProvider]]),
+      undefined,
+      new PgAiRunRepository(pool),
+    );
+    const result = await handleProposalSmsReply(
+      {
+        tenantId: tenant.tenantId,
+        fromE164: OWNER_PHONE,
+        body: 'EDIT make it two capacitors',
+        messageSid: `SM${crypto.randomUUID().replace(/-/g, '')}`,
+      },
+      {
+        proposalRepo: repo,
+        smsEventRepo,
+        settingsRepo: {
+          findByTenant: async () => ({ ownerPhone: OWNER_PHONE }),
+        } as unknown as SettingsRepository,
+        sendSms: async () => undefined,
+        interpretEdit: createLlmEditInterpreter(editGateway),
+      },
+    );
+    expect(result).toMatchObject({ handled: true, reason: 'edited' });
+
+    const { rows } = await pool.query(
+      `SELECT r.task_type, r.correlation_id, p.payload->'lineItems'->0->>'quantity' AS quantity
+         FROM proposals p JOIN ai_runs r ON r.id = p.ai_run_id
+        WHERE p.tenant_id = $1 AND p.id = $2`,
+      [tenant.tenantId, proposal.id],
+    );
+    // A texted edit has no call or conversation: its run is keyed to the proposal.
+    expect(rows).toEqual([{ task_type: 'proposal_sms_edit', correlation_id: proposal.id, quantity: '2' }]);
+    const { rows: draftRuns } = await pool.query(
+      `SELECT id, task_type FROM ai_runs WHERE tenant_id = $1 AND correlation_id = $2`,
+      [tenant.tenantId, conversationId],
+    );
+    expect(draftRuns).toEqual([{ id: proposal.aiRunId, task_type: 'draft_estimate' }]);
   });
 });
