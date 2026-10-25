@@ -126,18 +126,6 @@ export class PgWebhookEventRepository extends PgBaseRepository {
     });
   }
 
-  async markFailed(provider: string, eventId: string, error: string): Promise<void> {
-    await this.withClient(async (client) => {
-      await client.query(
-        `UPDATE webhook_events
-            SET status = 'failed',
-                error_message = $3
-          WHERE source = $1 AND idempotency_key = $2`,
-        [provider, eventId, error],
-      );
-    });
-  }
-
   async findById(provider: string, eventId: string): Promise<WebhookEventRecord | null> {
     return this.withClient(async (client) => {
       const result = await client.query(
@@ -146,25 +134,6 @@ export class PgWebhookEventRepository extends PgBaseRepository {
       );
       if (result.rows.length === 0) return null;
       return mapRow(result.rows[0]);
-    });
-  }
-
-  /**
-   * Returns rows in `received` status (never processed, never failed) in
-   * arrival order — the natural input for a retry worker. The supporting
-   * partial index `idx_webhook_unprocessed` makes this scan cheap.
-   */
-  async findUnprocessed(limit = 100): Promise<WebhookEventRecord[]> {
-    const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 100;
-    return this.withClient(async (client) => {
-      const result = await client.query(
-        `SELECT * FROM webhook_events
-          WHERE status = 'received'
-          ORDER BY created_at ASC
-          LIMIT $1`,
-        [safeLimit],
-      );
-      return result.rows.map(mapRow);
     });
   }
 }

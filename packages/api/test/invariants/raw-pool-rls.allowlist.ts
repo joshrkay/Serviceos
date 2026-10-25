@@ -890,19 +890,9 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     why: 'Status flip on the global webhook_events table, keyed by the verified (source, provider event id) used at receipt.',
   },
   {
-    file: 'src/webhooks/pg-webhook-event.ts', fn: 'PgWebhookEventRepository.markFailed', access: 'withClient', count: 1,
-    category: 'global_table', tables: ['webhook_events'],
-    why: 'Status flip to failed on the global webhook_events table. No production caller (tests only): a dead-code candidate.',
-  },
-  {
     file: 'src/webhooks/pg-webhook-event.ts', fn: 'PgWebhookEventRepository.findById', access: 'withClient', count: 1,
     category: 'global_table', tables: ['webhook_events'],
     why: 'Point read of a receipt by (source, key) on the global webhook_events table (the voicemail status route).',
-  },
-  {
-    file: 'src/webhooks/pg-webhook-event.ts', fn: 'PgWebhookEventRepository.findUnprocessed', access: 'withClient', count: 1,
-    category: 'global_table', tables: ['webhook_events'],
-    why: "Retry-worker scan of received rows across the global webhook_events table. No production caller (tests and the in-memory twin only); wiring it to a tenant surface would leak.",
   },
   {
     file: 'src/webhooks/pg-webhook.ts', fn: 'PgWebhookRepository.findByIdempotencyKey', access: 'withClient', count: 1,

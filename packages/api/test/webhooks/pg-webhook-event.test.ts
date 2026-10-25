@@ -6,8 +6,7 @@
  *   * recordReceipt inserts on first sight, returns inserted=true.
  *   * recordReceipt with same (provider, event_id) returns inserted=false
  *     and the existing row — no second INSERT into the table.
- *   * markProcessed / markFailed update status correctly.
- *   * findUnprocessed returns rows in `received` order.
+ *   * markProcessed updates status correctly.
  *   * findById returns null for unknown ids.
  *
  * Uses the same lightweight pool-stub pattern as
@@ -180,19 +179,6 @@ describe('P0-020 — PgWebhookEventRepository', () => {
     expect(calls[0].params).toEqual(['stripe', 'evt_123']);
   });
 
-  it('markFailed: records the error string against the matching row', async () => {
-    const { pool, calls } = makePoolStub({
-      responses: [{ match: /UPDATE webhook_events/i, rowCount: 1 }],
-    });
-    const repo = new PgWebhookEventRepository(pool as never);
-    await repo.markFailed('stripe', 'evt_123', 'downstream API 500');
-
-    expect(calls).toHaveLength(1);
-    expect(calls[0].sql).toMatch(/SET status = 'failed'/);
-    expect(calls[0].sql).toMatch(/error_message = \$3/);
-    expect(calls[0].params).toEqual(['stripe', 'evt_123', 'downstream API 500']);
-  });
-
   it('findById: returns null when no row matches', async () => {
     const { pool } = makePoolStub({
       responses: [{ match: /SELECT \* FROM webhook_events/i, rows: [] }],
@@ -233,60 +219,5 @@ describe('P0-020 — PgWebhookEventRepository', () => {
     expect(result?.eventType).toBe('user.created');
     expect(result?.payload).toEqual({ data: { id: 'usr_1' } });
     expect(result?.processedAt?.getTime()).toBe(processedAt.getTime());
-  });
-
-  it('findUnprocessed: returns received-status rows in arrival order with default limit', async () => {
-    const { pool, calls } = makePoolStub({
-      responses: [
-        {
-          match: /SELECT \* FROM webhook_events/i,
-          rows: [
-            {
-              id: 'wh-1',
-              source: 'stripe',
-              idempotency_key: 'evt_a',
-              event_type: 'payment_intent.succeeded',
-              payload: '{}',
-              created_at: NOW.toISOString(),
-              processed_at: null,
-              error_message: null,
-            },
-            {
-              id: 'wh-2',
-              source: 'stripe',
-              idempotency_key: 'evt_b',
-              event_type: 'payment_intent.succeeded',
-              payload: '{}',
-              created_at: NOW.toISOString(),
-              processed_at: null,
-              error_message: null,
-            },
-          ],
-        },
-      ],
-    });
-    const repo = new PgWebhookEventRepository(pool as never);
-    const result = await repo.findUnprocessed();
-
-    expect(result).toHaveLength(2);
-    expect(result[0].eventId).toBe('evt_a');
-    expect(result[1].eventId).toBe('evt_b');
-    expect(calls[0].sql).toMatch(/WHERE status = 'received'/);
-    expect(calls[0].sql).toMatch(/ORDER BY created_at ASC/);
-    expect(calls[0].params).toEqual([100]);
-  });
-
-  it('findUnprocessed: clamps invalid limit to default and floors fractional', async () => {
-    const { pool, calls } = makePoolStub({
-      responses: [
-        { match: /SELECT \* FROM webhook_events/i, rows: [] },
-        { match: /SELECT \* FROM webhook_events/i, rows: [] },
-      ],
-    });
-    const repo = new PgWebhookEventRepository(pool as never);
-    await repo.findUnprocessed(0);
-    await repo.findUnprocessed(7.9);
-    expect(calls[0].params).toEqual([100]);
-    expect(calls[1].params).toEqual([7]);
   });
 });
