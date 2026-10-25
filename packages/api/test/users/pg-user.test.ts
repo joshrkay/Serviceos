@@ -85,7 +85,7 @@ describe('P1-022 findByMobileNumber (tenant-scoped lookup contract)', () => {
  * resolve as an actor, and a suspended ex-owner would be miscounted
  * against the sole-active-owner bridge. Pin the mapping with a mocked
  * Pool (the `withTenant`/`withTenantTransaction` framework queries —
- * BEGIN/COMMIT/SET LOCAL ROLE/SELECT set_config — pass through; the
+ * BEGIN/COMMIT/SELECT set_config (the GUC, and the role when on) — pass through; the
  * one non-framework query is the real SELECT under test), mirroring
  * the pattern in test/appointments/pg-appointment.test.ts.
  */

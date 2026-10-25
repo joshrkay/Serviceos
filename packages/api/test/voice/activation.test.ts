@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import type { Pool } from 'pg';
+import { fakeTenantPool, type FakeResponder } from '../helpers/fake-tenant-pool';
 
 // Capture funnel emissions without touching PostHog.
 const recordFunnelEventMock = vi.fn();
@@ -7,7 +7,10 @@ vi.mock('../../src/analytics/posthog', () => ({
   recordFunnelEvent: (...args: unknown[]) => recordFunnelEventMock(...args),
 }));
 
-import { maybeFireFirstRealCallActivation } from '../../src/voice/activation';
+import { maybeFireActivationForInboundCall, maybeFireFirstRealCallActivation } from '../../src/voice/activation';
+
+/** The reads run under applyTenantContext, which requires a uuid. */
+const TENANT = '00000000-0000-4000-8000-0000000ac711';
 
 interface TenantRow {
   owner_id: string | null;
@@ -62,8 +65,8 @@ function makePool(overrides: PoolOverrides = {}) {
     }
     return { rows: [] };
   });
-  const pool = { query } as unknown as Pool;
-  return { pool, query, updateParams };
+  const fake = fakeTenantPool(query as unknown as FakeResponder);
+  return { pool: fake.pool, fake, query, updateParams };
 }
 
 function makeAuditRepo() {
@@ -82,12 +85,12 @@ describe('maybeFireFirstRealCallActivation', () => {
 
     const res = await maybeFireFirstRealCallActivation(
       { pool, auditRepo, sendEmail },
-      { tenantId: 'tenant-1', channel: 'voice_inbound' },
+      { tenantId: TENANT, channel: 'voice_inbound' },
     );
 
     expect(res).toEqual({ fired: true });
     // check-and-set ran for this tenant
-    expect(updateParams).toEqual([['tenant-1']]);
+    expect(updateParams).toEqual([[TENANT]]);
     // funnel event carries the four required fields
     expect(recordFunnelEventMock).toHaveBeenCalledTimes(1);
     expect(recordFunnelEventMock).toHaveBeenCalledWith(
@@ -95,7 +98,7 @@ describe('maybeFireFirstRealCallActivation', () => {
         distinctId: 'clerk_owner',
         event: 'first_real_call_received',
         properties: expect.objectContaining({
-          tenant_id: 'tenant-1',
+          tenant_id: TENANT,
           user_id: 'clerk_owner',
           source: 'server',
           timestamp: expect.any(String),
@@ -115,7 +118,7 @@ describe('maybeFireFirstRealCallActivation', () => {
 
     const res = await maybeFireFirstRealCallActivation(
       { pool, auditRepo: makeAuditRepo(), sendEmail },
-      { tenantId: 'tenant-1', channel: 'voice_inbound' },
+      { tenantId: TENANT, channel: 'voice_inbound' },
     );
 
     expect(res).toEqual({ fired: false });
@@ -127,7 +130,7 @@ describe('maybeFireFirstRealCallActivation', () => {
     const { pool, query } = makePool();
     const res = await maybeFireFirstRealCallActivation(
       { pool, auditRepo: makeAuditRepo() },
-      { tenantId: 'tenant-1', channel: 'inapp_voice' },
+      { tenantId: TENANT, channel: 'inapp_voice' },
     );
     expect(res).toEqual({ fired: false });
     expect(query).not.toHaveBeenCalled();
@@ -140,7 +143,7 @@ describe('maybeFireFirstRealCallActivation', () => {
     });
     const res = await maybeFireFirstRealCallActivation(
       { pool, auditRepo: makeAuditRepo() },
-      { tenantId: 'tenant-1', channel: 'voice_inbound' },
+      { tenantId: TENANT, channel: 'voice_inbound' },
     );
     expect(res).toEqual({ fired: false });
     expect(recordFunnelEventMock).not.toHaveBeenCalled();
@@ -152,7 +155,7 @@ describe('maybeFireFirstRealCallActivation', () => {
     });
     const res = await maybeFireFirstRealCallActivation(
       { pool, auditRepo: makeAuditRepo() },
-      { tenantId: 'tenant-1', channel: 'voice_inbound' },
+      { tenantId: TENANT, channel: 'voice_inbound' },
     );
     expect(res).toEqual({ fired: false });
   });
@@ -167,7 +170,7 @@ describe('maybeFireFirstRealCallActivation', () => {
     });
     const res = await maybeFireFirstRealCallActivation(
       { pool, auditRepo: makeAuditRepo() },
-      { tenantId: 'tenant-1', channel: 'voice_inbound' },
+      { tenantId: TENANT, channel: 'voice_inbound' },
     );
     expect(res).toEqual({ fired: false });
     // never reached the check-and-set
@@ -179,7 +182,7 @@ describe('maybeFireFirstRealCallActivation', () => {
     const { pool } = makePool({ inboundCount: 1 });
     const res = await maybeFireFirstRealCallActivation(
       { pool, auditRepo: makeAuditRepo() },
-      { tenantId: 'tenant-1', channel: 'voice_inbound' },
+      { tenantId: TENANT, channel: 'voice_inbound' },
     );
     expect(res).toEqual({ fired: false });
   });
@@ -195,7 +198,7 @@ describe('maybeFireFirstRealCallActivation', () => {
     });
     const res = await maybeFireFirstRealCallActivation(
       { pool, auditRepo: makeAuditRepo() },
-      { tenantId: 'tenant-1', channel: 'voice_inbound' },
+      { tenantId: TENANT, channel: 'voice_inbound' },
     );
     expect(res).toEqual({ fired: true });
     expect(recordFunnelEventMock).toHaveBeenCalledTimes(1);
@@ -205,7 +208,7 @@ describe('maybeFireFirstRealCallActivation', () => {
     const { pool } = makePool();
     const res = await maybeFireFirstRealCallActivation(
       { pool, auditRepo: makeAuditRepo() },
-      { tenantId: 'tenant-1', channel: 'voice_inbound' },
+      { tenantId: TENANT, channel: 'voice_inbound' },
     );
     expect(res).toEqual({ fired: true });
     expect(recordFunnelEventMock).toHaveBeenCalledTimes(1);
@@ -218,10 +221,82 @@ describe('maybeFireFirstRealCallActivation', () => {
     const sendEmail = vi.fn(async () => ({}));
     const res = await maybeFireFirstRealCallActivation(
       { pool, auditRepo: makeAuditRepo(), sendEmail },
-      { tenantId: 'tenant-1', channel: 'voice_inbound' },
+      { tenantId: TENANT, channel: 'voice_inbound' },
     );
     expect(res).toEqual({ fired: true });
     expect(sendEmail).not.toHaveBeenCalled();
     expect(recordFunnelEventMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Raw-pg audit 2026-10-23 §4 P1.2 / P1.5 — the reads and the once-only
+ * check-and-set run in ONE tenant transaction (rls_app_runtime), committed
+ * before the funnel event, the audit row and the email: no external call
+ * holds it open, and the audit write never needs a second connection.
+ */
+describe('activation — one tenant transaction, committed before the side effects', () => {
+  beforeEach(() => {
+    recordFunnelEventMock.mockClear();
+  });
+
+  function sideEffectProbe(fake: ReturnType<typeof makePool>['fake']) {
+    const openAt: Record<string, number> = {};
+    recordFunnelEventMock.mockImplementation(() => {
+      openAt.funnel = fake.open();
+    });
+    const auditRepo = { create: vi.fn(async () => { openAt.audit = fake.open(); }) } as never;
+    const sendEmail = vi.fn(async () => { openAt.email = fake.open(); return {}; });
+    return { openAt, auditRepo, sendEmail };
+  }
+
+  it('first-real-call: tenants, settings, count and stamp on one checkout inside BEGIN … COMMIT', async () => {
+    const { fake } = makePool();
+    const { openAt, auditRepo, sendEmail } = sideEffectProbe(fake);
+
+    expect(await maybeFireFirstRealCallActivation({ pool: fake.pool, auditRepo, sendEmail }, { tenantId: TENANT, channel: 'voice_inbound' })).toEqual({ fired: true });
+
+    expect(fake.checkouts()).toBe(1);
+    const kinds = fake.statements.map((s) => s.sql.trim().split(/\s+/)[0]);
+    expect(kinds[0]).toBe('BEGIN');
+    expect(kinds.at(-1)).toBe('COMMIT');
+    expect(fake.statements[1]).toMatchObject({ sql: expect.stringContaining("set_config('app.current_tenant_id'"), values: [TENANT] });
+    expect(fake.work()).toHaveLength(4);
+    expect(openAt).toEqual({ funnel: 0, audit: 0, email: 0 });
+  });
+
+  it('caller-identity (Vapi): tenants, settings and stamp on one checkout inside BEGIN … COMMIT', async () => {
+    const { fake } = makePool({
+      settings: { voice_agent_live_at: new Date(), activated_at: null, onboarding_test_call_skipped_at: null },
+    });
+    const { openAt, auditRepo, sendEmail } = sideEffectProbe(fake);
+
+    expect(
+      await maybeFireActivationForInboundCall({ pool: fake.pool, auditRepo, sendEmail }, { tenantId: TENANT, fromE164: '+15125550177' }),
+    ).toEqual({ fired: true });
+
+    expect(fake.checkouts()).toBe(1);
+    const kinds = fake.statements.map((s) => s.sql.trim().split(/\s+/)[0]);
+    expect(kinds[0]).toBe('BEGIN');
+    expect(kinds.at(-1)).toBe('COMMIT');
+    expect(fake.work()).toHaveLength(3);
+    expect(openAt).toEqual({ funnel: 0, audit: 0, email: 0 });
+  });
+
+  it('caller-identity: a verified caller (owner cell) is the test call and stamps nothing', async () => {
+    const fake = fakeTenantPool((sql) => {
+      if (sql.includes('FROM tenants')) return { rows: [{ owner_id: 'o', owner_email: null, subscription_status: 'trialing' }] };
+      if (sql.includes('FROM tenant_settings')) return { rows: [{ owner_phone: '+15125550177', business_phone: null, activated_at: null }] };
+      return undefined;
+    });
+
+    const res = await maybeFireActivationForInboundCall(
+      { pool: fake.pool, auditRepo: makeAuditRepo() },
+      { tenantId: TENANT, fromE164: '+15125550177' },
+    );
+
+    expect(res).toEqual({ fired: false, reason: 'verified_caller' });
+    expect(fake.work().some((s) => s.sql.includes('UPDATE'))).toBe(false);
+    expect(recordFunnelEventMock).not.toHaveBeenCalled();
   });
 });

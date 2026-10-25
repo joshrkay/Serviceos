@@ -6343,8 +6343,7 @@ export const MIGRATIONS = {
   //               auto-reclaimed by claimSend's WHERE clause, regardless of
   //               age — a resend here could duplicate an already-sent
   //               message. A possibly-stuck row is the accepted tradeoff
-  //               over a silent duplicate; see findStuckSendClaims for
-  //               observability (it reports, never auto-resolves).
+  //               over a silent duplicate; nothing auto-resolves it.
   //   'sent'    — permanent tombstone. claimSend's WHERE clause never
   //               matches it again regardless of age.
   // Purely a crash-safety layer: it does not replace or duplicate the
@@ -8960,6 +8959,23 @@ export const MIGRATIONS = {
     DROP POLICY IF EXISTS tenant_isolation_shadow_comparisons ON shadow_comparisons;
     CREATE POLICY tenant_isolation_shadow_comparisons ON shadow_comparisons
       USING (tenant_id = current_setting('app.current_tenant_id')::UUID);
+  `,
+
+  // #1813 follow-up — the shadow-comparison retention sweep's cross-tenant
+  // selection (FIND_TENANTS_WITH_DUE_SQL, workers/shadow-comparison-retention-
+  // worker.ts) bounds created_at alone, across every tenant. 352's
+  // idx_shadow_comparisons_tenant_created leads with tenant_id, so the best
+  // plan for that predicate read the WHOLE index (or the whole table) every
+  // hour however few rows were due. Leading with created_at makes it a range
+  // scan over the due rows only; tenant_id rides along so the scan stays
+  // index-only. The per-tenant DELETE and listForTenant keep using 352's
+  // index. Not CONCURRENTLY: the runner applies the corpus as one implicit
+  // transaction (see uq_tenant_integrations_twilio_phone_e164's note); an
+  // operator can build it CONCURRENTLY out-of-band first and this no-ops.
+  // Additive and idempotent.
+  '353_shadow_comparisons_created_index': `
+    CREATE INDEX IF NOT EXISTS idx_shadow_comparisons_created
+      ON shadow_comparisons (created_at, tenant_id);
   `,
 };
 

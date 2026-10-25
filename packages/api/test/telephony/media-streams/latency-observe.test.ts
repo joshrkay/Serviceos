@@ -144,7 +144,7 @@ function setup(
   const markReplyAudio = vi.fn(async () => 1);
   const store = new VoiceSessionStore({
     startInterval: false,
-    callTranscriptTurnRepo: { recordTurn, markReplyAudio },
+    callTranscriptTurnRepo: { recordTurn, markReplyAudio, redactCardNumberTurns: vi.fn(async () => 0) },
   });
   store.create('tenant-1', 'telephony', { callSid: CALL_SID });
   const ws = new FakeWs();

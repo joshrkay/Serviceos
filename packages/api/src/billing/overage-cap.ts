@@ -14,6 +14,14 @@ export interface OverageCapStore {
   get(tenantId: string): Promise<OverageCapCents>;
 }
 
+/** The cap one tenant_settings row stores (no row: the plan-price default). */
+export function overageCapFromSettings(
+  row: { ai_overage_cap_cents: number | null; ai_overage_uncapped: boolean | null } | undefined,
+): OverageCapCents {
+  if (row?.ai_overage_uncapped) return null;
+  return row?.ai_overage_cap_cents ?? undefined;
+}
+
 export class PgOverageCapStore extends PgBaseRepository implements OverageCapStore {
   constructor(pool: Pool) {
     super(pool);
@@ -28,9 +36,7 @@ export class PgOverageCapStore extends PgBaseRepository implements OverageCapSto
         `SELECT ai_overage_cap_cents, ai_overage_uncapped FROM tenant_settings WHERE tenant_id = $1`,
         [tenantId],
       );
-      const row = res.rows[0];
-      if (row?.ai_overage_uncapped) return null;
-      return row?.ai_overage_cap_cents ?? undefined;
+      return overageCapFromSettings(res.rows[0]);
     });
   }
 

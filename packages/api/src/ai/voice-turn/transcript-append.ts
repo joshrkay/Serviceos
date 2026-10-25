@@ -52,6 +52,7 @@ export interface ChallengeAwareSession {
  * whose exposure grows with each use.
  *
  * PRIV-3 — card numbers ARE matched on shape (Luhn-valid 13–19 digit runs,
+ * written or spoken as English or Spanish digit words,
  * `ai/privacy/pan-redact.ts`): a caller can recite one at any stage, and this
  * is the one place every transport's stored caller turn passes through, so
  * every store derived from the transcript (call_transcript_turns,
@@ -74,6 +75,25 @@ export function callerTranscriptText(
   return session?.pendingVoiceApproval?.stage === 'challenge'
     ? REDACTED_CHALLENGE_TEXT
     : redactCardNumbers(spoken);
+}
+
+/**
+ * PRIV-3 — what the rest of a caller turn reads the utterance as once its
+ * line is in the transcript. `stored` is the text the transport appended
+ * (`callerTranscriptText`), `appended.text` what the store kept: when the turn
+ * completes a card number the caller split across turns, the store replaced
+ * this turn's part of it with the marker, and that is what classification,
+ * the FSM, the safety scan and the task handlers must see (the per-turn scrub
+ * cannot: the part alone is too short to be a card). Otherwise the spoken
+ * text goes on as it was: a voice-approval challenge is stored as its
+ * placeholder but must still be compared as said.
+ */
+export function callerTurnTextAfterAppend(
+  spoken: string,
+  stored: string,
+  appended: { text: string },
+): string {
+  return appended.text === stored ? spoken : appended.text;
 }
 
 /**

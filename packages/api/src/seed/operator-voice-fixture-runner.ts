@@ -21,6 +21,7 @@ import { PgAuditRepository } from '../audit/pg-audit';
 import {
   createAuditEvent,
   type AuditEvent,
+  type RecentAuditEventsOptions,
   type AuditRepository,
 } from '../audit/audit';
 import { PgTenantTransactionRunner } from '../db/tenant-transaction';
@@ -141,7 +142,7 @@ class ProvenanceAuditRepository implements AuditRepository {
 
   findRecentByTenant(
     tenantId: string,
-    options?: { limit?: number },
+    options?: RecentAuditEventsOptions,
   ): Promise<AuditEvent[]> {
     if (!this.delegate.findRecentByTenant) return Promise.resolve([]);
     return this.delegate.findRecentByTenant(tenantId, options);

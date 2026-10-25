@@ -5,8 +5,12 @@
  * tts_play effect and appends it, and that it is a no-op when none present.
  */
 import { describe, it, expect } from 'vitest';
-import { callerTranscriptText,
-  REDACTED_CHALLENGE_TEXT, appendAgentTts } from '../../../src/ai/voice-turn/transcript-append';
+import {
+  callerTranscriptText,
+  callerTurnTextAfterAppend,
+  REDACTED_CHALLENGE_TEXT,
+  appendAgentTts,
+} from '../../../src/ai/voice-turn/transcript-append';
 import type { SideEffect } from '../../../src/ai/agents/customer-calling/types';
 
 function makeStore() {
@@ -115,5 +119,24 @@ describe('callerTranscriptText', () => {
     expect(callerTranscriptText({}, 'call me back on 602 555 0199')).toBe(
       'call me back on 602 555 0199',
     );
+  });
+});
+
+// PRIV-3 — what the rest of a caller turn reads the utterance as.
+describe('callerTurnTextAfterAppend', () => {
+  it('reads on as the store kept the turn when the store rewrote it (a split card completed)', () => {
+    expect(callerTurnTextAfterAppend('1111 thanks', '1111 thanks', { text: '[card number] thanks' })).toBe(
+      '[card number] thanks',
+    );
+  });
+
+  it('reads on as spoken when the store kept the turn as appended', () => {
+    expect(callerTurnTextAfterAppend('book a visit', 'book a visit', { text: 'book a visit' })).toBe('book a visit');
+  });
+
+  it('compares a voice-approval challenge as said, though it is stored as its placeholder', () => {
+    expect(
+      callerTurnTextAfterAppend('4821', REDACTED_CHALLENGE_TEXT, { text: REDACTED_CHALLENGE_TEXT }),
+    ).toBe('4821');
   });
 });

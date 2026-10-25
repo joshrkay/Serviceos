@@ -71,11 +71,16 @@ describe('Postgres integration — voice gate usage caps', () => {
   }
 
   const check = (tenantId: string) => gate({ tenantId, callSid: `CA${randomUUID().slice(0, 8)}` });
+  /**
+   * An answer carries the business hours and the after-hours mode the gate
+   * read; these tenants have no schedule and no stored mode (the default).
+   */
+  const ANSWERED = { allowed: true, businessHours: null, afterHoursVoiceMode: 'ai_answering' };
 
   it('answers a trial under 60 minutes and forwards to the owner at 60', async () => {
     const tenantId = await liveTenant({ status: 'trialing' });
     await useSeconds(tenantId, 3_599);
-    expect(await check(tenantId)).toEqual({ allowed: true });
+    expect(await check(tenantId)).toEqual(ANSWERED);
 
     await useSeconds(tenantId, 1);
     expect(await check(tenantId)).toEqual({
@@ -89,7 +94,7 @@ describe('Postgres integration — voice gate usage caps', () => {
     const tenantId = await liveTenant({ status: 'trialing' });
     await useSeconds(tenantId, 3_600, OWNER_PHONE);
 
-    expect(await check(tenantId)).toEqual({ allowed: true });
+    expect(await check(tenantId)).toEqual(ANSWERED);
   });
 
   it('forwards a third concurrent trial call', async () => {
@@ -108,7 +113,7 @@ describe('Postgres integration — voice gate usage caps', () => {
     const tenantId = await liveTenant({ status: 'active', planId: 'starter' });
     // 123 minutes: 63 over x $1.25 = $78.75 — still under the cap.
     await useSeconds(tenantId, 123 * 60);
-    expect(await check(tenantId)).toEqual({ allowed: true });
+    expect(await check(tenantId)).toEqual(ANSWERED);
 
     // 124 minutes: 64 over x $1.25 = $80.00 — cap reached.
     await useSeconds(tenantId, 60);
@@ -135,14 +140,14 @@ describe('Postgres integration — voice gate usage caps', () => {
     const raised = await liveTenant({ status: 'active', planId: 'starter' });
     await caps.set(raised, 20_000);
     await useSeconds(raised, 124 * 60); // $80.00 of overage — past the default cap
-    expect(await check(raised)).toEqual({ allowed: true });
+    expect(await check(raised)).toEqual(ANSWERED);
     await useSeconds(raised, 96 * 60); // 220 min: $200.00 — reaches the raised cap
     expect(await check(raised)).toMatchObject({ allowed: false, reason: 'overage_cap' });
 
     const removed = await liveTenant({ status: 'active', planId: 'starter' });
     await caps.set(removed, null);
     await useSeconds(removed, 1_000 * 60);
-    expect(await check(removed)).toEqual({ allowed: true });
+    expect(await check(removed)).toEqual(ANSWERED);
   });
 
   it('with a $0 cap, keeps answering inside the bundle and forwards once it is used up', async () => {
@@ -151,7 +156,7 @@ describe('Postgres integration — voice gate usage caps', () => {
     await caps.set(tenantId, 0);
 
     await useSeconds(tenantId, 59 * 60);
-    expect(await check(tenantId)).toEqual({ allowed: true });
+    expect(await check(tenantId)).toEqual(ANSWERED);
 
     await useSeconds(tenantId, 60);
     expect(await check(tenantId)).toMatchObject({ allowed: false, reason: 'overage_cap' });
@@ -161,12 +166,12 @@ describe('Postgres integration — voice gate usage caps', () => {
   // answering runs on the hard-flagged placeholder instead of voicemail.
   it('answers a paid call with no reviewed E1 script on file (placeholder, hard-flagged — O-2)', async () => {
     const tenantId = await liveTenant({ status: 'active', e1ReviewedScript: null });
-    expect(await check(tenantId)).toEqual({ allowed: true });
+    expect(await check(tenantId)).toEqual(ANSWERED);
   });
 
   it('answers a trial call with no reviewed E1 script on file, and still forwards at the 60-minute cap', async () => {
     const tenantId = await liveTenant({ status: 'trialing', e1ReviewedScript: null });
-    expect(await check(tenantId)).toEqual({ allowed: true });
+    expect(await check(tenantId)).toEqual(ANSWERED);
 
     await useSeconds(tenantId, 3_600);
     expect(await check(tenantId)).toEqual({
@@ -220,7 +225,7 @@ describe('Postgres integration — voice gate usage caps', () => {
         from: OWNER_PHONE,
         stirVerstat: 'TN-Validation-Passed-A',
       });
-      expect(result).toEqual({ allowed: true });
+      expect(result).toEqual(ANSWERED);
     });
 
     it('lets the tenant\'s own attested business number through while not_live', async () => {
@@ -232,7 +237,7 @@ describe('Postgres integration — voice gate usage caps', () => {
         from: BUSINESS_PHONE,
         stirVerstat: 'TN-Validation-Passed-A',
       });
-      expect(result).toEqual({ allowed: true });
+      expect(result).toEqual(ANSWERED);
     });
   });
 });

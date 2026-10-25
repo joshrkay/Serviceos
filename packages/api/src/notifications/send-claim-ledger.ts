@@ -29,8 +29,8 @@
  *                 reclaim, causing a later sweep to re-send. Landing in
  *                 'sending' first closes that window at the cost of a
  *                 possibly-stuck (never auto-resolved) row — an intentional
- *                 tradeoff over a silent duplicate send. See
- *                 `findStuckSendClaims` for surfacing (not resolving) these.
+ *                 tradeoff over a silent duplicate send. Nothing resolves
+ *                 such a row automatically.
  *  - 'sent'     — permanent tombstone. Once here, `claimSend`'s WHERE clause
  *                 can never match the row again regardless of age.
  *
@@ -39,8 +39,20 @@
  * (`jobs.thank_you_sms_sent_at`, `estimates.reminder_count`,
  * `message_dispatches` rows) — those keep their current meaning and are
  * still written only after a confirmed successful send.
+ *
+ * Every statement runs in a tenant session of its own (`withTenantSession`:
+ * BEGIN, the tenant GUC + `rls_app_runtime`, the statement, COMMIT — raw-pg
+ * audit 2026-10-23 §4 P1.6), so the send_claims RLS policy bounds it and not
+ * only its `tenant_id = $1`. A session never joins the caller's request
+ * transaction: each claim, state flip and release commits before the function
+ * returns, exactly as the bare `pool.query` it replaces did, so a claim taken
+ * inside a request that later rolls back still stands, and the `'sending'`
+ * row is durable before the provider is called. Whether a claim should
+ * instead ride the request transaction is an owner decision (P1.6) this
+ * module does not take.
  */
 import type { Pool } from 'pg';
+import { withTenantSession } from '../db/rls-runtime-role';
 
 /** Default window after which an unresolved 'claimed' row is reclaimable. */
 const DEFAULT_STALE_MINUTES = 15;
@@ -56,8 +68,7 @@ const DEFAULT_STALE_MINUTES = 15;
  * The WHERE clause below intentionally matches ONLY `status = 'claimed'` —
  * never `'sending'`. A `'sending'` row means a provider call may already be
  * in flight (or may have already completed before a crash), so reclaiming it
- * on a timer risks a duplicate send. It is never automatically reclaimed;
- * see `findStuckSendClaims` for surfacing (not resolving) rows stuck there.
+ * on a timer risks a duplicate send. It is never automatically reclaimed.
  */
 export async function claimSend(
   pool: Pool,
@@ -65,15 +76,17 @@ export async function claimSend(
   claimKey: string,
   staleMinutes: number = DEFAULT_STALE_MINUTES,
 ): Promise<boolean> {
-  const res = await pool.query(
-    `INSERT INTO send_claims (tenant_id, claim_key, status, claimed_at)
-     VALUES ($1, $2, 'claimed', NOW())
-     ON CONFLICT (tenant_id, claim_key) DO UPDATE
-       SET claimed_at = NOW(), status = 'claimed'
-       WHERE send_claims.status = 'claimed'
-         AND send_claims.claimed_at < NOW() - ($3 || ' minutes')::interval
-     RETURNING claim_key`,
-    [tenantId, claimKey, String(staleMinutes)],
+  const res = await withTenantSession(pool, tenantId, (client) =>
+    client.query(
+      `INSERT INTO send_claims (tenant_id, claim_key, status, claimed_at)
+       VALUES ($1, $2, 'claimed', NOW())
+       ON CONFLICT (tenant_id, claim_key) DO UPDATE
+         SET claimed_at = NOW(), status = 'claimed'
+         WHERE send_claims.status = 'claimed'
+           AND send_claims.claimed_at < NOW() - ($3 || ' minutes')::interval
+       RETURNING claim_key`,
+      [tenantId, claimKey, String(staleMinutes)],
+    ),
   );
   return (res.rowCount ?? 0) > 0;
 }
@@ -99,10 +112,12 @@ export async function markSendClaimSending(
   tenantId: string,
   claimKey: string,
 ): Promise<boolean> {
-  const res = await pool.query(
-    `UPDATE send_claims SET status = 'sending'
-     WHERE tenant_id = $1 AND claim_key = $2 AND status = 'claimed'`,
-    [tenantId, claimKey],
+  const res = await withTenantSession(pool, tenantId, (client) =>
+    client.query(
+      `UPDATE send_claims SET status = 'sending'
+       WHERE tenant_id = $1 AND claim_key = $2 AND status = 'claimed'`,
+      [tenantId, claimKey],
+    ),
   );
   return (res.rowCount ?? 0) > 0;
 }
@@ -116,10 +131,12 @@ export async function markSendClaimComplete(
   tenantId: string,
   claimKey: string,
 ): Promise<void> {
-  await pool.query(
-    `UPDATE send_claims SET status = 'sent', sent_at = NOW()
-     WHERE tenant_id = $1 AND claim_key = $2`,
-    [tenantId, claimKey],
+  await withTenantSession(pool, tenantId, (client) =>
+    client.query(
+      `UPDATE send_claims SET status = 'sent', sent_at = NOW()
+       WHERE tenant_id = $1 AND claim_key = $2`,
+      [tenantId, claimKey],
+    ),
   );
 }
 
@@ -142,37 +159,13 @@ export async function releaseSendClaim(
   tenantId: string,
   claimKey: string,
 ): Promise<void> {
-  await pool.query(
-    `DELETE FROM send_claims
-     WHERE tenant_id = $1 AND claim_key = $2 AND status IN ('claimed', 'sending')`,
-    [tenantId, claimKey],
+  await withTenantSession(pool, tenantId, (client) =>
+    client.query(
+      `DELETE FROM send_claims
+       WHERE tenant_id = $1 AND claim_key = $2 AND status IN ('claimed', 'sending')`,
+      [tenantId, claimKey],
+    ),
   );
-}
-
-/**
- * Surfaces rows genuinely stuck at 'sending' — the process crashed between
- * the sending UPDATE and either the completion write or a caught-error
- * release. These are NEVER auto-reclaimed (see module doc) and this helper
- * does NOT resolve them either; it only reports so a future monitor/operator
- * can decide (confirm the provider send actually happened, then manually
- * mark 'sent'; or manually release for a resend). Do not wire this into any
- * path that silently resolves these rows.
- */
-export async function findStuckSendClaims(
-  pool: Pool,
-  olderThanMinutes: number,
-): Promise<Array<{ tenantId: string; claimKey: string; claimedAt: Date }>> {
-  const res = await pool.query(
-    `SELECT tenant_id, claim_key, claimed_at FROM send_claims
-     WHERE status = 'sending'
-       AND claimed_at < NOW() - ($1 || ' minutes')::interval`,
-    [String(olderThanMinutes)],
-  );
-  return res.rows.map((row) => ({
-    tenantId: row.tenant_id,
-    claimKey: row.claim_key,
-    claimedAt: row.claimed_at,
-  }));
 }
 
 export type SendClaimOutcome<T> =
@@ -244,9 +237,11 @@ export async function readSendClaimStatus(
   tenantId: string,
   claimKey: string,
 ): Promise<'claimed' | 'sending' | 'sent' | null> {
-  const res = await pool.query(
-    `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
-    [tenantId, claimKey],
+  const res = await withTenantSession(pool, tenantId, (client) =>
+    client.query<{ status: string }>(
+      `SELECT status FROM send_claims WHERE tenant_id = $1 AND claim_key = $2`,
+      [tenantId, claimKey],
+    ),
   );
   const status = res.rows[0]?.status;
   return status === 'sent' || status === 'claimed' || status === 'sending' ? status : null;
@@ -320,6 +315,11 @@ async function duplicateOutcome<T>(
  * `markProviderStarting()` throws the internal `SendClaimLostError`, which
  * unwinds `sendFn` before it reaches the provider and is converted here to a
  * `'duplicate'` outcome (no release, so the winner's `'sending'` row stands).
+ *
+ * Every step — the claim, the `'sending'` CAS, the status read of a lost
+ * claim, the finalize and the release — is its own tenant session, committed
+ * before the next one starts: none is open across `sendFn` (or the provider
+ * call inside it), and none joins a request transaction around the caller.
  */
 export async function withSendClaim<T>(
   pool: Pool,

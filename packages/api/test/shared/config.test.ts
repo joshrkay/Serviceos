@@ -1240,3 +1240,203 @@ describe('U10 — LANGFUSE_* trace export config', () => {
     );
   });
 });
+
+describe('PRIV-6 — prompt/reply export to Langfuse Cloud is refused in prod/staging without an acknowledgement', () => {
+  beforeEach(() => {
+    resetConfig();
+  });
+
+  // Passes every other prod/staging gate, so these tests isolate the Langfuse
+  // content-export guard.
+  const baseProdEnv = {
+    NODE_ENV: 'production',
+    DATABASE_URL: 'postgres://u:p@h/d',
+    CLERK_SECRET_KEY: 'sk_x',
+    CLERK_PUBLISHABLE_KEY: 'pk_x',
+    CLERK_WEBHOOK_SECRET: 'whsec_x',
+    STRIPE_WEBHOOK_SECRET: 'whsec_stripe_x',
+    AI_PROVIDER_API_KEY: 'ak_x',
+    CORS_ORIGIN: 'https://app.example.com',
+    WEB_URL: 'https://app.example.com',
+    PUBLIC_API_URL: 'https://api.example.com',
+    TELEPHONY_ENABLED: 'false',
+    EMAIL_ENABLED: 'false',
+    STORAGE_ENABLED: 'false',
+    RLS_RUNTIME_ROLE: 'true',
+    TENANT_ENCRYPTION_KEY: 'a'.repeat(64),
+  };
+  // Both keys set: the exporter is live (createTraceExporterFromConfig).
+  const liveExport = {
+    LANGFUSE_PUBLIC_KEY: 'pk-lf-live',
+    LANGFUSE_SECRET_KEY: 'sk-lf-live',
+  };
+
+  it('production — refuses capture=true against the default Langfuse Cloud base URL', () => {
+    expect(() =>
+      loadConfig({ ...baseProdEnv, ...liveExport, LANGFUSE_CAPTURE_CONTENT: 'true' }),
+    ).toThrow(/LANGFUSE_CAPTURE_CONTENT=true[\s\S]*LANGFUSE_CLOUD_CONTENT_ACKNOWLEDGED=true/);
+  });
+
+  it('staging — refuses capture=true against Langfuse Cloud too', () => {
+    expect(() =>
+      loadConfig({
+        ...baseProdEnv,
+        ...liveExport,
+        NODE_ENV: 'staging',
+        LANGFUSE_CAPTURE_CONTENT: 'true',
+      }),
+    ).toThrow(/LANGFUSE_CAPTURE_CONTENT=true/);
+  });
+
+  it.each([
+    'https://cloud.langfuse.com',
+    'https://us.cloud.langfuse.com',
+    'https://eu.cloud.langfuse.com',
+    'https://hipaa.cloud.langfuse.com',
+  ])('production — a regional Langfuse Cloud host (%s) is not self-hosted', (baseUrl) => {
+    expect(() =>
+      loadConfig({
+        ...baseProdEnv,
+        ...liveExport,
+        LANGFUSE_BASE_URL: baseUrl,
+        LANGFUSE_CAPTURE_CONTENT: 'true',
+      }),
+    ).toThrow(/LANGFUSE_CAPTURE_CONTENT=true/);
+  });
+
+  // A fully qualified host keeps its terminal dot in URL.hostname, and the SDK
+  // reaches the same Langfuse Cloud endpoint through it. Case and port never
+  // change the host either.
+  it.each([
+    'https://cloud.langfuse.com.',
+    'https://us.cloud.langfuse.com.',
+    'https://langfuse.com.',
+    'https://CLOUD.Langfuse.COM',
+    'https://Hipaa.Cloud.LANGFUSE.com.',
+    'https://cloud.langfuse.com:443',
+    'https://eu.cloud.langfuse.com.:8443/',
+  ])('production — %s is Langfuse Cloud, so capture without an acknowledgement is refused', (baseUrl) => {
+    expect(() =>
+      loadConfig({
+        ...baseProdEnv,
+        ...liveExport,
+        LANGFUSE_BASE_URL: baseUrl,
+        LANGFUSE_CAPTURE_CONTENT: 'true',
+      }),
+    ).toThrow(/LANGFUSE_CAPTURE_CONTENT=true[\s\S]*LANGFUSE_CLOUD_CONTENT_ACKNOWLEDGED=true/);
+  });
+
+  it('production — a trailing-dot Langfuse Cloud host is accepted once acknowledged', () => {
+    const config = loadConfig({
+      ...baseProdEnv,
+      ...liveExport,
+      LANGFUSE_BASE_URL: 'https://us.cloud.langfuse.com.',
+      LANGFUSE_CAPTURE_CONTENT: 'true',
+      LANGFUSE_CLOUD_CONTENT_ACKNOWLEDGED: 'true',
+    });
+    expect(config.LANGFUSE_CLOUD_CONTENT_ACKNOWLEDGED).toBe(true);
+  });
+
+  // Ending in "langfuse.com" is not enough: only langfuse.com itself or one of
+  // its subdomains is Langfuse Cloud.
+  it.each([
+    'https://langfuse.example.com',
+    'https://langfuse.example.com.',
+    'https://notcloud.langfuse.com.evil',
+    'https://notcloud.langfuse.com.evil.',
+    'https://notlangfuse.com.',
+  ])('production — %s is not Langfuse Cloud, so capture needs no acknowledgement', (baseUrl) => {
+    const config = loadConfig({
+      ...baseProdEnv,
+      ...liveExport,
+      LANGFUSE_BASE_URL: baseUrl,
+      LANGFUSE_CAPTURE_CONTENT: 'true',
+    });
+    expect(config.LANGFUSE_CAPTURE_CONTENT).toBe(true);
+  });
+
+  it('production — an acknowledgement of "false" or blank (an unset Railway secret) does not count', () => {
+    for (const ack of ['false', ''] as const) {
+      resetConfig();
+      expect(() =>
+        loadConfig({
+          ...baseProdEnv,
+          ...liveExport,
+          LANGFUSE_CAPTURE_CONTENT: 'true',
+          LANGFUSE_CLOUD_CONTENT_ACKNOWLEDGED: ack,
+        }),
+      ).toThrow(/LANGFUSE_CAPTURE_CONTENT=true/);
+    }
+  });
+
+  it('production — a loose acknowledgement ("yes", "1") still refuses boot, at schema parse', () => {
+    for (const ack of ['yes', '1'] as const) {
+      resetConfig();
+      expect(() =>
+        loadConfig({
+          ...baseProdEnv,
+          ...liveExport,
+          LANGFUSE_CAPTURE_CONTENT: 'true',
+          LANGFUSE_CLOUD_CONTENT_ACKNOWLEDGED: ack,
+        }),
+      ).toThrow(/Configuration validation failed[\s\S]*LANGFUSE_CLOUD_CONTENT_ACKNOWLEDGED/);
+    }
+  });
+
+  it('production — accepts capture=true when the base URL is a self-hosted instance', () => {
+    const config = loadConfig({
+      ...baseProdEnv,
+      ...liveExport,
+      LANGFUSE_BASE_URL: 'https://langfuse.internal.example',
+      LANGFUSE_CAPTURE_CONTENT: 'true',
+    });
+    expect(config.LANGFUSE_CAPTURE_CONTENT).toBe(true);
+  });
+
+  it('production — a look-alike host is self-hosted, not Langfuse Cloud', () => {
+    const config = loadConfig({
+      ...baseProdEnv,
+      ...liveExport,
+      LANGFUSE_BASE_URL: 'https://notlangfuse.com',
+      LANGFUSE_CAPTURE_CONTENT: 'true',
+    });
+    expect(config.LANGFUSE_CAPTURE_CONTENT).toBe(true);
+  });
+
+  it('production — accepts capture=true to Langfuse Cloud with LANGFUSE_CLOUD_CONTENT_ACKNOWLEDGED=true', () => {
+    const config = loadConfig({
+      ...baseProdEnv,
+      ...liveExport,
+      LANGFUSE_CAPTURE_CONTENT: 'true',
+      LANGFUSE_CLOUD_CONTENT_ACKNOWLEDGED: 'true',
+    });
+    expect(config.LANGFUSE_CAPTURE_CONTENT).toBe(true);
+    expect(config.LANGFUSE_CLOUD_CONTENT_ACKNOWLEDGED).toBe(true);
+  });
+
+  it('production — metadata-only export to Langfuse Cloud (capture off) needs no acknowledgement', () => {
+    const config = loadConfig({ ...baseProdEnv, ...liveExport });
+    expect(config.LANGFUSE_CAPTURE_CONTENT).toBe(false);
+    expect(config.LANGFUSE_CLOUD_CONTENT_ACKNOWLEDGED).toBe(false);
+  });
+
+  it('production — capture=true with a key missing is a no-op exporter, so boot is not refused', () => {
+    const config = loadConfig({
+      ...baseProdEnv,
+      LANGFUSE_PUBLIC_KEY: 'pk-lf-live',
+      LANGFUSE_CAPTURE_CONTENT: 'true',
+    });
+    expect(config.LANGFUSE_CAPTURE_CONTENT).toBe(true);
+  });
+
+  it('dev — capture=true to Langfuse Cloud is allowed without an acknowledgement', () => {
+    const config = loadConfig({ NODE_ENV: 'dev', ...liveExport, LANGFUSE_CAPTURE_CONTENT: 'true' });
+    expect(config.LANGFUSE_CAPTURE_CONTENT).toBe(true);
+  });
+
+  it('rejects a non-boolean acknowledgement value at schema parse', () => {
+    expect(() =>
+      loadConfig({ NODE_ENV: 'dev', LANGFUSE_CLOUD_CONTENT_ACKNOWLEDGED: 'maybe' }),
+    ).toThrow('Configuration validation failed');
+  });
+});

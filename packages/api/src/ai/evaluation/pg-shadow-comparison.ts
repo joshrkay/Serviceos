@@ -13,6 +13,22 @@
  * numbers, and known-entity patterns deterministically. A future PR can
  * replace scrubPii with a more sophisticated redaction module without
  * touching the storage logic.
+ *
+ * Retention: rows are deleted once older than SHADOW_COMPARISON_RETENTION_DAYS
+ * (default 365) by the hourly, leader-gated sweep in
+ * workers/shadow-comparison-retention-worker.ts, for every tenant and the
+ * placeholder bucket below. Scrubbed reply text is still caller-derived, so it
+ * is not kept indefinitely.
+ *
+ * `ai_run_id` is always NULL today. ShadowComparisonGateway reads it from
+ * `request.metadata.aiRunId`, and no caller sets that: the ai_runs id exists
+ * only inside LLMGateway.complete, which hands the request to the provider
+ * stack (quota → failover → retry/breaker → shadow) without it. Linking it
+ * means threading a per-call id through every LLM request, and the shadow
+ * save runs on its own connection: a run row written on a still-open tenant
+ * transaction (the in-transaction guard only logs outside tests) is not
+ * visible there, so the INSERT would fail the FK and the sample would be
+ * dropped. It is not wired; the column stays NULL until a reader needs it.
  */
 
 import { Pool } from 'pg';
@@ -104,9 +120,11 @@ function mapRow(row: Record<string, unknown>): ShadowComparisonResult {
  * fails on its tenant id. Reads are stricter: only SYSTEM_TENANT_ID maps to
  * the placeholder, so `listForTenant('system')` reads back what a 'system'
  * call stored, and any other non-UUID is refused rather than opening the
- * bucket that holds cross-tenant platform calls.
+ * bucket that holds cross-tenant platform calls. The retention sweep deletes
+ * this bucket's expired rows like any tenant's, but writes no audit event for
+ * them: the placeholder has no tenants row for audit_events to reference.
  */
-const PLACEHOLDER_TENANT_ID = '00000000-0000-0000-0000-000000000000';
+export const PLACEHOLDER_TENANT_ID = '00000000-0000-0000-0000-000000000000';
 
 function storageTenantId(tenantId: string | undefined): string {
   return tenantId && isValidTenantId(tenantId) ? tenantId : PLACEHOLDER_TENANT_ID;

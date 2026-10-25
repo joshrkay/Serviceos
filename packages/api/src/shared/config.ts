@@ -52,11 +52,19 @@ const configSchema = z.object({
   // Sentry off-by-default posture). Prompt/reply content is exported ONLY
   // when LANGFUSE_CAPTURE_CONTENT=true — voice traces carry caller
   // transcripts — and then only after redaction. Base URL is configurable
-  // for a self-hosted instance. No prod hard-requirement.
+  // for a self-hosted instance. The keys are never required; but in
+  // prod/staging, content capture against Langfuse Cloud (the default base
+  // URL) is refused at boot unless LANGFUSE_CLOUD_CONTENT_ACKNOWLEDGED=true
+  // records that the operator has a processing agreement covering it
+  // (PRIV-6, validateLangfuseContentExport below).
   LANGFUSE_PUBLIC_KEY: z.string().min(1).optional(),
   LANGFUSE_SECRET_KEY: z.string().min(1).optional(),
   LANGFUSE_BASE_URL: z.string().url().default('https://cloud.langfuse.com'),
   LANGFUSE_CAPTURE_CONTENT: z
+    .enum(['true', 'false'])
+    .default('false')
+    .transform((v) => v === 'true'),
+  LANGFUSE_CLOUD_CONTENT_ACKNOWLEDGED: z
     .enum(['true', 'false'])
     .default('false')
     .transform((v) => v === 'true'),
@@ -254,6 +262,17 @@ const configSchema = z.object({
   // ~38 saturated tenants and could never fire. Pinned in
   // test/workers/failure-rate-monitor.test.ts; raise it as tenants grow.
   FAILURE_MONITOR_SPEND_MAX_CENTS: z.coerce.number().int().min(0).default(200),
+  // #1813 follow-up — days a `shadow_comparisons` row (PII-scrubbed primary and
+  // shadow LLM replies, written while SHADOW_LLM_ENABLED is on) is kept before
+  // the hourly retention sweep deletes it (workers/shadow-comparison-retention-
+  // worker.ts). Default 365 = the platform default of
+  // tenant_settings.recording_retention_days, the horizon past which the
+  // recording-retention sweep purges ai_runs prompt and reply content (PRIV-1).
+  // A non-positive or fractional value fails boot: there is no "keep forever".
+  // Nor is there one by another name: more than 36500 days (100 years) fails
+  // boot too (a window of 1e9 days would put the sweep's horizon outside
+  // Postgres's timestamp range and fail every sweep).
+  SHADOW_COMPARISON_RETENTION_DAYS: z.coerce.number().int().positive().max(36500).default(365),
   // QUALITY-2026-07-12 WS5 — Microsoft Presidio PII redaction backend for
   // training-asset ingestion. Two separate REST services (matching Presidio's
   // standard deployment): the Analyzer detects PII spans, the Anonymizer
@@ -392,6 +411,7 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
   if (cachedConfig.NODE_ENV === 'prod' || cachedConfig.NODE_ENV === 'staging') {
     validateProductionConfig(cachedConfig);
     validateFeatureRequiredConfig(env);
+    validateLangfuseContentExport(cachedConfig);
     // Deliberately WARNINGS, never a boot failure: production runs without
     // SENTRY_DSN today, and refusing to boot would take it down. ALERT_SMS_TO
     // only pages when SMS delivery is configured (the same three variables
@@ -503,6 +523,46 @@ function validateProductionConfig(config: AppConfig): void {
         'WEB_URL is where humans open the app; PUBLIC_API_URL is where Twilio/Stripe/OAuth call back. They must differ.'
     );
   }
+}
+
+/**
+ * True for Langfuse Cloud, the third-party hosted service, in every region
+ * (cloud.langfuse.com, us./eu./hipaa.cloud.langfuse.com, …). Anything else is
+ * treated as an instance the operator runs. URL.hostname keeps the terminal
+ * dot of a fully qualified name (cloud.langfuse.com.), which reaches the same
+ * Langfuse Cloud endpoint, so one trailing dot is dropped before the match.
+ */
+function isLangfuseCloudHost(baseUrl: string): boolean {
+  const host = new URL(baseUrl).hostname.toLowerCase().replace(/\.$/, '');
+  return host === 'langfuse.com' || host.endsWith('.langfuse.com');
+}
+
+/**
+ * PRIV-6 — prod/staging refuse to boot when prompt/reply content would be
+ * exported to Langfuse Cloud without an explicit acknowledgement.
+ *
+ * With both LANGFUSE keys set and LANGFUSE_CAPTURE_CONTENT=true, every gateway
+ * completion for every tenant (caller turns, summaries, SMS drafts) ships its
+ * redacted prompt and reply off-platform. The redaction is heuristic, so the
+ * content goes to Langfuse only when it stays inside infrastructure the
+ * operator runs (a self-hosted LANGFUSE_BASE_URL), or when the operator sets
+ * LANGFUSE_CLOUD_CONTENT_ACKNOWLEDGED=true to record that a processing
+ * agreement covers Langfuse Cloud. With either key absent the exporter is a
+ * no-op (createTraceExporterFromConfig), so nothing is refused; metadata-only
+ * export (capture off) is never refused.
+ */
+function validateLangfuseContentExport(config: AppConfig): void {
+  const exportLive = Boolean(config.LANGFUSE_PUBLIC_KEY && config.LANGFUSE_SECRET_KEY);
+  if (!exportLive || !config.LANGFUSE_CAPTURE_CONTENT) return;
+  if (!isLangfuseCloudHost(config.LANGFUSE_BASE_URL)) return;
+  if (config.LANGFUSE_CLOUD_CONTENT_ACKNOWLEDGED) return;
+  throw new Error(
+    'Production configuration error: LANGFUSE_CAPTURE_CONTENT=true would send every tenant\'s ' +
+      `prompts and replies, including call transcripts, to Langfuse Cloud (${config.LANGFUSE_BASE_URL}). ` +
+      'Point LANGFUSE_BASE_URL at a self-hosted Langfuse instance, set LANGFUSE_CAPTURE_CONTENT=false ' +
+      '(metadata-only traces), or set LANGFUSE_CLOUD_CONTENT_ACKNOWLEDGED=true once a processing ' +
+      'agreement with Langfuse covers this content.'
+  );
 }
 
 /**

@@ -19,6 +19,7 @@ import { v4 as uuidv4 } from 'uuid';
 import type { VoiceSessionStore, VoiceSession } from '../ai/agents/customer-calling/voice-session-store';
 import type { SideEffect } from '../ai/agents/customer-calling/types';
 import type { VoiceTurnProcessor } from '../ai/voice-turn';
+import { callerTranscriptText } from '../ai/voice-turn/transcript-append';
 import { createAuditEvent, type AuditRepository } from '../audit/audit';
 import type { LeadRepository } from '../leads/lead';
 import { createLead } from '../leads/lead-service';
@@ -317,7 +318,8 @@ export function createWebchatService(deps: WebchatServiceDeps) {
       // may never complete.
       if (ASKS_FOR_PERSON.test(text)) {
         meta.turns += 1;
-        deps.store.appendTranscript(session.id, { speaker: 'caller', text, ts: Date.now() });
+        // PRIV-3 — stored as every caller turn is: any card number scrubbed.
+        deps.store.appendTranscript(session.id, { speaker: 'caller', text: callerTranscriptText(session, text), ts: Date.now() });
         await escalate(tenantId, session, meta, 'visitor asked for a person');
         deps.store.appendTranscript(session.id, { speaker: 'agent', text: ESCALATED_REPLY, ts: Date.now() });
         return { replies: [ESCALATED_REPLY], ended: false, escalated: true, capped: false };

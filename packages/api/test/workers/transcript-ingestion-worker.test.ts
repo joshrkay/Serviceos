@@ -584,6 +584,56 @@ describe('transcript-ingestion-worker', () => {
     expect(hits.every((h) => h.chunk.sourceId.startsWith(recordingId + ':'))).toBe(true);
   });
 
+  // PRIV-3 — the payload is a snapshot the recording hook took; a rewrite of
+  // a card split across turns may have landed on the rows since. The upsert
+  // keeps the stored text where it holds more card markers, and the chunks
+  // are built from the rows as stored, so neither the rows nor the corpus get
+  // the fragments back.
+  it('builds its chunks from the rows as stored, never from a snapshot holding fewer card markers', async () => {
+    const callTranscriptTurnRepo = new InMemoryCallTranscriptTurnRepository();
+    const voiceRepo = new InMemoryVoiceRepository();
+    const knowledgeChunkRepo = new InMemoryKnowledgeChunkRepository();
+    const recordingId = await seedRecording(voiceRepo);
+    for (const [turnIndex, speaker, text] of [
+      [0, 'caller', 'my card is [card number]'],
+      [1, 'agent', 'go on'],
+      [2, 'caller', '[card number] thanks'],
+    ] as const) {
+      await callTranscriptTurnRepo.recordTurn({ tenantId: TENANT_A, voiceRecordingId: recordingId, turnIndex, speaker, text });
+    }
+    const worker = createTranscriptIngestionWorker({
+      callTranscriptTurnRepo,
+      voiceRepo,
+      knowledgeChunkRepo,
+      embeddings: stubEmbedder(),
+    });
+
+    await worker.handle(
+      buildMessage({
+        tenantId: TENANT_A,
+        voiceRecordingId: recordingId,
+        turns: turnsFrom(['caller: my card is 4111 1111 1111', 'agent: go on', 'caller: [card number] thanks']),
+      }),
+      logger,
+    );
+
+    expect((await callTranscriptTurnRepo.listByRecording(TENANT_A, recordingId)).map((t) => t.text)).toEqual([
+      'my card is [card number]',
+      'go on',
+      '[card number] thanks',
+    ]);
+    const hits = await knowledgeChunkRepo.search({
+      tenantId: TENANT_A,
+      queryEmbedding: [...CONST_EMBEDDING],
+      sourceTypes: ['transcript_window'],
+      minSimilarity: 0,
+      k: 50,
+    });
+    expect(hits.length).toBeGreaterThan(0);
+    expect(JSON.stringify(hits.map((h) => [h.chunk.content, h.chunk.contentScrubbed]))).not.toMatch(/4111|1111/);
+    expect(hits[0].chunk.content).toContain('caller: my card is [card number]');
+  });
+
   it('idempotent under retry — second handle call upserts in place', async () => {
     const callTranscriptTurnRepo = new InMemoryCallTranscriptTurnRepository();
     const voiceRepo = new InMemoryVoiceRepository();

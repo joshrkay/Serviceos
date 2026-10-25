@@ -42,6 +42,14 @@ export async function closeSharedTestDb(): Promise<void> {
  */
 export const RLS_APP_ROLE = 'rls_app_runtime';
 
+/**
+ * The one statement applyTenantContext's transactional path runs with
+ * RLS_RUNTIME_ROLE on: the tenant GUC and the role, both transaction-local
+ * (`set_config('role', …, true)` is `SET LOCAL ROLE`). A test reading a
+ * statement log finds the role switch here, not in a `SET LOCAL ROLE` line.
+ */
+export const TENANT_CONTEXT_WITH_ROLE_SQL = `SELECT set_config('app.current_tenant_id', $1, true), set_config('role', '${RLS_APP_ROLE}', true)`;
+
 export async function ensureRlsRuntimeRole(pool: Pool): Promise<void> {
   await pool.query(`DO $$ BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = '${RLS_APP_ROLE}') THEN

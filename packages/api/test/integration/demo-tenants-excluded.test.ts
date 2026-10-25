@@ -696,6 +696,8 @@ describe('Postgres integration — demo tenants and the platform tenant are excl
     const ALLOW_LIST: Record<string, string> = {
       'workers/money-reconciliation.ts': 'the string is in a comment; it lists tenants through the injected enumerator',
       'workers/provision-twilio.ts': 'reads one tenant by id (subscription_status)',
+      'workers/shadow-comparison-retention-worker.ts':
+        'reads one tenant by id (whether its purge audit row can reference it); it picks tenants from shadow_comparisons, and purges demo rows too',
       'billing/call-usage-billing.ts': 'reads one tenant by id (stripe_customer_id)',
       'billing/subscription.ts': 'reads one tenant by id (Stripe ids, checkout session)',
       'billing/stripe-connect.ts': 'reads one tenant by id (connect account)',

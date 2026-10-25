@@ -11,7 +11,6 @@ import { Pool } from 'pg';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import {
   claimSend,
-  findStuckSendClaims,
   markSendClaimComplete,
   markSendClaimSending,
   releaseSendClaim,
@@ -382,33 +381,5 @@ describe('send_claims ledger (integration)', () => {
     expect(rows).toHaveLength(0);
     // Immediate re-claim succeeds with no stale wait.
     expect(await claimSend(pool, tenantId, 'defer-prep-crash')).toBe(true);
-  });
-
-  it('findStuckSendClaims surfaces old "sending" rows but not fresh "sending", "claimed", or "sent" rows', async () => {
-    const { tenantId } = await createTestTenant(pool);
-    await pool.query(
-      `INSERT INTO send_claims (tenant_id, claim_key, status, claimed_at)
-       VALUES ($1, 'old-sending', 'sending', NOW() - INTERVAL '120 minutes')`,
-      [tenantId],
-    );
-    await pool.query(
-      `INSERT INTO send_claims (tenant_id, claim_key, status, claimed_at)
-       VALUES ($1, 'fresh-sending', 'sending', NOW())`,
-      [tenantId],
-    );
-    await pool.query(
-      `INSERT INTO send_claims (tenant_id, claim_key, status, claimed_at)
-       VALUES ($1, 'old-claimed', 'claimed', NOW() - INTERVAL '120 minutes')`,
-      [tenantId],
-    );
-    await pool.query(
-      `INSERT INTO send_claims (tenant_id, claim_key, status, claimed_at, sent_at)
-       VALUES ($1, 'old-sent', 'sent', NOW() - INTERVAL '120 minutes', NOW() - INTERVAL '120 minutes')`,
-      [tenantId],
-    );
-
-    const stuck = await findStuckSendClaims(pool, 60);
-    const stuckForTenant = stuck.filter((s) => s.tenantId === tenantId);
-    expect(stuckForTenant.map((s) => s.claimKey)).toEqual(['old-sending']);
   });
 });

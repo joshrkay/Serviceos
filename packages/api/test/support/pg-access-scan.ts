@@ -37,18 +37,32 @@
  * through its function (`analyseClientUse`):
  *
  * - the SQL run on it, and whether a context helper (`CONTEXT_HELPERS`) took
- *   it before the first effect query (R-order, `order`);
- * - every other call that RECEIVES it (as an argument, or inside an object
- *   literal argument), and every other way it escapes (`<alias x>`,
- *   `<object>`, `<return>`).
+ *   it before the first effect query (R-order, `order`) — SQL a delegate runs
+ *   on it before the helper counts as an effect at the call, and so does a
+ *   delegate whose body the scan cannot read (`<unread delegate X>`: fails
+ *   closed); SQL that is not readable is never transaction control / a lock;
+ *   `client.query`, `client['query']` and `client[K]` are all read;
+ * - every other call that RECEIVES it (as an argument, or inside an object or
+ *   array literal argument at any depth, or a spread of one:
+ *   `peek({ client })`, `peek.apply(x, [client])`, `peek(...[client])`), and
+ *   every other way it escapes (`<alias x>`, `<object>`, `<return>`, and
+ *   `<closure>` for a function over it that is passed, returned or stored —
+ *   `noteClosure` — wherever in the function it is declared, and through
+ *   `const r = q` aliases);
+ * - SQL the scan cannot read (`opaqueSql`, decided from the argument's
+ *   structure by `sqlReadable`: a caller-supplied `sql`, `sql + ' LIMIT 1'`,
+ *   `claimSql(source)`, `parts.join(' ')`), whose tables the guard therefore
+ *   cannot read.
  *
  * A call whose callee is a PARAMETER of an enclosing function (`run(client)`
  * in `systemLookup(pool, run)`, `fn(client, lease)` in `withLock`,
- * `options.beforeStep(client)`), made before any context helper took the
- * client, makes that function a RAW-CHECKOUT HELPER: it hands its principal
- * checkout to code its caller supplies. Every call that resolves to a helper
- * by symbol — directly, through an import alias, or through an interface or
- * base-class member the helper implements — is a site of its own:
+ * `options.beforeStep(client)`; not a built-in such as `ids.map(…)`, though
+ * `fn.call` / `fn.apply` / `fn.bind` on a parameter is not a built-in), made
+ * before any context helper took the client, makes that function a
+ * RAW-CHECKOUT HELPER: it hands its principal checkout to code its caller
+ * supplies. Every call that resolves to a helper by symbol — directly,
+ * through an import alias, or through an interface or base-class member the
+ * helper implements — is a site of its own:
  * `checkout-callback` (`withClient` for `PgBaseRepository.withClient`, the
  * original helper), whose SQL, R-order and handoffs come from the callback
  * the caller passes. A caller that only passes its OWN parameter through
@@ -56,7 +70,8 @@
  * helper too, so the closure is computed to a fixpoint. Any other call
  * receiving the client is a named HANDOFF, reported by callee text so the
  * guard can require it in the entry's `handsOffTo`; the scan also opens that
- * function's body one hop for SQL (and for parameter callbacks of its own).
+ * function's body one hop for SQL (and for parameter callbacks of its own),
+ * and reports where THAT body hands the client on as `callee > next`.
  *
  * Plus two rules on the same Program:
  *
@@ -64,8 +79,8 @@
  *   otherwise blind the typed rule (`pool as any`, or an unresolved import).
  * - `guc-only`: a string or template literal that sets a policy GUC
  *   (`set_config('app.current_tenant_id', …)` in any case, `SET [LOCAL|SESSION]
- *   app.…`, quoted or not). Setting the GUC without the runtime role looks
- *   RLS-safe and is not (audit F4).
+ *   app.…`, quoted or not, SQL comments read as whitespace). Setting the GUC
+ *   without the runtime role looks RLS-safe and is not (audit F4).
  *
  * ## Pure in its roots
  *
@@ -112,7 +127,7 @@ export interface CheckoutOrder {
   readonly clientVar: string | null;
   /** Line of the first context-helper call that takes the client, or null. */
   readonly contextLine: number | null;
-  /** The first query on the client that is not BEGIN / SAVEPOINT / an advisory lock. */
+  /** The first query on the client that is not transaction control (BEGIN, SAVEPOINT, COMMIT, ROLLBACK, …) / an advisory lock. */
   readonly firstEffect: { readonly line: number; readonly sql: string } | null;
   /** A context helper took the client before any effect query (and the client is tracked). */
   readonly contextFirst: boolean;
@@ -133,6 +148,12 @@ export interface PgAccessSite {
   readonly sql: readonly string[];
   /** Some SQL names its table through a substitution (`FROM "${table}"`). */
   readonly dynamicSql: boolean;
+  /**
+   * Some SQL this access runs is not a literal the scan can read: a
+   * caller-supplied `sql` parameter, a string a function builds. Its tables
+   * are unknowable here, so the entry must declare `dynamicSql`.
+   */
+  readonly opaqueSql: boolean;
   /** On `pool.connect`, `withClient` and `checkout-callback`. */
   readonly order?: CheckoutOrder;
   /**
@@ -176,12 +197,18 @@ export const CONTEXT_HELPERS: ReadonlyArray<{ readonly name: string; readonly fi
 
 const PG_DECL_RE = /[\\/]node_modules[\\/](@types[\\/])?pg[\\/]/;
 const PG_MEMBERS = new Set(['query', 'connect']);
+/** Function.prototype members that run the function they are called on. */
+const FUNCTION_METHODS = new Set(['call', 'apply', 'bind']);
 const LISTENER_METHODS = new Set(['on', 'once', 'addListener', 'prependListener', 'prependOnceListener']);
 /** Pool events whose listener receives a client, and at which argument. */
 const POOL_CLIENT_EVENTS: Readonly<Record<string, number>> = { connect: 0, acquire: 0, remove: 0, release: 1, error: 1 };
-/** Statements that do not touch a table, so they may precede the context helper. */
+/**
+ * Statements that do not touch a table, so they may precede the context
+ * helper: transaction control (a cleanup closure's `ROLLBACK` declared above
+ * `connect()` is not a first effect) and an advisory lock.
+ */
 const TX_CONTROL_RE =
-  /^\s*(BEGIN\b|START\s+TRANSACTION\b|SAVEPOINT\b|RELEASE\s+SAVEPOINT\b|SELECT\s+pg_(try_)?advisory_(xact_)?lock(_shared)?\s*\()/i;
+  /^\s*(BEGIN\b|START\s+TRANSACTION\b|SAVEPOINT\b|RELEASE\s+SAVEPOINT\b|COMMIT\b|ROLLBACK\b|END\b|ABORT\b|SELECT\s+pg_(try_)?advisory_(xact_)?lock(_shared)?\s*\()/i;
 const DYNAMIC_TABLE_RE = /\b(FROM|JOIN|INTO|UPDATE|TABLE|USING|TRUNCATE|COPY)\s+(ONLY\s+)?"?\$\{/i;
 /** One table reference: an optionally quoted, optionally schema-qualified identifier. */
 const TABLE_NAME_SRC = '"?([a-z_][a-z0-9_]*)"?(?:\\."?([a-z_][a-z0-9_]*)"?)?';
@@ -265,10 +292,7 @@ export function findPgAccess(
 
 /** Scan an existing Program (lets a caller build the large one once). */
 export function findPgAccessInProgram(program: ts.Program, opts: PgAccessScanOptions): PgAccessSite[] {
-  return new PgAccessScan(program.getTypeChecker(), path.resolve(opts.baseDir)).run(
-    program,
-    opts.gucNames ?? DEFAULT_GUC_NAMES,
-  );
+  return new PgAccessScan(program, path.resolve(opts.baseDir)).run(opts.gucNames ?? DEFAULT_GUC_NAMES);
 }
 
 // ─── small AST helpers ──────────────────────────────────────────────────────
@@ -315,6 +339,25 @@ function isWrapper(n: ts.Node): boolean {
   );
 }
 
+/**
+ * The SQL argument of a `query` member run through Function.prototype:
+ * `q.call(db, sql)` and `q.bind(db, sql)` → `sql`; `q.apply(db, [sql])` →
+ * `sql` (undefined, so unreadable, unless the arguments are an array
+ * literal); `q.bind(db)(sql)` → `sql` (undefined unless called in place).
+ */
+function functionMethodSqlArg(call: ts.CallExpression, method: string): ts.Expression | undefined {
+  if (method === 'apply') {
+    const list = call.arguments[1] ? strip(call.arguments[1]) : undefined;
+    return list && ts.isArrayLiteralExpression(list) ? list.elements[0] : undefined;
+  }
+  if (method === 'bind' && call.arguments.length < 2) {
+    let e: ts.Node = call;
+    while (isWrapper(e.parent)) e = e.parent;
+    return ts.isCallExpression(e.parent) && e.parent.expression === e ? e.parent.arguments[0] : undefined;
+  }
+  return call.arguments[1];
+}
+
 function isUndefinedExpr(e: ts.Expression): boolean {
   return (ts.isIdentifier(e) && e.text === 'undefined') || e.kind === ts.SyntaxKind.NullKeyword || ts.isVoidExpression(e);
 }
@@ -338,6 +381,16 @@ function isFunctionLikeWithBody(n: ts.Node): n is ts.FunctionLikeDeclaration {
       ts.isGetAccessorDeclaration(n) ||
       ts.isSetAccessorDeclaration(n)) &&
     !!n.body
+  );
+}
+
+/** A function a closure can be: an arrow, a function expression or declaration, an object-literal method. */
+function isClosureNode(n: ts.Node): n is ts.FunctionLikeDeclaration {
+  return (
+    ts.isArrowFunction(n) ||
+    ts.isFunctionExpression(n) ||
+    (ts.isFunctionDeclaration(n) && !!n.body) ||
+    (ts.isMethodDeclaration(n) && ts.isObjectLiteralExpression(n.parent))
   );
 }
 
@@ -410,6 +463,14 @@ interface Helper {
 
 interface ClientUse {
   sql: string[];
+  /** A query here (or in a delegate) runs SQL that is not readable (`sqlReadable`). */
+  opaqueSql: boolean;
+  /**
+   * One per unreadable query here: the parameter it runs verbatim
+   * (`client.query(sql)` with `sql` a parameter), or null. A delegate's are
+   * excused only where its caller binds each such parameter to readable SQL.
+   */
+  opaqueFrom: Array<ts.ParameterDeclaration | null>;
   contextPos: number | null;
   effect: { pos: number; sql: string } | null;
   handoffs: Set<string>;
@@ -435,20 +496,34 @@ class PgAccessScan {
    * (`db: { query }`, `c: ClientBase`), and the SQL run through it: a Pool
    * passed there is a pool-escape.
    */
-  private readonly structural = new Map<ts.Node, { fn: ts.SignatureDeclaration; slots: Array<{ index: number; path: readonly string[]; sql: string[] }> }>();
+  private readonly structural = new Map<
+    ts.Node,
+    { fn: ts.SignatureDeclaration; slots: Array<{ index: number; path: readonly string[]; sql: string[]; opaque: boolean }> }
+  >();
+
+  private readonly checker: ts.TypeChecker;
 
   constructor(
-    private readonly checker: ts.TypeChecker,
+    private readonly program: ts.Program,
     private readonly baseDir: string,
-  ) {}
+  ) {
+    this.checker = program.getTypeChecker();
+  }
 
-  run(program: ts.Program, gucNames: readonly string[]): PgAccessSite[] {
+  run(gucNames: readonly string[]): PgAccessSite[] {
+    const program = this.program;
     const gucAlt = gucNames.map((n) => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|');
     const gucRes = [
-      new RegExp(`set_config\\(\\s*'app\\.(${gucAlt})'`, 'i'),
-      new RegExp(`\\bSET\\s+(?:(?:LOCAL|SESSION)\\s+)?"?app\\.(${gucAlt})\\b`, 'i'),
+      new RegExp(`set_config"?\\s*\\(\\s*'app\\.(${gucAlt})'`, 'i'),
+      new RegExp(`\\bSET\\s+(?:(?:LOCAL|SESSION)\\s+)?"?app"?\\s*\\.\\s*"?(${gucAlt})\\b`, 'i'),
       new RegExp(`^app\\.(${gucAlt})$`),
     ];
+    // SQL comments are whitespace to Postgres (`set_config/**/(`, `SET LOCAL /* x */ app.…`).
+    // The raw text is tested too, so a `--` inside a string literal cannot hide the rest of its line.
+    const isGucLiteral = (text: string): boolean => {
+      const bare = text.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/--[^\n]*/g, ' ');
+      return gucRes.some((re) => re.test(text) || re.test(bare));
+    };
     const files = program.getSourceFiles().filter((sf) => {
       if (sf.isDeclarationFile) return false;
       const abs = path.resolve(sf.fileName);
@@ -465,11 +540,7 @@ class PgAccessScan {
           this.notePoolListener(node, sites);
           this.noteUnclassifiedMember(node, sites);
           const callee = node.expression;
-          const memberName = ts.isPropertyAccessExpression(callee)
-            ? callee.name.text
-            : ts.isElementAccessExpression(callee) && ts.isStringLiteralLike(callee.argumentExpression)
-              ? callee.argumentExpression.text
-              : null;
+          const memberName = this.memberNameOf(callee);
           if (memberName && PG_MEMBERS.has(memberName)) {
             const receiver = (callee as ts.PropertyAccessExpression | ts.ElementAccessExpression).expression;
             if (this.checker.getTypeAtLocation(receiver).flags & ts.TypeFlags.Any) {
@@ -482,7 +553,7 @@ class PgAccessScan {
         }
         if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateExpression(node)) {
           const text = literalText(node);
-          if (gucRes.some((re) => re.test(text))) sites.push(this.site(node, 'guc-only', 'literal', { sql: [text] }));
+          if (isGucLiteral(text)) sites.push(this.site(node, 'guc-only', 'literal', { sql: [text] }));
         }
         ts.forEachChild(node, visit);
       };
@@ -533,6 +604,7 @@ class PgAccessScan {
       snippet: (sf.text.split('\n')[line] ?? '').trim().slice(0, 200),
       sql,
       dynamicSql: sql.some((s) => DYNAMIC_TABLE_RE.test(s)),
+      opaqueSql: extra.opaqueSql ?? false,
       ...(extra.order ? { order: extra.order } : {}),
       ...(extra.handoffs ? { handoffs: extra.handoffs } : {}),
     };
@@ -551,17 +623,29 @@ class PgAccessScan {
     const call = node.parent as ts.CallExpression;
     const access = classifyCall(member.name, member.owners);
     if (access === 'pool.query' || access === 'ambient-or-pool') {
-      sites.push(this.site(node, access, ownerText, { sql: this.queryArgSql(call) }));
+      sites.push(this.site(node, access, ownerText, { sql: this.queryArgSql(call), opaqueSql: !this.sqlArgReadable(call) }));
     } else if (access === 'pool.connect' || access === 'client.connect') {
       const analysis = this.analyseCheckout(call);
       sites.push(
         this.site(node, access, ownerText, {
           sql: analysis.sql,
+          opaqueSql: analysis.opaqueSql,
           handoffs: analysis.handoffs,
           ...(access === 'pool.connect' ? { order: analysis.order } : {}),
         }),
       );
     }
+  }
+
+  /**
+   * The member a callee names: `x.query`, `x['query']`, or `x[K]` whose key's
+   * type is one string literal (`const K = 'query'`). Null for anything else.
+   */
+  private memberNameOf(callee: ts.Expression): string | null {
+    if (ts.isPropertyAccessExpression(callee)) return callee.name.text;
+    if (!ts.isElementAccessExpression(callee)) return null;
+    const names = this.literalNames(callee.argumentExpression);
+    return names?.length === 1 ? names[0] : null;
   }
 
   /** The string-literal values a key expression's type narrows to, or null when it does not. */
@@ -620,7 +704,8 @@ class PgAccessScan {
       // skipping it keeps the checker off every array read in the tree).
       if (ts.isNumericLiteral(node.argumentExpression) || this.isNumericKey(node.argumentExpression)) return null;
       const names = this.literalNames(node.argumentExpression);
-      const receiverType = this.checker.getTypeAtLocation(node.expression);
+      // Non-nullable: `pool?.['query']` on a `Pool | undefined`.
+      const receiverType = this.checker.getNonNullableType(this.checker.getTypeAtLocation(node.expression));
       if (names === null || (names.length > 1 && names.some((n) => PG_MEMBERS.has(n)))) {
         // A key the checker cannot narrow to one name, on a pg-typed receiver.
         const owners = this.pgOwnersOfType(receiverType);
@@ -647,6 +732,10 @@ class PgAccessScan {
     return literalsOf(call.arguments[0], this.checker);
   }
 
+  private sqlArgReadable(call: ts.CallExpression): boolean {
+    return sqlReadable(call.arguments[0], this.checker);
+  }
+
   // ── checkouts and the client's travels ────────────────────────────────
 
   /**
@@ -657,6 +746,7 @@ class PgAccessScan {
    */
   private analyseCheckout(call: ts.CallExpression): {
     sql: string[];
+    opaqueSql: boolean;
     order: CheckoutOrder;
     handoffs: string[];
   } {
@@ -671,6 +761,7 @@ class PgAccessScan {
     for (const p of use.params) this.registerSlot(p.root, p.clientArgs);
     return {
       sql: use.sql,
+      opaqueSql: use.opaqueSql,
       handoffs: [...use.handoffs].sort(),
       order: orderOf(sf, binding ? binding.text : null, use, !!clientSym),
     };
@@ -692,7 +783,8 @@ class PgAccessScan {
     return !!sym && clients.has(sym);
   }
 
-  private objectHoldsClient(e: ts.Expression, clients: ReadonlySet<ts.Symbol>): boolean {
+  /** `{ client }`, `{ client: client }` (or `cond ? client : other` there): an object literal with the client as a property. */
+  private objectPropertyIsClient(e: ts.Expression, clients: ReadonlySet<ts.Symbol>): boolean {
     const s = strip(e);
     return (
       ts.isObjectLiteralExpression(s) &&
@@ -707,11 +799,54 @@ class PgAccessScan {
   }
 
   /**
+   * The client inside an object or array literal, at any depth, or a spread of
+   * one: `peek({ client })`, `peek.apply(undefined, [client])`,
+   * `Reflect.apply(peek, x, [client])`, `peek(...[client])`, `peek({ all: [client] })`;
+   * and such a literal behind a ternary or `??` / `||` / `&&` (as
+   * `isClientExpr` reads them): `peek(flag ? [client] : [])`,
+   * `peek(given ?? [client])`. An element or property access holds the client
+   * when its receiver does, read the same way (so at any depth, and on a
+   * branch): `peek([client][0])`, `peek((flag ? [client] : [client])[0])`,
+   * `peek((given ?? [client])[0])`, `peek((flag ? { c: client } : …).c)`,
+   * `peek([[client]][0][0])`, `peek({ all: [client] }.all[0])`. Which element
+   * or property is taken is not read (`{ c: client, n: 1 }.n` holds it too),
+   * so this decides a handoff, never context (`objectPropertyIsClient` does).
+   */
+  private objectHoldsClient(e: ts.Expression, clients: ReadonlySet<ts.Symbol>): boolean {
+    const s = strip(e);
+    const holds = (v: ts.Expression): boolean => this.isClientExpr(v, clients) || this.objectHoldsClient(v, clients);
+    if (ts.isBinaryExpression(s) && isLogicalOperator(s.operatorToken.kind)) {
+      return (
+        this.objectHoldsClient(s.right, clients) ||
+        (s.operatorToken.kind !== ts.SyntaxKind.AmpersandAmpersandToken && this.objectHoldsClient(s.left, clients))
+      );
+    }
+    if (ts.isConditionalExpression(s)) {
+      return this.objectHoldsClient(s.whenTrue, clients) || this.objectHoldsClient(s.whenFalse, clients);
+    }
+    if (ts.isElementAccessExpression(s) || ts.isPropertyAccessExpression(s)) return this.objectHoldsClient(s.expression, clients);
+    if (ts.isSpreadElement(s)) return holds(s.expression);
+    if (ts.isArrayLiteralExpression(s)) return s.elements.some(holds);
+    return (
+      ts.isObjectLiteralExpression(s) &&
+      s.properties.some((p) => {
+        if (ts.isShorthandPropertyAssignment(p)) {
+          const v = this.checker.getShorthandAssignmentValueSymbol(p);
+          return !!v && clients.has(v);
+        }
+        if (ts.isSpreadAssignment(p)) return this.objectHoldsClient(p.expression, clients);
+        return ts.isPropertyAssignment(p) && holds(p.initializer);
+      })
+    );
+  }
+
+  /**
    * Follow `clients` through `region` from position `from`: SQL on them,
-   * context-helper calls, every call that receives them, and every other
-   * escape. `broadSql` also takes `.query` SQL on other receivers (a
-   * callback's whole body); `followDelegates` opens a named callee's body
-   * one hop.
+   * context-helper calls, every call that receives them, every closure over
+   * them that leaves (`noteClosure`; any closure in `region`, even one
+   * declared above `from`), and every other escape. `broadSql` also takes
+   * `.query` SQL on other receivers (a callback's whole body);
+   * `followDelegates` opens a named callee's body one hop.
    */
   private analyseClientUse(
     region: ts.Node,
@@ -720,46 +855,194 @@ class PgAccessScan {
     mode: { broadSql: boolean; followDelegates: boolean },
   ): ClientUse {
     const sf = region.getSourceFile();
-    const use: ClientUse = { sql: [], contextPos: null, effect: null, handoffs: new Set(), params: [] };
-    const walk = (n: ts.Node): void => {
-      if (n.getStart(sf) >= from) {
-        if (ts.isCallExpression(n) || ts.isNewExpression(n)) {
-          const args = n.arguments ?? [];
-          const direct = args.flatMap((a, i) => (this.isClientExpr(a, clients) ? [i] : []));
-          const viaObject = args.some((a) => this.objectHoldsClient(a, clients));
-          if (direct.length || viaObject) {
-            if (ts.isCallExpression(n) && isContextHelperCall(n, this.checker)) {
-              if (use.contextPos === null) use.contextPos = n.getStart(sf);
-            } else {
-              this.recordHandoff(n, direct, use, mode.followDelegates, clients);
+    const use: ClientUse = {
+      sql: [], opaqueSql: false, opaqueFrom: [], contextPos: null, effect: null, handoffs: new Set(), params: [],
+    };
+    /** Locals bound to a closure over the client (`const q = (sql) => client.query(sql)`), and their aliases. */
+    const closures = this.hoistedClosures(region, clients);
+    // `inClosure`: inside a function over the client that is declared above
+    // `from` (a hoisted function, a closure over a `let` assigned later). It
+    // can run once the client exists, so its SQL, effects and handoffs count
+    // where they stand; a context helper in it does not (it may never run).
+    const walk = (n: ts.Node, inClosure: boolean): void => {
+      const after = n.getStart(sf) >= from;
+      const live = after || inClosure;
+      if (live && (ts.isCallExpression(n) || ts.isNewExpression(n))) {
+        const args = n.arguments ?? [];
+        const direct = args.flatMap((a, i) => (this.isClientExpr(a, clients) ? [i] : []));
+        const viaObject = args.some((a) => this.objectHoldsClient(a, clients));
+        if (direct.length || viaObject) {
+          // Context counts only when the helper gets the client itself (or as a
+          // property of an object literal: `executeAudited({ client, … })`). A
+          // literal reached through an index or property (`[other, client][0]`,
+          // `(flag ? [client] : [other])[0]`) may hand it another client, so it is
+          // an unread handoff (fails closed) rather than context.
+          if (
+            ts.isCallExpression(n) &&
+            isContextHelperCall(n, this.checker) &&
+            (direct.length > 0 || args.some((a) => this.objectPropertyIsClient(a, clients)))
+          ) {
+            if (after && use.contextPos === null) use.contextPos = n.getStart(sf);
+          } else {
+            this.recordHandoff(n, direct, use, mode.followDelegates, clients);
+          }
+        }
+        if (ts.isCallExpression(n)) {
+          const callee = n.expression;
+          // `.query(…)` (or `['query'](…)`, `[K](…)`), or a call of a query
+          // FUNCTION handed over in the client's place
+          // (`fn((sql) => client.query(sql))` → `q('SELECT …')`): a pg client is
+          // never callable, so calling a tracked one is a query.
+          const member = ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee) ? callee : null;
+          const isQuery = member !== null && this.memberNameOf(member) === 'query';
+          const onClient = member && isQuery ? this.isClientExpr(member.expression, clients) : this.isClientExpr(callee, clients);
+          if ((isQuery && (onClient || mode.broadSql || clients.size === 0)) || (!isQuery && onClient)) {
+            const texts = this.queryArgSql(n);
+            const readable = this.sqlArgReadable(n);
+            use.sql.push(...texts);
+            if (!readable) {
+              use.opaqueSql = true;
+              const a0 = n.arguments[0] ? strip(n.arguments[0]) : undefined;
+              const d = a0 && ts.isIdentifier(a0) ? this.checker.getSymbolAtLocation(a0)?.valueDeclaration : undefined;
+              use.opaqueFrom.push(d && ts.isParameter(d) ? d : null);
+            }
+            // Transaction control / a lock only when every statement the
+            // argument can be is one, alone (`'BEGIN; DELETE …'` is not); SQL
+            // the scan cannot read never is.
+            const statements = readable ? sqlStatements(n.arguments[0], this.checker) : ['<non-literal SQL>'];
+            const effect = statements.find((t) => !isTxControl(t));
+            if (onClient && use.effect === null && effect !== undefined) {
+              use.effect = { pos: n.getStart(sf), sql: effect.replace(/\s+/g, ' ').trim().slice(0, 120) };
             }
           }
-          if (ts.isCallExpression(n)) {
-            const callee = n.expression;
-            if (ts.isPropertyAccessExpression(callee) && callee.name.text === 'query') {
-              const onClient = this.isClientExpr(callee.expression, clients);
-              if (onClient || mode.broadSql || clients.size === 0) {
-                const texts = this.queryArgSql(n);
-                use.sql.push(...texts);
-                const first = texts[0] ?? '<non-literal SQL>';
-                if (onClient && use.effect === null && !TX_CONTROL_RE.test(first)) {
-                  use.effect = { pos: n.getStart(sf), sql: first.replace(/\s+/g, ' ').trim().slice(0, 120) };
-                }
-              }
-            }
-          }
-        } else if (ts.isIdentifier(n) && clients.size > 0) {
-          const sym = ts.isShorthandPropertyAssignment(n.parent)
-            ? this.checker.getShorthandAssignmentValueSymbol(n.parent)
-            : this.checker.getSymbolAtLocation(n);
-          const escape = sym && clients.has(sym) ? escapeOf(n) : null;
+        }
+      } else if (ts.isIdentifier(n) && clients.size > 0) {
+        const sym = ts.isShorthandPropertyAssignment(n.parent)
+          ? this.checker.getShorthandAssignmentValueSymbol(n.parent)
+          : this.checker.getSymbolAtLocation(n);
+        if (sym && clients.has(sym)) {
+          const escape = live ? escapeOf(n) : null;
           if (escape) use.handoffs.add(escape);
+        } else if (sym && closures.has(sym) && !isDeclarationName(n)) {
+          // A use of a closure local: passed / returned / stored, or `const r = q` (an alias, followed too).
+          const alias = this.noteClosure(n, use);
+          if (alias) closures.add(alias);
         }
       }
-      ts.forEachChild(n, walk);
+      let inner = inClosure;
+      if (n !== region && clients.size > 0 && isClosureNode(n) && this.capturesClient(n, clients, closures)) {
+        const bound = this.noteClosure(n, use);
+        if (bound) closures.add(bound);
+        if (!after) inner = true;
+      }
+      ts.forEachChild(n, (c) => walk(c, inner));
     };
-    walk(region);
+    walk(region, false);
     return use;
+  }
+
+  /**
+   * Function declarations in `region` over the client (or over one another),
+   * to a fixpoint: hoisted, so a use above the declaration is a use of the
+   * closure too (`later(q); function q() { return client.query(…) }`).
+   */
+  private hoistedClosures(region: ts.Node, clients: ReadonlySet<ts.Symbol>): Set<ts.Symbol> {
+    const out = new Set<ts.Symbol>();
+    if (clients.size === 0) return out;
+    const decls: ts.FunctionDeclaration[] = [];
+    const collect = (n: ts.Node): void => {
+      if (n !== region && ts.isFunctionDeclaration(n) && n.body && n.name) decls.push(n);
+      ts.forEachChild(n, collect);
+    };
+    collect(region);
+    for (let grew = decls.length > 0; grew; ) {
+      grew = false;
+      for (const d of decls) {
+        const sym = this.checker.getSymbolAtLocation(d.name!);
+        if (sym && !out.has(sym) && this.capturesClient(d, clients, out)) {
+          out.add(sym);
+          grew = true;
+        }
+      }
+    }
+    return out;
+  }
+
+  /** Whether a function's body names a tracked client (or a local closure over one). */
+  private capturesClient(
+    fn: ts.FunctionLikeDeclaration,
+    clients: ReadonlySet<ts.Symbol>,
+    closures: ReadonlySet<ts.Symbol>,
+  ): boolean {
+    let found = false;
+    const visit = (m: ts.Node): void => {
+      if (found) return;
+      if (ts.isIdentifier(m)) {
+        const s = ts.isShorthandPropertyAssignment(m.parent)
+          ? this.checker.getShorthandAssignmentValueSymbol(m.parent)
+          : this.checker.getSymbolAtLocation(m);
+        found = !!s && (clients.has(s) || closures.has(s));
+        return;
+      }
+      ts.forEachChild(m, visit);
+    };
+    if (fn.body) visit(fn.body);
+    return found;
+  }
+
+  /**
+   * A closure over the client — a function that uses it, or a local holding
+   * one — that can run later or elsewhere is a `<closure>` handoff: handed to
+   * a call (or, when the callee is a parameter and not a default-lib built-in
+   * like `ids.map`, a raw-checkout helper slot, like the client itself),
+   * returned, or stored. Called in place, handed to a context helper, or bound
+   * to a local (whose symbol is returned, so its later uses — and aliases of
+   * it — are followed), it is not.
+   */
+  private noteClosure(node: ts.Node, use: ClientUse): ts.Symbol | undefined {
+    if (ts.isFunctionDeclaration(node)) return node.name ? this.checker.getSymbolAtLocation(node.name) : undefined;
+    let e: ts.Node = node;
+    while (isWrapper(e.parent)) e = e.parent;
+    const p = e.parent;
+    let call: ts.CallExpression | ts.NewExpression | null = null;
+    let index: number | null = null;
+    if (ts.isCallExpression(p) && p.expression === e) return undefined; // an IIFE, or `q(…)`
+    if ((ts.isCallExpression(p) || ts.isNewExpression(p)) && (p.arguments ?? []).some((a) => a === e)) {
+      call = p;
+      index = p.arguments!.findIndex((a) => a === e);
+    } else if (
+      (ts.isPropertyAssignment(p) && p.initializer === e) ||
+      ts.isShorthandPropertyAssignment(p) ||
+      (ts.isMethodDeclaration(e) && ts.isObjectLiteralExpression(p)) ||
+      ts.isArrayLiteralExpression(p)
+    ) {
+      // In an object or array literal (`fn.apply(this, [cb])`): what holds it decides.
+      let holder: ts.Node = ts.isObjectLiteralExpression(p) || ts.isArrayLiteralExpression(p) ? p : p.parent;
+      while (isWrapper(holder.parent)) holder = holder.parent;
+      const outer = holder.parent;
+      if ((ts.isCallExpression(outer) || ts.isNewExpression(outer)) && (outer.arguments ?? []).some((a) => a === holder)) {
+        call = outer;
+      }
+    } else if (ts.isVariableDeclaration(p) && p.initializer === e && ts.isIdentifier(p.name)) {
+      return this.checker.getSymbolAtLocation(p.name);
+    }
+    if (!call) {
+      use.handoffs.add('<closure>');
+      return undefined;
+    }
+    if (ts.isCallExpression(call) && isContextHelperCall(call, this.checker)) return undefined; // runs under its context
+    // `ids.map(cb)`, `map.set(k, cb)` on a parameter: a built-in, not a callback the caller supplies.
+    const root = ts.isCallExpression(call) && !this.isDefaultLibCall(call) ? this.paramRootOf(strip(call.expression)) : null;
+    if (root) {
+      if (use.contextPos === null) {
+        // Before context: the caller's callback gets a closure over the principal client.
+        if (this.declsFor(root.fn).size > 0) use.params.push({ root, clientArgs: index === null ? [] : [index] });
+        else use.handoffs.add('<closure>');
+      }
+      if (!root.viaDefault) return undefined;
+    }
+    use.handoffs.add('<closure>');
+    return undefined;
   }
 
   private recordHandoff(
@@ -785,24 +1068,73 @@ class PgAccessScan {
     if (!followDelegates) return;
     // Literals passed alongside the client are SQL the callee may run on it
     // (`queueStatement(c, 'DELETE FROM …', tenantId)`).
+    const passed: string[] = [];
     call.arguments?.forEach((a, i) => {
       const s = strip(a);
       if (direct.includes(i) || this.objectHoldsClient(a, clients) || ts.isFunctionLike(s)) return;
-      use.sql.push(...literalsOf(a, this.checker));
+      passed.push(...literalsOf(a, this.checker));
     });
+    use.sql.push(...passed);
     // One hop into the callee: its SQL on the client, and its own parameter callbacks.
     const decl = ts.isCallExpression(call) ? this.calleeDeclaration(call) : undefined;
-    if (!decl || !decl.body) return;
     const params = new Set<ts.Symbol>();
-    for (const i of direct) {
-      const p = decl.parameters[i];
-      const sym = p && ts.isIdentifier(p.name) ? this.checker.getSymbolAtLocation(p.name) : undefined;
-      if (sym) params.add(sym);
+    if (decl?.body) {
+      for (const i of direct) {
+        const p = decl.parameters[i];
+        const sym = p && ts.isIdentifier(p.name) ? this.checker.getSymbolAtLocation(p.name) : undefined;
+        if (sym) params.add(sym);
+      }
     }
-    if (params.size === 0) return;
+    if (!decl?.body || params.size === 0) {
+      // R-order fails closed: a body the scan cannot read (an interface member,
+      // `new X(client)`, `.call`/`.apply`/`.bind`, `Reflect.apply`, the client
+      // only inside an object or array literal or a spread of one) may run
+      // anything on the client, so before context the call is the first effect.
+      if (use.contextPos === null && use.effect === null) {
+        use.effect = { pos: call.getStart(sf), sql: `<unread delegate ${text}>` };
+      }
+      return;
+    }
     const inner = this.analyseClientUse(decl.body, params, decl.body.pos, { broadSql: false, followDelegates: false });
     use.sql.push(...inner.sql);
+    // A delegate that runs a parameter verbatim (`queueStatement(c, sql)`) runs
+    // what this call binds there: excused only when that is readable SQL.
+    const args = call.arguments ?? [];
+    const excused = inner.opaqueFrom.every((p) => {
+      const i = p ? decl.parameters.indexOf(p) : -1;
+      return i >= 0 && !args.slice(0, i + 1).some(ts.isSpreadElement) && sqlReadable(args[i], this.checker);
+    });
+    if (inner.opaqueSql && !excused) use.opaqueSql = true;
+    // R-order: before any context helper took the client, what the delegate
+    // runs on it (other than transaction control / a lock) is this checkout's first effect.
+    const innerEffect = inner.effect;
+    if (
+      use.contextPos === null &&
+      use.effect === null &&
+      innerEffect &&
+      (inner.contextPos === null || innerEffect.pos < inner.contextPos)
+    ) {
+      use.effect = { pos: call.getStart(sf), sql: innerEffect.sql };
+    }
     for (const p of inner.params) this.registerSlot(p.root, p.clientArgs);
+    // Where the delegate hands the client on is named too (`runSteps > tryConsumeOn`),
+    // so a new second hop fails review; its body is not read.
+    for (const h of inner.handoffs) use.handoffs.add(`${text} > ${h}`);
+  }
+
+  /**
+   * A call whose callee TypeScript's default lib alone declares (`Array#map`,
+   * `Map#set`, `Promise.all`) — but not Function.prototype's `call` / `apply` /
+   * `bind`: `fn.call(this, cb)`, `fn.apply(this, [cb])` and
+   * `fn.bind(this, cb)` on a parameter run the CALLER's `fn`.
+   */
+  private isDefaultLibCall(call: ts.CallExpression): boolean {
+    const c = strip(call.expression);
+    const member = this.memberNameOf(c);
+    if (member !== null && FUNCTION_METHODS.has(member)) return false;
+    const name = ts.isPropertyAccessExpression(c) ? c.name : ts.isElementAccessExpression(c) ? c.argumentExpression : c;
+    const decls = this.checker.getSymbolAtLocation(name)?.getDeclarations() ?? [];
+    return decls.length > 0 && decls.every((d) => this.program.isSourceFileDefaultLibrary(d.getSourceFile()));
   }
 
   /** The function-like declaration (with a body) a call's callee resolves to. */
@@ -848,7 +1180,13 @@ class PgAccessScan {
       }
     }
     if (!ts.isIdentifier(e)) return null;
-    const decl = this.checker.getSymbolAtLocation(e)?.valueDeclaration;
+    // A shorthand property (`read({ db })`, as `slotArgument` hands it over)
+    // names the property; follow the value it takes, like the longhand `{ db: db }`.
+    const sym =
+      ts.isShorthandPropertyAssignment(e.parent) && e.parent.name === e
+        ? this.checker.getShorthandAssignmentValueSymbol(e.parent)
+        : this.checker.getSymbolAtLocation(e);
+    const decl = sym?.valueDeclaration;
     if (!decl) return null;
     if (ts.isParameter(decl) && ts.isIdentifier(decl.name)) {
       const fn = decl.parent as ts.SignatureDeclaration;
@@ -995,7 +1333,11 @@ class PgAccessScan {
   }
 
   private calleeSymbol(call: ts.CallExpression): ts.Symbol | undefined {
-    const c = strip(call.expression);
+    return this.symbolOfCallee(strip(call.expression));
+  }
+
+  /** What a (stripped) callee names: an identifier, `x.m`, `x['m']`, or `x[K]` with `K` typed as one literal. */
+  private symbolOfCallee(c: ts.Expression): ts.Symbol | undefined {
     if (ts.isIdentifier(c)) return resolveAlias(this.checker.getSymbolAtLocation(c), this.checker);
     if (ts.isPropertyAccessExpression(c)) return this.checker.getSymbolAtLocation(c.name);
     if (ts.isElementAccessExpression(c)) {
@@ -1003,7 +1345,7 @@ class PgAccessScan {
       if (!names || names.length !== 1) return undefined;
       return (
         (ts.isStringLiteralLike(c.argumentExpression) ? this.checker.getSymbolAtLocation(c.argumentExpression) : undefined) ??
-        this.checker.getTypeAtLocation(c.expression).getProperty(names[0])
+        this.checker.getNonNullableType(this.checker.getTypeAtLocation(c.expression)).getProperty(names[0])
       );
     }
     return undefined;
@@ -1067,6 +1409,7 @@ class PgAccessScan {
   /** One call to raw-checkout helper(s): its callback(s) read as the site. Null for a pure pass-through. */
   private helperCallSite(call: ts.CallExpression, matched: readonly Helper[]): PgAccessSite | null {
     let emit = false;
+    let opaqueSql = false;
     const sql: string[] = [];
     const handoffs = new Set<string>();
     const orders: CheckoutOrder[] = [];
@@ -1107,6 +1450,7 @@ class PgAccessScan {
         followDelegates: true,
       });
       sql.push(...use.sql);
+      opaqueSql ||= use.opaqueSql;
       for (const h of use.handoffs) handoffs.add(h);
       for (const p of use.params) this.registerSlot(p.root, p.clientArgs);
       orders.push(orderOf(region.getSourceFile(), names.length ? names.join(',') : null, use, clients.size > 0));
@@ -1118,6 +1462,7 @@ class PgAccessScan {
     const access = matched.some((h) => h.withClient) ? 'withClient' : 'checkout-callback';
     return this.site(call.expression, access, [...new Set(matched.map((h) => h.name))].join('|'), {
       sql,
+      opaqueSql,
       order,
       handoffs: [...handoffs].sort(),
     });
@@ -1134,10 +1479,17 @@ class PgAccessScan {
     );
   }
 
-  /** `pool.on('connect', (client) => …)`: the listener runs on every client the event carries. */
+  /**
+   * `pool.on('connect', (client) => …)` (or `pool['on']`, `pool[K]` with
+   * `const K = 'on'`, `pool?.['on']`, and the callee in parentheses, behind `!`
+   * or cast: `(pool.on)(…)`, `pool.on!(…)`, `(pool['on'] as Pool['on'])(…)`):
+   * the listener runs on every client the event carries.
+   */
   private notePoolListener(call: ts.CallExpression, sites: PgAccessSite[]): void {
-    const callee = call.expression;
-    if (!ts.isPropertyAccessExpression(callee) || !LISTENER_METHODS.has(callee.name.text)) return;
+    const callee = strip(call.expression);
+    if (!ts.isPropertyAccessExpression(callee) && !ts.isElementAccessExpression(callee)) return;
+    const method = this.memberNameOf(callee);
+    if (method === null || !LISTENER_METHODS.has(method)) return;
     if (!this.poolish(callee.expression)) return;
     const event = call.arguments[0];
     const names = event ? this.literalNames(event) : null;
@@ -1171,6 +1523,7 @@ class PgAccessScan {
     sites.push(
       this.site(callee, 'checkout-callback', 'Pool.on', {
         sql: use.sql,
+        opaqueSql: use.opaqueSql,
         order: orderOf(region.getSourceFile(), bound.join(','), use, true),
         handoffs: [...use.handoffs].sort(),
       }),
@@ -1184,30 +1537,42 @@ class PgAccessScan {
    * are escapes (`structuralEscapes`).
    */
   private noteUnclassifiedMember(call: ts.CallExpression, sites: PgAccessSite[]): void {
-    const callee = call.expression;
-    if (!ts.isPropertyAccessExpression(callee) || !PG_MEMBERS.has(callee.name.text)) return;
-    const owners = pgOwners(this.checker.getSymbolAtLocation(callee.name));
+    // `db.query(…)`, `db['query'](…)`, `db[K](…)` with `const K = 'query'`, and the
+    // member run through Function.prototype: `db['query'].call(db, sql)`,
+    // `db.query.apply(db, [sql])`, `db.query.bind(db)(sql)`.
+    let callee: ts.Expression = call.expression;
+    let sqlArg: ts.Expression | undefined = call.arguments[0];
+    const method = ts.isPropertyAccessExpression(callee) || ts.isElementAccessExpression(callee) ? this.memberNameOf(callee) : null;
+    if (method !== null && FUNCTION_METHODS.has(method)) {
+      callee = strip((callee as ts.PropertyAccessExpression | ts.ElementAccessExpression).expression);
+      sqlArg = functionMethodSqlArg(call, method);
+    }
+    if (!ts.isPropertyAccessExpression(callee) && !ts.isElementAccessExpression(callee)) return;
+    const member = this.memberNameOf(callee);
+    if (member === null || !PG_MEMBERS.has(member)) return;
+    const owners = pgOwners(this.symbolOfCallee(callee));
     if (owners.includes('Pool')) return; // pool.query / pool.connect / ambient-or-pool
-    if (callee.name.text === 'connect' && owners.length) return; // client.connect
+    if (member === 'connect' && owners.length) return; // client.connect
     if (this.checker.getTypeAtLocation(callee.expression).flags & ts.TypeFlags.Any) return; // R-any
-    const sql = callee.name.text === 'query' ? this.queryArgSql(call) : [];
+    const sql = member === 'query' ? literalsOf(sqlArg, this.checker) : [];
+    const opaqueSql = member === 'query' && !sqlReadable(sqlArg, this.checker);
     const { inner, cast } = uncast(callee.expression);
     if (cast) {
-      if (this.poolish(inner)) sites.push(this.site(callee, 'pool-escape', 'cast', { sql }));
+      if (this.poolish(inner)) sites.push(this.site(callee, 'pool-escape', 'cast', { sql, opaqueSql }));
       return;
     }
-    if (!ts.isIdentifier(inner)) return;
-    const decl = this.checker.getSymbolAtLocation(inner)?.valueDeclaration;
+    const decl = ts.isIdentifier(inner) ? this.checker.getSymbolAtLocation(inner)?.valueDeclaration : undefined;
     if (decl && ts.isVariableDeclaration(decl) && decl.initializer && this.poolish(uncast(decl.initializer).inner)) {
       // `const db: Queryable = pool; db.query(…)`
-      sites.push(this.site(callee, 'pool-escape', 'variable', { sql }));
+      sites.push(this.site(callee, 'pool-escape', 'variable', { sql, opaqueSql }));
       return;
     }
+    // A parameter, or a property path on one (`deps.db.query(…)`, `deps.db['query'](…)`).
     const root = this.paramRootOf(inner);
-    if (root) this.addStructuralSlot(root, sql);
+    if (root) this.addStructuralSlot(root, sql, opaqueSql);
   }
 
-  private addStructuralSlot(root: ParamRoot, sql: readonly string[]): boolean {
+  private addStructuralSlot(root: ParamRoot, sql: readonly string[], opaque: boolean): boolean {
     if (root.index < 0 || this.declsFor(root.fn).size === 0) return false; // an anonymous callback's parameter
     let entry = this.structural.get(root.fn);
     if (!entry) {
@@ -1217,10 +1582,12 @@ class PgAccessScan {
     const slot = entry.slots.find((s) => s.index === root.index && s.path.join('.') === root.path.join('.'));
     if (slot) {
       const before = slot.sql.length;
+      const wasOpaque = slot.opaque;
       for (const q of sql) if (!slot.sql.includes(q)) slot.sql.push(q);
-      return slot.sql.length !== before;
+      slot.opaque ||= opaque;
+      return slot.sql.length !== before || slot.opaque !== wasOpaque;
     }
-    entry.slots.push({ index: root.index, path: root.path, sql: [...sql] });
+    entry.slots.push({ index: root.index, path: root.path, sql: [...sql], opaque });
     return true;
   }
 
@@ -1246,12 +1613,17 @@ class PgAccessScan {
                 reported.add(key);
                 const anchor = (entry.fn as ts.FunctionLikeDeclaration).body ?? entry.fn;
                 sites.push(
-                  this.site(call.expression, 'pool-escape', functionName(anchor, entry.fn.getSourceFile()), { sql: slot.sql }),
+                  this.site(call.expression, 'pool-escape', functionName(anchor, entry.fn.getSourceFile()), {
+                    sql: slot.sql,
+                    opaqueSql: slot.opaque,
+                  }),
                 );
                 return;
               }
               const root = this.paramRootOf(inner);
-              if (root && this.addStructuralSlot({ ...root, path: [...root.path, ...arg.rest] }, slot.sql)) grew = true;
+              if (root && this.addStructuralSlot({ ...root, path: [...root.path, ...arg.rest] }, slot.sql, slot.opaque)) {
+                grew = true;
+              }
             });
           }
         }
@@ -1314,15 +1686,24 @@ class PgAccessScan {
             if (h) report(n, h);
           }
         } else if (ts.isElementAccessExpression(n)) {
-          for (const name of this.literalNames(n.argumentExpression) ?? []) {
+          const names = this.literalNames(n.argumentExpression) ?? [];
+          for (const name of names) {
             const candidates = byName.get(name);
             if (!candidates) continue;
             const s =
               (ts.isStringLiteralLike(n.argumentExpression)
                 ? this.checker.getSymbolAtLocation(n.argumentExpression)
-                : undefined) ?? this.checker.getTypeAtLocation(n.expression).getProperty(name);
+                : undefined) ??
+              this.checker.getNonNullableType(this.checker.getTypeAtLocation(n.expression)).getProperty(name);
             const h = helperOf(s, candidates);
-            if (h) report(n, h);
+            if (!h) continue;
+            // `this[k](cb)` with `k: 'withClient' | 'other'`: pass 2 cannot
+            // resolve a call through a key of several names, so even a call is indirect.
+            if (names.length > 1) {
+              sites.push(this.site(n, 'indirect', h.name));
+              break;
+            }
+            report(n, h);
           }
         }
         ts.forEachChild(n, visit);
@@ -1505,6 +1886,92 @@ export function literalText(node: ts.StringLiteral | ts.NoSubstitutionTemplateLi
   return (
     node.head.text +
     node.templateSpans.map((s) => '${' + s.expression.getText() + '}' + s.literal.text).join('')
+  );
+}
+
+/**
+ * Whether the scan can read every statement a SQL argument can be, decided
+ * from its structure (not from whether some literal turned up inside it): a
+ * string or numeric literal; a `const` (or property) chain ending in one; `+`
+ * or a ternary of readable parts; a query config `{ text: <readable> }`; a
+ * template whose substitutions are all readable. Anything else — a parameter, a call
+ * (`claimSql(source)`, `parts.join(' ')`), a `let` — can carry a whole
+ * statement, so its tables cannot be read.
+ */
+function sqlReadable(expr: ts.Expression | undefined, checker: ts.TypeChecker, depth = 0): boolean {
+  if (!expr) return false;
+  const e = strip(expr);
+  // A number is a literal too (`LIMIT ${BATCH_LIMIT}` with `const BATCH_LIMIT = 200`).
+  if (ts.isStringLiteralLike(e) || ts.isNumericLiteral(e)) return true;
+  if (ts.isTemplateExpression(e)) return e.templateSpans.every((s) => sqlReadable(s.expression, checker, depth));
+  if (ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    return sqlReadable(e.left, checker, depth) && sqlReadable(e.right, checker, depth);
+  }
+  if (ts.isConditionalExpression(e)) return sqlReadable(e.whenTrue, checker, depth) && sqlReadable(e.whenFalse, checker, depth);
+  if (ts.isObjectLiteralExpression(e)) {
+    // (A shorthand `{ text }` is not: literalsOf does not read through it.)
+    const text = e.properties.find((p) => propertyNameText(p.name) === 'text');
+    return !!text && ts.isPropertyAssignment(text) && sqlReadable(text.initializer, checker, depth);
+  }
+  // Two hops, as literalsOf follows them: readable SQL is SQL whose text was read.
+  if ((ts.isIdentifier(e) || ts.isPropertyAccessExpression(e)) && depth < 2) {
+    const target = ts.isPropertyAccessExpression(e) ? e.name : e;
+    return constChainReadable(resolveAlias(checker.getSymbolAtLocation(target), checker), checker, depth);
+  }
+  return false;
+}
+
+/**
+ * The statements a readable SQL argument can be, as text: a template as one
+ * statement (`SAVEPOINT ${name}`), each branch of a ternary, each way a `+`
+ * can join (more than 16 reads as one non-literal statement).
+ */
+function sqlStatements(expr: ts.Expression | undefined, checker: ts.TypeChecker, depth = 0): string[] {
+  const opaque = ['<non-literal SQL>'];
+  if (!expr) return opaque;
+  const e = strip(expr);
+  if (ts.isStringLiteralLike(e) || ts.isNumericLiteral(e)) return [e.text];
+  if (ts.isTemplateExpression(e)) return [literalText(e)];
+  if (ts.isConditionalExpression(e)) return [...sqlStatements(e.whenTrue, checker, depth), ...sqlStatements(e.whenFalse, checker, depth)];
+  if (ts.isBinaryExpression(e) && e.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    const left = sqlStatements(e.left, checker, depth);
+    const right = sqlStatements(e.right, checker, depth);
+    return left.length * right.length > 16 ? opaque : left.flatMap((l) => right.map((r) => l + r));
+  }
+  if (ts.isObjectLiteralExpression(e)) {
+    const text = e.properties.find((p) => propertyNameText(p.name) === 'text');
+    return text && ts.isPropertyAssignment(text) ? sqlStatements(text.initializer, checker, depth) : opaque;
+  }
+  if ((ts.isIdentifier(e) || ts.isPropertyAccessExpression(e)) && depth < 2) {
+    const target = ts.isPropertyAccessExpression(e) ? e.name : e;
+    const decls = resolveAlias(checker.getSymbolAtLocation(target), checker)?.getDeclarations() ?? [];
+    const out = decls.flatMap((d) =>
+      (ts.isVariableDeclaration(d) || ts.isPropertyAssignment(d) || ts.isPropertyDeclaration(d)) && d.initializer
+        ? sqlStatements(d.initializer, checker, depth + 1)
+        : opaque,
+    );
+    return out.length ? out : opaque;
+  }
+  return opaque;
+}
+
+/** Transaction control (BEGIN, SAVEPOINT, COMMIT, ROLLBACK, END, ABORT) or an advisory lock, and nothing after it. */
+function isTxControl(statement: string): boolean {
+  return TX_CONTROL_RE.test(statement) && !/;\s*\S/.test(statement);
+}
+
+/** Every declaration of `symbol` is a `const` / property whose initializer is readable SQL. */
+function constChainReadable(symbol: ts.Symbol | undefined, checker: ts.TypeChecker, depth: number): boolean {
+  const decls = symbol?.getDeclarations() ?? [];
+  return (
+    decls.length > 0 &&
+    decls.every((d) => {
+      if (ts.isVariableDeclaration(d)) {
+        const constant = ts.isVariableDeclarationList(d.parent) && (d.parent.flags & ts.NodeFlags.Const) !== 0;
+        return constant && sqlReadable(d.initializer, checker, depth + 1);
+      }
+      return (ts.isPropertyAssignment(d) || ts.isPropertyDeclaration(d)) && sqlReadable(d.initializer, checker, depth + 1);
+    })
   );
 }
 

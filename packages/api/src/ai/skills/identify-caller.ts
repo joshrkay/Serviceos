@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import { withTenantClient } from '../../db/tenant-transaction';
 import { normalizePhone, isNanpKey } from '../../shared/phone';
 
 export { normalizePhone };
@@ -44,12 +45,19 @@ export async function identifyCaller(input: IdentifyCallerInput): Promise<Identi
   // of equality probes the index serves directly. (This intentionally drops
   // the rare 7-digit-stored suffix case the old `LIKE` covered — the two
   // real conventions are stored-with-1 and stored-without-1.)
+  //
+  // The lookup runs as `rls_app_runtime` for the dialled tenant (raw-pg audit
+  // §4 P1.4): on the request client when one is ambient for this tenant,
+  // otherwise in a short tenant transaction of its own. The customers policy
+  // bounds it; `tenant_id = $1` stays as defense in depth.
   const tail = normalized; // guaranteed a valid 10-digit NANP key by isNanpKey
-  const result = await pool.query<{ id: string; display_name: string }>(
-    `SELECT id, display_name FROM customers
-      WHERE tenant_id = $1
-        AND phone_normalized IN ($2, '1' || $2)`,
-    [tenantId, tail]
+  const result = await withTenantClient(pool, tenantId, (client) =>
+    client.query<{ id: string; display_name: string }>(
+      `SELECT id, display_name FROM customers
+        WHERE tenant_id = $1
+          AND phone_normalized IN ($2, '1' || $2)`,
+      [tenantId, tail],
+    ),
   );
 
   if (result.rows.length === 0) {

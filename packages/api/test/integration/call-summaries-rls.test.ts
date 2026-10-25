@@ -10,14 +10,14 @@
  * RLS-subject principal the same statement fails closed.
  *
  * Real Postgres, RLS_RUNTIME_ROLE=true: the repository's own statements are
- * logged to prove BEGIN / set_config(tenant) / SET LOCAL ROLE rls_app_runtime
+ * logged to prove BEGIN / the tenant GUC + rls_app_runtime role (one statement)
  * wrap the INSERT, the real columns are pinned through summarizeSession, and
  * raw probes through `rls_app_runtime` (asTenant, the canonical leak suite's
  * pattern) prove tenant B cannot read tenant A's row.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
-import { closeSharedTestDb, createTestTenant, getSharedTestDb, RLS_APP_ROLE } from './shared';
+import { closeSharedTestDb, createTestTenant, getSharedTestDb, RLS_APP_ROLE, TENANT_CONTEXT_WITH_ROLE_SQL } from './shared';
 import { PgCallSummaryRepository } from '../../src/ai/skills/pg-call-summary';
 import { summarizeSession } from '../../src/ai/skills/summarize-session';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
@@ -102,14 +102,10 @@ describe('A2 — call_summaries is written under the tenant RLS context and isol
     });
     expect(result.qualityScore).toBeCloseTo(0.75, 5);
 
-    // The INSERT ran inside BEGIN / tenant GUC / SET LOCAL ROLE rls_app_runtime / COMMIT.
+    // The INSERT ran inside BEGIN / tenant GUC + rls_app_runtime role (one statement) / COMMIT.
     const insert = log.findIndex((s) => s.startsWith('INSERT INTO call_summaries'));
     expect(insert).toBeGreaterThan(-1);
-    expect(log.slice(0, insert)).toEqual([
-      'BEGIN',
-      "SELECT set_config('app.current_tenant_id', $1, true)",
-      `SET LOCAL ROLE ${RLS_APP_ROLE}`,
-    ]);
+    expect(log.slice(0, insert)).toEqual(['BEGIN', TENANT_CONTEXT_WITH_ROLE_SQL]);
     expect(log[insert + 1]).toBe('COMMIT');
 
     const { rows } = await pool.query(

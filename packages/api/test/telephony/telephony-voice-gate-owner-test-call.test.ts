@@ -21,10 +21,12 @@ import { createVoiceGate } from '../../src/voice/voice-gate';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
 import type { AuditRepository } from '../../src/audit/audit';
 import type { Pool } from 'pg';
+import { fakeTenantPool } from '../helpers/fake-tenant-pool';
 
 const AUTH_TOKEN = 'test-tw-token-owner-test-call';
 const PUBLIC_BASE_URL = 'https://api.test';
-const TENANT_ID = 'tenant-owner-test-call';
+/** The gate's tenant reads run under applyTenantContext, which requires a uuid. */
+const TENANT_ID = '00000000-0000-4000-8000-000000001605';
 const OWNER_PHONE = '+14805550100';
 
 function makeGateway(): LLMGateway {
@@ -43,29 +45,30 @@ function makeGateway(): LLMGateway {
   return { complete: vi.fn().mockResolvedValue(response) } as unknown as LLMGateway;
 }
 
-/** A not_live, trialing tenant whose owner_phone/business_phone are on file. */
+/**
+ * A not_live, trialing tenant whose owner_phone/business_phone are on file:
+ * the gate's one row (the tenants registry row joined to tenant_settings).
+ */
 function mockPool(opts: { ownerPhone?: string | null; businessPhone?: string | null } = {}): Pool {
-  return {
-    query: vi.fn(async (sql: string) => {
-      if (sql.includes('FROM tenants')) {
-        return { rows: [{ subscription_status: 'trialing', past_due_grace_until: null }] };
-      }
-      if (sql.includes('voice_agent_live_at')) {
-        return { rows: [{ voice_agent_live_at: null }] };
-      }
-      if (sql.includes('owner_phone')) {
-        return {
-          rows: [
-            {
-              owner_phone: opts.ownerPhone ?? OWNER_PHONE,
-              business_phone: opts.businessPhone ?? null,
-            },
-          ],
-        };
-      }
-      return { rows: [] };
-    }),
-  } as unknown as Pool;
+  return fakeTenantPool((sql) => {
+    if (sql.includes('FROM tenants t')) {
+      return {
+        rows: [
+          {
+            subscription_status: 'trialing',
+            past_due_grace_until: null,
+            has_settings: true,
+            voice_agent_live_at: null,
+            owner_phone: opts.ownerPhone ?? OWNER_PHONE,
+            business_phone: opts.businessPhone ?? null,
+            business_hours: {},
+            timezone: null,
+          },
+        ],
+      };
+    }
+    return undefined;
+  }).pool;
 }
 
 function mockAudit(): AuditRepository {

@@ -53,7 +53,12 @@ export interface RawPgSite {
   readonly category: RawPgCategory;
   /** Tables the function's SQL touches. The guard checks the SQL against this list. */
   readonly tables: readonly string[];
-  /** The SQL names its table through a template substitution (`FROM "<table>"`); the why must say so. */
+  /**
+   * The SQL's tables cannot be read statically: it names a table through a
+   * template substitution (`FROM "<table>"`), or its text is not a literal (a
+   * caller-supplied `sql`, a string a function builds). `tables` is then by
+   * review, and the why must say the SQL is dynamic.
+   */
   readonly dynamicSql?: true;
   /** Why this is acceptable today (>= 40 chars). */
   readonly why: string;
@@ -61,8 +66,10 @@ export interface RawPgSite {
   readonly migrateBy?: string;
   /**
    * Checkouts and helper calls: every function (by the callee's text, e.g.
-   * `watchSessionLease`, `this.ensureTable`) the client is handed to, and any
-   * other escape (`<alias x>`, `<object>`, `<return>`, `callback <text>`).
+   * `watchSessionLease`, `this.ensureTable`) the client is handed to, where
+   * each such function hands it on (`runSteps > tryConsumeOn`), and any other
+   * escape (`<alias x>`, `<object>`, `<return>`, `<closure>` for a function
+   * over the client that is passed, returned or stored, `callback <text>`).
    * Exact: a new handoff and a stale one both fail.
    */
   readonly handsOffTo?: readonly string[];
@@ -88,8 +95,12 @@ export interface SanctionedHelper {
 export const SANCTIONED_HELPERS: readonly SanctionedHelper[] = [
   {
     file: 'src/db/migrate.ts', fn: 'runMigrations', access: 'pool.connect', count: 1,
-    handsOffTo: ['runMigrationsOnClient', 'verifyCriticalConstraints'],
-    why: 'The migrator runs DDL as the privileged owner by design (it creates the roles and the policies) on a direct-pool client handed to runMigrationsOnClient and, on the duplicate-policy recovery path, verifyCriticalConstraints. It never reads tenant rows.',
+    handsOffTo: [
+      'runMigrationsOnClient', 'runMigrationsOnClient > <closure>', 'runMigrationsOnClient > applyMigrations',
+      'runMigrationsOnClient > withMigrationAdvisoryLock', 'verifyCriticalConstraints',
+      'verifyCriticalConstraints > findMissingCriticalConstraints',
+    ],
+    why: 'The migrator runs DDL as the privileged owner by design (it creates the roles and the policies) on a direct-pool client handed to runMigrationsOnClient (withMigrationAdvisoryLock(client, () => applyMigrations(client))) and, on the duplicate-policy recovery path, verifyCriticalConstraints (its findMissingCriticalConstraints catalog read). It never reads tenant rows.',
   },
   {
     file: 'src/db/pg-base.ts', fn: 'PgBaseRepository.withTenantTransaction', access: 'pool.connect', count: 1,
@@ -106,8 +117,8 @@ export const SANCTIONED_HELPERS: readonly SanctionedHelper[] = [
     why: 'The attributed cross-tenant sweep: BEGIN + applyCrossTenantRole (rls_cross_tenant) before fn(client); clearTenantContext resets the role before release.',
   },
   {
-    file: 'src/db/rls-runtime-role.ts', fn: 'applyTenantContext', access: 'guc-only', count: 1,
-    why: "applyTenantContext's transactional set_config('app.current_tenant_id', $1, true), followed by SET LOCAL ROLE rls_app_runtime: the context helper itself.",
+    file: 'src/db/rls-runtime-role.ts', fn: 'applyTenantContext', access: 'guc-only', count: 2,
+    why: "applyTenantContext's transactional context, the helper itself: with RLS_RUNTIME_ROLE on, ONE statement sets the tenant GUC and the role (set_config('app.current_tenant_id', $1, true), set_config('role', 'rls_app_runtime', true)); off, the GUC-only set_config as before.",
   },
   {
     file: 'src/db/rls-runtime-role.ts', fn: 'withTenantSession', access: 'pool.connect', count: 1,
@@ -130,13 +141,13 @@ export const SANCTIONED_HELPERS: readonly SanctionedHelper[] = [
   },
   {
     file: 'src/db/tenant-transaction.ts', fn: 'PgTenantTransactionRunner.run', access: 'pool.connect', count: 1,
-    contextFirst: true, handsOffTo: ['<object>'],
-    why: 'The savepoint/advisory-lock unit of work: BEGIN + applyTenantContext, then the client goes into the TenantContext object published to tenantContextStore for the repositories inside fn.',
+    contextFirst: true, handsOffTo: ['<closure>', '<object>'],
+    why: "The savepoint/advisory-lock unit of work: BEGIN + applyTenantContext, then the client goes into the TenantContext object published to tenantContextStore for the repositories inside fn, and the TransactionScope's lock/savepoint closures run their SQL on it inside fn.",
   },
   {
     file: 'src/middleware/tenant-context.ts', fn: 'withTenantTransaction', access: 'pool.connect', count: 1,
-    contextFirst: true, handsOffTo: ['<object>'],
-    why: 'The /api request middleware: checks out the request client, BEGIN + applyTenantContext, then publishes it in the TenantContext object to tenantContextStore. The same file also holds a listed pre-tenant lookup.',
+    contextFirst: true, handsOffTo: ['<closure>', '<object>'],
+    why: "The /api request middleware: checks out the request client, BEGIN + applyTenantContext, then publishes it in the TenantContext object to tenantContextStore; the COMMIT/ROLLBACK + release closures (cleanup, releaseOnce) run from res.end and the response's finish/close listeners. The same file also holds a listed pre-tenant lookup.",
   },
   {
     file: 'src/workers/tenant-query.ts', fn: 'tenantQuery', access: 'pool.connect', count: 1,
@@ -157,20 +168,10 @@ export const TABLES_WITHOUT_MIGRATION: ReadonlyArray<{ readonly table: string; r
  * The `tenant_filtered_no_rls` debt, frozen. Migrating one means deleting its
  * entry and LOWERING this number; adding one means raising it, in review.
  */
-export const TFNR_CEILING = 41;
+export const TFNR_CEILING = 12;
 
 export const RAW_PG_SITES: readonly RawPgSite[] = [
   // ── ai/ ────────────────────────────────────────────────────────────────
-  {
-    file: 'src/ai/skills/identify-caller.ts', fn: 'identifyCaller', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['customers'], migrateBy: 'audit 2026-10-23 §4 P1.4',
-    why: 'Call establishment looks up the caller in customers on the raw input.pool, as the principal. The tenant is the dialled-number tenant of a Twilio-signed webhook (resolveInboundTenantId); WHERE tenant_id = $1 is the only boundary.',
-  },
-  {
-    file: 'src/ai/supervisor-presence.ts', fn: 'pgSupervisorPresenceLoader', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['users'], migrateBy: 'audit 2026-10-23 §4 P1.4',
-    why: 'Emergency-escalation presence check: EXISTS(users WHERE tenant_id = $1 AND current_mode …) on the raw pool, by design per the file header. The tenant comes from the voice session; the WHERE clause is the only scope.',
-  },
   {
     file: 'src/ai/training/knowledge-chunks.ts', fn: 'PgKnowledgeChunkRepository.insert', access: 'withClient', count: 1,
     category: 'platform_constant_exception', tables: ['knowledge_chunks'],
@@ -187,26 +188,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/app.ts', fn: 'createApp.resolveDisplayName', access: 'pool.query', count: 1,
     category: 'global_table', tables: ['tenants'],
     why: 'Terminal router display name: SELECT name FROM tenants WHERE id = $1 with the req.auth tenant. tenants is the registry (no tenant_id column, no RLS).',
-  },
-  {
-    file: 'src/app.ts', fn: 'userModeService.getUser', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['users'], migrateBy: 'audit 2026-10-23 §4 P2.1',
-    why: 'Mode loader read on FORCE-RLS users, run on its own pooled connection outside the request transaction on every requireTenant request (60 s cache). WHERE tenant_id = $1 AND clerk_user_id = $2 with the JWT tenant/user is the only boundary.',
-  },
-  {
-    file: 'src/app.ts', fn: 'userModeService.getTenantSettings', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P2.1',
-    why: 'GET /api/me reads tenant_settings (FORCE RLS) on the raw pool, WHERE tenant_id = $1 with auth.tenantId. settingsRepo already has a withTenant path for the same table.',
-  },
-  {
-    file: 'src/app.ts', fn: 'userModeService.getTenantIntegrationStatuses', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_integrations'], migrateBy: 'audit 2026-10-23 §4 P2.1',
-    why: 'GET /api/me lists provider/status from FORCE-RLS tenant_integrations with no GUC at all; it returns rows only because the principal bypasses RLS. Isolation is WHERE tenant_id = $1 (auth tenant).',
-  },
-  {
-    file: 'src/app.ts', fn: 'userModeService.setMode', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['users'], migrateBy: 'audit 2026-10-23 §4 P2.1',
-    why: 'POST /api/me/mode UPDATEs users (FORCE RLS) outside the request transaction (it does not roll back with the request). Scoped only by WHERE tenant_id = $3 AND clerk_user_id = $4, both from req.auth.',
   },
 
   // ── auth/ ──────────────────────────────────────────────────────────────
@@ -249,11 +230,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/auth/platform-admin.ts', fn: 'revokePlatformAdmin', access: 'pool.connect', count: 1,
     category: 'global_table', tables: ['platform_admins'],
     why: 'Revoke from the global platform_admins table. No caller outside tests (audit §1.3 dead-code candidate, P4.2); no tenant data either way.',
-  },
-  {
-    file: 'src/auth/resolve-owner-email.ts', fn: 'resolveOwnerEmail', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['users', 'tenants'], migrateBy: 'audit 2026-10-23 §4 P2.3',
-    why: "Billing checkout/portal email lookup on a second pooled connection as the principal: users WHERE tenant_id = $1 AND clerk_user_id = $2, tenants WHERE id = $1, $1 = req.auth tenant. Should prefer the ambient request client.",
   },
 
   // ── availability/ ──────────────────────────────────────────────────────
@@ -366,7 +342,8 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
   {
     file: 'src/demo/reset.ts', fn: 'claimLease', access: 'checkout-callback', count: 1,
     category: 'platform_constant_exception', tables: ['demo_tenant_leases', 'audit_events'], handsOffTo: ['writePlatformAudit'],
-    why: "The reset claim on inPlatformTransaction's client: the claimSql UPDATE of the RLS-exempt lease row (by server-held lease id) and writePlatformAudit's audit_events row pinned to DEMO_PLATFORM_TENANT_ID.",
+    dynamicSql: true,
+    why: "The reset claim on inPlatformTransaction's client: the claimSql UPDATE of the RLS-exempt lease row (by server-held lease id) and writePlatformAudit's audit_events row pinned to DEMO_PLATFORM_TENANT_ID. The SQL is dynamic only in that claimSql(source) returns it: a fixed UPDATE demo_tenant_leases plus a source-chosen literal predicate (tables by review).",
   },
   {
     file: 'src/demo/reset.ts', fn: 'takeOverStaleReset', access: 'checkout-callback', count: 1,
@@ -433,13 +410,16 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
   {
     file: 'src/demo/service.ts', fn: 'settle', access: 'checkout-callback', count: 1,
     category: 'platform_constant_exception', tables: ['demo_tenant_leases', 'demo_calls', 'demo_call_budget', 'audit_events'],
-    handsOffTo: ['releaseNoCall', 'writePlatformAudit'],
-    why: "Settles a public demo call on inPlatformTransaction's client: lease/demo_calls/demo_call_budget updates by server-held ids and writePlatformAudit rows pinned to DEMO_PLATFORM_TENANT_ID. The visitor never supplies a tenant id.",
+    handsOffTo: ['releaseNoCall', 'releaseNoCall > releaseOn', 'releaseNoCall > writePlatformAudit', 'writePlatformAudit'],
+    why: "Settles a public demo call on inPlatformTransaction's client: lease/demo_calls/demo_call_budget updates by server-held ids (releaseNoCall's releaseOn returns the allowance) and writePlatformAudit rows pinned to DEMO_PLATFORM_TENANT_ID. The visitor never supplies a tenant id.",
   },
   {
     file: 'src/demo/start-transaction.ts', fn: 'runStartTransaction', access: 'pool.connect', count: 1,
     category: 'platform_constant_exception', tables: ['phone_rate_limits', 'leads', 'audit_events', 'tenants', 'demo_tenant_leases', 'demo_call_budget', 'demo_calls'],
-    handsOffTo: ['runSteps', 'setPlatformTenantContext'],
+    handsOffTo: [
+      'runSteps', 'runSteps > captureVisitorLead', 'runSteps > reserve', 'runSteps > tryConsumeOn',
+      'runSteps > writePlatformAudit', 'setPlatformTenantContext',
+    ],
     why: "The demo-call start transaction runs as the principal with the platform tenant's GUC and no role (the runtime role has no grant on the lease table). runSteps writes the allowance, lead, budget and demo_calls rows pinned to DEMO_PLATFORM_TENANT_ID and hands takeLease to the caller's steps (startDemoCall's entry).",
   },
 
@@ -552,48 +532,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     why: "Runs before any tenant is known for a JWT without tenant_id, keyed by the verified Clerk subject; returns only that subject's own rows. Under rls_app_runtime it would see zero rows, so it must stay on the principal.",
   },
 
-  // ── notifications/ ─────────────────────────────────────────────────────
-  {
-    file: 'src/notifications/lifecycle-email.ts', fn: 'claimLifecycleEmail', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['lifecycle_emails'], migrateBy: 'audit 2026-10-23 §4 P2.4',
-    why: 'Raw INSERT into FORCE-RLS lifecycle_emails stamping tenant_id = $1 from a server-derived id (queue payload or sweep row); WITH CHECK is not enforced for the principal.',
-  },
-  {
-    file: 'src/notifications/lifecycle-email.ts', fn: 'releaseLifecycleEmail', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['lifecycle_emails'], migrateBy: 'audit 2026-10-23 §4 P2.4',
-    why: 'Transport-failure release: DELETE FROM lifecycle_emails WHERE tenant_id = $1 AND kind = $2 for the tenant that just claimed it, as the principal.',
-  },
-  {
-    file: 'src/notifications/send-claim-ledger.ts', fn: 'claimSend', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['send_claims'], migrateBy: 'audit 2026-10-23 §4 P1.6',
-    why: 'The SMS send-claim ledger under every proposal-execution, drip, thank-you and transactional send: a bare pool.query keyed by (tenant_id, claim_key) with a server-derived tenant. It commits independently of the request on purpose (P1.6 decision pending).',
-  },
-  {
-    file: 'src/notifications/send-claim-ledger.ts', fn: 'markSendClaimSending', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['send_claims'], migrateBy: 'audit 2026-10-23 §4 P1.6',
-    why: 'Send-claim state flip WHERE tenant_id = $1 AND claim_key = $2 on FORCE-RLS send_claims, as the principal, with the same server-derived tenant as claimSend.',
-  },
-  {
-    file: 'src/notifications/send-claim-ledger.ts', fn: 'markSendClaimComplete', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['send_claims'], migrateBy: 'audit 2026-10-23 §4 P1.6',
-    why: 'Marks a send claim complete, tenant-filtered by the internal tenantId (withSendClaim, outbound-messaging), outside RLS.',
-  },
-  {
-    file: 'src/notifications/send-claim-ledger.ts', fn: 'releaseSendClaim', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['send_claims'], migrateBy: 'audit 2026-10-23 §4 P1.6',
-    why: 'Tenant-filtered DELETE of a send claim from withSendClaim on failure, as the principal (FORCE-RLS send_claims).',
-  },
-  {
-    file: 'src/notifications/send-claim-ledger.ts', fn: 'findStuckSendClaims', access: 'pool.query', count: 1,
-    category: 'cross_tenant_intentional', tables: ['send_claims'], migrateBy: 'audit 2026-10-23 §4 P3.4',
-    why: 'Operator-monitor sweep across all tenants with deliberately no tenant filter. It has no production caller (tests only): delete it, or wire it under withCrossTenantSweep (P3.4).',
-  },
-  {
-    file: 'src/notifications/send-claim-ledger.ts', fn: 'readSendClaimStatus', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['send_claims'], migrateBy: 'audit 2026-10-23 §4 P1.6',
-    why: 'Reads a send claim WHERE tenant_id = $1 AND claim_key = $2 with an internal tenantId (sendText, duplicateOutcome), as the principal.',
-  },
-
   // ── onboarding/ ────────────────────────────────────────────────────────
   {
     file: 'src/onboarding/activate-pack-with-seed.ts', fn: 'activatePackWithSeed', access: 'pool.connect', count: 1,
@@ -609,13 +547,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/onboarding/choices/price-tiers.ts', fn: 'PgRegionalPriceTierRepository.upsert', access: 'pool.query', count: 1,
     category: 'global_table', tables: ['regional_price_tiers'],
     why: 'Admin write path into the platform regional_price_tiers table (no tenant_id, no RLS). No src or script caller, only integration tests (P4.2 dead-code candidate).',
-  },
-  {
-    file: 'src/onboarding/load-facts.ts', fn: 'loadOnboardingFacts', access: 'ambient-or-pool', count: 7,
-    category: 'tenant_filtered_no_rls',
-    tables: ['tenant_integrations', 'tenants', 'voice_sessions', 'tenant_settings', 'pack_activations', 'onboarding_drafts', 'proposals'],
-    migrateBy: 'audit 2026-10-23 §4 P1.11',
-    why: 'db = currentTenantContext()?.client ?? pool: requests get the RLS request client, but the setup-reminder sweep has no context and falls back to the raw pool, so its seven reads rest only on WHERE tenant_id = $1 for a sweep-row tenant.',
   },
 
   // ── portal/ proposals/ public-intake/ push/ ────────────────────────────
@@ -641,8 +572,8 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
   },
   {
     file: 'src/proposals/execution/idempotency-lock.ts', fn: 'PgIdempotencyLockProvider.withLock', access: 'pool.connect', count: 1,
-    category: 'global_table', tables: [], handsOffTo: ['watchSessionLease'],
-    why: "Raw-checkout helper: a session advisory lock keyed by sha256(tenantId\\0idempotencyKey) on a directPool checkout (no table), watchSessionLease on the client's error/end, then fn(client, lease) — the caller's callback, listed per caller (IdempotencyGuard.checkAndExecute).",
+    category: 'global_table', tables: [], handsOffTo: ['<closure>', 'watchSessionLease', 'watchSessionLease > <closure>'],
+    why: "Raw-checkout helper: a session advisory lock keyed by sha256(tenantId\\0idempotencyKey) on a directPool checkout (no table), watchSessionLease on the client's error/end (its stopWatching closure detaches them), then runWithSessionLease(lease, () => fn(client, lease)) — the caller's callback, listed per caller (IdempotencyGuard.checkAndExecute).",
   },
   {
     file: 'src/public-intake/public-business-info.ts', fn: 'resolvePublicBusinessPhone', access: 'pool.query', count: 1,
@@ -676,6 +607,11 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/queues/pg-queue.ts', fn: 'PgQueue.delete', access: 'withClient', count: 1,
     category: 'global_table', tables: ['_queue_messages', '_queue_dlq'], handsOffTo: ['this.ensureTable'],
     why: 'Ack: DELETE FROM _queue_messages WHERE id = $1 on the global queue table (no tenant_id, no RLS); the id comes from receiveBatch.',
+  },
+  {
+    file: 'src/queues/pg-queue.ts', fn: 'PgQueue.findPending', access: 'withClient', count: 1,
+    category: 'global_table', tables: ['_queue_messages', '_queue_dlq'], handsOffTo: ['this.ensureTable'],
+    why: "PRIV-3 read-only lookup: SELECT of a job type's still-queued messages whose server-built payload contains the match (JSONB @>) on the global, non-RLS _queue_messages; claims nothing. Its one caller (pendingCardNumberRewrites, voice/card-number-rewrite-retry.ts) matches on the call's own tenantId and callSid, so the recording hook reads only that tenant's queued card-number rewrites.",
   },
   {
     file: 'src/queues/pg-queue.ts', fn: 'PgQueue.recordFailure', access: 'withClient', count: 1,
@@ -733,36 +669,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/routes/onboarding.ts', fn: 'GET /phone', access: 'ambient-or-pool', count: 1,
     category: 'tenant_context_applied', tables: ['tenant_integrations'],
     why: "Request-client read of the tenant's twilio tenant_integrations row under the /api withTenantTransaction middleware. The pool fallback is latent only.",
-  },
-  {
-    file: 'src/routes/onboarding.ts', fn: 'POST /phone/retry', access: 'ambient-or-pool', count: 1,
-    category: 'tenant_context_applied', tables: ['tenant_integrations'],
-    why: 'Request-client status read under the /api middleware, WHERE tenant_id = req.auth.tenantId. The pool fallback is latent only; db also goes to isBillingLive and markPickPending (the pool-escape entry below).',
-  },
-  {
-    file: 'src/routes/onboarding.ts', fn: 'POST /phone/retry', access: 'pool-escape', count: 2,
-    category: 'tenant_context_applied', tables: ['tenants', 'tenant_integrations'],
-    why: "db (request client, ?? pool) goes into isBillingLive (SELECT subscription_status FROM tenants WHERE id = $1) and markPickPending (tenant_integrations upsert for the auth tenant), whose { query } parameters the typed rule cannot classify.",
-  },
-  {
-    file: 'src/routes/onboarding.ts', fn: 'POST /phone/claim', access: 'ambient-or-pool', count: 1,
-    category: 'tenant_context_applied', tables: ['tenant_integrations'],
-    why: 'Owner-only request-client status read under the /api middleware, WHERE tenant_id = req.auth.tenantId. The pool fallback is latent only; db also goes to isBillingLive and markPickPending (pool-escape below).',
-  },
-  {
-    file: 'src/routes/onboarding.ts', fn: 'POST /phone/claim', access: 'pool-escape', count: 2,
-    category: 'tenant_context_applied', tables: ['tenants', 'tenant_integrations'],
-    why: "db (request client, ?? pool) goes into isBillingLive (tenants registry read) and markPickPending (tenant_integrations upsert for the auth tenant) through structural { query } parameters, under the /api middleware.",
-  },
-  {
-    file: 'src/routes/onboarding.ts', fn: 'POST /phone/change', access: 'ambient-or-pool', count: 2,
-    category: 'tenant_context_applied', tables: ['tenant_integrations'],
-    why: 'Owner-only request-client read of the twilio row plus a compare-and-set UPDATE (pendingChange) under the /api middleware, both WHERE tenant_id = req.auth.tenantId; db also goes to isBillingLive (pool-escape below).',
-  },
-  {
-    file: 'src/routes/onboarding.ts', fn: 'POST /phone/change', access: 'pool-escape', count: 1,
-    category: 'global_table', tables: ['tenants'],
-    why: "db (request client, ?? pool) goes into isBillingLive's structural { query } parameter: SELECT subscription_status FROM tenants WHERE id = $1 for the auth tenant. tenants has no RLS.",
   },
   {
     file: 'src/routes/onboarding.ts', fn: 'POST /calendar/choose', access: 'ambient-or-pool', count: 1,
@@ -833,35 +739,25 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
   },
   {
     file: 'src/shared/pg-vertical-pack-registry.ts', fn: 'PgVerticalPackRegistry.update', access: 'withClient', count: 1,
-    category: 'global_table', tables: ['vertical_packs'],
-    why: 'Updates a global pack-catalog row by id. Its only callers (activatePackStatus/deprecatePack) have no callers themselves; a global mutation that must stay platform-admin-gated if ever wired.',
+    category: 'global_table', tables: ['vertical_packs'], dynamicSql: true,
+    why: 'Updates a global pack-catalog row by id. The SQL is dynamic: UPDATE vertical_packs SET <setClauses joined> is built from column = $n literals for the fields present, so its tables are by review (vertical_packs only). Its only callers (activatePackStatus/deprecatePack) have no callers themselves; a global mutation that must stay platform-admin-gated if ever wired.',
   },
 
   // ── telephony/ ─────────────────────────────────────────────────────────
   {
-    file: 'src/telephony/business-hours-loader.ts', fn: 'loadTenantBusinessHours', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P1.3',
-    why: 'business_hours/timezone FROM tenant_settings WHERE tenant_id = $1 on a (pool: Pool) helper: the inbound voice after-hours check (dialled-number tenant) and /api/analytics/voice-roi (JWT tenant, on a second connection).',
-  },
-  {
     file: 'src/telephony/twilio-webhook-credential.ts', fn: 'systemLookup', access: 'pool.connect', count: 1,
     category: 'global_table', tables: [],
-    why: 'Raw-checkout helper: BEGIN, the system_lookup GUC, then run(client) and COMMIT on a principal client. It reads no table itself; each caller is a checkout-callback entry with its own category (two pre-tenant lookups and findByTenant).',
+    why: 'Raw-checkout helper: BEGIN, the system_lookup GUC, then run(client) and COMMIT on a principal client. It reads no table itself; each caller is a checkout-callback entry with its own category (the two pre-tenant lookups; findByTenant reads under tenant context).',
   },
   {
     file: 'src/telephony/twilio-webhook-credential.ts', fn: 'systemLookup', access: 'guc-only', count: 1,
     category: 'pre_tenant_lookup', tables: ['tenant_integrations'],
-    why: "set_config('app.system_lookup','true',true) inside systemLookup's own transaction: the escape-hatch GUC for migration 074's permissive read policy. Transaction-local; moot on a BYPASSRLS principal. findByTenant runs under it too (P1.7).",
+    why: "set_config('app.system_lookup','true',true) inside systemLookup's own transaction: the escape-hatch GUC for migration 074's permissive read policy, for the two pre-tenant lookups only. Transaction-local; moot on a BYPASSRLS principal.",
   },
   {
     file: 'src/telephony/twilio-webhook-credential.ts', fn: 'findByPhoneNumber', access: 'checkout-callback', count: 1,
     category: 'pre_tenant_lookup', tables: ['tenant_integrations'],
     why: "Inbound Twilio webhook before HMAC verification: the dialled DID (normalised E.164) picks the twilio tenant_integrations row whose token verifies the signature; DIDs are unique across tenants (#1061). The tokens never leave the verifier.",
-  },
-  {
-    file: 'src/telephony/twilio-webhook-credential.ts', fn: 'findByTenant', access: 'checkout-callback', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_integrations'], migrateBy: 'audit 2026-10-23 §4 P1.7',
-    why: "The tenant is already known (a trusted voice-session tenant), yet the read runs on systemLookup's principal client under system_lookup: WHERE provider = 'twilio' AND tenant_id = $1 is the only boundary. Should use tenant context instead.",
   },
   {
     file: 'src/telephony/twilio-webhook-credential.ts', fn: 'findBySubaccount', access: 'checkout-callback', count: 1,
@@ -887,7 +783,8 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
   },
   {
     file: 'src/tenants/deprovision.ts', fn: 'deprovisionTenant', access: 'pool.connect', count: 1,
-    category: 'cross_tenant_intentional', tables: ['files', 'tenants'], dynamicSql: true, handsOffTo: ['purgeTenantRows'],
+    category: 'cross_tenant_intentional', tables: ['files', 'tenants'], dynamicSql: true,
+    handsOffTo: ['purgeTenantRows', 'purgeTenantRows > deleteBatch', 'purgeTenantRows > isPool', 'purgeTenantRows > listTenantTables'],
     migrateBy: 'audit 2026-10-23 §4 P3.3',
     why: 'Privileged single-tenant purge: BEGIN; SET LOCAL session_replication_role = replica (needs a superuser-class principal, so it cannot run as rls_app_runtime), files harvest, purgeTenantRows (dynamic DELETE FROM "<table>" WHERE tenant_id = $1 per tenant_id table) and the tenants delete, all keyed on one UUID-validated tenant. Attribution (applyCrossTenantRole) is P3.3.',
   },
@@ -941,39 +838,9 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
 
   // ── voice/ ─────────────────────────────────────────────────────────────
   {
-    file: 'src/voice/activation.ts', fn: 'maybeFireFirstRealCallActivation', access: 'pool.query', count: 4,
-    category: 'tenant_filtered_no_rls', tables: ['tenants', 'tenant_settings', 'voice_sessions'], migrateBy: 'audit 2026-10-23 §4 P1.5',
-    why: 'Voice session-end hook on the raw pool at call teardown: a tenants read plus tenant_settings/voice_sessions reads and an UPDATE, each WHERE tenant_id = $1 with the server-side session tenant, as the principal.',
-  },
-  {
-    file: 'src/voice/activation.ts', fn: 'maybeFireActivationForInboundCall', access: 'pool.query', count: 3,
-    category: 'tenant_filtered_no_rls', tables: ['tenants', 'tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P1.2',
-    why: 'Verified Vapi webhook activation: tenants read plus a tenant_settings read and UPDATE WHERE tenant_id = $1 on the raw pool, the tenant being the HMAC-authenticated /vapi/:tenantId path.',
-  },
-  {
-    file: 'src/voice/check-upgrade-nudge.ts', fn: 'checkAndFireUpgradeNudge', access: 'pool.query', count: 2,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P1.5',
-    why: 'Voice session-end hook: SELECT then check-and-set UPDATE of tenant_settings WHERE tenant_id = $1 with the session tenant fixed at inbound session creation, on the raw pool.',
-  },
-  {
-    file: 'src/voice/go-live.ts', fn: 'loadVoiceAgentLiveAt', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P1.3',
-    why: 'Reads tenant_settings.voice_agent_live_at WHERE tenant_id = $1 on the raw pool: the /voice gate (signature-verified dialled-number tenant) and the go-live paths.',
-  },
-  {
     file: 'src/voice/go-live.ts', fn: 'subscriptionAllowsVoice', access: 'pool.query', count: 1,
     category: 'global_table', tables: ['tenants'],
     why: 'SELECT subscription_status FROM tenants WHERE id = $1 (req.auth tenant or session tenant). tenants has no RLS.',
-  },
-  {
-    file: 'src/voice/go-live.ts', fn: 'enableVoiceAgentLive', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P1.5',
-    why: 'POST /go-live and the session-end auto go-live: UPDATE tenant_settings WHERE tenant_id = $1 AND voice_agent_live_at IS NULL on the raw pool (req.auth or session tenant).',
-  },
-  {
-    file: 'src/voice/go-live.ts', fn: 'pauseVoiceAgentLive', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P1.5',
-    why: 'POST /pause: UPDATE tenant_settings WHERE tenant_id = $1 (req.auth tenant) on the raw pool instead of the request client.',
   },
   {
     file: 'src/voice/outbound-consent.ts', fn: 'checkOutboundConsent', access: 'pool.connect', count: 1,
@@ -988,22 +855,12 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
   {
     file: 'src/voice/voice-config.ts', fn: 'saveVoiceConfig', access: 'pool.query', count: 2,
     category: 'tenant_context_applied', tables: ['tenant_settings'],
-    why: "Its only caller (PUT /api/onboarding/voice) passes currentTenantContext()?.client cast to Pool, so both tenant_settings statements run on the request client. The Pool-typed parameter is a latent trap for a future raw caller.",
+    why: "Its only caller (PUT /api/onboarding/voice) passes db = currentTenantContext()?.client ?? pool, cast to Pool. The route is under the /api withTenantTransaction middleware and on neither skip list, so in a served request db is the request client and both tenant_settings statements run under applyTenantContext. With no tenant context active (the route moved onto a skip list, the middleware not mounted) it falls back to the raw principal pool, where WHERE tenant_id = $1 is the only boundary: latent, like the other onboarding ?? pool entries. A second caller passing a real Pool would be the same, and is not a site of its own.",
   },
   {
     file: 'src/voice/voice-config.ts', fn: 'refreshVapiFirstMessage', access: 'pool.query', count: 1,
     category: 'tenant_context_applied', tables: ['tenant_settings'],
-    why: "Both callers (PATCH /api/settings/language after commit, and scripts/backfill-vapi-assistant-notice.ts) pass { query } wrapping tenantQuery(pool, tenantId, …), so the tenant_settings read runs under rls_app_runtime for that tenant. The Pick<Pool, 'query'> parameter is a latent trap for a future raw caller.",
-  },
-  {
-    file: 'src/voice/voice-gate.ts', fn: 'createVoiceGate', access: 'pool.query', count: 2,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_settings', 'voice_sessions'], migrateBy: 'audit 2026-10-23 §4 P1.3',
-    why: 'The inbound /voice gate reads owner_phone and the live-call count for the dialled-number tenant on the raw pool; WHERE tenant_id = $1 is the only boundary. One withTenantSession per decision is the fix.',
-  },
-  {
-    file: 'src/voice/voice-gate.ts', fn: 'isOwnersOwnNumber', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P1.3',
-    why: "The #1605 owner test-call bypass compares From with the dialled tenant's owner/business phone FROM tenant_settings WHERE tenant_id = $1 on the raw pool; returns a boolean only.",
+    why: "Its one caller, the PATCH /api/settings/language after-commit re-push (routes/settings.ts), passes { query } wrapping tenantQuery(pool, tenantId, …), so the tenant_settings read runs under rls_app_runtime for that tenant. (scripts/backfill-vapi-assistant-notice.ts runs the same read through tenantQuery itself and does not call this.) The Pick<Pool, 'query'> parameter is a latent trap for a future raw caller.",
   },
   {
     file: 'src/voice/voice-service.ts', fn: 'recordInboundCall', access: 'pool.connect', count: 1,
@@ -1078,24 +935,14 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     why: 'Fallback read of tenants.stripe_connect_account_id (isValidTenantId-gated) for the #1102 event.account binding check; an unknown tenant fails closed.',
   },
   {
-    file: 'src/webhooks/routes.ts', fn: 'POST /clerk', access: 'pool.connect', count: 2,
-    category: 'tenant_filtered_no_rls', tables: ['users'], migrateBy: 'audit 2026-10-23 §4 P2.2',
-    why: "user.created invitee join and owner membership: each opens a client, BEGIN + set_config GUC (no role) and INSERTs into users with tenant_id = the invitation row's / bootstrap tenant, so WITH CHECK is not enforced. Swap set_config for applyTenantContext.",
-  },
-  {
-    file: 'src/webhooks/routes.ts', fn: 'POST /clerk', access: 'guc-only', count: 2,
-    category: 'tenant_filtered_no_rls', tables: ['users'], migrateBy: 'audit 2026-10-23 §4 P2.2',
-    why: "The two set_config('app.current_tenant_id', $1, true) lines of the Clerk users inserts: GUC without the runtime role, so the comment's 'fails the RLS policy without it' does not hold.",
-  },
-  {
     file: 'src/webhooks/routes.ts', fn: 'POST /clerk', access: 'pool.query', count: 1,
     category: 'cross_tenant_intentional', tables: ['users'], migrateBy: 'audit 2026-10-23 §4 P3.2',
     why: "user.deleted soft-deletes every membership row of the Svix-verified Clerk user id across tenants (UPDATE users … WHERE clerk_user_id = $1). Intentional, but unattributed; under rls_app_runtime it would match 0 rows.",
   },
   {
-    file: 'src/webhooks/routes.ts', fn: 'POST /stripe', access: 'pool.query', count: 5,
-    category: 'tenant_filtered_no_rls', tables: ['tenants', 'tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P1.10',
-    why: 'Signed Stripe events: four tenants-registry lookups/updates by session or customer id (no RLS) plus the AI-model seed UPDATE tenant_settings WHERE tenant_id = $1 (FORCE RLS) as the principal; that one is the debt.',
+    file: 'src/webhooks/routes.ts', fn: 'POST /stripe', access: 'pool.query', count: 4,
+    category: 'global_table', tables: ['tenants'],
+    why: "Signed Stripe events: the tenants-registry reads and writes keyed by the event's own ids (no RLS): the expired checkout's pending-session clear, and the customer-id lookups for usage settlement, the AI-model seed / self-check and the deprovision enqueue. The seed UPDATE itself runs in a withTenantSession (P1.10).",
   },
   {
     file: 'src/webhooks/routes.ts', fn: 'POST /stripe', access: 'pool.connect', count: 1,
@@ -1126,8 +973,8 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
   },
   {
     file: 'src/workers/leader-tick.ts', fn: 'runLeaderGatedTick', access: 'pool.connect', count: 1,
-    category: 'global_table', tables: [], handsOffTo: ['watchSessionLease'],
-    why: "Dedicated lockPool client for the leader pg_try_advisory_lock / pg_advisory_unlock only (watchSessionLease listens on its error/end); no table. The work itself runs separately.",
+    category: 'global_table', tables: [], handsOffTo: ['watchSessionLease', 'watchSessionLease > <closure>'],
+    why: "Dedicated lockPool client for the leader pg_try_advisory_lock / pg_advisory_unlock only (watchSessionLease listens on its error/end; its stopWatching closure detaches them); no table. The work itself runs separately.",
   },
   {
     file: 'src/workers/overage-settlement-reconciliation.ts', fn: 'listStaleSettlements', access: 'pool.query', count: 1,
@@ -1173,10 +1020,5 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/workers/trial-reminder-sweep.ts', fn: 'runTrialReminderSweep', access: 'pool.query', count: 1,
     category: 'global_table', tables: ['tenants'],
     why: "Trial-ending scan of the tenants registry (no RLS); each email goes to that tenant's own owner_email.",
-  },
-  {
-    file: 'src/workers/verify-ai.ts', fn: 'createVerifyAiWorker.handle', access: 'pool.query', count: 5,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P1.9',
-    why: 'The LLM verification worker reads and updates tenant_settings WHERE tenant_id = $1 with the server-set payload tenant (Stripe-resolved or req.auth retry), on the raw pool. One withTenantSession per stage.',
   },
 ];

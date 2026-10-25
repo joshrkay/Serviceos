@@ -9,6 +9,7 @@ import {
 } from './webhook-handler';
 import { createLogger } from '../logging/logger';
 import { isValidTenantId } from '../db/schema';
+import { withTenantSession } from '../db/rls-runtime-role';
 import { bootstrapTenant, TenantRepository } from '../auth/clerk';
 import {
   writeClerkUserMetadata,
@@ -870,34 +871,25 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                 });
                 throw new Error('pool not configured for invitee join');
               }
-              // Insert the users row directly. The tenant GUC is set
-              // with set_config(..., true), which only lasts inside a
-              // transaction (PR 319 review P1), hence the BEGIN /
-              // COMMIT block. This raw pool client never switches to
-              // rls_app_runtime, so it keeps the pool's privileged
-              // principal (db/rls-runtime-role.ts) and the users policy
-              // does not scope this INSERT: the tenant comes from the
-              // invitation row (pending.tenantId), never the payload.
+              // Insert the users row directly, in a tenant session for the
+              // invitation's tenant (BEGIN, the tenant GUC + rls_app_runtime,
+              // the INSERT, COMMIT): the users policy scopes it and its WITH
+              // CHECK refuses a row for any other tenant. The tenant comes
+              // from the invitation row (pending.tenantId), never the
+              // payload. The session commits before markAccepted, so the
+              // invitation is only consumed once the membership row exists.
               //
-              // The tenantId is also asserted to look like a UUID
-              // before it is used. set_config and the INSERT both bind
-              // it as a parameter, so this is a shape check, not an
-              // injection guard. The id comes from the DB row
+              // The tenantId is also asserted to look like a UUID before it
+              // is used, so a bad row fails here with its own message instead
+              // of after a checkout. The id comes from the DB row
               // (FK-backed), so this is belt + suspenders, but explicit
               // prevents a future change from accidentally widening the
               // column.
-              const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-              if (!UUID_RE.test(pending.tenantId)) {
+              if (!isValidTenantId(pending.tenantId)) {
                 throw new Error(`Invalid tenantId on pending invitation: ${pending.tenantId}`);
               }
-              const client = await deps.pool.connect();
-              try {
-                await client.query('BEGIN');
-                await client.query(
-                  "SELECT set_config('app.current_tenant_id', $1, true)",
-                  [pending.tenantId],
-                );
-                await client.query(
+              await withTenantSession(deps.pool, pending.tenantId, (client) =>
+                client.query(
                   `INSERT INTO users (
                      id, tenant_id, clerk_user_id, email, role,
                      first_name, last_name, created_at, updated_at
@@ -914,14 +906,8 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                     (userData.first_name as string | null) ?? null,
                     (userData.last_name as string | null) ?? null,
                   ],
-                );
-                await client.query('COMMIT');
-              } catch (txErr) {
-                await client.query('ROLLBACK').catch(() => undefined);
-                throw txErr;
-              } finally {
-                client.release();
-              }
+                ),
+              );
               await deps.pendingInvitationRepo.markAccepted(pending.id);
 
               // Push tenant_id back to Clerk public_metadata so the
@@ -1166,9 +1152,10 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           // membership row. Authorization is DB-authoritative
           // (resolveAuthorization): a caller with no `users` row is rejected,
           // so a bootstrapped owner without this row is locked out of /api.
-          // Insert idempotently under the tenant's RLS context (`users` has no
-          // unique (tenant_id, clerk_user_id) constraint, so WHERE NOT EXISTS
-          // instead of ON CONFLICT — safe on webhook replay).
+          // Insert idempotently in a tenant session for the bootstrapped
+          // tenant (the GUC + rls_app_runtime, so the users policy and its
+          // WITH CHECK apply), with WHERE NOT EXISTS so a webhook replay
+          // inserts nothing.
           //
           // A failure here RETHROWS and fails the webhook (500 → Clerk
           // retries; the catch below marks the event 'failed' so dedup lets
@@ -1179,17 +1166,10 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           // Logging-only was the previous behavior and left the owner locked
           // out with no retry (Clerk got a 200). Migration 249 backfills any
           // rows missed before this change.
-          if (deps.pool) {
-            const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-            if (UUID_RE.test(result.tenantId)) {
-              const ownerClient = await deps.pool.connect();
-              try {
-                await ownerClient.query('BEGIN');
-                await ownerClient.query(
-                  "SELECT set_config('app.current_tenant_id', $1, true)",
-                  [result.tenantId],
-                );
-                await ownerClient.query(
+          if (deps.pool && isValidTenantId(result.tenantId)) {
+            try {
+              await withTenantSession(deps.pool, result.tenantId, (client) =>
+                client.query(
                   `INSERT INTO users (
                      id, tenant_id, clerk_user_id, email, role,
                      first_name, last_name, created_at, updated_at
@@ -1205,19 +1185,15 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                     (userData.first_name as string | null) ?? null,
                     (userData.last_name as string | null) ?? null,
                   ],
-                );
-                await ownerClient.query('COMMIT');
-              } catch (ownerErr) {
-                await ownerClient.query('ROLLBACK').catch(() => undefined);
-                logger.error('Owner users-row insert failed — failing webhook so Clerk retries', {
-                  tenantId: result.tenantId,
-                  userId,
-                  error: ownerErr instanceof Error ? ownerErr.message : String(ownerErr),
-                });
-                throw ownerErr;
-              } finally {
-                ownerClient.release();
-              }
+                ),
+              );
+            } catch (ownerErr) {
+              logger.error('Owner users-row insert failed — failing webhook so Clerk retries', {
+                tenantId: result.tenantId,
+                userId,
+                error: ownerErr instanceof Error ? ownerErr.message : String(ownerErr),
+              });
+              throw ownerErr;
             }
           }
 
@@ -2676,7 +2652,10 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
           // Once billing reaches a live state, seed the tenant's AI model from
           // the platform default and enqueue the onboarding AI self-check.
           // Idempotent: the worker skips if already passed and the COALESCE
-          // never clobbers a model already chosen for the tenant.
+          // never clobbers a model already chosen for the tenant. The tenant
+          // comes from the registry by the signed event's customer; the seed
+          // itself is a tenant session of its own (rls_app_runtime, raw-pg
+          // audit 2026-10-23 §4 P1.10), committed before the job is enqueued.
           //
           // Trial-checkout is also the trigger for Twilio SETUP: now that the
           // tenant has a card on file the worker creates the subaccount +
@@ -2694,11 +2673,13 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
             const tenantId = tenantRes.rows[0]?.id;
             if (tenantId) {
               if (config.AI_DEFAULT_MODEL) {
-                await deps.pool.query(
-                  `UPDATE tenant_settings
-                      SET ai_model = COALESCE(ai_model, $2), updated_at = NOW()
-                    WHERE tenant_id = $1`,
-                  [tenantId, config.AI_DEFAULT_MODEL],
+                await withTenantSession(deps.pool, tenantId, (client) =>
+                  client.query(
+                    `UPDATE tenant_settings
+                        SET ai_model = COALESCE(ai_model, $2), updated_at = NOW()
+                      WHERE tenant_id = $1`,
+                    [tenantId, config.AI_DEFAULT_MODEL],
+                  ),
                 );
               }
               const verifyPayload: VerifyAiPayload = { tenantId };

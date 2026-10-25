@@ -43,10 +43,12 @@ interface Row {
  */
 function stubPool(rows: Row[], opts: { failOn?: RegExp } = {}) {
   const statements: string[] = [];
+  const params: Array<unknown[] | undefined> = [];
   const released: boolean[] = [];
   const client = {
     query: async (sql: string, values?: unknown[]) => {
       statements.push(sql);
+      params.push(values);
       if (opts.failOn?.test(sql)) throw new Error('connection reset by peer');
       if (/provider_data->>'phoneE164'/.test(sql)) {
         const did = values?.[0] as string;
@@ -65,7 +67,7 @@ function stubPool(rows: Row[], opts: { failOn?: RegExp } = {}) {
     release: () => released.push(true),
   };
   const pool = { connect: async () => client } as unknown as Pool;
-  return { pool, statements, released };
+  return { pool, statements, params, released };
 }
 
 const tenantRow = (tenantId: string, subaccountSid: string | null, token: string | null): Row => ({
@@ -243,7 +245,7 @@ describe('createTwilioWebhookCredentialResolver (#1072)', () => {
     });
   });
 
-  it('scopes every lookup with the system_lookup GUC and always releases the client', async () => {
+  it('scopes the cross-tenant lookups (DID, subaccount) with the system_lookup GUC and always releases the client', async () => {
     const { pool, statements, released } = stubPool(ROWS);
     const resolve = createTwilioWebhookCredentialResolver({ pool, env: baseEnv });
 
@@ -251,6 +253,20 @@ describe('createTwilioWebhookCredentialResolver (#1072)', () => {
 
     expect(statements[0]).toBe('BEGIN');
     expect(statements[1]).toContain("set_config('app.system_lookup', 'true', true)");
+    expect(statements).toContain('COMMIT');
+    expect(released).toEqual([true]);
+  });
+
+  it("reads a known tenant's row under that tenant's own context, never the system_lookup escape (audit §4 P1.7)", async () => {
+    const { pool, statements, params, released } = stubPool(ROWS);
+    const resolve = createTwilioWebhookCredentialResolver({ pool, env: baseEnv });
+
+    expect(await resolve({ tenantId: B_TENANT })).toMatchObject({ outcome: 'verify', authToken: B_TOKEN });
+
+    expect(statements[0]).toBe('BEGIN');
+    expect(statements[1]).toContain("set_config('app.current_tenant_id', $1, true)");
+    expect(params[1]).toEqual([B_TENANT]);
+    expect(statements.some((sql) => sql.includes('app.system_lookup'))).toBe(false);
     expect(statements).toContain('COMMIT');
     expect(released).toEqual([true]);
   });

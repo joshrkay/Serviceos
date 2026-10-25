@@ -52,14 +52,15 @@ import {
 } from '../integrations/twilio/phone-number-repository';
 import { getSentryClient, type SentryClient } from '../monitoring/sentry';
 import { buildVoicemailTwiml } from '../telephony/voicemail-fallback';
-import { isTenantAfterHours } from '../telephony/business-hours-loader';
+import { isAfterHours, isTenantAfterHours } from '../telephony/business-hours-loader';
+import type { BusinessHoursConfig } from '../compliance/business-hours';
 import {
   createVoicemailStatusRouter,
   type VoicemailStatusHandlerOptions,
   type VoicemailWebhookReceiptStore,
 } from '../telephony/voicemail-status-route';
 import type { VoicemailRedelivery } from '../telephony/voicemail-redelivery';
-import type { SettingsRepository } from '../settings/settings';
+import type { EscalationSettings, SettingsRepository } from '../settings/settings';
 import { resolveEscalationSettings } from '../settings/settings';
 import type { LeadRepository } from '../leads/lead';
 import type { GateReason } from '../voice/trial-limits';
@@ -255,6 +256,10 @@ export interface TelephonyRouterDeps {
     reason?: GateReason;
     /** Usage caps: ring this owner phone (null → voicemail). */
     forwardTo?: string | null;
+    /** An answer's business hours, from the settings row the gate read (VoiceGateResult). */
+    businessHours?: BusinessHoursConfig | null;
+    /** An answer's after-hours mode, from that same row (VoiceGateResult). */
+    afterHoursVoiceMode?: EscalationSettings['after_hours_voice_mode'];
   }>;
   /**
    * Optional health snapshot factory. When set, mounts a public
@@ -569,6 +574,11 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
 
     // §10 voice gates — subscription, go-live, usage caps. Voicemail on a
     // setup block; usage caps ring the owner first (forwardToOwnerTwiml).
+    // An answer carries the business hours and the after-hours mode from the
+    // tenant_settings row the gate already read in its tenant session, for the
+    // after-hours fork below.
+    let gateBusinessHours: BusinessHoursConfig | null | undefined;
+    let gateAfterHoursVoiceMode: EscalationSettings['after_hours_voice_mode'];
     if (deps.voiceGate) {
       // Point at /recording, NOT /voicemail-status. Only /recording actually
       // persists: it downloads RecordingUrl, uploads to storage and inserts
@@ -596,6 +606,8 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
             );
           return;
         }
+        gateBusinessHours = gate.businessHours;
+        gateAfterHoursVoiceMode = gate.afterHoursVoiceMode;
       } catch (err) {
         logger.error('telephony/voice: voiceGate failed closed', {
           callSid,
@@ -612,11 +624,20 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     const shopName = deps.businessName ?? 'our team';
     if (deps.pool && deps.settingsRepo) {
       try {
-        const afterHours = await isTenantAfterHours(deps.pool, tenantId);
+        // Raw-pg audit §4 P1.3 — one tenant session per inbound call: reuse
+        // the gate's read (every createVoiceGate answer — trial, paid, dunning
+        // grace, the owner test call — carries the hours and the after-hours
+        // mode); only no gate wired, or a gate whose answer carries none,
+        // reads them here.
+        const afterHours =
+          gateBusinessHours !== undefined
+            ? isAfterHours(gateBusinessHours)
+            : await isTenantAfterHours(deps.pool, tenantId);
         if (afterHours) {
-          const settings = await deps.settingsRepo.findByTenant(tenantId);
-          const esc = resolveEscalationSettings(settings);
-          if (esc.after_hours_voice_mode !== 'ai_answering') {
+          const afterHoursVoiceMode =
+            gateAfterHoursVoiceMode ??
+            resolveEscalationSettings(await deps.settingsRepo.findByTenant(tenantId)).after_hours_voice_mode;
+          if (afterHoursVoiceMode !== 'ai_answering') {
             const base = (deps.publicBaseUrl ?? '').replace(/\/+$/, '');
             const callback = base
               ? `${base}/api/telephony/voicemail-status`

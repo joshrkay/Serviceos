@@ -128,10 +128,9 @@ import {
   createMeRouter,
   DEFAULT_TENANT_TIMEZONE,
   InMemoryUserModeService,
-  type MeUserRecord,
-  type MeTenantSettings,
   type UserModeService,
 } from './routes/me';
+import { createPgUserModeService, createUserModeLoader } from './users/pg-user-mode-service';
 import { setUserModeLoader } from './middleware/auth';
 import {
   setSupervisorPresenceLoader,
@@ -472,6 +471,7 @@ import { seedCanonicalVerticalPacks } from './shared/canonical-vertical-packs';
 import { createTenantOwnership } from './shared/tenant-ownership';
 import { createTranscriptionWorker, voicemailJobContextFromPersisted } from './workers/transcription';
 import { createPinLockAlertRetryWorker, createPinLockAlertRetryScheduler } from './workers/pin-lock-alert-retry';
+import { createCardNumberRewriteRetryWorker, pendingCardNumberRewrites } from './voice/card-number-rewrite-retry';
 import { createTranscriptionRouterHandoff } from './workers/transcription-router-handoff';
 import { createMemoCreatorModeLoader } from './workers/memo-creator-mode';
 // U9 — voicemail router gate: owner/approver caller-ID check (same identity
@@ -493,6 +493,10 @@ import {
   runRecordingRetentionSweep,
   PgRecordingRetentionRepository,
 } from './workers/recording-retention-worker';
+import {
+  runShadowComparisonRetentionSweep,
+  PgShadowComparisonRetentionRepository,
+} from './workers/shadow-comparison-retention-worker';
 import { createRetrieveAdapter } from './ai/orchestration/retrieve-adapter';
 import { FrancLanguageDetector } from './voice/language-detector';
 import type { RetrieveAdapter } from './ai/orchestration/context-builder';
@@ -500,11 +504,6 @@ import type { RetrieveAdapter } from './ai/orchestration/context-builder';
 // future channel adapters) can resolve a session's language from the
 // customer override + tenant default + STT hint.
 export { detectLanguage } from './ai/orchestration/language-detector';
-// UB-C1 — the media-stream adapter's initialLanguageResolver composes the
-// identified caller's preferredLanguage with the tenant's language settings
-// through detectLanguage (which applies the supported_languages gate).
-import { detectLanguage as detectInitialCallLanguage } from './ai/orchestration/language-detector';
-import { identifyCaller } from './ai/skills/identify-caller';
 import { PgCallSummaryRepository } from './ai/skills/pg-call-summary';
 import type { EmbeddingProvider } from './ai/providers/openai-compatible';
 import {
@@ -685,7 +684,6 @@ import {
 import { requireAuth, resolveAuthorization, setAuthorizationLoader } from './middleware/auth';
 import { createAuthorizationLoader } from './auth/authorization-loader';
 import { withTenantTransaction } from './middleware/tenant-context';
-import type { TenantIntegrationStatus } from './integrations/status-machine';
 // In-memory dev fallback for the WebhookEvent idempotency repo. Extracted from
 // this composition-root into its own module so app.ts no longer carries an
 // inline repository class. Production/staging always use the Pg variant
@@ -2682,6 +2680,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     dripCampaigns: 590036,
     // #1770 — connected-domain verification sweep. DISTINCT key.
     customDomains: 590044,
+    // #1813 follow-up — shadow_comparisons retention sweep. DISTINCT key.
+    shadowComparisonRetention: 590047,
   } as const;
   // #1090 — every leader-gated sweep run is registered here so `runShutdown`
   // can wait for the tick that is ALREADY RUNNING before it closes the pool.
@@ -3901,10 +3901,19 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // U8 (R8): every appended Twilio turn is also persisted to
   // call_transcript_turns keyed by CallSid + session id, so the recording
   // webhook can recover the transcript after a restart / reap.
+  // PRIV-3 — every cross-turn card-number rewrite of those rows goes to the
+  // durable queue before its live write, for the retry worker registered
+  // below and the recording hook.
   const voiceSessionStore = new VoiceSessionStore({
     transport: voiceEventTransport,
     callTranscriptTurnRepo,
+    cardRewriteRetryQueue: queue,
   });
+  const cardNumberRewriteRetryWorker = createCardNumberRewriteRetryWorker({ callTranscriptTurnRepo, auditRepo });
+  workerRegistry.set(
+    cardNumberRewriteRetryWorker.type,
+    cardNumberRewriteRetryWorker as import('./queues/queue').WorkerHandler<unknown>,
+  );
   // LCR-04 — voicemail recording callbacks that arrive while the database is
   // down are re-POSTed (exactly as Twilio signed them) until acknowledged:
   // Twilio itself never redelivers a 5xx recording callback.
@@ -4796,6 +4805,9 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             voiceRepo,
             auditRepo,
             ...(embeddingProvider ? { queue } : {}),
+            // PRIV-3 — a split card's rewrites still queued for the call: after
+            // a restart (or on another replica) no session knows of them.
+            pendingCardNumberRewrites: pendingCardNumberRewrites(queue),
             logger: createLogger({
               service: 'recording-transcript-hook',
               environment: process.env.NODE_ENV || 'development',
@@ -5263,53 +5275,25 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             ...(sharedTtsProvider ? { ttsProvider: sharedTtsProvider } : {}),
             terminologyProvider,
             // UB-C1 — resolve the language the call OPENS in, before the
-            // Deepgram socket is created: identified caller's
-            // preferredLanguage > tenant default, both gated by the
-            // tenant's supported_languages opt-in (detectLanguage applies
-            // the gate internally). Failure-soft: any error falls back to
-            // the tenant default / English rather than blocking audio.
-            initialLanguageResolver: async (
-              tenantId: string,
-              ctx: { callSid: string; sessionId: string },
-            ) => {
-              const settings = await settingsRepo.findByTenant(tenantId).catch(() => null);
-              let customerPreferred: 'en' | 'es' | null = null;
-              const callerPhone = twilioAdapter.getCallerPhone(ctx.sessionId);
-              if (pool && callerPhone) {
-                try {
-                  const identified = await identifyCaller({
-                    tenantId,
-                    fromPhone: callerPhone,
-                    pool,
-                  });
-                  if (identified.status === 'matched') {
-                    const customer = await customerRepo.findById(tenantId, identified.customerId);
-                    const pref = customer?.preferredLanguage;
-                    if (pref === 'en' || pref === 'es') customerPreferred = pref;
-                  }
-                } catch {
-                  /* failure-soft — fall through to the tenant default */
-                }
-              }
-              return detectInitialCallLanguage({
-                customerPreferredLanguage: customerPreferred,
-                tenantDefaultLanguage: settings?.defaultLanguage === 'es' ? 'es' : 'en',
-                supportedLanguages: settings?.supportedLanguages ?? ['en'],
-              });
-            },
+            // Deepgram socket is created (the identified caller's
+            // preferredLanguage > tenant default, gated by supported_languages;
+            // failure-soft). See TwilioGatherAdapter.resolveStreamOpeningLanguage.
+            initialLanguageResolver: (tenantId: string, ctx: { callSid: string; sessionId: string }) =>
+              twilioAdapter.resolveStreamOpeningLanguage(tenantId, ctx),
             fillerEngine,
             fillerCache,
             // U5 — absolute per-call duration cap: one timer per leg, armed
             // at start() and never re-armed by media frames (the audio-idle
             // timer is, so it never fires on a live call).
             maxCallDurationMs: config.VOICE_MAX_CALL_DURATION_MS,
-            speechTurn: async ({ session, speechResult, callSid, tenantId, callerTiming }) =>
+            speechTurn: async ({ session, speechResult, callSid, tenantId, callerTiming, onCallerText }) =>
               twilioAdapter.processCallerUtterance({
                 sessionId: session.id,
                 callSid,
                 speechResult,
                 tenantId,
                 ...(callerTiming ? { callerTiming } : {}),
+                ...(onCallerText ? { onCallerText } : {}),
               }),
             // RV-130 (CRITICAL) — greeting + recording-disclosure bootstrap
             // once Deepgram opens. initializeStreamSession speaks the
@@ -6301,108 +6285,15 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // Pg-backed UserModeService when DATABASE_URL is set; in-memory in
   // dev / no-DB mode. The middleware-side mode loader is wired at the
   // same time so requireTenant can populate `req.auth.mode` against the
-  // same data source used by the /api/me reads.
+  // same data source used by the /api/me reads. The reads ride the request
+  // transaction's client; setMode commits on its own (users/pg-user-mode-service.ts).
   const userModeService: UserModeService = pool
-    ? {
-        async getUser(tenantId, userId) {
-          // P12-001 review fix — `userId` here is the Clerk subject
-          // (`req.auth.userId` = `payload.sub`), not the UUID PK on
-          // `users.id`. Lookup goes through `clerk_user_id`. The
-          // returned `user_id` continues to be the Clerk sub so
-          // downstream callers (the API surface) stay aligned with
-          // the auth-layer identity.
-          const r = await pool.query(
-            `SELECT id, clerk_user_id, tenant_id, role,
-                    COALESCE(can_field_serve, false) AS can_field_serve,
-                    COALESCE(current_mode, 'supervisor') AS current_mode,
-                    mode_changed_at
-             FROM users
-             WHERE tenant_id = $1 AND clerk_user_id = $2
-             LIMIT 1`,
-            [tenantId, userId],
-          );
-          if (r.rowCount === 0) return null;
-          const row = r.rows[0] as Record<string, unknown>;
-          const rec: MeUserRecord = {
-            user_id: String(row.clerk_user_id),
-            // Sweep-2 S5 — internal users.id UUID; this is what
-            // appointment_assignments.technician_id references, so the
-            // web technician surfaces resolve THIS, not the Clerk sub.
-            internal_user_id: String(row.id),
-            tenant_id: String(row.tenant_id),
-            role: String(row.role),
-            can_field_serve: Boolean(row.can_field_serve),
-            current_mode: row.current_mode as MeUserRecord['current_mode'],
-            mode_changed_at: row.mode_changed_at
-              ? new Date(row.mode_changed_at as string)
-              : null,
-          };
-          return rec;
-        },
-        async getTenantSettings(tenantId) {
-          const r = await pool.query(
-            `SELECT backup_supervisor_user_id,
-                    COALESCE(unsupervised_proposal_routing, 'queue_and_sms') AS unsupervised_proposal_routing,
-                    COALESCE(timezone, $2) AS timezone
-             FROM tenant_settings WHERE tenant_id = $1 LIMIT 1`,
-            [tenantId, DEFAULT_TENANT_TIMEZONE],
-          );
-          if (r.rowCount === 0) {
-            return {
-              backup_supervisor_user_id: null,
-              unsupervised_proposal_routing: 'queue_and_sms',
-              timezone: DEFAULT_TENANT_TIMEZONE,
-            } as MeTenantSettings;
-          }
-          const row = r.rows[0] as Record<string, unknown>;
-          return {
-            backup_supervisor_user_id: row.backup_supervisor_user_id
-              ? String(row.backup_supervisor_user_id)
-              : null,
-            unsupervised_proposal_routing:
-              row.unsupervised_proposal_routing as MeTenantSettings['unsupervised_proposal_routing'],
-            timezone: String(row.timezone),
-          };
-        },
-        async getTenantIntegrationStatuses(tenantId) {
-          const r = await pool.query(
-            `SELECT provider, status, updated_at
-             FROM tenant_integrations
-             WHERE tenant_id = $1`,
-            [tenantId],
-          );
-          return r.rows.map((row) => ({
-            provider: String(row.provider),
-            status: String(row.status) as TenantIntegrationStatus,
-            updated_at: row.updated_at ? new Date(String(row.updated_at)) : null,
-          }));
-        },
-        async setMode(tenantId, userId, mode) {
-          // P12-001 review fix — `userId` is the Clerk subject; match
-          // on `clerk_user_id`, not the UUID PK. Without this the
-          // UPDATE silently no-ops in production.
-          const now = new Date();
-          await pool.query(
-            `UPDATE users
-             SET current_mode = $1, mode_changed_at = $2, updated_at = now()
-             WHERE tenant_id = $3 AND clerk_user_id = $4`,
-            [mode, now, tenantId, userId],
-          );
-          return { modeChangedAt: now };
-        },
-      }
+    ? createPgUserModeService(pool)
     : inMemoryUserModeService!;
 
   // Wire the middleware-side mode loader. Reuses the same service so
   // we don't drift between read paths.
-  setUserModeLoader(async (userId, tenantId) => {
-    try {
-      const u = await userModeService.getUser(tenantId, userId);
-      return u ? u.current_mode : null;
-    } catch {
-      return null;
-    }
-  });
+  setUserModeLoader(createUserModeLoader(userModeService));
 
   // QUALITY-2026-07-12 WS4 — wire the DB-authoritative authorization loader.
   // Only when a real Pool exists AND dev-auth-bypass is off: dev-bypass already
@@ -6633,6 +6524,7 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
               queue,
               auditRepo,
               encryptionKey: a2pKey,
+              pool,
             })
           : null,
       }),
@@ -7225,6 +7117,33 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
         });
       }).catch((err) => {
         recordingRetentionLogger.error('Recording-retention sweep failed', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
+    }, 60 * 60_000));
+  }
+
+  // Shadow-comparison retention (#1813 follow-up). Hourly; pool-gated like the
+  // recording retention purge above (the Pg repository is the only one). NOT
+  // gated on SHADOW_LLM_ENABLED: rows written while the flag was on must still
+  // age out after it is turned off. The repository writes each batch's audit
+  // row in the DELETE's own transaction, so the sweep takes no audit
+  // repository. WS2: worker-only.
+  if (pool && shouldRunWorkers) {
+    const shadowComparisonRetentionLogger = createLogger({
+      service: 'shadow-comparison-retention-worker',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    const shadowComparisonRetentionRepo = new PgShadowComparisonRetentionRepository(pool);
+    registerInterval(setInterval(() => {
+      void runAsLeader(SWEEP_LOCK.shadowComparisonRetention, async () => {
+        await runShadowComparisonRetentionSweep({
+          repo: shadowComparisonRetentionRepo,
+          logger: shadowComparisonRetentionLogger,
+          retentionDays: config.SHADOW_COMPARISON_RETENTION_DAYS,
+        });
+      }).catch((err) => {
+        shadowComparisonRetentionLogger.error('Shadow-comparison retention sweep failed', {
           error: err instanceof Error ? err.message : String(err),
         });
       });

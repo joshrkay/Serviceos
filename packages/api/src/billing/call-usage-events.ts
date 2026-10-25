@@ -1,4 +1,4 @@
-import type { Pool } from "pg";
+import type { Pool, PoolClient } from "pg";
 import { PgBaseRepository } from "../db/pg-base";
 import { samePhone } from "../voice/activation";
 
@@ -96,7 +96,7 @@ export class PgCallUsageRepository extends PgBaseRepository {
    * conversion because paid usage is measured per period instead).
    */
   async sumTrialBillableSeconds(tenantId: string): Promise<number> {
-    return this.sumBillableSeconds(tenantId, new Date(0), new Date(8.64e15));
+    return this.withTenant(tenantId, (client) => sumTrialBillableSecondsOn(client, tenantId));
   }
 
   async sumBillableSeconds(
@@ -104,15 +104,35 @@ export class PgCallUsageRepository extends PgBaseRepository {
     periodStart: Date,
     periodEnd: Date,
   ): Promise<number> {
-    return this.withTenant(tenantId, async (client) => {
-      const result = await client.query<{ seconds: string }>(
-        `SELECT COALESCE(SUM(duration_seconds), 0)::text AS seconds
-           FROM call_usage_events
-          WHERE tenant_id = $1 AND billable
-            AND ended_at >= $2 AND ended_at < $3`,
-        [tenantId, periodStart, periodEnd],
-      );
-      return Number(result.rows[0]?.seconds ?? 0);
-    });
+    return this.withTenant(tenantId, (client) =>
+      sumBillableSecondsOn(client, tenantId, periodStart, periodEnd),
+    );
   }
+}
+
+/**
+ * Billable seconds in [periodStart, periodEnd), read on a client the caller
+ * already holds under the tenant's context — for a caller that answers
+ * several questions in one tenant transaction (the voice gate, the trial
+ * nudge) instead of a repository round trip each.
+ */
+export async function sumBillableSecondsOn(
+  client: PoolClient,
+  tenantId: string,
+  periodStart: Date,
+  periodEnd: Date,
+): Promise<number> {
+  const result = await client.query<{ seconds: string }>(
+    `SELECT COALESCE(SUM(duration_seconds), 0)::text AS seconds
+       FROM call_usage_events
+      WHERE tenant_id = $1 AND billable
+        AND ended_at >= $2 AND ended_at < $3`,
+    [tenantId, periodStart, periodEnd],
+  );
+  return Number(result.rows[0]?.seconds ?? 0);
+}
+
+/** The trial allowance measure (every billable second so far) on the caller's tenant client. */
+export function sumTrialBillableSecondsOn(client: PoolClient, tenantId: string): Promise<number> {
+  return sumBillableSecondsOn(client, tenantId, new Date(0), new Date(8.64e15));
 }

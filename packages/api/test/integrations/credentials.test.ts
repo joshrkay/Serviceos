@@ -80,11 +80,14 @@ describe('createCredentialResolver', () => {
 
       const sqls = client.query.mock.calls.map((call) => String(call[0]).trim());
       expect(sqls[0]).toBe('BEGIN');
-      expect(sqls[1]).toBe("SELECT set_config('app.current_tenant_id', $1, true)");
+      // The tenant GUC and the role, both transaction-local, in one statement.
+      expect(sqls[1]).toBe(
+        "SELECT set_config('app.current_tenant_id', $1, true), set_config('role', 'rls_app_runtime', true)",
+      );
       expect(client.query.mock.calls[1][1]).toEqual([T1]);
-      expect(sqls[2]).toBe('SET LOCAL ROLE rls_app_runtime');
-      expect(sqls[3]).toMatch(/FROM tenant_integrations/);
-      expect(sqls[4]).toBe('COMMIT');
+      expect(sqls[2]).toMatch(/FROM tenant_integrations/);
+      expect(sqls[3]).toBe('COMMIT');
+      expect(sqls).toHaveLength(4);
       expect(client.release).toHaveBeenCalledTimes(1);
       await resolver.close();
     } finally {

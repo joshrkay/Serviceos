@@ -37,26 +37,22 @@ export function isBillingLiveStatus(status: string | null | undefined): boolean 
   return status != null && BILLING_LIVE_STATUSES.has(status);
 }
 
-export async function readTenantBillingState(
-  pool: Pool,
-  tenantId: string,
-): Promise<TenantBillingState | null> {
-  const res = await pool.query<{
-    subscription_status: string | null;
-    plan_id: CallPlanId | null;
-    current_period_start: Date | null;
-    current_period_end: Date | null;
-    owner_id: string | null;
-    owner_email: string | null;
-    past_due_grace_until: Date | null;
-  }>(
-    `SELECT subscription_status, plan_id, current_period_start, current_period_end,
-            owner_id, owner_email, past_due_grace_until
-       FROM tenants WHERE id = $1`,
-    [tenantId],
-  );
-  const row = res.rows[0];
-  if (!row) return null;
+/** The tenants columns behind a TenantBillingState, as pg returns them. */
+export interface TenantBillingRow {
+  subscription_status: string | null;
+  plan_id: CallPlanId | null;
+  current_period_start: Date | null;
+  current_period_end: Date | null;
+  owner_id: string | null;
+  owner_email: string | null;
+  past_due_grace_until: Date | null;
+}
+
+/**
+ * The snapshot of one tenants row. Shared with the voice gate, which reads
+ * these columns joined to the tenant_settings row in its tenant session.
+ */
+export function tenantBillingStateFromRow(row: TenantBillingRow): TenantBillingState {
   return {
     status: row.subscription_status,
     planId: row.plan_id,
@@ -68,4 +64,18 @@ export async function readTenantBillingState(
     ownerEmail: row.owner_email,
     pastDueGraceUntil: row.past_due_grace_until ? new Date(row.past_due_grace_until) : null,
   };
+}
+
+export async function readTenantBillingState(
+  pool: Pool,
+  tenantId: string,
+): Promise<TenantBillingState | null> {
+  const res = await pool.query<TenantBillingRow>(
+    `SELECT subscription_status, plan_id, current_period_start, current_period_end,
+            owner_id, owner_email, past_due_grace_until
+       FROM tenants WHERE id = $1`,
+    [tenantId],
+  );
+  const row = res.rows.at(0);
+  return row ? tenantBillingStateFromRow(row) : null;
 }
