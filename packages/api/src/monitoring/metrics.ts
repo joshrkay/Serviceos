@@ -380,6 +380,22 @@ export const cardNumberRewriteFailedTotal = new Counter({
   registers: [metricsRegistry],
 });
 
+/**
+ * PRIV-2 — voicemails whose Twilio-hosted copy the notify-only branch of the
+ * voicemail-status route left at Twilio, by why: `no_credentials` (no platform
+ * Twilio credentials, so nothing can delete it), `no_recording_url` (the
+ * callback named no recording URL) and `delete_failed` (the DELETE did not
+ * succeed). Each one is also recorded in `webhook_events` (source
+ * `twilio_voicemail_orphaned_copy`) so it can be deleted later. Alert on any
+ * increase: the audio outlives the tenant's retention horizon until it is.
+ */
+export const voicemailTwilioCopyOrphanedTotal = new Counter({
+  name: 'voicemail_twilio_copy_orphaned_total',
+  help: 'Voicemail Twilio copies the notify-only branch could not delete, by reason (no_credentials, no_recording_url, delete_failed)',
+  labelNames: ['reason'] as const,
+  registers: [metricsRegistry],
+});
+
 // ---------- Platform SLOs (WS15 — operational resilience) ----------
 
 /**

@@ -36,8 +36,10 @@ import { TwilioGatherAdapter } from '../../src/telephony/twilio-adapter';
 import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
 import {
   buildVoicemailStorageKey,
+  TWILIO_ORPHANED_COPY_PROVIDER,
   type VoicemailPersistedEvent,
 } from '../../src/telephony/voicemail-status-route';
+import { voicemailTwilioCopyOrphanedTotal } from '../../src/monitoring/metrics';
 import { InMemoryLeadRepository } from '../../src/leads/in-memory-lead';
 import {
   createVoicemailRedelivery,
@@ -46,7 +48,11 @@ import {
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryWebhookEventRepository } from '../../src/webhooks/in-memory-webhook-event';
 import type { LLMGateway, LLMResponse } from '../../src/ai/gateway/gateway';
-import type { TwilioCopyRemover } from '../../src/telephony/twilio-recording-deleter';
+import {
+  TWILIO_COPY_DELETED_EVENT,
+  type TwilioCopyRemover,
+  type TwilioRecordingDeleter,
+} from '../../src/telephony/twilio-recording-deleter';
 import type {
   StorageProvider,
   ObjectMetadata,
@@ -190,10 +196,14 @@ interface HarnessOptions {
   withReceiptStore?: boolean;
   /** Omit storage/creds to exercise the notify-only fallback. */
   withTranscriptionLeg?: boolean;
+  /** Omit the storage bucket only (credentials stay wired): notify-only. */
+  withStorage?: boolean;
   /** Tenant fallback result for session-less callbacks. */
   resolveTenantId?: () => string | undefined;
   /** PRIV-2 — the Twilio-copy delete after the whole pipeline. */
   twilioCopyRemover?: TwilioCopyRemover;
+  /** PRIV-2 — the bare deleter, for the notify-only branch (no row to stamp). */
+  twilioRecordingDeleter?: TwilioRecordingDeleter;
   /** Replace the fixed-token credential getter (outage tests). */
   authTokenGetter?: Parameters<typeof createTelephonyRouter>[0]['authTokenGetter'];
   /** LCR-04 — the redelivery queue for callbacks taken during an outage. */
@@ -209,6 +219,7 @@ function buildHarness(opts: HarnessOptions = {}) {
   const webhookEventRepo = new InMemoryWebhookEventRepository();
   const withReceiptStore = opts.withReceiptStore ?? true;
   const withTranscriptionLeg = opts.withTranscriptionLeg ?? true;
+  const withStorage = opts.withStorage ?? true;
 
   let session;
   if (opts.sessionCallSid) {
@@ -247,7 +258,7 @@ function buildHarness(opts: HarnessOptions = {}) {
         store,
         pool: pool as unknown as import('pg').Pool,
         storage,
-        storageBucket: STORAGE_BUCKET,
+        storageBucket: withStorage ? STORAGE_BUCKET : '',
         ...(withTranscriptionLeg
           ? {
               twilioAccountSid: TWILIO_ACCOUNT_SID,
@@ -269,6 +280,7 @@ function buildHarness(opts: HarnessOptions = {}) {
           uploadObject: uploadObject as never,
           onVoicemailPersisted,
           ...(opts.twilioCopyRemover ? { twilioCopyRemover: opts.twilioCopyRemover } : {}),
+          ...(opts.twilioRecordingDeleter ? { twilioRecordingDeleter: opts.twilioRecordingDeleter } : {}),
         },
       },
     }),
@@ -843,5 +855,126 @@ describe('PRIV-2 (review round 2) — two voicemails on one call keep both messa
       `put /${STORAGE_BUCKET}/${TENANT_ID}/CA-vm-1-RE-vm-2-voicemail.mp3`,
       'delete RE-vm-2',
     ]);
+  });
+});
+
+// PRIV-2 edge — the notify-only branch (storage, the pool or the Twilio
+// credentials not wired) stores no audio and writes no voice_recordings row,
+// so neither the ingest-time delete nor the retention sweep's retry phase ever
+// sees this recording. With credentials it is deleted here, once the lead
+// exists; without them (or when the delete fails) it is recorded durably so it
+// can be deleted later — never silently left at Twilio.
+describe('PRIV-2 — the notify-only branch never leaves the Twilio copy unaccounted for', () => {
+  const ORPHAN_KEY = `${TENANT_ID}:RE-vm-1`;
+  const orphanedCount = async (reason: string): Promise<number> =>
+    (await voicemailTwilioCopyOrphanedTotal.get()).values.find((v) => v.labels.reason === reason)?.value ?? 0;
+
+  it('credentials but no storage: deletes the Twilio copy with the same deleter, after the lead lands', async () => {
+    const order: string[] = [];
+    let h!: ReturnType<typeof buildHarness>;
+    const twilioRecordingDeleter = {
+      deleteRecording: vi.fn(async () => {
+        order.push(`delete(leads=${(await h.leadRepo.findByTenant(TENANT_ID)).length})`);
+        return 'deleted' as const;
+      }),
+    };
+    h = buildHarness({ sessionCallSid: 'CA-vm-1', withStorage: false, twilioRecordingDeleter });
+
+    const res = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+
+    expect(res.status).toBe(200);
+    expect(h.pool.voiceRows).toHaveLength(0);
+    expect(h.uploadObject).not.toHaveBeenCalled();
+    expect(twilioRecordingDeleter.deleteRecording).toHaveBeenCalledWith(FINAL_PARAMS.RecordingUrl);
+    expect(order).toEqual(['delete(leads=1)']);
+    expect(await h.webhookEventRepo.findById(TWILIO_ORPHANED_COPY_PROVIDER, ORPHAN_KEY)).toBeNull();
+    // The same event and entity type deleteTwilioCopy writes, so a count of
+    // Twilio-copy deletions includes the notify-only ones.
+    expect(TWILIO_COPY_DELETED_EVENT).toBe('voice_recording.twilio_copy_deleted');
+    const deletions = h.auditRepo.getAll().filter((e) => e.eventType === TWILIO_COPY_DELETED_EVENT);
+    expect(deletions).toHaveLength(1);
+    expect(deletions[0]).toMatchObject({ entityType: 'voice_recording', entityId: 'RE-vm-1' });
+    expect(deletions[0].metadata).toMatchObject({
+      callSid: 'CA-vm-1',
+      recordingSid: 'RE-vm-1',
+      reason: 'notify_only',
+      alreadyGone: false,
+    });
+    const audits = await h.auditRepo.findByEntity(TENANT_ID, 'voice_recording', 'RE-vm-1');
+    expect(audits.map((a) => a.eventType)).toEqual([TWILIO_COPY_DELETED_EVENT]);
+  });
+
+  it('no credentials: the recording is recorded durably for later deletion, counted, and the lead still lands', async () => {
+    const before = await orphanedCount('no_credentials');
+    const h = buildHarness({ sessionCallSid: 'CA-vm-1', withTranscriptionLeg: false });
+
+    const res = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+
+    expect(res.status).toBe(200);
+    expect(await h.leadRepo.findByTenant(TENANT_ID)).toHaveLength(1);
+    const orphan = await h.webhookEventRepo.findById(TWILIO_ORPHANED_COPY_PROVIDER, ORPHAN_KEY);
+    expect(orphan?.payload).toEqual({
+      tenantId: TENANT_ID,
+      callSid: 'CA-vm-1',
+      recordingSid: 'RE-vm-1',
+      recordingUrl: FINAL_PARAMS.RecordingUrl,
+      reason: 'no_credentials',
+    });
+    expect(await orphanedCount('no_credentials')).toBe(before + 1);
+    const audits = await h.auditRepo.findByEntity(TENANT_ID, 'voice_recording', 'RE-vm-1');
+    expect(audits.map((a) => a.eventType)).toEqual(['voicemail.twilio_copy_orphaned']);
+    expect(audits[0].metadata).toMatchObject({ reason: 'no_credentials' });
+    // Not counted as a deletion.
+    expect(h.auditRepo.getAll().filter((e) => e.eventType === TWILIO_COPY_DELETED_EVENT)).toHaveLength(0);
+  });
+
+  it('a failed delete is recorded durably too, never dropped', async () => {
+    const before = await orphanedCount('delete_failed');
+    const twilioRecordingDeleter = {
+      deleteRecording: vi.fn(async (): Promise<'deleted'> => {
+        throw new Error('Twilio recording delete failed 503: unavailable');
+      }),
+    };
+    const h = buildHarness({ sessionCallSid: 'CA-vm-1', withStorage: false, twilioRecordingDeleter });
+
+    const res = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+
+    expect(res.status).toBe(200);
+    expect(twilioRecordingDeleter.deleteRecording).toHaveBeenCalledOnce();
+    const orphan = await h.webhookEventRepo.findById(TWILIO_ORPHANED_COPY_PROVIDER, ORPHAN_KEY);
+    expect(orphan?.payload).toMatchObject({ recordingSid: 'RE-vm-1', reason: 'delete_failed' });
+    expect(await orphanedCount('delete_failed')).toBe(before + 1);
+    expect(h.auditRepo.getAll().filter((e) => e.eventType === TWILIO_COPY_DELETED_EVENT)).toHaveLength(0);
+  });
+
+  it('a replayed notify-only callback keeps one lead and one durable record, counted once', async () => {
+    const before = await orphanedCount('no_credentials');
+    const h = buildHarness({ sessionCallSid: 'CA-vm-1', withTranscriptionLeg: false });
+
+    const first = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+    const replay = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+
+    expect(first.status).toBe(200);
+    expect(replay.status).toBe(200);
+    expect(await h.leadRepo.findByTenant(TENANT_ID)).toHaveLength(1);
+    const orphans = (await h.webhookEventRepo.findUnprocessed()).filter(
+      (e) => e.provider === TWILIO_ORPHANED_COPY_PROVIDER,
+    );
+    expect(orphans.map((e) => e.eventId)).toEqual([ORPHAN_KEY]);
+    expect(await orphanedCount('no_credentials')).toBe(before + 1);
+  });
+
+  it('the full pipeline leaves the delete to the copy remover: no second delete, no durable record', async () => {
+    const twilioRecordingDeleter = { deleteRecording: vi.fn(async () => 'deleted' as const) };
+    const twilioCopyRemover = vi.fn(async () => true);
+    const h = buildHarness({ sessionCallSid: 'CA-vm-1', twilioRecordingDeleter, twilioCopyRemover });
+
+    const res = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
+
+    expect(res.status).toBe(200);
+    expect(h.pool.voiceRows).toHaveLength(1);
+    expect(twilioCopyRemover).toHaveBeenCalledOnce();
+    expect(twilioRecordingDeleter.deleteRecording).not.toHaveBeenCalled();
+    expect(await h.webhookEventRepo.findById(TWILIO_ORPHANED_COPY_PROVIDER, ORPHAN_KEY)).toBeNull();
   });
 });

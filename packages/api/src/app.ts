@@ -4849,6 +4849,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             );
           },
           ...(voicemailTwilioCopyRemover ? { twilioCopyRemover: voicemailTwilioCopyRemover } : {}),
+          // PRIV-2 — the same deleter, for the notify-only branch (no row).
+          ...(twilioRecordingDeleter ? { twilioRecordingDeleter } : {}),
         },
       },
       // WS3 — per-tenant staged rollout of the realtime path (default ON) and
