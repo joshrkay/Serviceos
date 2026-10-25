@@ -180,11 +180,13 @@ export async function handleVapiCallEvent(
   // handler, so it must fall through and reprocess. Mirrors the Twilio
   // webhook's recordReceipt/markProcessed pattern (see `recordTwilio` in
   // webhooks/routes.ts).
+  // U7-05+ — the receipt holds ids only. The caller's number drives the
+  // activation check below from this request; it is never stored.
   const receipt = await deps.webhookRepo.recordReceipt(
     'vapi',
     callId,
     'call.ended',
-    { tenantId: req.tenantId, fromE164 },
+    { tenantId: req.tenantId, callId },
   );
   if (!receipt.inserted && receipt.record?.processedAt) {
     return { status: 200, body: { duplicate: true } };

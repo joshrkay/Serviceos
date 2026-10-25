@@ -16,7 +16,11 @@
  *
  * Extracted from app.ts (composition-root decomposition) so the application
  * factory no longer carries an inline repository class.
+ *
+ * Stores the same minimized payload as the Pg variant (U7-05+).
  */
+
+import { minimizeWebhookPayload } from './webhook-payload-allowlist';
 
 interface WebhookEventRecord {
   id: string;
@@ -44,6 +48,7 @@ export class InMemoryWebhookEventRepository {
   ): Promise<{ inserted: boolean; record: WebhookEventRecord }> {
     if (!provider) throw new Error('provider is required');
     if (!eventId) throw new Error('eventId is required');
+    const stored = minimizeWebhookPayload(provider, eventType, payload);
     const k = this.key(provider, eventId);
     const existing = this.events.get(k);
     if (existing) {
@@ -54,7 +59,7 @@ export class InMemoryWebhookEventRepository {
       provider,
       eventId,
       eventType,
-      payload,
+      payload: stored,
       receivedAt: new Date(),
       processedAt: null,
       processingError: null,

@@ -15,6 +15,7 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { PgWebhookEventRepository } from '../../src/webhooks/pg-webhook-event';
+import { findPii, twilioInboundSmsBody } from '../support/webhook-pii-fixtures';
 
 interface QueryCall {
   sql: string;
@@ -64,10 +65,10 @@ describe('P0-020 — PgWebhookEventRepository', () => {
           rows: [
             {
               id: 'wh-1',
-              source: 'stripe',
-              idempotency_key: 'evt_123',
-              event_type: 'payment_intent.succeeded',
-              payload: JSON.stringify({ amount: 1000 }),
+              source: 'twilio',
+              idempotency_key: 'SM123',
+              event_type: 'sms',
+              payload: JSON.stringify({ MessageSid: 'SM123' }),
               created_at: NOW.toISOString(),
               processed_at: null,
               error_message: null,
@@ -79,30 +80,51 @@ describe('P0-020 — PgWebhookEventRepository', () => {
     });
 
     const repo = new PgWebhookEventRepository(pool as never);
-    const result = await repo.recordReceipt(
-      'stripe',
-      'evt_123',
-      'payment_intent.succeeded',
-      { amount: 1000 },
-    );
+    const result = await repo.recordReceipt('twilio', 'SM123', 'sms', { MessageSid: 'SM123' });
 
     expect(result.inserted).toBe(true);
-    expect(result.record.provider).toBe('stripe');
-    expect(result.record.eventId).toBe('evt_123');
-    expect(result.record.eventType).toBe('payment_intent.succeeded');
-    expect(result.record.payload).toEqual({ amount: 1000 });
+    expect(result.record.provider).toBe('twilio');
+    expect(result.record.eventId).toBe('SM123');
+    expect(result.record.eventType).toBe('sms');
+    expect(result.record.payload).toEqual({ MessageSid: 'SM123' });
     expect(result.record.processedAt).toBeNull();
     expect(result.record.processingError).toBeNull();
 
     // Only one query — no follow-up SELECT when INSERT actually inserted.
     expect(client.query).toHaveBeenCalledTimes(1);
     expect(calls[0].sql).toMatch(/ON CONFLICT \(source, idempotency_key\) DO NOTHING/);
-    expect(calls[0].params).toEqual([
-      'stripe',
-      'payment_intent.succeeded',
-      'evt_123',
-      JSON.stringify({ amount: 1000 }),
-    ]);
+    expect(calls[0].params).toEqual(['twilio', 'sms', 'SM123', JSON.stringify({ MessageSid: 'SM123' })]);
+  });
+
+  it('recordReceipt: writes the allowlisted payload, never the personal fields (U7-05+)', async () => {
+    const { pool, calls } = makePoolStub({
+      responses: [{ match: /INSERT INTO webhook_events/i, rows: [{ id: 'wh-2', payload: {} }], rowCount: 1 }],
+    });
+    const repo = new PgWebhookEventRepository(pool as never);
+    await repo.recordReceipt('twilio', 'SMpii', 'sms', twilioInboundSmsBody('SMpii', 'ACx'));
+
+    const written = JSON.parse(calls[0].params[3] as string);
+    expect(findPii(written)).toEqual([]);
+    expect(written).toEqual({
+      AccountSid: 'ACx',
+      ApiVersion: '2010-04-01',
+      MessageSid: 'SMpii',
+      MessagingServiceSid: 'MGfixture',
+      NumMedia: '1',
+      NumSegments: '1',
+      SmsMessageSid: 'SMpii',
+      SmsSid: 'SMpii',
+      SmsStatus: 'received',
+    });
+  });
+
+  it('recordReceipt: refuses a source with no payload policy before writing', async () => {
+    const { pool, calls } = makePoolStub();
+    const repo = new PgWebhookEventRepository(pool as never);
+    await expect(repo.recordReceipt('brand_new_provider', 'e1', 't', { email: 'x@example.com' })).rejects.toThrow(
+      /no webhook_events payload policy/,
+    );
+    expect(calls).toHaveLength(0);
   });
 
   it('recordReceipt: duplicate (provider, event_id) returns inserted=false (idempotency)', async () => {
