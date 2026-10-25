@@ -5,6 +5,18 @@
 Decisions (durable, resumable jobs; limits serialized with their consumers) and its owner
 decisions apply here. U7 and U8 refer to each other by name; both live next to this file.
 
+**Revised 2026-10-25** against `main` at `58383e730`. The implementation planning and its
+critique re-checked the code references here. The ones that moved are corrected in place, and the
+review's design fixes are folded in where each rule lives. The design named no build order, so the
+corrected slice list is its own last section, "Slices and order" (Gate 0 to Gate 4), with serial
+PRs off `main` instead of one branch. U7 owns the primitives the two units share: the two-key lock
+class ids, the dedicated side pool, the lock-order flags, the sink registry and the sweep keys
+590048 to 590057. U8 imports them and starts its sweep keys at 590058. The written inventory this
+unit starts with is
+[`docs/plans/2026-10-25-001-u7-erasure-inventory.md`](2026-10-25-001-u7-erasure-inventory.md), and
+the owner sub-choices the design leaves open are in
+[`docs/plans/2026-10-25-002-u7-u8-owner-decision-packet.md`](2026-10-25-002-u7-u8-owner-decision-packet.md).
+
 ## U7. Data-subject erasure (PRIV-5) — after U4, needs an owner decision
 
 - **Goal:** an owner can erase one customer's personal data and AI artifacts, short of purging the
@@ -30,8 +42,10 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
   - `packages/api/src/integrations/twilio/a2p-10dlc/registration.ts:21-24` and
     `packages/api/src/workers/a2p-10dlc-registration.ts` (a provider workflow that checkpoints every
     created resource and resumes after a crash)
-  - `packages/api/src/proposals/pg-proposal.ts:644-655` (a guarded claim) and `:657` (stale claims
-    retried, then failed after a retry limit)
+  - `packages/api/src/proposals/pg-proposal.ts:694-704` (`claimForExecution`, a guarded claim run
+    through `withCrossTenantSweep`) and `:706-790` (`resetStaleExecuting`: stale claims retried,
+    then failed after a retry limit). U7's job claim takes the same shape: select across tenants
+    with `withCrossTenantSweep`, then claim per tenant.
 - **Approach**, recommended defaults pending that decision:
   - The endpoint is `POST /api/customers/:id/erase`:
     - owner-only and audited
@@ -121,7 +135,7 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         spend events under the spend lock. So:
         - **The manifest classifies `(event_type, key)` pairs, not bare keys.** A bare key can mean
           two things. `jobs/job-money-state.ts:139` writes `{ from, to }` holding money states on
-          a job, and `routes/onboarding.ts:955` writes `{ from, to }` holding phone numbers. A
+          a job, and `routes/onboarding.ts:946` writes `{ from, to }` holding phone numbers. A
           list of bare safe keys would have to hold `from` and `to`, so a later
           `customer.phone_changed { from, to }` would keep both phones through the erase. `error`
           and `name` are ambiguous the same way. So each pair is listed as PII or safe
@@ -132,22 +146,28 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         - **The lists are enforced at build time, and the backstop doesn't depend on them.** A
           throw under test catches only a path some test runs. A later route could write
           `customer.contact_merged { mergedPhone }` through `createAuditEventBestEffort`
-          (`audit/audit.ts:95`) with no test on that call. In production the pair is in neither
+          (`audit/audit.ts:104`) with no test on that call. In production the pair is in neither
           list, so the trigger, the strip and the value pass would all treat it as safe, and the
           phone would survive every erase.
           - **A check at the `createAuditEvent` call can't see most audit writes.** The inner
             call is generic almost everywhere. `executeAudited` runs `createAuditEvent(input)`
             on whatever the caller's `audit` callback returns
             (`commands/command-runner.ts:92-101`). `createAuditEventBestEffort` passes its own
-            parameter through (`audit/audit.ts:95-100`). About 30 local helpers take
-            `eventType: string` and `metadata: Record<string, unknown>`, such as
+            parameter through (`audit/audit.ts:104`). The scale is large: `main` has 408
+            `createAuditEvent(` calls in 209 files, with about 335 distinct literal event types
+            and 9 template-literal ones, and `eventType: string` appears 50 times in 36 files.
+            Many local helpers take `eventType: string` and
+            `metadata: Record<string, unknown>`, such as
             `sms/tech-status/handler.ts:75-92` (which adds `fromE164`),
             `invoices/invoice-payment-link.ts:300` and `materials/job-materials.ts:55`.
             Onboarding builds `agent.onboarding.${eventType}` into `SideEffect` objects
             (`ai/agents/onboarding/transitions.ts:86`), which
-            `ai/orchestration/onboarding-conversation.ts:370` turns into audit events. Two
-            paths insert into `audit_events` with raw SQL (`demo/platform-audit.ts:34`,
-            `learning/entity-aliases/pg-entity-alias.ts:93`). A check at the call would fail
+            `ai/orchestration/onboarding-conversation.ts:370` turns into audit events. Four
+            paths insert into `audit_events` with raw SQL: `demo/platform-audit.ts:34`,
+            `learning/entity-aliases/pg-entity-alias.ts:93`, `voice/pg-call-transcript-turn.ts:326`
+            (the card-number split-redaction audit, inside its rewrite transaction) and
+            `workers/shadow-comparison-retention-worker.ts:221` (the purge audit, inside its
+            `DELETE` transaction). A check at the call would fail
             on all of these, an implementer would have to exempt the wrappers, and those are
             exactly the paths left unchecked. A `{ fromName }` added through the tech-status
             helper would then keep the subject's name through every erase, since that row's
@@ -162,14 +182,27 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
             AuditMetadata<E>)`, and so does the audit variant of `SideEffect`.
           - A structural test fails on a cast to `AuditEventInput` or `AuditMetadata`, on an
             `any`- or `string`-typed value where an `eventType` goes, and on SQL that inserts
-            into `audit_events` outside `audit/pg-audit.ts`. The two raw inserts above move
-            onto the repository.
+            into `audit_events` outside `audit/pg-audit.ts`. The four raw inserts above move
+            onto the repository. Two of them insert on a caller's client in the middle of a
+            transaction, so the repository gains an on-client insert that keeps each one atomic
+            with its rewrite or its delete, and the late-write value probe below runs on that
+            same client.
+          - **The typing lands as a ratchet, not one change.** At this scale one PR can't be
+            reviewed, and every open PR that adds an event type would conflict with it. So the
+            pairs ship first as a registry of data, with a ratchet test whose ceiling is today's
+            count of untyped call sites. Call sites then move module by module, about 40 files
+            per PR, each lowering the ceiling, and only the last PR makes `createAuditEvent`
+            require the union. Every PR that adds an event type adds its pairs.
           - Fixture: a helper typed `(eventType: string, metadata: Record<string, unknown>)`
             that feeds `createAuditEvent` fails to compile.
           - The strip, run on rows keyed by a tombstone key, treats any pair in neither list as
             PII.
-          - The trigger's PII pair list is generated from the manifest, and the schema test
-            compares the trigger's list with the manifest's.
+          - **The trigger's PII pair list is data, not trigger arguments.** Passed as trigger
+            arguments generated from the manifest, it would make every PR that adds a PII-keyed
+            event type ship a migration that rebuilds the trigger on the hottest table in the
+            database. So the pairs live in a pinned table that a migration upserts with no DDL.
+            The trigger reads it, and a pair it doesn't find counts as PII, so the trigger fails
+            closed. The schema test compares the table's rows with the manifest's pairs.
         - An `error` value is stored as a code, never as `err.message`.
         - **A phase-2 step strips PII by link and by value.** Picking rows only by `entity_id` or
           `correlation_id` misses a row keyed by something else. `sms/tech-status/handler.ts:83-91`
@@ -256,7 +289,7 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         - **A late audit write is probed by its values too, because the value pass reads only rows
           that already exist.** The tech-status handler builds `{ fromE164 }` before its insert
           (`sms/tech-status/handler.ts:75-92,115-118`), with the message SID as `entity_id` and a
-          random `correlation_id` (`audit/audit.ts:83`). Suppose it pauses between the two while the
+          random `correlation_id` (`audit/audit.ts:92`). Suppose it pauses between the two while the
           erase runs. Its insert can then commit after the final re-scan. Neither of its keys is a
           tombstone key, so the trigger passes it. The external-sink drain waits only for provider
           sends, not for a local insert. The subject's phone would sit in a row written after
@@ -735,7 +768,7 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           - Steps read them only through `readErasureIdentifiers`, which throws unless the
             manifest declares the step a reader.
           - **No repository can hand them out by accident.** The job claim follows
-            `pg-proposal.ts:644-655`, an `UPDATE ... RETURNING *` passed to `mapRow`. On the job
+            `pg-proposal.ts:694-704`, an `UPDATE ... RETURNING *` passed to `mapRow`. On the job
             row, a claim written that way would put the encrypted identifiers on the job object
             every step receives, without naming their column, and a new step could call the
             generic `decrypt` on them. So they live in `customer_erasure_identifiers` (above),
@@ -937,8 +970,11 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           (`queues/pg-queue.ts:108`), so the work starts at once. The message only wakes a worker.
           The job row is the record, and the queue's retry limit and dead-letter queue never end an
           erase.
-        - A leader-gated sweep (`runAsLeader` with a new `SWEEP_LOCK` key, `app.ts:2588`, `:2674`)
-          runs once at boot and then every minute. It claims every job that has no live lease and
+        - A leader-gated sweep (`runAsLeader` with a new `SWEEP_LOCK` key, `app.ts:2603`, `:2691`)
+          runs once at boot and then every minute. Keys in use on `main` are 590001 to 590036,
+          590044, 590046 and 590047. U7 holds the block 590048 to 590057, and needs at least six
+          of it: the engine, the webhook payload purge, the DLQ purge, the S3 backstop, the
+          held-send release and the notification drain. U8 starts at 590058. It claims every job that has no live lease and
           either has a non-terminal step whose `next_attempt_at` has passed, or isn't terminal and
           has no non-terminal step left, so only its close remains.
         - **Every U7 sweep starts with no tenant, so every one uses U4's pattern.**
@@ -1106,8 +1142,10 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           their tombstone rows first or through an `ON DELETE CASCADE`. The subject's
           owned-entity ids, session ids and recipient hashes would stop fencing, and a stale
           writer could reattach data with no step left to catch it. Grants to the runtime role
-          alone don't stop that: `applyTenantContext` switches to `rls_app_runtime` only inside
-          a tenant transaction (`db/rls-runtime-role.ts:63-71`), and cross-tenant work runs as
+          alone don't stop that: `applyTenantContext` switches to `rls_app_runtime` only for a
+          tenant session (one `set_config` statement inside a transaction,
+          `db/rls-runtime-role.ts:62-77`, or `SET ROLE` on a session, `:79-84`), and cross-tenant
+          work runs as
           `rls_cross_tenant` or the connection principal. A sweep written as one cross-tenant
           `DELETE` would run as one of those. So:
           - A `BEFORE UPDATE OR DELETE` trigger on the tombstone, and a `BEFORE DELETE` trigger
@@ -1121,6 +1159,9 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           - The tombstone's composite foreign key to the job is `ON DELETE RESTRICT`.
           - The catalog test asserts those grants, that foreign-key action, and that both
             triggers are enabled (`'O'`).
+          - Test: deprovision and the demo reset still purge a tenant that holds erasure jobs and
+            tombstones. Replica mode skips the never-lifted triggers and the foreign-key checks
+            alike, so neither blocks them.
       - **The endpoint returns the job, not the result.** It responds `202` with the job id once
         phase 1 commits. The owner reads progress, each store's outcome and the candidate list from
         `GET /api/customers/:id/erase`. Every "erase result" in this unit means that job state.
@@ -1128,7 +1169,8 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
     store that holds customer data: service locations, custom-field values, converted leads, callback
     tasks, an external trace sink. That shows the scope has to be discovered systematically, not
     patched one store at a time. The first deliverable is a written inventory, reviewed on its own
-    PR, of every place a customer's data can live, reached through any of six kinds of link:
+    PR, of every place a customer's data can live, reached through any of six kinds of link. It is
+    `docs/plans/2026-10-25-001-u7-erasure-inventory.md` (slice U7-00), checked against `main`:
     - **Direct:** a `customer_id` foreign key.
     - **Bare column:** a `%customer_id` column with no foreign key.
     - **Session- or call-linked:** keyed by the customer's `voice_sessions`, `call_sid` or
@@ -1137,22 +1179,50 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
       `intent_summary`. `call_usage_events` (`schema.ts:7058-7070`) holds `caller_phone`, keyed
       only by a `call_id TEXT` with no foreign key.
     - **Polymorphic:** an `entity_type` / `entity_id` pair that names the customer, or one of the
-      customer's jobs, estimates or invoices. For example, `customer-mms/customer-mms-intake.ts:150-163`
-      uploads each customer MMS image to S3 and creates a `files` row with `entityType: 'customer'`.
-      The schema test also lists every `entity_type` / `entity_id` table, so each must be classified.
+      customer's jobs, estimates or invoices. For example,
+      `sms/customer-mms/customer-mms-intake.ts:150-163` uploads each customer MMS image to S3 and
+      creates a `files` row with `entityType: 'customer'`. The schema test also lists every
+      `entity_type` / `entity_id` table, so each must be classified.
       The erase deletes those file rows and their S3 objects.
     - **Identifier-linked:** matched only by the customer's phone, email or name.
     - **External sinks:** S3 objects, Twilio recordings, Langfuse traces when
       `LANGFUSE_CAPTURE_CONTENT` is on, and Vapi when `VAPI_API_KEY` is set.
       `trace-exporter.ts` exports gateway inputs and outputs, including transcripts, under
       correlation and session ids.
+      - **Sinks the first draft missed.** The call-site scanner below forces each to be
+        classified, and slice U7-14b does that work:
+        - Google Maps geocoding and the distance matrix (`locations/geocoder.ts:80`,
+          `scheduling/travel-time/google-provider.ts:83`) receive service addresses. Google offers
+          no per-request delete, so each is a fenced sink whose erase outcome is a retention
+          entry, `provider_retained`.
+        - Google Business Profile: `replyToReview` (`reputation/google-business-client.ts:412`)
+          publishes our reply to a review, and `google_reviews` (`schema.ts:2683-2704`) stores
+          the reviewer's display name, profile URL and comment. The stored copy is scrubbed. The
+          public reply is owner packet item 19.
+        - Anthropic's OpenAI-compatible endpoint (`ai/gateway/layer-two-models.ts:12`) gets an
+          endpoint-host retention entry of its own (see "A model provider's retention entry is
+          keyed by the endpoint" below).
+        - Sentry (`monitoring/sentry.ts`, redacted in `beforeSend` at `:77`), PostHog
+          (`analytics/posthog.ts`, kept to ids and enums by `analytics/audit-event-mapping.ts`)
+          and the hosting provider's log retention are retention entries in the result. Each is
+          checked, not assumed.
+        - Clerk webhook payloads in `webhook_events` (below) are staff data, outside this unit's
+          subject, but its global-list entry classifies them.
+        - `technician_location_pings` (`schema.ts:989-1002`), GPS points linked through
+          `appointment_id`, is a store (see "Phase 1 collects to a fixed point" below).
+        - S3 and R2 object-created notifications need infrastructure this unit doesn't create: a
+          bucket notification to SQS or a Cloudflare Queue, plus pull credentials (an owner
+          action). R2 sends JSON messages, not form-encoded keys. Until that exists, late objects
+          are found by the backstop listing alone.
       - **Vapi takes whole calls by routing, not by a call site.** Provisioning step 4.5 links
         every tenant number to a Vapi assistant (`workers/provision-twilio.ts:602-650`). Vapi
         then runs those calls on its own infrastructure. It keeps the call log, with the
         caller's number and the transcript, and records the call unless the assistant turns
         recording off. Locally, the end-of-call webhook inserts a `voice_sessions` row with
-        only the Vapi call id (`integrations/vapi/webhook.ts:125-150`), with no customer link
-        and no phone. The call-site scan sees only the assistant-config calls, because subject
+        only the Vapi call id (`recordInboundSession`, `integrations/vapi/webhook.ts:128-153`, a
+        raw `pool.connect` with `applyTenantContext` that the raw-pg allowlist lists), with no
+        customer link and no phone. Its `webhook_events` receipt does hold the caller's number,
+        `{ tenantId, fromE164 }` (`:184-189`). The call-site scan sees only the assistant-config calls, because subject
         data reaches Vapi through Twilio number routing. So:
         - Vapi is a manifest entry marked as an integration whose data enters by routing.
         - **A Vapi call is a Twilio call too.** `linkPhoneNumber` imports the tenant's Twilio
@@ -1160,15 +1230,16 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           every Vapi call still arrives at Twilio as a Call resource on that account, with the
           caller's number as `From`. Vapi gives the call its own id and carries the Twilio
           `CallSid` as the call's `phoneCallProviderId`. The webhook stores only the Vapi id,
-          only from the end-of-call report (`integrations/vapi/webhook.ts:125-150`), and ignores
-          every non-terminal event (`:166-170`). An end-of-call report can be missing, after a
+          only from the end-of-call report (`integrations/vapi/webhook.ts:128-153`), and ignores
+          every non-terminal event (`:170-174`). An end-of-call report can be missing, after a
           failed delivery or a call that ends without one. Then the Twilio parent leg, any
           transfer's child leg and the Vapi recording and transcript would never be targets.
           So:
           - The webhook records the Vapi call id, its `phoneCallProviderId` and the Twilio
             account on the `voice_sessions` row from the first call event it receives, not
             only from the end-of-call report. It records the caller's keyed phone hash, and
-            links the customer when the number resolves to one.
+            links the customer when the number resolves to one. That edits an allowlisted raw
+            site, so its `raw-pool-rls.allowlist.ts` entry changes in the same commit.
           - `snapshot` adds each subject Vapi call id as a Vapi target, and its `CallSid` as a
             Twilio Call target, whose child legs and recordings the Twilio steps find as for any
             call (see "Child legs are found through Twilio's own parent link" below).
@@ -1191,7 +1262,8 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           can't be confirmed, the target ends `provider_retained`.
         - The alternative is a boot guard that requires the assistant to be created with
           recording and transcript storage off (the PRIV-6 acknowledgement shape). Owner
-          decision 1 picks one.
+          decision 1 picks one. The design names no default, so it is owner packet item 9
+          (recommended: delete through the API).
         - U8 covers Vapi's spend (see U8's "Every `externalSinks` entry declares its spend").
       Two business integrations hold directly linked customer records too:
       - **Stripe.** `payments/stripe-saved-card.ts:84-124` creates a Stripe Customer with the
@@ -1214,7 +1286,7 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
             next Pay Now mints another. A concurrency loser's link is deactivated and never
             stored (`invoices/public-invoice-service.ts:332-336`), and the code notes that
             nothing persists which account a link was minted under
-            (`invoice-payment-link.ts:285`). Deactivating a link deletes neither the link nor the
+            (`invoice-payment-link.ts:286`). Deactivating a link deletes neither the link nor the
             Product its `price_data` created, so every Product minted before the name change
             above keeps the customer's name. So:
             - Each payment-link create writes an append-only row per invoice or estimate before
@@ -1372,7 +1444,7 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           transport value" below). ElevenLabs logs each request's text and audio to the
           account's history unless the request sends `enable_logging=false`, which needs its
           Zero Retention Mode. Each history item can be deleted. So one of these applies, and
-          owner decision 1 names which:
+          owner decision 1 names which (owner packet item 10):
           - Every request sends `enable_logging=false`, and a boot guard checks the account has
             Zero Retention Mode, the PRIV-6 way.
           - Or an ElevenLabs step pages `GET /v1/history` over the window of the subject's calls,
@@ -1417,7 +1489,9 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           technician can restore it. The result lists the calendar store as provider-retained in
           the bin until its purge date.
         - Owner decision 1 covers these defaults, including whether to set `mip_opt_out=true` on
-          every Deepgram request and whether to seek zero data retention from OpenAI.
+          every Deepgram request and whether to seek zero data retention from OpenAI. Neither has
+          a named default; they are owner packet items 11 and 12. U8 keys its Deepgram rate on
+          the same flag.
 
     The erase code and its tests are then written against that inventory. The list of stores below
     is a starting point, not the definition.
@@ -1506,8 +1580,10 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
     - Build an erase-coverage manifest in code. It names every table that references `customers`.
       Foreign keys alone miss many links, because a lot of customer links in this schema are bare
       columns: `leads.converted_customer_id` (`schema.ts:1411`), `portal_sessions.customer_id`
-      (`:1760`), and the bare `customer_id` columns at `:1611`, `:2963`, `:4171` and `:4243`. So the
-      manifest covers three kinds of link:
+      (`:1760`), the bare `customer_id` columns at `:1611`, `:2963`, `:4171` and `:4243`, and
+      `message_dispatches.customer_id` (`:8185`), which `329_message_dispatch_outcomes` added
+      with no foreign key, together with `job_id` and `purpose`. So the manifest covers three
+      kinds of link:
       - every foreign key to `customers`, whether in a table definition or added later by
         `ALTER TABLE`
       - every column whose name ends in `customer_id`, foreign key or not, including external ids
@@ -1535,12 +1611,18 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
       fails when any match, or any newly added one, is missing from the manifest. A future table or
       bare link column therefore can't silently escape the erase.
     - **Every table is created by the migrations, so the catalog sees it.** `PgQueue` creates
-      `_queue_messages` and `_queue_dlq` in `ensureTable` (`queues/pg-queue.ts:38-71`), kept out
-      of the `MIGRATIONS` registry on purpose, and `flags/pg-feature-flags.ts:27` creates
-      `_feature_flags` the same way. A freshly migrated test database doesn't have them
-      (`test/integration/shared.ts:98` checks `to_regclass('_queue_messages')` for that
-      reason), so the catalog tests would see them only in some test orders. So:
-      - Those three tables move into `MIGRATIONS`.
+      `_queue_messages` and `_queue_dlq` in `ensureTable` (`queues/pg-queue.ts:32-71`, with
+      `CREATE TABLE` at `:38` and `:51`), kept out of the `MIGRATIONS` registry on purpose, and
+      `flags/pg-feature-flags.ts:27` creates `_feature_flags` the same way. A freshly migrated
+      test database doesn't have them (`test/integration/shared.ts:106` checks
+      `to_regclass('_queue_messages')` for that reason), so the catalog tests would see them only
+      in some test orders. So:
+      - Those three tables move into `MIGRATIONS`. `ensureTable` also adds
+        `_queue_messages.last_error` (`ALTER TABLE … ADD COLUMN IF NOT EXISTS`, `:69`), so the
+        migration includes that column, and a test asserts it on a fresh database.
+      - The `raw-pool-rls.allowlist.ts` entries that hand off to `this.ensureTable` change in the
+        same commit. Open #1830 rewrites that allowlist and the queue entries in `demo/reset`, so
+        this lands after it.
       - A structural test fails on `CREATE TABLE` in `packages/api/src` outside `db/schema.ts`.
       - The queue tables are then classified like any other (see "The queue tables hold names,
         phones and message bodies" below).
@@ -1579,19 +1661,44 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         under no matching column name. `webhook_events` (`schema.ts:264-276`) has only `source`,
         `event_type`, `idempotency_key`, `payload`, `status` and `error_message`, no `tenant_id`,
         and nothing deletes from it. The Twilio route records the whole body, `From`, `Body` and
-        `MediaUrl0` included, as `payload` (`webhooks/routes.ts:3237`, for `/twilio/sms/:tenantId`
-        at `:3335`), and the SendGrid route stores whole event batches with recipient emails
-        (`:3430`). So:
-        - The Twilio and SendGrid receipt writers store only ids from now on, as the voicemail
-          and LSA receipts already do (`telephony/voicemail-status-route.ts:387-392`,
-          `lsa/lsa-webhook.ts:134-137`).
+        `MediaUrl0` included, as `payload` (`webhooks/routes.ts:3290`, for `/twilio/sms/:tenantId`
+        at `:3388`), and the SendGrid route stores whole event batches with recipient emails
+        (`:3483`). Three more sources put personal data there:
+        - **Stripe.** The route stores `event.data` for every event type
+          (`webhooks/routes.ts:1392-1398`), keyed by the Stripe event id, with the tenant only in
+          the payload's metadata. `checkout.session` carries `customer_details` (name, email,
+          phone, address), and `setup_intent`, `payment_intent.*`, `charge.refunded`,
+          `charge.refund.updated` and `charge.dispute.created` carry `billing_details`, often
+          with no tenant metadata at all.
+        - **Vapi.** The receipt is `{ tenantId, fromE164 }` (`integrations/vapi/webhook.ts:184-189`).
+        - **Clerk.** The route stores whole payloads (`webhooks/routes.ts:760-766`). That is staff
+          data, outside this unit's subject, but the `webhook_events` entry classifies it.
+        So:
+        - **Every receipt writer keeps only the keys its readers use, from now on.** The Twilio,
+          SendGrid and Vapi receipts store ids only, as the voicemail and LSA receipts already do
+          (`telephony/voicemail-status-route.ts:387-392`, `lsa/lsa-webhook.ts:134-137`). The
+          Stripe receipt keeps an allowlist of keys. Its reader, `money-reconciliation.ts:294-317`,
+          reads only `object.amount_total`, `object.payment_intent`, `object.metadata.tenant_id`,
+          `object.metadata.invoice_id`, `object.metadata.deposit_for_job_id` and
+          `object.payment_status`. A one-time backfill strips the rows already stored. The
+          reconciliation then needs no new lookback window, and Stripe receipts need no purge.
+          Test: money reconciliation still matches after the strip.
         - The erase blanks `payload` on the `webhook_events` rows keyed by the subject's message
-          and call SIDs.
-        - A leader-gated purge blanks `payload` on processed rows past a fixed window, no shorter
-          than its readers need (`workers/money-reconciliation.ts` reads Stripe receipts). That
-          covers older rows the erase can't link. The erase result lists `webhook_events` as held
-          until the next purge date, like the calendar bin.
-        - `idempotency_keys.response_body` (`schema.ts:7442`) caches API responses, such as a
+          and call SIDs, which matters only for rows older than the backfill.
+        - A leader-gated purge blanks the other sources' payloads on processed rows past a fixed
+          window, for rows the erase can't link (owner packet item 17 proposes 90 days). The erase
+          result lists `webhook_events` as held until the next purge date, like the calendar bin.
+        - **The purge's indexes are built out of band.** Nothing deletes from `webhook_events`,
+          so a plain `CREATE INDEX` inside the corpus can pass the 25-second statement timeout and
+          fail the deploy. The partial indexes the purge and the orphaned-copy lookup need are
+          built `CONCURRENTLY` out of band first, the documented precedent
+          (`schema.ts:6787-6798`, `:8972-8974`), and their migration then no-ops.
+        - Open #1833 adds `twilio_voicemail_orphaned_copy` rows, whose payload
+          (`callSid`, `recordingSid`, `recordingUrl`, `reason`) is the only durable pointer to an
+          undeleted Twilio recording. They become recording targets before any blanking, are
+          marked processed only once the copy is gone, and the purge skips them while
+          unresolved. Their payload has no `leadId`, and #1833 is asked to add it.
+        - `idempotency_keys.response_body` (`schema.ts:7441`) caches API responses, such as a
           customer create, for 24 hours before the hold-reaper prunes them. A step with a
           `not_before` of phase 1 plus that lifetime plus the prune interval confirms that no row
           created before phase 1 is left.
@@ -1601,7 +1708,8 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           purge blanks it.
         - **The queue tables hold names, phones and message bodies.** A delay notice carries
           `customerName`, `destination` and `message`
-          (`notifications/delay-notifications.ts:257-267`), an emergency page carries
+          (`DelayNoticeQueuePayload`, `notifications/delay-notifications.ts:262-277`), an emergency
+          page carries
           `callerPhone` (`telephony/emergency-page-retry.ts:66`), and MMS ingest carries
           `fromPhone` and `body` (`sms/tech-status/mms-ingest.ts:323-332`). `last_error` and
           `_queue_dlq.error` keep handler error text, and nothing deletes from `_queue_dlq`. A
@@ -1612,7 +1720,8 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
             on, every row whose `payload->>'tenantId'` is the tenant and whose payload holds a
             tombstone key (a customer, session, message SID or appointment id) or matches the
             subject's phone or email hashes in the value pass. The final re-scan repeats it.
-          - A leader-gated purge bounds `_queue_dlq` by age, and errors are stored as codes.
+          - A leader-gated purge bounds `_queue_dlq` by age (owner packet item 17 proposes 30
+            days), and errors are stored as codes.
           - A handler whose fenced write is refused acks its message, so the message never
             retries into the DLQ.
           - **A tenantless payload store meets the trigger rule another way.** The fence trigger
@@ -1723,7 +1832,8 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
       `jsonb`, `json` and free `text` rule above is the test behind that list.
   - **Fence writers that are still in flight, or the erase can be undone.** An erase can overlap an
     asynchronous writer. For example, the gateway creates a pending `ai_runs` row before it
-    dispatches, and only writes `outputSnapshot` after completion (`gateway.ts:568-588`, `:679`);
+    dispatches, and only writes `outputSnapshot` after completion (`gateway.ts:654`, in the block
+    from `:636`, and `:745`, in the block from `:730`);
     the trace export, transcript append and session summary work the same way. A completion that
     lands after the scrub would put the data back.
     - The erase first writes a durable, tenant-scoped erasure tombstone. It is keyed by:
@@ -1842,7 +1952,7 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           fixed number of lock stripes per tenant, so phase 1 takes a bounded number of locks.
         - **Stripes and the spend lock have key spaces of their own.** The app takes most
           advisory locks as `pg_advisory_xact_lock(hashtext($1))` (`jobs/pg-job.ts:138`,
-          `invoices/payment-mode-change.ts:171`), whose keys are `int4`, and `app.ts:2603`
+          `invoices/payment-mode-change.ts:171`), whose keys are `int4`, and `app.ts:2618`
           already records one silent collision (590014). With 10,000 tenants at, say, 64 stripes
           each, plus 10,000 spend keys, about 1.5 collisions between a spend key and a stripe are
           expected. Tenant B's phase 1 would then hold tenant A's spend lock in exclusive mode,
@@ -1852,10 +1962,13 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
             int4)`, with one fixed class id for erasure stripes and another for the spend lock.
             The object id is `hashtext` of the tenant and stripe, or of the tenant. Postgres
             keeps the one-key and two-key spaces apart, so no one-key lock can collide with them.
-          - The existing two-key locks (`proposals/execution/idempotency-lock.ts:65`,
-            `db/tenant-transaction.ts:112`, `db/migrate.ts:51` and the trigger at
-            `db/schema.ts:8683`) take their first key from a hash, so a collision with a fixed
-            class needs both halves to match.
+          - U7 owns the class ids (`db/advisory-lock-classes.ts`), the stripe helper and the
+            lock-order flags. U8's spend module imports them; neither unit defines its own.
+          - The existing two-key locks (the session-level `PgIdempotencyLockProvider`,
+            `proposals/execution/idempotency-lock.ts:65`; `TransactionScope.lock`,
+            `db/tenant-transaction.ts:179`; `withMigrationAdvisoryLock`, `db/migrate.ts:51`; and
+            the assignment triggers at `db/schema.ts:8682` and `:8803`) take their first key from
+            a hash, so a collision with a fixed class needs both halves to match.
           - Ascending stripe order means ascending object id, so two tenants whose stripes
             collide still lock in one order.
           - A unit test pins the two class ids as distinct constants, and a structural test
@@ -2157,7 +2270,8 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           (`integrations/calendar-sync.ts:112`). `appointment_calendar_events` keeps only the
           latest id: the upsert overwrites it (`:322`), and a failed push overwrites a good id with
           null (`:195`). Once appointment sync is
-          wired (today only test-push calls it, `routes/calendar-integrations.ts:361`), a
+          wired (today only the test-push route calls it, `routes/calendar-integrations.ts:358`,
+          with the call at `:373`), a
           reschedule or a retry after a lost response leaves earlier events with the customer's
           name and address that no stored id names. A deterministic event id doesn't help: Google
           requires event ids to be unique per calendar, and an insert with an existing id, a
@@ -2184,6 +2298,20 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
       the encrypted raw copy in `metadata.raw_transcript_retention` with it. So:
       - Every table that the erase-coverage manifest classifies `scrub` or `anonymize` gets a
         `BEFORE INSERT OR UPDATE` trigger.
+      - **The triggers are attached late and in batches, not when their functions land.** No
+        tombstone can exist before phase 1 ships, so a trigger attached early only adds cost to
+        every write on about 100 tables, `audit_events`, `ai_runs` and `call_transcript_turns`
+        among them. And the first boot that attaches them is the danger: the corpus runs as one
+        implicit transaction under `lock_timeout` 5 s and `statement_timeout` 25 s
+        (`db/migrate.ts:169-170`), and each `CREATE TRIGGER` takes a lock that blocks writes on
+        its table until the corpus commits, so attaching every table at once locks them all
+        together at deploy. So:
+        - The trigger functions land early, tested on fixture tables only.
+        - They are attached to production tables just before phase 1 (slice U7-10b), in
+          batches, each its own migration, cold tables before hot ones, sized from a measured
+          lock time so a batch fits the deploy's budget. That is the first-deploy lock plan, and
+          each batch PR records its measurement.
+        - Each is created only when `pg_trigger` lacks it, so later boots take no lock.
       - The trigger takes the shared stripe lock of each subject key it checks, so it serializes
         with phase 1 like every other writer. It probes the tombstone in a later statement than
         the one that took the stripes (see "The tombstone probe is its own statement" above).
@@ -2323,7 +2451,9 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         database" above fails on any other code that sets it.
       - The tombstone lookup is an index probe on `(tenant_id, key)`, not unique (see "Each
         tombstone row names its job"), so the per-row cost on hot tables such as
-        `call_transcript_turns` stays small.
+        `call_transcript_turns` stays small. A numeric budget pins it: the Docker-gated suite
+        measures the p95 overhead of a `call_transcript_turns` burst with no tombstone, and fails
+        above a fixed number of milliseconds per row, set from the first measurement.
       - Test: a transcription is held at its provider while the erase runs. Its completion write is
         refused by the trigger, the recording's transcript and metadata stay blank, and the job
         doesn't retry.
@@ -2830,12 +2960,46 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         - passes a call inside a `withErasureFence` callback whose `sinkId` is registered and
           is the call's own entry
   - **Fence outbound provider writes too, including ambiguous ones.** An outbound SMS can pass its
-    tombstone check and then complete at Twilio after the provider cleanup has run.
-    `notifications/send-service.ts:750-816` calls Twilio first and writes the `message_dispatches`
-    row, with the returned SID, only afterwards. If Twilio accepts the message but our client times
-    out, the catch path records a `failed` row with no SID. Nothing links the message to the
-    subject, so a SID-only cleanup can't find it, and the erase would report success while Twilio
-    still holds the recipient and the body. So:
+    tombstone check and then complete at Twilio after the provider cleanup has run, and today
+    nothing records most sends before the provider call:
+    - **The SMS chokepoint is the delivery provider, not the send service.** Every SMS on `main`
+      goes through one object: `GatedMessageDelivery`, the consent and DNC gate wired once at
+      `app.ts:1698`, wraps `PerTenantTwilioDeliveryProvider`
+      (`notifications/delivery-provider-factory.ts:249`), which sends on the tenant's account
+      (`notifications/per-tenant-twilio-delivery-provider.ts:58`). Only three senders reach it
+      through `outbound.sendText` (`notifications/outbound-messaging.ts:291`, D-045), which
+      writes a `send_claims` row before the call: `notifications/send-service.ts` (`textOne`,
+      `:945`), `marketing/drip/drip-engine.ts:166` and `workers/thank-you-sms-worker.ts:329`.
+      About forty other `sendSms(` call sites reach it with no claim at all.
+      - The customer-facing ones include `conversations/reply-service.ts:534`,
+        `notifications/twilio-customer-message-service.ts:88`,
+        `notifications/twilio-delay-notification-service.ts:45`,
+        `notifications/customer-message-delivery.ts:145`,
+        `reputation/private-message-sender-adapter.ts:75`,
+        `sms/negotiation/inbound-negotiation-handler.ts:196`,
+        `sms/recovery/resume-handler.ts:135` and `:171`,
+        `sms/recovery/dropped-call-handler.ts:201` and `feedback/dispatcher.ts:40`.
+      - The owner and staff notifications that can carry a subject's phone or name include
+        `telephony/emergency-page-retry.ts:304`, `workers/call-me-back-worker.ts:84`,
+        `ai/skills/patch-owner-through.ts:233`, `voice/triage/owner-cell-patch.ts:150`,
+        `ai/voice-turn/create-voice-turn-processor.ts:3396` and `:3854`,
+        `telephony/media-streams/mediastream-adapter.ts:3339`,
+        `proposals/execution/emergency-dispatch-handler.ts:348`,
+        `appointments/assignment-notifications.ts:173` and `:243`,
+        `workers/daily-digest-worker.ts:598`, and the `messageDelivery` sends in `app.ts`
+        (`:1852`, `:4001`, `:4059`, `:5815`, `:5856`, `:6394`, `:7171` and `:7259`).
+      A write-ahead inside `outbound.sendText` would fence three of them, and the scanner's
+      debt of unfenced call sites (see "A partial build can't be switched on" in "Slices and
+      order") could never reach zero. So the SMS write-ahead sits at the
+      `GatedMessageDelivery` → `PerTenantTwilioDeliveryProvider` boundary, which every send
+      passes, and the senders then pass their source keys to it in batches (see "Slices and
+      order").
+    - The email branch of `notifications/send-service.ts` (`dispatchOne`, `:827`) still calls the
+      provider first and writes the `message_dispatches` row, with the returned id, only
+      afterwards. If the provider accepts the message but our client times out, the catch path
+      records a `failed` row with no id.
+    Nothing then links the message to the subject, so an id-only cleanup can't find it, and the
+    erase would report success while the provider still holds the recipient and the body. So:
     - **The check and the claim are one atomic step, serialized against the tombstone.** A
       separate check and insert would let a sender pause between them: the erase would commit its
       tombstone, find no in-flight row and report success, and the sender would then insert its
@@ -2845,6 +3009,14 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         normalization version), the account and the sending
         number, Messaging Service or address, the `customer_id`, the source (`source_type`,
         `source_id`) and a hash of the body.
+      - **That row lives in a new table, `outbound_claims`, not in `send_claims` or
+        `message_dispatches`.** `send_claims` (`schema.ts:6354-6365`) has a required `claim_key`
+        primary key, three states (`claimed`, `sending`, `sent`) and stale-reclaim semantics that
+        a send with no key doesn't fit. `message_dispatches` is written only after a confirmed
+        send, and `329_message_dispatch_outcomes` (`schema.ts:8183-8196`) already widened its
+        status `CHECK` to `scheduled` and `blocked`, `NOT VALID`. So `outbound_claims` has
+        `tenant_id NOT NULL`, forced RLS, a state `CHECK` of its own and its foreign keys inline,
+        and neither existing table's `CHECK` is widened.
       - It writes that row in one transaction that first takes the subject's erasure lock in
         shared mode. The lock is a `pg_advisory_xact_lock_shared` on the stripe of the customer
         id. A send with no customer id locks the stripe of its normalized recipient's keyed hash
@@ -2881,7 +3053,7 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
       Estimate/Invoice routes that no send claim wraps today.
     - **Each claim write commits on its own, whatever transaction the caller holds.** `POST
       /api/estimates/:id/send` (`routes/estimates.ts:944`) isn't in `LLM_LONG_CALL_ROUTES`
-      (`middleware/tenant-context.ts:212`), so it runs inside the request transaction. That
+      (`middleware/tenant-context.ts:242`), so it runs inside the request transaction. That
       transaction commits only at `res.end`, and rolls back on a `>= 400` response, on a client
       disconnect before the response, or when its COMMIT fails (#1133). The dispatch repository
       is a `PgBaseRepository`, so it would join that transaction through `tenantContextStore`.
@@ -2890,21 +3062,26 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
       removes the row and its SID, the status callback names a row that doesn't exist, and a
       later erase never targets SM1. The request would also hold its shared stripe across both
       provider calls of a `both`-channel send, past phase 1's budget, so phase 1 would time out
-      whenever such a send is in flight. Today's `send_claims` avoids this by writing through
-      `pool.query` (`notifications/send-claim-ledger.ts:68`). So:
+      whenever such a send is in flight. Today's `send_claims` avoids this: since TFNR batch 2
+      each of its statements runs in a tenant session of its own (`withTenantSession`,
+      `notifications/send-claim-ledger.ts:79` and on), which commits before the function
+      returns. The module records that whether a claim should ride the request transaction is
+      an open owner question, P1.6 (`:40-53`). This rule closes it (owner packet item 16). So:
       - For every sink whose write is a provider call, `withErasureFence` runs the claim
         transaction (stripes, tombstone check, claim insert), the guarded flip, and each terminal
         write (`sent` with its SID, `failed`, `ambiguous`) on its own connection, outside any
-        ambient transaction (`runOutsideRequestTransaction`, `middleware/tenant-context.ts:676`).
+        ambient transaction (`runOutsideRequestTransaction`, `middleware/tenant-context.ts:732`).
         Each commits before the next starts. The claim is durable before the call, and the
         stripe is held only for the short claim transaction.
       - **Those connections come from a small dedicated pool, not the main one.** That
         function's comment warns that a fresh checkout can wait on the request's own client, and
-        `middleware/tenant-context.ts:222-226` records the incident: in-app voice turns that
+        `middleware/tenant-context.ts:250-253` records the incident: in-app voice turns that
         each held two connections "deadlocked on checkout and 500'd every tenant's /api". A
         caller that holds a main-pool client and awaits a second checkout from the same pool can
-        repeat it. So the claim, flip and terminal writes run on the same dedicated pool as U8's
-        spend module (see U8's "They run on a small dedicated pool"). Every transaction on it
+        repeat it. So the claim, flip and terminal writes run on a small dedicated side pool,
+        `db/side-pool.ts`, which U7 owns and U8's spend module shares (see U8's "They run on a
+        small dedicated pool"). If U7 lands first it creates the pool; its connections count
+        against PgBouncer's pool size. Every transaction on it
         sets a `lock_timeout`, so a wait on a lock that a main-pool transaction holds ends in an
         error, never a hang.
       - The direct send routes (`routes/estimates.ts:944`, `routes/invoices.ts:649`) also move
@@ -2912,7 +3089,8 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         and hold one connection while they wait on the provider.
       - A local-write fence may still join the caller's transaction.
       - A structural check fails on a provider-sink claims repository that takes its client from
-        `tenantContextStore`.
+        `tenantContextStore`, `withTenantScope` (which open #1830 adds), or `withTenantClient`, or
+        that extends `PgBaseRepository`, which joins `tenantContextStore` the same way.
       - Docker-gated test: a `POST /api/estimates/:id/send` whose client disconnects after mocked
         Twilio accepts keeps its claim and SID, and a later erase deletes the message.
     - **Terminal states:**
@@ -2994,7 +3172,7 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
       - Each write-ahead row records the account SID, and either the `MessagingServiceSid` or the
         bare `From`.
       - **The fallback reads its target, never the dispatch row.** `message_dispatches` has
-        `customer_id` and `recipient TEXT NOT NULL` (`schema.ts:8186`, `:1101`), so the catalog
+        `customer_id` and `recipient TEXT NOT NULL` (`schema.ts:8185`, `:1101`), so the catalog
         and per-column rules make `recipient` a designated column. The local scrub blanks it
         within minutes of `snapshot`, and nothing orders that scrub after the Twilio messages
         step, whose fallback runs hours later. A fallback that read the row would list Messages
@@ -3056,19 +3234,38 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
     - customer-linked notes
     - `call_transcript_turns`, `call_summaries`, `knowledge_chunks` by source
     - `voice_sessions.transcript`, `voice_recordings.transcript`
+    - `technician_location_pings` linked through `appointment_id` (GPS points at the customer's
+      address)
+    - `shadow_comparisons` (`schema.ts:8937-8962`, migration 352): `primary_response_text` and
+      `shadow_response_text`, linked by `ai_run_id` (`ON DELETE SET NULL`), with forced RLS and a
+      retention worker of their own. The `ai_runs` step scrubs them by `ai_run_id` with the
+      subject's runs.
+    - our stored copy of the subject's Google reviews (`google_reviews`, `schema.ts:2683-2704`:
+      `reviewer_display_name`, `reviewer_profile_url`, `comment_text`). Whether our public reply
+      is deleted too is owner packet item 19.
     - stored audio (S3 and Twilio)
     - entity aliases and correction lessons that reference the customer
     - `ai_runs` content, found two ways:
       - **Linked rows.** Rows whose `correlation_id` is one of the subject's conversation, session or
         call ids. U2 (OBS-2) makes every drafting call carry that id; before U7 ships, check that the
         classifier, summary and other voice-path gateway calls carry it too, and close any gap.
+        Open #1832 links classifier runs, review-response runs and SMS and voice edit runs, so the
+        linked-row step lands after it. The gaps its own review lists (the transcript decomposer
+        on chat and memos, and multi-intent memos with no conversation) are left to the
+        historical scan.
       - **Historical rows.** Rows written before that linkage have random correlation ids, so match
         them by content instead. Use a tenant-scoped, batched scan of `input_snapshot` /
         `output_snapshot` text for the subject's normalized phone numbers, email and full name. U4's
         purge has already scrubbed anything older than the window it last applied, so the scan
         starts from the tenant's oldest remaining `ai_runs` row, not from the current retention
         setting. A window shortened since the last purge would otherwise hide rows the purge hasn't
-        reached yet.
+        reached yet. It skips rows whose `content_purged_at` is set (U4's PRIV-1 purge, migration
+        316), since their content is already gone.
+      - **The scrubbed `ai_runs` value is U4's kept-keys shape.** U4's purge rewrites a run's
+        snapshots to their non-content keys. If U7 scrubbed to `'{}'`, the fence would see U4's
+        later rewrite of a tombstoned run as putting data back, refuse it, and roll back the
+        tenant's whole purge batch on every sweep. So the scrub writes U4's shape and stamps
+        `content_purged_at`, and U4 then skips the row.
       - **The scan also matches the subject's ids.** A drafting prompt can carry only the resolved
         customer id and non-identifying job details. For example, `estimate-task.ts` serializes
         `context.existingEntities`, including the verified `customerId`, into the user message, and
@@ -3095,7 +3292,15 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
     `estimates.job_id`, `invoices.job_id`, `payments.invoice_id`), so each keeps its link to the
     blanked row (`keep-link`, see "Each `anonymize` table names how it treats its link").
   - **Keep** `consent_events` and DNC rows as suppression records, hashing the phone if counsel
-    requires it.
+    requires it (owner packet item 18 proposes keeping it unhashed unless counsel says otherwise).
+  - **Legal hold.** The first draft didn't address it. U4 added `voice_recordings.legal_hold`
+    (`schema.ts:4275`, indexed at `:8037-8040`), and every U4 purge phase exempts held rows. It
+    also exempts the runs created within a day of a held recording and the call's unattached
+    transcript turns (`workers/recording-retention-worker.ts:20-40`, `:92-118`). Which wins when
+    an erase meets a hold is owner packet item 13. The recommended answer is the hold: the held
+    recordings, their transcripts, summaries, chunks and runs stay, the erase reports them
+    "held under legal hold", and the store stays open until the hold is lifted. Counsel should
+    confirm.
 - **Test scenarios:** one Docker-gated integration test that seeds a customer across every store,
   erases them, and asserts:
   - each store is scrubbed, including a pre-linkage `ai_runs` row found only by content and a linked
@@ -3268,3 +3473,146 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
   - **the historical scan ignores a newly shortened window:** the owner shortens the retention
     window, and the erase runs before the next purge. A pre-linkage `ai_runs` row older than the new
     window is still found and scrubbed.
+
+## Slices and order (2026-10-25)
+
+This replaces the plan of 13 stacked PRs on long-lived `fix/ai-hardening-erasure-<nn>` branches,
+and the single `fix/ai-hardening-erasure` branch E7 named. Stacked branches invite the damage
+recorded in `docs/solutions/workflow-issues/main-merge-damage-on-long-lived-branches.md`. So every
+PR is cut from `main` after the one before it merges, runs the E3 protocol, and merges `main` in
+rather than rebasing.
+
+### Rules that hold for every slice
+
+- **Shared primitives are U7's.** U7 owns the two-key lock class ids
+  (`db/advisory-lock-classes.ts`), the stripe helper, the lock-order flags, the dedicated side pool
+  (`db/side-pool.ts`), the sink registry (`externalSinks`, which carries U8's `spend` field) and
+  the sweep keys 590048 to 590057. U8 imports them and starts its sweep keys at 590058. If U8 is
+  ready first, it builds them in U7's files under U7's names.
+- **No primitive ships alone.** CLAUDE.md forbids built-but-never-wired code, so each primitive
+  merges in the same PR as its first caller (U7-06 with U7-07, for example), or the PR body
+  records the exception and the slice that wires it.
+- **Migration keys are taken at merge time.** `353_shadow_comparisons_created_index` is the tail on
+  `main` (`db/schema.ts:8976`, `test/db/migration-immutability.test.ts:684`), and U8 takes keys
+  from the same tail. No key is pre-assigned across PRs. A merged key is immutable, so tables that
+  ship in different PRs never share a migration (the hash-key table and the interval tables are
+  two migrations). The PR that merges second renumbers and updates the snapshot in the same
+  commit.
+- **Migration shape.** New foreign keys are defined inline in `CREATE TABLE`:
+  `compileMigrationSQL` (`db/schema.ts:8991-9006`) puts a `DROP` in front of every
+  `ALTER TABLE … ADD CONSTRAINT` and every `CREATE POLICY` on every boot, so a constraint added by
+  `ALTER` is dropped and revalidated at each deploy. A `CHECK` that must widen on an existing table
+  follows the `NOT VALID` drop-and-add pattern (`db/schema.ts:8191-8195`). Indexes on
+  `webhook_events` are built `CONCURRENTLY` out of band. Only migrations 217 and 220 grant on all
+  tables, but each later U7 table needs its own `REVOKE`, placed after them in the corpus.
+- **A partial build can't be switched on.** `CUSTOMER_ERASURE_ENABLED` defaults to off. While it
+  is off, the erase, confirm, dismiss, release and drop routes aren't mounted and the erasure sweep
+  isn't registered, so no tombstone can exist and every trigger, fence and probe merged earlier
+  passes everything through. Tests reach those paths by seeding tombstones through a test fixture.
+  U7-14a freezes today's unfenced call sites as a debt list with a ceiling, and each later PR
+  lowers it. Boot refuses the flag while that ceiling is above 0, while any manifest store that
+  holds subject data has no registered step, or while a required boot guard fails. The new
+  production boot guards enforce only while the flag is on, and warn otherwise, so a merged
+  prefix can't stop a deploy.
+- **Webhook handlers use the webhook base (P0-014).** That covers the status-callback, email-event,
+  storage-notification and Vapi handlers that U7-16, U7-17, U7-18 and U7-43 add or change.
+- **Every new raw database site gets a category and an allowlist entry.** Open #1830 sets the
+  `tenant_filtered_no_rls` ceiling to 0 and makes the raw-pg guard read role switches, so the side
+  pool, the stripes and `session_replication_role` each need one.
+
+### Gate 0: start now, no dependencies
+
+1. **U7-00: the inventory doc**,
+   [`docs/plans/2026-10-25-001-u7-erasure-inventory.md`](2026-10-25-001-u7-erasure-inventory.md),
+   with every store and sink above. The same docs PR folds these corrections into #1695 and
+   amends E7 for the split. Then #1695 merges.
+2. **U7-05+: receipts keep only what their readers use.** Twilio, SendGrid and Vapi receipts store
+   ids only, the Stripe receipt keeps its allowlist of keys, and a one-time backfill strips the
+   stored rows. Red test: money reconciliation still matches.
+3. **U7-04a: the four raw `INSERT INTO audit_events`** (`voice/pg-call-transcript-turn.ts:326`,
+   `workers/shadow-comparison-retention-worker.ts:221`, `demo/platform-audit.ts:34`,
+   `learning/entity-aliases/pg-entity-alias.ts:93`) move onto an on-client repository insert,
+   with a structural ban on new ones. No behaviour change. Red test: a forced audit failure rolls
+   back the card-number rewrite and the shadow-comparison delete with it.
+
+### Gate 1: #1695 merged, #1830 merged, owner packet items 13, 14 and 16 answered
+
+4. **U7-01**, including the `last_error` column. Red test: the column exists on a fresh database.
+   It lands after #1830, which rewrites the queue entries in `demo/reset`.
+5. **U7-02 and U7-03**, adding `google_reviews`, `technician_location_pings`,
+   `message_dispatches.customer_id`, `shadow_comparisons` and one `webhook_events` entry per
+   source.
+6. **U7-04b**: the `(event_type, key)` pair registry as data, and a ratchet test whose ceiling is
+   today's untyped sites.
+   - **U7-04c to U7-04g**: call sites move by module, about 40 files per PR.
+   - **U7-04h**: `createAuditEvent` requires the union.
+   - These start after #1833 merges, since it adds event types.
+7. **U7-06 merged with U7-07**, then U7-08 and U7-09. Red test for U7-07: deprovision
+   (`tenants/deprovision.ts:205`, replica mode) and the demo reset (`tenants/purge-walk.ts:113`)
+   still purge a tenant that holds jobs and tombstones; the `RESTRICT` foreign keys and the
+   never-lifted triggers block neither.
+
+### Gate 2
+
+8. **U7-10a**: the fence functions, tested on fixture tables, then U7-11, U7-12 and U7-13. The
+   `audit_events` pair list lives in a data table. In U7-11, U7's `ai_runs` scrub writes U4's
+   kept-keys shape and stamps `content_purged_at`, so U4 skips those rows.
+9. **U7-14a**: the call-site scanner and its debt snapshot. **U7-14b**: classify the sinks the
+   first draft missed, or give each an erase step (Google Maps, Business Profile, Anthropic,
+   Sentry, PostHog, Clerk, provisioning).
+10. **U7-15**: `withErasureFence` and the side pool.
+11. **U7-16a**: the SMS write-ahead at the `GatedMessageDelivery` → `PerTenantTwilioDeliveryProvider`
+    boundary, on the new `outbound_claims` table. **U7-16b**: the source keys from the roughly 40
+    senders, in batches. Red test: every customer-facing sender, and every owner notification
+    that carries a subject's phone or name (the emergency page, call-me-back), writes a claim with
+    its source keys.
+    - Then U7-17 and U7-18.
+    - Then U7-19. Red test: once the Send routes leave the request transaction, the estimate or
+      invoice status change and its audit event still commit together, and a provider failure
+      leaves the prior status.
+12. **U7-20 to U7-24.** U7-23 starts after #1833 merges.
+
+### Gate 3: the erase flag still off
+
+13. **U7-25a**: the phase-1 transaction and the fence-key collection.
+    - **U7-10b**: the triggers attached to production tables in batches, with the first-deploy
+      lock plan and the performance budget. Red test: the numeric p95 budget on a
+      `call_transcript_turns` burst.
+    - **U7-25b**: the routes and the boot completeness check.
+14. **U7-26a** (the engine) and **U7-26b** (alerts and retention), then U7-27 and U7-28.
+
+### Gate 4
+
+15. **Local steps:**
+    - U7-29, with the legal-hold answer.
+    - U7-30.
+    - U7-31, after #1832, with the hold window. Red test: U4 already exempts runs created within
+      a day of a held recording, and unattached transcript turns
+      (`workers/recording-retention-worker.ts:20-40`, `:92-118`), and U7 matches it.
+    - U7-32a (the strip and the value pass) and U7-32b (the late-write probe in the repository).
+    - U7-33: the queue tables, the DLQ and the non-Stripe webhook purges. After U7-05+ the
+      reconciliation needs no change.
+    - U7-34 and U7-35.
+16. **Twilio steps:** U7-36, then U7-37, then U7-38.
+    - U7-37 builds per-account deleters, and fixes #1833's notify-only branch too: it maps any 404
+      from platform credentials to `already_gone`, the blind spot U7-37 exists to close. Check what
+      Twilio returns for a tenant-owned account that isn't a subaccount before relying on it.
+    - Red test for U7-37: #1833's rows with reason `no_recording_url` carry no `recordingUrl`, so
+      the account is found by looking up the `RecordingSid` across the tenant's known accounts.
+17. **Other providers:** U7-39 to U7-45.
+    - U7-43 runs on the backstop listing alone until the notification queue is provisioned.
+    - U7-46 (Vapi) and U7-48 (ElevenLabs, Deepgram) wait for owner packet items 9 to 11.
+18. **U7-49**: the result, the acceptance test and the runbook. **U7-50** is the owner screen, only
+    if owner packet item 15 asks for one now. It follows the CLAUDE.md mobile rules: 44 px tap
+    targets, no overflow at 320 px, a jsdom class-contract test and a Playwright viewport test.
+
+### Open PRs
+
+- **#1833** edits `telephony/twilio-recording-deleter.ts`, `telephony/voicemail-status-route.ts`,
+  `app.ts`, `metrics.ts` and `ai/gateway/gateway.ts`, which overlap U7-04, U7-23, U7-24, U7-32
+  and U7-37. Ask it now, before it merges, to add `leadId` to the orphaned-copy payload; its audit
+  row already carries it.
+- **#1830** adds `withTenantScope`, which joins `tenantContextStore` the way
+  `PgBaseRepository.withTenant` does, so U7-19's structural ban covers it. U7-01 lands after it.
+- **#1832**: U7-31 waits for it.
+- **#1831** overlaps only `shared/config.ts`.
