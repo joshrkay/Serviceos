@@ -214,7 +214,12 @@ deliberate cross-tenant sweep, a platform-constant write) add an entry:
   runs `clearTenantContext`'s two RESETs). Run a global read that takes its
   own checkout (the pack catalog's `withClient`) after the scope, never inside
   it or beside it (the public intake header and the tenant site view, P2.6,
-  `test/integration/public-intake-tenant-context.test.ts`).
+  `test/integration/public-intake-tenant-context.test.ts`). A sweep's
+  per-tenant reads take one scope per tenant, inside the per-tenant try and
+  closed before any external call: the overage reconciliation's covering
+  read, metered usage and overage cap (P2.7,
+  `test/integration/overage-reconciliation-tenant-context.test.ts`) end
+  their session before `settlePeriod` posts to Stripe.
 - A bare `pool.query` READ on an /api request path is a second connection
   held next to the request's. Find where it runs relative to the
   `withTenantTransaction` middleware first: route gates such as

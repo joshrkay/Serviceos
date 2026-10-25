@@ -168,7 +168,7 @@ export const TABLES_WITHOUT_MIGRATION: ReadonlyArray<{ readonly table: string; r
  * The `tenant_filtered_no_rls` debt, frozen. Migrating one means deleting its
  * entry and LOWERING this number; adding one means raising it, in review.
  */
-export const TFNR_CEILING = 9;
+export const TFNR_CEILING = 8;
 
 export const RAW_PG_SITES: readonly RawPgSite[] = [
   // ── ai/ ────────────────────────────────────────────────────────────────
@@ -968,11 +968,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/workers/overage-settlement-reconciliation.ts', fn: 'listGapTenants', access: 'pool.query', count: 1,
     category: 'global_table', tables: ['tenants'],
     why: 'Subscribed, non-demo starter/growth tenants with a mirrored billing period, from the tenants registry (no tenant_id column, no RLS); ids and period columns only.',
-  },
-  {
-    file: 'src/workers/overage-settlement-reconciliation.ts', fn: 'runOverageSettlementReconciliation', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['call_usage_settlements'], migrateBy: 'audit 2026-10-23 §4 P2.7',
-    why: "The gap backfill's covering-settlement read: call_usage_settlements WHERE tenant_id = $1 (a listGapTenants row) on the raw pool, as the principal; the tenant predicate is the only boundary.",
   },
   {
     file: 'src/workers/payment-link-reconciliation-sweep.ts', fn: 'listCollectOnSiteTenantIds', access: 'pool.connect', count: 1,
