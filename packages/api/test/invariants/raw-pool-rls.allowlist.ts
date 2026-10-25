@@ -895,6 +895,16 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     why: 'Point read of a receipt by (source, key) on the global webhook_events table (the voicemail status route).',
   },
   {
+    file: 'src/webhooks/webhook-payload-backfill.ts', fn: 'PgWebhookPayloadBackfillStore.readPage', access: 'withClient', count: 1,
+    category: 'global_table', tables: ['webhook_events'],
+    why: 'U7-05+ operator backfill (scripts/backfill-webhook-events-minimize.ts): keyset page of the global webhook_events table by id, with md5(payload) for the rewrite guard. No tenant_id, no RLS.',
+  },
+  {
+    file: 'src/webhooks/webhook-payload-backfill.ts', fn: 'PgWebhookPayloadBackfillStore.rewrite', access: 'withClient', count: 1,
+    category: 'global_table', tables: ['webhook_events'],
+    why: "U7-05+ operator backfill: one UPDATE per page setting only payload to the source's allowlist, by id and only where md5(payload) still matches the read. Global table, no RLS.",
+  },
+  {
     file: 'src/webhooks/pg-webhook.ts', fn: 'PgWebhookRepository.findByIdempotencyKey', access: 'withClient', count: 1,
     category: 'global_table', tables: ['webhook_events'],
     why: 'Dedup read for handleWebhookEvent on the global webhook_events table, keyed by (source, provider idempotency key). No tenant_id, no RLS.',
