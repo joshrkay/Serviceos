@@ -41,6 +41,12 @@ be alive and may push batch A or B at any time, so every batch start has to re-c
 
 - 2026-10-18, Josh: owner decisions 1 (PRIV-5 erasure scope) and 2 (money cap on AI spend) are
   settled on the hardening plan's recommended defaults. U7 and U8 may start once U4 and U3 merge.
+- 2026-10-25, planning: the U7 and U8 implementation planning, checked against `main` at
+  `58383e730`, found sub-choices that those defaults don't cover. The designs name no default for
+  them, or they arose after the designs were written. Decisions 1 and 2 accept the designs on
+  scope; these sub-choices are still open. They are listed, each with a recommendation, in
+  [`docs/plans/2026-10-25-002-u7-u8-owner-decision-packet.md`](2026-10-25-002-u7-u8-owner-decision-packet.md),
+  and each design's "Slices and order" names the slices that wait on them.
 
 ## Assurance program (rebuilt 2026-10-18 after owner review)
 
@@ -363,16 +369,44 @@ subscriptions while the next wave starts.
   and 2 land.
 - **Requirements:** R1, R3, R5
 - **Dependencies:** E6 (decisions 1 and 2); U7 depends on U4 merged (Twilio deleter seam, `ai_runs`
-  purge); U8 depends on U3 merged.
-- **Files:** per the hardening plan's U7 and U8 sections; U8 adds an idempotent `tenant_settings`
-  migration at the then-current next key.
-- **Approach:** run the E3 protocol unchanged on branches `fix/ai-hardening-erasure` and
-  `fix/ai-hardening-spend-cap`. Money in integer cents; the cap check before dispatch including
-  failover and streaming; the erasure endpoint owner-only, audited, never a proposal.
+  purge); U8 depends on U3 merged. Both are on `main`. Each design's gates add their own
+  dependencies: #1695 merged with the 2026-10-25 corrections, the open PRs each design names, and
+  the owner-packet answers its slices wait on.
+- **Files:** per each design's "Slices and order"
+  ([`2026-10-18-002a-u7-data-subject-erasure-design.md`](2026-10-18-002a-u7-data-subject-erasure-design.md),
+  [`2026-10-18-002b-u8-ai-spend-cap-design.md`](2026-10-18-002b-u8-ai-spend-cap-design.md)).
+- **Approach** (amended 2026-10-25; it replaced one branch per unit):
+  - **Serial PRs off `main`, not one branch.** U7 is about 50 slices and U8 about 35, too many for
+    one reviewable PR, and stacked long-lived branches invite the damage in
+    `docs/solutions/workflow-issues/main-merge-damage-on-long-lived-branches.md`. Each PR is cut
+    from `main` after the one before it merges, runs the E3 protocol unchanged, quotes the decision
+    and any packet answer it builds on, and merges `main` in rather than rebasing. The single
+    branches `fix/ai-hardening-erasure` and `fix/ai-hardening-spend-cap` are not used.
+  - **The gates.**
+    - U7 Gate 0 starts now: the U7-00 inventory
+      ([`docs/plans/2026-10-25-001-u7-erasure-inventory.md`](2026-10-25-001-u7-erasure-inventory.md)),
+      webhook receipts that keep only what their readers use, and the four raw `audit_events`
+      inserts moved onto the repository.
+    - U7 Gate 1 waits for #1695 and #1830 to merge and for owner packet items 13, 14 and 16.
+      Gates 2 to 4 follow the U7 design's order; the erase flag stays off until Gate 4 is done.
+    - U8 starts with PR-0, its design corrections on #1695. No U8 code slice starts until #1695
+      has merged, owner packet items 1 and 2 are answered, the owner of the shared primitives is
+      agreed, and #1829 to #1833 have landed. U8's PR-1 and PR-2 merge together.
+  - **Shared primitives belong to U7.** U7 owns the two-key lock class ids
+    (`db/advisory-lock-classes.ts`), the stripe helper and the lock-order flags, the dedicated side
+    pool (`db/side-pool.ts`) and the sink registry (`externalSinks`, which carries U8's `spend`
+    field). U8 imports them. Whichever unit is ready first builds them in U7's files, under U7's
+    names.
+  - **Keys.** Migration keys are taken at merge time from `main`'s tail (353 on `58383e730`); the
+    PR that merges second renumbers and updates the immutability snapshot in the same commit, as
+    E5 already requires. Sweep keys 590048 to 590057 are reserved for U7; U8 starts at 590058.
+  - Money in integer cents; the cap check before dispatch including failover and streaming; the
+    erasure endpoint owner-only, audited, never a proposal.
 - **Test scenarios:** the hardening plan's U7 and U8 scenarios, including the Docker-gated erasure
   integration test (every store scrubbed, amounts kept, suppression kept, audit event, 403 for
   non-owner, other tenant untouched) and the U8 monthly-window integration test.
-- **Verification:** both PRs green with the decision quoted in the PR body.
+- **Verification:** every U7 and U8 PR green, with the decision and any owner-packet answer it
+  relies on quoted in its PR body.
 
 ### E8. Close-out
 - **Goal:** the next session can pick up without this one.

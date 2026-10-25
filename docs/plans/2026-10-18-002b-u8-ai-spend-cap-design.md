@@ -1,9 +1,11 @@
 # U8 design: money cap on AI spend per tenant
 
 **Part of:** [`docs/plans/2026-10-18-002-fix-ai-enterprise-hardening-plan.md`](2026-10-18-002-fix-ai-enterprise-hardening-plan.md).
-**Status:** draft design, pending the owner decision named below. The plan's Key Technical
-Decisions (durable, resumable jobs; limits serialized with their consumers) and its owner
-decisions apply here. U7 and U8 refer to each other by name; both live next to this file.
+**Status:** design accepted on scope (decisions 1–2, 2026-10-18); open sub-choices in
+[`docs/plans/2026-10-25-002-u7-u8-owner-decision-packet.md`](2026-10-25-002-u7-u8-owner-decision-packet.md).
+The plan's Key Technical Decisions (durable, resumable jobs; limits serialized with their
+consumers) and its owner decisions apply here. U7 and U8 refer to each other by name; both live
+next to this file.
 
 **Revised 2026-10-25** against `main` at `58383e730`. The implementation planning and its
 critique re-checked the code references here and found gaps. Their corrections are folded in
