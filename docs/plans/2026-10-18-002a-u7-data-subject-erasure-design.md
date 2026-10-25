@@ -1170,8 +1170,8 @@ the owner sub-choices the design leaves open are in
   - **U7 starts with a data inventory, before any erase code.** Review keeps turning up one more
     store that holds customer data: service locations, custom-field values, converted leads, callback
     tasks, an external trace sink. That shows the scope has to be discovered systematically, not
-    patched one store at a time. The first deliverable is a written inventory, reviewed on its own
-    PR, of every place a customer's data can live, reached through any of six kinds of link. It is
+    patched one store at a time. The first deliverable is a written inventory, reviewed in the
+    docs-only PR #1695 before any erase code, of every place a customer's data can live, reached through any of six kinds of link. It is
     `docs/plans/2026-10-25-001-u7-erasure-inventory.md` (slice U7-00), checked against `main`:
     - **Direct:** a `customer_id` foreign key.
     - **Bare column:** a `%customer_id` column with no foreign key.

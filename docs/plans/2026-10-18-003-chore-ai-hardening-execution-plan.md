@@ -376,7 +376,7 @@ subscriptions while the next wave starts.
   ([`2026-10-18-002a-u7-data-subject-erasure-design.md`](2026-10-18-002a-u7-data-subject-erasure-design.md),
   [`2026-10-18-002b-u8-ai-spend-cap-design.md`](2026-10-18-002b-u8-ai-spend-cap-design.md)).
 - **Approach** (amended 2026-10-25; it replaced one branch per unit):
-  - **Serial PRs off `main`, not one branch.** U7 is about 50 slices and U8 about 35, too many for
+  - **Serial PRs off `main`, not one branch.** U7 is 64 slices (U7-00 to U7-50 with their splits) and U8 about 35, too many for
     one reviewable PR, and stacked long-lived branches invite the damage in
     `docs/solutions/workflow-issues/main-merge-damage-on-long-lived-branches.md`. Each PR is cut
     from `main` after the one before it merges, runs the E3 protocol unchanged, quotes the decision
