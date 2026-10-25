@@ -122,7 +122,8 @@ export const gatewayFailoverTotal = new Counter({
  * for the whole call. The gateway logs an error with the call site and lets
  * the call proceed; any non-zero rate is a route that belongs on
  * LLM_LONG_CALL_ROUTES (middleware/tenant-context.ts). Under NODE_ENV=test the
- * gateway throws LlmCallInTransactionError instead.
+ * gateway throws LlmCallInTransactionError instead. Any increase pages the
+ * operator from every process role (monitoring/llm-call-in-transaction-alert.ts).
  */
 export const gatewayLlmCallInTransactionTotal = new Counter({
   name: 'gateway_llm_call_in_transaction_total',

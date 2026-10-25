@@ -218,6 +218,10 @@ import {
 } from './monitoring/metrics';
 // WS15 — platform SLO monitor + drain-abandonment alarm.
 import { createAlertOperator, emitDrainAbandonment } from './monitoring/alert-operator';
+import {
+  createLlmCallInTransactionCheck,
+  LLM_CALL_IN_TRANSACTION_CHECK_INTERVAL_MS,
+} from './monitoring/llm-call-in-transaction-alert';
 import { createDemoCallsRouter } from './demo/routes';
 import { isDemoCallsEnabled, loadDemoConfig } from './demo/config';
 import { createDemoLeaseResetter } from './demo/reset';
@@ -2740,10 +2744,37 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     registerInterval(setInterval(() => void sampleQueueDepth(), 15000));
   }
 
-  // WS2 — baseline for the process-role split. samplePoolMetrics +
-  // sampleQueueDepth are the only intervals registered above and are cheap
-  // observability that runs in EVERY role (incl. PROCESS_ROLE=web); every
-  // interval registered after this point is a gated background WORKER loop.
+  // TI-02 follow-up — page on any increase of
+  // gateway_llm_call_in_transaction_total. The counter lives in the process
+  // that made the call (web for an in-request call), which the worker-only SLO
+  // monitor cannot see, so this check runs in EVERY role and each process pages
+  // for its own count. Its own operator seam, like the demo budget pages below:
+  // the SLO monitor's exists only on worker replicas. Not leader-locked.
+  {
+    const llmInTransactionLogger = createLogger({
+      service: 'llm-call-in-transaction-alert',
+      environment: process.env.NODE_ENV || 'development',
+    });
+    const checkLlmCallInTransaction = createLlmCallInTransactionCheck({
+      alert: createAlertOperator({
+        sentry: sentryClient,
+        delivery: messageDelivery,
+        alertSmsTo: config.ALERT_SMS_TO,
+        cooldownMs: config.SLO_ALERT_COOLDOWN_MIN * 60 * 1000,
+        logger: llmInTransactionLogger,
+      }),
+      logger: llmInTransactionLogger,
+    });
+    registerInterval(
+      setInterval(() => void checkLlmCallInTransaction(), LLM_CALL_IN_TRANSACTION_CHECK_INTERVAL_MS),
+    );
+  }
+
+  // WS2 — baseline for the process-role split. samplePoolMetrics,
+  // sampleQueueDepth and the LLM-call-in-transaction check are the only
+  // intervals registered above and are cheap observability that runs in EVERY
+  // role (incl. PROCESS_ROLE=web); every interval registered after this point
+  // is a gated background WORKER loop.
   // `backgroundIntervalCount` (exposed on the returned app) is the count of
   // those worker loops — length minus this baseline — so it is 0 in web role.
   const observabilityIntervalCount = backgroundIntervals.length;

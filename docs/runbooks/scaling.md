@@ -136,7 +136,9 @@ PgBouncer config: `pool_mode = transaction`, `max_client_conn` high (e.g. 1000),
   > fails its own test. Anywhere else it logs an error with the call site and
   > increments this counter, and the call proceeds. Any non-zero rate is a
   > route that belongs on `LLM_LONG_CALL_ROUTES`; the log's `taskType` and
-  > `stack` name it. The check only sees calls through `LLMGateway`: a route
+  > `stack` name it. Any increase pages the operator (critical, from every
+  > process role; `docs/runbooks/slo-alerts.md`, "LLM call inside a tenant
+  > transaction"). The check only sees calls through `LLMGateway`: a route
   > awaiting another external API (speech, DNS, a certificate provider)
   > inside the request transaction is not caught by it.
   >
