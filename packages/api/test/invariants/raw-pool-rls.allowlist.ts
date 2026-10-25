@@ -168,7 +168,7 @@ export const TABLES_WITHOUT_MIGRATION: ReadonlyArray<{ readonly table: string; r
  * The `tenant_filtered_no_rls` debt, frozen. Migrating one means deleting its
  * entry and LOWERING this number; adding one means raising it, in review.
  */
-export const TFNR_CEILING = 12;
+export const TFNR_CEILING = 10;
 
 export const RAW_PG_SITES: readonly RawPgSite[] = [
   // ── ai/ ────────────────────────────────────────────────────────────────
@@ -576,11 +576,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     why: "Raw-checkout helper: a session advisory lock keyed by sha256(tenantId\\0idempotencyKey) on a directPool checkout (no table), watchSessionLease on the client's error/end (its stopWatching closure detaches them), then runWithSessionLease(lease, () => fn(client, lease)) — the caller's callback, listed per caller (IdempotencyGuard.checkAndExecute).",
   },
   {
-    file: 'src/public-intake/public-business-info.ts', fn: 'resolvePublicBusinessPhone', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_integrations'], migrateBy: 'audit 2026-10-23 §4 P2.6',
-    why: "Public intake / tenant site fallback for the tenant's own public phone: provider_data->>'phoneE164' FROM tenant_integrations WHERE tenant_id = $1 (UUID-validated, tenantRepo-checked URL tenant), as the principal.",
-  },
-  {
     file: 'src/push/pg-device-token-repository.ts', fn: 'PgDeviceTokenRepository.register', access: 'guc-only', count: 2,
     category: 'cross_tenant_intentional', tables: ['device_tokens'],
     migrateBy: 'audit 2026-10-23 §1.4 device_tokens (move the cleanup to withCrossTenantSweep, §4 P3.2 pattern)',
@@ -674,11 +669,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/routes/onboarding.ts', fn: 'POST /calendar/choose', access: 'ambient-or-pool', count: 1,
     category: 'tenant_context_applied', tables: ['tenant_settings'],
     why: 'Owner-only request-client UPDATE of calendar_provider under the /api withTenantTransaction middleware, tenant from req.auth.tenantId. The pool fallback is latent only.',
-  },
-  {
-    file: 'src/routes/public-intake.ts', fn: 'createPublicIntakeRouter', access: 'pool.query', count: 2,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_settings', 'google_reviews'], migrateBy: 'audit 2026-10-23 §4 P2.6',
-    why: "Unauthenticated GET /:tenantId (UUID-validated, tenantRepo-checked): business_hours FROM tenant_settings and AVG/COUNT FROM google_reviews WHERE tenant_id = $1, the URL tenant's own public header data, on the raw pool.",
   },
 
   // ── seed/ ──────────────────────────────────────────────────────────────

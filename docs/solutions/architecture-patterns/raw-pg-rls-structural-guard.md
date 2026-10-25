@@ -198,6 +198,18 @@ deliberate cross-tenant sweep, a platform-constant write) add an entry:
   two connections; and await the session's own reads one after another: a
   pg client runs one query at a time, so a `Promise.all` on it gains nothing
   and pg 8 deprecates it (loadOnboardingFacts, P1.11).
+- A page that reads several of one tenant's rows through different modules
+  (a repository's settings read, then `resolvePublicBusinessPhone`, then its
+  own reads) takes `withTenantScope(pool, tenantId, fn)`: the request
+  transaction when it is for that tenant, otherwise one
+  `PgTenantTransactionRunner` session published to `tenantContextStore`, so
+  the repository and every `withTenantClient` inside join it. One checkout and
+  one BEGIN / context / COMMIT for the page, fewer round trips than the
+  repository's own session plus the bare reads (a repository session also
+  runs `clearTenantContext`'s two RESETs). Run a global read that takes its
+  own checkout (the pack catalog's `withClient`) after the scope, never inside
+  it or beside it (the public intake header and the tenant site view, P2.6,
+  `test/integration/public-intake-tenant-context.test.ts`).
 - A bare `pool.query` READ on an /api request path is a second connection
   held next to the request's. Find where it runs relative to the
   `withTenantTransaction` middleware first: route gates such as
