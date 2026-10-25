@@ -30,6 +30,7 @@
  * were priced but never billed.
  */
 import type { Pool } from 'pg';
+import { withTenantClient, withTenantScope } from '../db/tenant-transaction';
 import type { Logger } from '../logging/logger';
 import type { CallUsageBillingService, CallUsageSettlementRow } from '../billing/call-usage-billing';
 import type { PgCallUsageRepository } from '../billing/call-usage-events';
@@ -158,6 +159,7 @@ export async function runOverageSettlementReconciliation(
     failed: 0,
   };
   if (!deps.pool || !deps.billing) return result;
+  const pool = deps.pool;
 
   const now = deps.now ?? (() => new Date());
   const asOf = now();
@@ -165,7 +167,7 @@ export async function runOverageSettlementReconciliation(
   // ── Path 1: re-drive stale pending/failed settlements ──
   let staleRows: StaleSettlementRow[];
   try {
-    staleRows = await listStaleSettlements(deps.pool, new Date(asOf.getTime() - STALE_AFTER_MS));
+    staleRows = await listStaleSettlements(pool, new Date(asOf.getTime() - STALE_AFTER_MS));
   } catch (err) {
     deps.logger.error('Overage reconciliation: stale-settlement query failed', {
       error: err instanceof Error ? err.message : String(err),
@@ -201,7 +203,7 @@ export async function runOverageSettlementReconciliation(
   // ── Path 2: backfill gap periods (metered usage, never billed) ──
   let tenants: GapTenantRow[];
   try {
-    tenants = await listGapTenants(deps.pool);
+    tenants = await listGapTenants(pool);
   } catch (err) {
     deps.logger.error('Overage reconciliation: gap-tenant query failed', {
       error: err instanceof Error ? err.message : String(err),
@@ -226,24 +228,29 @@ export async function runOverageSettlementReconciliation(
       if (prevStart.getTime() >= asOf.getTime()) continue; // not closed yet
 
       result.gapsChecked++;
-      const covered = await deps.pool.query(COVERING_SETTLEMENT_SQL, [
-        tenant.id,
-        prevStart,
-        prevEnd,
-      ]);
-      if ((covered.rowCount ?? 0) > 0) continue;
-
       const planId = tenant.plan_id as CallPlanId;
-      const billableSeconds = await deps.callUsage.sumBillableSeconds(
-        tenant.id,
-        prevStart,
-        prevEnd,
-      );
-      const price = priceMinuteUsage({
-        planId,
-        billableSeconds,
-        overageCapCents: await deps.overageCaps.get(tenant.id),
+      // The tenant's three reads — is the period already covered, its metered
+      // usage, its overage cap — share ONE tenant session under the RLS
+      // runtime role: withTenantScope publishes it, so the usage and cap
+      // repositories join it. It is closed before settlePeriod's Stripe call.
+      const price = await withTenantScope(pool, tenant.id, async () => {
+        const covered = await withTenantClient(pool, tenant.id, (client) =>
+          client.query(COVERING_SETTLEMENT_SQL, [tenant.id, prevStart, prevEnd]),
+        );
+        if ((covered.rowCount ?? 0) > 0) return null;
+
+        const billableSeconds = await deps.callUsage.sumBillableSeconds(
+          tenant.id,
+          prevStart,
+          prevEnd,
+        );
+        return priceMinuteUsage({
+          planId,
+          billableSeconds,
+          overageCapCents: await deps.overageCaps.get(tenant.id),
+        });
       });
+      if (!price) continue; // a settlement row already covers the window
       if (price.customerChargeCents <= 0) continue; // within bundle — nothing to bill
 
       const subscriptionPriceId = deps.priceIdForPlan(planId);

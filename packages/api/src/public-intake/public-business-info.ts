@@ -4,6 +4,7 @@
  * hosted tenant site (tenant-site/).
  */
 import type { Pool } from 'pg';
+import { withTenantClient } from '../db/tenant-transaction';
 import type { TenantSettings } from '../settings/settings';
 import type { VerticalPackRegistry } from '../shared/vertical-pack-registry';
 import { isValidVerticalType } from '../shared/vertical-types';
@@ -48,6 +49,12 @@ export async function resolvePublicServiceTypes(
  * number to customers. Suppress stub/magic values and return null — every
  * render site guards on a phone being present, so the honest empty state
  * falls out for free.
+ *
+ * The fallback reads tenant_integrations under the RLS runtime role
+ * (withTenantClient): on the caller's tenant transaction when it holds one
+ * for this tenant — the intake header's and the tenant site's withTenantScope
+ * session, or the /api request transaction on /api/tenant-site/preview and
+ * /publish — and otherwise in one tenant session of its own.
  */
 export async function resolvePublicBusinessPhone(
   settings: Pick<TenantSettings, 'businessPhone'> | null | undefined,
@@ -59,13 +66,15 @@ export async function resolvePublicBusinessPhone(
     businessPhone = null;
   }
   if (!businessPhone && pool) {
-    const twilioRow = await pool.query<{ phone: string | null; stub: string | null }>(
-      `SELECT provider_data->>'phoneE164' AS phone,
-              provider_data->>'stub' AS stub
-       FROM tenant_integrations
-       WHERE tenant_id = $1 AND provider = 'twilio'
-       LIMIT 1`,
-      [tenantId],
+    const twilioRow = await withTenantClient(pool, tenantId, (client) =>
+      client.query<{ phone: string | null; stub: string | null }>(
+        `SELECT provider_data->>'phoneE164' AS phone,
+                provider_data->>'stub' AS stub
+         FROM tenant_integrations
+         WHERE tenant_id = $1 AND provider = 'twilio'
+         LIMIT 1`,
+        [tenantId],
+      ),
     );
     const fallbackPhone = twilioRow.rows[0]?.phone?.trim() || null;
     const isStubRow = twilioRow.rows[0]?.stub === 'true';

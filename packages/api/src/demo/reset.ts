@@ -23,7 +23,14 @@
  *      walk (bounded batches; keep-list below), the fixture re-seed. The
  *      tenant's trade and pool slot (what the re-seed needs) are read
  *      before any of them, so a tenant that could not be re-seeded fails
- *      with nothing deleted.
+ *      with nothing deleted. The fence runs on the connection principal
+ *      (the lease table is RLS-exempt and rls_app_runtime holds no grant on
+ *      it); a step that reads the tenant's own rows (the drain's executing
+ *      proposals, the stored-object keys) then takes the tenant's context
+ *      and reads them as rls_app_runtime (`fencedTenant`). The queue
+ *      statements (`_queue_messages` has no RLS), the in-flight registry
+ *      read (RLS-exempt) and the walk's fence stay on the principal, and the
+ *      re-seed applies its own context.
  *   4. The release, fenced by the same token in its UPDATE. `released_at`
  *      is set only here, so the tenant stays unleasable through every step.
  *
@@ -41,7 +48,7 @@ import type { Pool, PoolClient } from 'pg';
 import type { StorageProvider } from '../files/file-service';
 import type { Logger } from '../logging/logger';
 import type { AlertOperatorFn } from '../monitoring/alert-operator';
-import { clearTenantContext } from '../db/rls-runtime-role';
+import { applyTenantContext, clearTenantContext } from '../db/rls-runtime-role';
 import { purgeTenantRows } from '../tenants/purge-walk';
 import {
   buildDemoFixtureDeps,
@@ -169,13 +176,43 @@ const sleepReal = (ms: number) =>
 /**
  * The drain's predicate: work that could still write for the tenant. Every
  * in-flight registry row of the tenant (any generation) and every proposal
- * still `executing`. S6-8 extends this one function (D7 terminalization).
- * Never reads `visible_at` or `attempts`.
+ * still `executing`; the drain waits until their sum is zero. S6-8 extends
+ * these two reads (D7 terminalization). Never reads `visible_at` or
+ * `attempts`.
+ *
+ * Two statements because the two tables answer to different roles: the
+ * registry is an RLS-exempt platform table that rls_app_runtime holds no
+ * grant on (migration 317), read on the principal before the step's tenant
+ * context; `proposals` is under FORCE RLS, read after it as rls_app_runtime.
+ * Under READ COMMITTED each takes its own snapshot (the one statement before
+ * them took one for both). The step stays READ COMMITTED: REPEATABLE READ
+ * would give the two reads one snapshot, but the step's first statement is
+ * the fence's FOR SHARE on the lease row, and under REPEATABLE READ that
+ * fails with a serialization error (40001) whenever the reset's own
+ * heartbeat UPDATE of the row commits while the fence waits on it.
+ *
+ * The second snapshot matters only once something writes demo_inflight_jobs:
+ * nothing in src does yet (S6-8 adds job-guard's registration and D7's for
+ * proposal executions), so today the registry count is 0 and the drain waits
+ * on the proposals count alone. Once it is written, a job missing from the
+ * first read must not be live at the second. S6-8 must re-check that: every
+ * registry INSERT stays in the same transaction as the generation check's
+ * FOR SHARE on the lease row (so nothing registers once the reset has
+ * claimed the lease), and a D7 execution registers in the same transaction
+ * that moves its proposal to `executing`. If either stops holding, re-read
+ * the registry after the proposals count.
  */
-export async function drainPredicate(client: PoolClient, tenantId: string): Promise<number> {
+async function inFlightJobCount(client: PoolClient, tenantId: string): Promise<number> {
   const { rows } = await client.query<{ n: number }>(
-    `SELECT (SELECT count(*) FROM demo_inflight_jobs WHERE tenant_id = $1)
-          + (SELECT count(*) FROM proposals WHERE tenant_id = $1 AND status = 'executing') AS n`,
+    `SELECT count(*) AS n FROM demo_inflight_jobs WHERE tenant_id = $1`,
+    [tenantId],
+  );
+  return Number(rows[0]?.n ?? 0);
+}
+
+async function executingProposalCount(client: PoolClient, tenantId: string): Promise<number> {
+  const { rows } = await client.query<{ n: number }>(
+    `SELECT count(*) AS n FROM proposals WHERE tenant_id = $1 AND status = 'executing'`,
     [tenantId],
   );
   return Number(rows[0]?.n ?? 0);
@@ -295,7 +332,13 @@ export function createDemoLeaseResetter(deps: DemoResetDeps): DemoLeaseResetter 
       await seedDemoTenantFromFixture(client, tenant, fd);
     });
 
-  /** One fenced step: its own transaction, the fence first, then `fn`. */
+  /**
+   * One fenced step: its own transaction, the fence first, then `fn` on the
+   * principal client. The fence is a FOR SHARE read of the RLS-exempt lease
+   * row, which rls_app_runtime holds no grant on (migration 317), so it runs
+   * before any tenant context; its row lock is the transaction's and holds
+   * until COMMIT / ROLLBACK whatever role the step's later statements take.
+   */
   async function fenced<T>(
     leaseId: string,
     token: string,
@@ -319,6 +362,30 @@ export function createDemoLeaseResetter(deps: DemoResetDeps): DemoLeaseResetter 
       await clearTenantContext(client);
       client.release();
     }
+  }
+
+  /**
+   * A fenced step on the tenant's own rows: `fenced`, then `principal` (if
+   * any) for what only the principal may read, then the tenant's context, so
+   * `tenant` runs as rls_app_runtime and the policies bind. The context is
+   * transaction-local (the step's COMMIT / ROLLBACK ends it, and `fenced`
+   * still clears the client before release).
+   */
+  function fencedTenant<T, P = undefined>(
+    leaseId: string,
+    token: string,
+    step: ResetStep,
+    tenantId: string,
+    phases: {
+      principal?: (client: PoolClient) => Promise<P>;
+      tenant: (client: PoolClient, principal: P | undefined) => Promise<T>;
+    },
+  ): Promise<T> {
+    return fenced(leaseId, token, step, async (client) => {
+      const before = phases.principal ? await phases.principal(client) : undefined;
+      await applyTenantContext(client, tenantId, { transactional: true });
+      return phases.tenant(client, before);
+    });
   }
 
   function startHeartbeat(leaseId: string, token: string): () => void {
@@ -380,9 +447,9 @@ export function createDemoLeaseResetter(deps: DemoResetDeps): DemoLeaseResetter 
     await step('drain', async () => {
       const polls = Math.max(1, Math.ceil((deps.settings.resetDrainSeconds * 1000) / drainPollMs));
       for (let i = 0; ; i += 1) {
-        const pending = await fenced(leaseId, token, { name: 'drain' }, async (c) => {
-          await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
-          return drainPredicate(c, tenantId);
+        const pending = await fencedTenant(leaseId, token, { name: 'drain' }, tenantId, {
+          principal: (c) => inFlightJobCount(c, tenantId),
+          tenant: async (c, inFlight) => (inFlight ?? 0) + (await executingProposalCount(c, tenantId)),
         });
         if (pending === 0) return;
         if (i >= polls) {
@@ -401,21 +468,22 @@ export function createDemoLeaseResetter(deps: DemoResetDeps): DemoLeaseResetter 
 
     // Stored objects, while the files rows that name them still exist.
     await step('object_delete', async () => {
-      const objects = await fenced(leaseId, token, { name: 'object_delete' }, async (c) => {
-        await c.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
-        const { rows } = await c.query<{ s3_bucket: string; s3_key: string; thumbnail_s3_key: string | null }>(
-          `SELECT s3_bucket, s3_key, thumbnail_s3_key FROM files WHERE tenant_id = $1 ORDER BY id`,
-          [tenantId],
-        );
-        const found: Array<{ bucket: string; key: string }> = [];
-        for (const row of rows) {
-          if (!row.s3_bucket) continue;
-          if (row.s3_key) found.push({ bucket: row.s3_bucket, key: row.s3_key });
-          if (row.thumbnail_s3_key && row.thumbnail_s3_key !== row.s3_key) {
-            found.push({ bucket: row.s3_bucket, key: row.thumbnail_s3_key });
+      const objects = await fencedTenant(leaseId, token, { name: 'object_delete' }, tenantId, {
+        tenant: async (c) => {
+          const { rows } = await c.query<{ s3_bucket: string; s3_key: string; thumbnail_s3_key: string | null }>(
+            `SELECT s3_bucket, s3_key, thumbnail_s3_key FROM files WHERE tenant_id = $1 ORDER BY id`,
+            [tenantId],
+          );
+          const found: Array<{ bucket: string; key: string }> = [];
+          for (const row of rows) {
+            if (!row.s3_bucket) continue;
+            if (row.s3_key) found.push({ bucket: row.s3_bucket, key: row.s3_key });
+            if (row.thumbnail_s3_key && row.thumbnail_s3_key !== row.s3_key) {
+              found.push({ bucket: row.s3_bucket, key: row.thumbnail_s3_key });
+            }
           }
-        }
-        return found;
+          return found;
+        },
       });
       for (let i = 0; i < objects.length; i += DEMO_RESET_OBJECT_BATCH) {
         const batch = objects.slice(i, i + DEMO_RESET_OBJECT_BATCH);
