@@ -2509,6 +2509,8 @@ export function createVoiceTurnProcessor(
           ...(typeof fx.payload.conversationId === 'string'
             ? { conversationId: fx.payload.conversationId }
             : {}),
+          // OBS-2 — the draft's runs are keyed to this call, like its classifier's.
+          voiceSessionId: session.id,
           existingEntities: entities,
           userId:
             typeof fx.payload.customerId === 'string'

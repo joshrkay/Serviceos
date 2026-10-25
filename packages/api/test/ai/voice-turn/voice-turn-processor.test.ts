@@ -1925,6 +1925,10 @@ describe('createVoiceTurnProcessor — respond_to_review (A46)', () => {
     );
 
     expect(respondToReviewTaskHandler.handle).toHaveBeenCalledOnce();
+    // OBS-2 — the draft's runs are keyed to this call, like its classifier's.
+    expect(respondToReviewTaskHandler.handle).toHaveBeenCalledWith(
+      expect.objectContaining({ voiceSessionId: session.id }),
+    );
     const stored = (await proposalRepo.findByTenant('tenant-abc')).find(
       (p) => p.proposalType === 'review_response_proposal',
     );

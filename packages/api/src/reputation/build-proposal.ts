@@ -12,7 +12,7 @@
  *        creditTierForReview()  → requested cents
  *        creditRepo.sum…()      → prior issued in last 12 months
  *        applyCreditCap()       → effective cents (0 → omit component)
- *   7. assemble payload, return.
+ *   7. assemble payload, return it with the public-reply run's id.
  *
  * All `approved` flags default to `false`. The operator approves each
  * component independently in the review UI. The execution handler
@@ -30,7 +30,7 @@
 
 import { LLMGateway } from '../ai/gateway/gateway';
 import { BrandVoiceLoader } from './brand-voice';
-import { ClassificationResult, classifyReview } from './classifier';
+import { ClassificationResult, ClassifyReviewDeps, classifyReview } from './classifier';
 import {
   applyCreditCap,
   creditTierForReview,
@@ -75,7 +75,7 @@ export interface BuildReviewResponseProposalDeps {
    */
   classifier?: (
     review: Review,
-    deps: { llmGateway: LLMGateway },
+    deps: ClassifyReviewDeps,
   ) => Promise<ClassificationResult>;
   matcher?: (
     review: Review,
@@ -85,17 +85,46 @@ export interface BuildReviewResponseProposalDeps {
   draftPrivate?: typeof draftPrivateFollowUp;
 }
 
+export interface BuildReviewResponseProposalOptions {
+  /**
+   * OBS-2 — the join keys every model call in this pipeline passes to the
+   * gateway, so its ai_runs rows (classification, public reply, private
+   * follow-up) share one correlation_id. Per review, so it is not part of the
+   * deps bundle (the polling worker reuses that across every review). Each
+   * creator picks its key: the call or conversation for a spoken request
+   * (`draftingRunMetadata`), the review for the polling worker.
+   */
+  runMetadata?: Record<string, unknown>;
+}
+
+export interface ReviewResponseDraft {
+  payload: ReviewResponseProposalPayload;
+  /**
+   * OBS-2 — the run the proposal links (`proposals.ai_run_id`): the one that
+   * wrote the public reply, the component every review response has and the
+   * text posted to Google. The classification and private follow-up runs are
+   * found by the shared correlation_id. Absent when the gateway persisted no
+   * run (the FK needs a real row).
+   */
+  aiRunId?: string;
+}
+
 export async function buildReviewResponseProposal(
   review: Review,
   deps: BuildReviewResponseProposalDeps,
-): Promise<ReviewResponseProposalPayload> {
+  options: BuildReviewResponseProposalOptions = {},
+): Promise<ReviewResponseDraft> {
   const classifier = deps.classifier ?? classifyReview;
   const matcher = deps.matcher ?? matchReviewerToCustomer;
   const draftPublic = deps.draftPublic ?? draftPublicResponse;
   const draftPrivate = deps.draftPrivate ?? draftPrivateFollowUp;
+  const llm = {
+    llmGateway: deps.llmGateway,
+    ...(options.runMetadata ? { runMetadata: options.runMetadata } : {}),
+  };
 
   // 1. Classify.
-  const classification = await classifier(review, { llmGateway: deps.llmGateway });
+  const classification = await classifier(review, llm);
 
   // 2. Match reviewer → customer. Conservative — returns null when
   // uncertain. The downstream components fork on this null/non-null.
@@ -107,13 +136,13 @@ export async function buildReviewResponseProposal(
   // 4. Public response — ALWAYS drafted (every review gets a public
   // reply option, matched or not). Input + output PII redaction
   // lives inside the composer.
-  const publicText = await draftPublic(
+  const publicReply = await draftPublic(
     {
       review,
       classification: classification.classification,
       brandVoice,
     },
-    { llmGateway: deps.llmGateway },
+    llm,
   );
 
   // 5. Private follow-up — only when we have a confident customer
@@ -129,7 +158,7 @@ export async function buildReviewResponseProposal(
         matchedCustomer: matched,
         channel: DEFAULT_PRIVATE_FOLLOWUP_CHANNEL,
       },
-      { llmGateway: deps.llmGateway },
+      llm,
     );
     privateFollowUp = {
       customerId: matched.customerId,
@@ -163,13 +192,16 @@ export async function buildReviewResponseProposal(
   }
 
   return {
-    reviewId: review.id,
-    classification: classification.classification,
-    publicResponse: {
-      text: publicText,
-      approved: false,
+    payload: {
+      reviewId: review.id,
+      classification: classification.classification,
+      publicResponse: {
+        text: publicReply.text,
+        approved: false,
+      },
+      privateFollowUp,
+      serviceCredit,
     },
-    privateFollowUp,
-    serviceCredit,
+    ...(publicReply.aiRunId ? { aiRunId: publicReply.aiRunId } : {}),
   };
 }

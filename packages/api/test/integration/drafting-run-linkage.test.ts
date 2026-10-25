@@ -22,6 +22,14 @@ import { PgProposalRepository } from '../../src/proposals/pg-proposal';
 import { PgAiRunRepository } from '../../src/ai/pg-ai-run';
 import { LLMGateway, type LLMProvider, type LLMRequest, type LLMResponse } from '../../src/ai/gateway/gateway';
 import { EstimateTaskHandler } from '../../src/ai/tasks/estimate-task';
+import { RespondToReviewTaskHandler } from '../../src/ai/tasks/review-response-task';
+import { runGoogleReviewsSweep } from '../../src/workers/google-reviews';
+import { PgReviewRepository } from '../../src/reputation/pg-review';
+import { InMemoryReviewPollStateRepository } from '../../src/reputation/poll-state';
+import { NoopBrandVoiceLoader } from '../../src/reputation/brand-voice';
+import { InMemoryServiceCreditRepository } from '../../src/reputation/service-credit';
+import type { BuildReviewResponseProposalDeps } from '../../src/reputation/build-proposal';
+import { createLogger } from '../../src/logging/logger';
 
 describe('OBS-2 — proposals.ai_run_id → the drafting run, keyed to the conversation (Postgres)', () => {
   let pool: Pool;
@@ -131,5 +139,155 @@ describe('OBS-2 — proposals.ai_run_id → the drafting run, keyed to the conve
 
     await repo.update(tenant.tenantId, first.id, { aiRunId: undefined });
     expect((await repo.findById(tenant.tenantId, first.id))?.aiRunId).toBeUndefined();
+  });
+
+  // OBS-2 — the two review_response_proposal creators. Their payload comes from
+  // up to three runs (classification, public reply, private follow-up); the
+  // proposal joins to the public-reply run, and every run in the draft shares
+  // the creator's correlation_id.
+  const REPLIES: Record<string, string> = {
+    review_classify: JSON.stringify({ classification: 'vague_complaint', confidence: 0.9 }),
+    review_public_response: 'Sorry the visit fell short — please reach out so we can make it right.',
+  };
+
+  function reviewGateway(): LLMGateway {
+    const provider: LLMProvider = {
+      name: 'stub',
+      isAvailable: async () => true,
+      complete: async (req: LLMRequest): Promise<LLMResponse> => ({
+        content: REPLIES[req.taskType] ?? '{}',
+        model: 'stub-model',
+        provider: 'stub',
+        tokenUsage: { input: 10, output: 5, total: 15 },
+        latencyMs: 1,
+      }),
+    };
+    return new LLMGateway(
+      { defaultProvider: 'stub' },
+      new Map([['stub', provider]]),
+      undefined,
+      new PgAiRunRepository(pool),
+    );
+  }
+
+  function reviewDraftDeps(): BuildReviewResponseProposalDeps {
+    return {
+      llmGateway: reviewGateway(),
+      // No matched customer: classification + public reply only.
+      customerLoader: { findRecentCustomersWithName: async () => [] },
+      brandVoiceLoader: new NoopBrandVoiceLoader(),
+      serviceCreditRepo: new InMemoryServiceCreditRepository(),
+    };
+  }
+
+  async function runsOn(tenantId: string, correlationId: string) {
+    const { rows } = await pool.query(
+      `SELECT id, task_type FROM ai_runs WHERE tenant_id = $1 AND correlation_id = $2 ORDER BY created_at, task_type`,
+      [tenantId, correlationId],
+    );
+    return rows as Array<{ id: string; task_type: string }>;
+  }
+
+  it('a spoken review response joins to its public-reply run, keyed with the rest of the draft to the conversation', async () => {
+    const reviewTenant = await createTestTenant(pool);
+    const reviewRepo = new PgReviewRepository(pool);
+    const now = new Date();
+    const { review } = await reviewRepo.upsert({
+      id: crypto.randomUUID(),
+      tenantId: reviewTenant.tenantId,
+      externalReviewId: `accounts/A/locations/L/reviews/${crypto.randomUUID()}`,
+      locationId: 'accounts/A/locations/L',
+      reviewerDisplayName: 'Maria Alvarez',
+      reviewerProfileUrl: null,
+      rating: 2,
+      commentText: 'It was okay I suppose',
+      createTime: new Date(now.getTime() - 60 * 60 * 1000),
+      updateTime: null,
+      firstFetchedAt: now,
+      lastFetchedAt: now,
+    });
+    const repo = new PgProposalRepository(pool);
+    const conversationId = crypto.randomUUID();
+    const { proposal } = await new RespondToReviewTaskHandler(repo, reviewRepo, reviewDraftDeps()).handle({
+      tenantId: reviewTenant.tenantId,
+      userId: reviewTenant.userId,
+      message: 'Respond to that 2-star review',
+      existingEntities: { reviewReference: 'that 2-star review' },
+      conversationId,
+    });
+    expect(proposal.proposalType).toBe('review_response_proposal');
+    expect(proposal.aiRunId).toBeDefined();
+    await repo.create(proposal); // the FK is enforced here
+
+    const { rows } = await pool.query(
+      `SELECT r.task_type, r.correlation_id
+         FROM proposals p JOIN ai_runs r ON r.id = p.ai_run_id
+        WHERE p.tenant_id = $1 AND p.id = $2`,
+      [reviewTenant.tenantId, proposal.id],
+    );
+    expect(rows).toEqual([{ task_type: 'review_public_response', correlation_id: conversationId }]);
+    expect((await runsOn(reviewTenant.tenantId, conversationId)).map((r) => r.task_type).sort()).toEqual([
+      'review_classify',
+      'review_public_response',
+    ]);
+  });
+
+  it('a polled review response joins to its public-reply run, keyed with the rest of the draft to the review', async () => {
+    const reviewTenant = await createTestTenant(pool);
+    const reviewRepo = new PgReviewRepository(pool);
+    const proposalRepo = new PgProposalRepository(pool);
+    const externalReviewId = `accounts/A/locations/L/reviews/${crypto.randomUUID()}`;
+    const updateTime = new Date().toISOString();
+    const result = await runGoogleReviewsSweep({
+      reviewRepo,
+      pollStateRepo: new InMemoryReviewPollStateRepository(),
+      credentialResolver: {
+        async getCredential(tenantId: string) {
+          return {
+            tenant_id: tenantId,
+            provider: 'google_business',
+            credentials: { accessToken: 'at', providerData: { accountId: 'A', locationId: 'L' } },
+            credential_version: 1,
+          };
+        },
+        async close() {},
+      },
+      listTenantIds: async () => [reviewTenant.tenantId],
+      logger: createLogger({ service: 'test', environment: 'test', level: 'error' }),
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            reviews: [
+              {
+                name: externalReviewId,
+                reviewer: { displayName: 'Maria Alvarez' },
+                starRating: 'TWO',
+                comment: 'It was okay I suppose',
+                createTime: updateTime,
+                updateTime,
+              },
+            ],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      proposalEmission: { proposalRepo, buildProposalDeps: reviewDraftDeps() },
+    });
+    expect(result.proposalsEmitted).toBe(1);
+
+    const review = await reviewRepo.findByExternalId(reviewTenant.tenantId, externalReviewId);
+    expect(review).not.toBeNull();
+    const { rows } = await pool.query(
+      `SELECT p.target_entity_id, r.task_type, r.correlation_id
+         FROM proposals p JOIN ai_runs r ON r.id = p.ai_run_id
+        WHERE p.tenant_id = $1 AND p.proposal_type = 'review_response_proposal'`,
+      [reviewTenant.tenantId],
+    );
+    expect(rows).toEqual([
+      { target_entity_id: review!.id, task_type: 'review_public_response', correlation_id: review!.id },
+    ]);
+    expect((await runsOn(reviewTenant.tenantId, review!.id)).map((r) => r.task_type).sort()).toEqual([
+      'review_classify',
+      'review_public_response',
+    ]);
   });
 });

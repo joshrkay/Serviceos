@@ -16,6 +16,17 @@ export interface TaskContext {
    */
   untrustedMessage?: boolean;
   conversationId?: string;
+  /**
+   * OBS-2 — the live voice session (telephony or in-app call) this task runs
+   * in. Set only on the two live surfaces' in-call respond_to_review handoff
+   * to `RespondToReviewTaskHandler` (create-voice-turn-processor.ts for
+   * telephony, inapp-adapter.ts for in-app). No other caller sets it; without
+   * it `draftingRunMetadata` keys by the conversation, else the recording.
+   * Every AI run on a call is keyed to the session id (the classifier's
+   * correlation id there), so that review draft's runs are too. Never stamped
+   * on the proposal.
+   */
+  voiceSessionId?: string;
   existingEntities?: Record<string, unknown>;
   userId: string;
   /**
@@ -171,22 +182,25 @@ export interface TaskHandler {
 /**
  * OBS-2 — the join keys every drafting handler passes on its
  * `gateway.complete`, so the ai_runs row the completion writes can be found
- * from the conversation it served: `ai_runs.correlation_id` is the
- * conversation id (else, for a memo with none, the recording id) instead of
- * a gateway-minted random uuid. `sessionId` groups the trace with the
- * classifier's (which passes the conversation id as its session). No new
- * column: correlation_id already exists. Spread into the request:
+ * from the call or conversation it served: `ai_runs.correlation_id` is the
+ * live call's voice session id, else the conversation id, else (for a memo
+ * with neither) the recording id — instead of a gateway-minted random uuid.
+ * Each is the key the classifier's run on that surface carries too.
+ * `sessionId` groups the trace with the classifier's (the voice session on a
+ * call, the conversation in chat and memos). No new column: correlation_id
+ * already exists. Spread into the request:
  * `gateway.complete({ ..., ...draftingRunMetadata(context) })`.
  */
 export function draftingRunMetadata(
-  context: Pick<TaskContext, 'conversationId' | 'recordingId'>,
+  context: Pick<TaskContext, 'conversationId' | 'recordingId' | 'voiceSessionId'>,
 ): { metadata?: Record<string, unknown> } {
-  const correlationId = context.conversationId ?? context.recordingId;
+  const sessionId = context.voiceSessionId ?? context.conversationId;
+  const correlationId = sessionId ?? context.recordingId;
   if (!correlationId) return {};
   return {
     metadata: {
       correlationId,
-      ...(context.conversationId ? { sessionId: context.conversationId } : {}),
+      ...(sessionId ? { sessionId } : {}),
     },
   };
 }

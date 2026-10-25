@@ -45,6 +45,8 @@ export interface DraftPrivateFollowUpInput {
 
 export interface DraftPrivateFollowUpDeps {
   llmGateway: LLMGateway;
+  /** OBS-2 — the run's join keys; see `ClassifyReviewDeps.runMetadata`. */
+  runMetadata?: Record<string, unknown>;
 }
 
 const CLASSIFICATION_GUIDANCE: Record<Classification, string> = {
@@ -136,6 +138,7 @@ export async function draftPrivateFollowUp(
       { role: 'user', content: userPrompt },
     ],
     tenantId: input.review.tenantId,
+    ...(deps.runMetadata ? { metadata: deps.runMetadata } : {}),
   });
 
   // OUTPUT redaction. Keep the matched customer's first name visible

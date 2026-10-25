@@ -23,6 +23,10 @@
  *                   idempotencyKey `review_response:{reviewId}`; an LLM /
  *                   drafting failure degrades to a clarification, never a
  *                   dropped utterance.
+ *
+ * OBS-2 — every run in the draft is keyed to the call or conversation the
+ * request came from (`draftingRunMetadata`; the review itself when there is
+ * neither), and the proposal links the run that wrote the public reply.
  */
 import {
   createProposal,
@@ -35,7 +39,13 @@ import {
 } from '../../reputation/build-proposal';
 import { Review, ReviewRepository } from '../../reputation/review';
 import { ExtractedEntities } from '../orchestration/intent-classifier';
-import { TaskContext, TaskHandler, TaskResult } from './task-handlers';
+import {
+  TaskContext,
+  TaskHandler,
+  TaskResult,
+  draftingRunLink,
+  draftingRunMetadata,
+} from './task-handlers';
 
 /** How far back "that recent review" reaches. */
 export const REVIEW_LOOKBACK_MS = 14 * 24 * 60 * 60 * 1000;
@@ -140,9 +150,13 @@ export class RespondToReviewTaskHandler implements TaskHandler {
       return this.clarify(context, 'Review response drafting is not available right now.');
     }
 
-    let payload;
+    let draft;
     try {
-      payload = await buildReviewResponseProposal(review, this.draftDeps);
+      draft = await buildReviewResponseProposal(review, this.draftDeps, {
+        // A request with no call, conversation or recording to key to is
+        // keyed to the review — the polling worker's key — never a random id.
+        runMetadata: draftingRunMetadata(context).metadata ?? { correlationId: review.id },
+      });
     } catch {
       // LLM / drafting failure — degrade to a clarification so the utterance
       // is never silently dropped; the operator can retry or use the screen.
@@ -155,7 +169,7 @@ export class RespondToReviewTaskHandler implements TaskHandler {
     const proposal = createProposal({
       tenantId: context.tenantId,
       proposalType: 'review_response_proposal',
-      payload: payload as unknown as Record<string, unknown>,
+      payload: draft.payload as unknown as Record<string, unknown>,
       summary: summarize(review),
       sourceContext: context.conversationId
         ? { conversationId: context.conversationId }
@@ -166,6 +180,7 @@ export class RespondToReviewTaskHandler implements TaskHandler {
       // One voice-initiated draft per review, ever — a redelivered recording
       // or a repeated command dedups on this key at the DB layer.
       idempotencyKey: `review_response:${review.id}`,
+      ...draftingRunLink(draft),
       ...(context.tenantThresholdOverride
         ? { tenantThresholdOverride: context.tenantThresholdOverride }
         : {}),
