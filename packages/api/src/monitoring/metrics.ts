@@ -122,7 +122,8 @@ export const gatewayFailoverTotal = new Counter({
  * for the whole call. The gateway logs an error with the call site and lets
  * the call proceed; any non-zero rate is a route that belongs on
  * LLM_LONG_CALL_ROUTES (middleware/tenant-context.ts). Under NODE_ENV=test the
- * gateway throws LlmCallInTransactionError instead.
+ * gateway throws LlmCallInTransactionError instead. Any increase pages the
+ * operator from every process role (monitoring/llm-call-in-transaction-alert.ts).
  */
 export const gatewayLlmCallInTransactionTotal = new Counter({
   name: 'gateway_llm_call_in_transaction_total',
@@ -377,6 +378,22 @@ export const cardNumberRewriteFailedTotal = new Counter({
   name: 'voice_card_number_rewrite_failed_total',
   help: 'Cross-turn card-number rewrites of stored call rows that did not land, by stage (live, enqueue, retry_exhausted).',
   labelNames: ['stage'] as const,
+  registers: [metricsRegistry],
+});
+
+/**
+ * PRIV-2 — voicemails whose Twilio-hosted copy the notify-only branch of the
+ * voicemail-status route left at Twilio, by why: `no_credentials` (no platform
+ * Twilio credentials, so nothing can delete it), `no_recording_url` (the
+ * callback named no recording URL) and `delete_failed` (the DELETE did not
+ * succeed). Each one is also recorded in `webhook_events` (source
+ * `twilio_voicemail_orphaned_copy`) so it can be deleted later. Alert on any
+ * increase: the audio outlives the tenant's retention horizon until it is.
+ */
+export const voicemailTwilioCopyOrphanedTotal = new Counter({
+  name: 'voicemail_twilio_copy_orphaned_total',
+  help: 'Voicemail Twilio copies the notify-only branch could not delete, by reason (no_credentials, no_recording_url, delete_failed)',
+  labelNames: ['reason'] as const,
   registers: [metricsRegistry],
 });
 

@@ -2,9 +2,10 @@
  * Reviewed raw `pg` access sites (raw-pg audit 2026-10-23, §3.4).
  *
  * Every entry is a place where SQL runs WITHOUT the RLS runtime role that
- * `applyTenantContext` sets, or where a checkout / GUC is hand-rolled — a
- * checkout itself, every call to a raw-checkout helper (its callback runs on
- * the helper's principal client), a Pool escaping into a structural type — and
+ * `applyTenantContext` sets, or where a checkout / GUC / role switch is
+ * hand-rolled — a checkout itself, every call to a raw-checkout helper (its
+ * callback runs on the helper's principal client), a Pool escaping into a
+ * structural type, a drop back to the principal inside a tenant session — and
  * the reason it is acceptable today. Keyed by (file, fn, access) with an EXACT
  * count: line numbers move on every edit, a function name plus a count stays
  * stable and still catches a new statement. Checkouts and helper calls also
@@ -25,6 +26,13 @@ export const RAW_PG_CATEGORIES = [
   'tenant_filtered_no_rls',
   /** A write pinned to a platform constant tenant (the demo platform) that cannot take the runtime role. */
   'platform_constant_exception',
+  /**
+   * A `role-switch` only: inside a tenant session, a drop from rls_app_runtime
+   * back to the connection principal for the statements after it, on tables
+   * with no tenant RLS (checked like global_table). Transaction-local, so the
+   * session's COMMIT / ROLLBACK ends it.
+   */
+  'principal_inside_tenant_session',
 ] as const;
 export type RawPgCategory = (typeof RAW_PG_CATEGORIES)[number];
 
@@ -39,6 +47,8 @@ export const RAW_PG_ACCESS_KINDS = [
   /** A Pool passed into a structurally typed parameter (or cast) whose `.query` the typed rule cannot classify. */
   'pool-escape',
   'guc-only',
+  /** A literal that switches or resets the role (SET / RESET ROLE, set_config('role', …)); its SQL is the queries after it. */
+  'role-switch',
 ] as const;
 export type RawPgAccess = (typeof RAW_PG_ACCESS_KINDS)[number];
 
@@ -51,7 +61,10 @@ export interface RawPgSite {
   /** Exact number of such accesses in the function. */
   readonly count: number;
   readonly category: RawPgCategory;
-  /** Tables the function's SQL touches. The guard checks the SQL against this list. */
+  /**
+   * Tables the function's SQL touches (a `role-switch`: the SQL after the
+   * switch). The guard checks the SQL against this list.
+   */
   readonly tables: readonly string[];
   /**
    * The SQL's tables cannot be read statically: it names a table through a
@@ -108,6 +121,10 @@ export const SANCTIONED_HELPERS: readonly SanctionedHelper[] = [
     why: 'The repository tenant transaction: BEGIN + applyTenantContext before fn(client); clearTenantContext resets the role and GUC before release.',
   },
   {
+    file: 'src/db/pg-base.ts', fn: 'PgBaseRepository.withTenantTransaction', access: 'role-switch', count: 1,
+    why: "clearTenantContext(client) in the finally, after fn(client) and the COMMIT / ROLLBACK that already ended the SET LOCAL context, on this function's own pool.connect checkout (whose entry hands the client to clearTenantContext), just before release: belt-and-braces, so no role or GUC reaches the pool's next checkout.",
+  },
+  {
     file: 'src/db/pg-base.ts', fn: 'PgBaseRepository.withClient', access: 'pool.connect', count: 1,
     why: 'The raw principal checkout behind every withClient call. It is a raw-checkout helper, so each CALL is a listed withClient entry with its callback SQL, not this.',
   },
@@ -117,8 +134,31 @@ export const SANCTIONED_HELPERS: readonly SanctionedHelper[] = [
     why: 'The attributed cross-tenant sweep: BEGIN + applyCrossTenantRole (rls_cross_tenant) before fn(client); clearTenantContext resets the role before release.',
   },
   {
+    file: 'src/db/pg-base.ts', fn: 'PgBaseRepository.withCrossTenantSweep', access: 'role-switch', count: 2,
+    why: "Both on this function's own pool.connect checkout, where no tenant session is open: applyCrossTenantRole(client, { transactional: true }) right after BEGIN takes the attributed rls_cross_tenant role for fn(client) (the sweep itself), and clearTenantContext(client) in the finally resets it before release.",
+  },
+  {
     file: 'src/db/rls-runtime-role.ts', fn: 'applyTenantContext', access: 'guc-only', count: 2,
     why: "applyTenantContext's transactional context, the helper itself: with RLS_RUNTIME_ROLE on, ONE statement sets the tenant GUC and the role (set_config('app.current_tenant_id', $1, true), set_config('role', 'rls_app_runtime', true)); off, the GUC-only set_config as before.",
+  },
+  // R-role: every role switch in src is sanctioned here — these four helpers'
+  // literals, and each call to clearTenantContext / applyCrossTenantRole on its
+  // caller's own checkout (withTenantTransaction and withCrossTenantSweep
+  // above, the demo reset's fenced step and the demo pool seeder, the two
+  // worker enumerations below) — or a listed drop to the principal.
+  // withTenantSession, withTenantConnection and the request middleware take
+  // rls_app_runtime through applyTenantContext only, so they hold none.
+  {
+    file: 'src/db/rls-runtime-role.ts', fn: 'applyTenantContext', access: 'role-switch', count: 2,
+    why: "Takes rls_app_runtime, the helper itself: the transactional path in its one context statement (set_config('role', 'rls_app_runtime', true) is SET LOCAL ROLE, ended by COMMIT / ROLLBACK), the session path with SET ROLE (its caller runs clearTenantContext before release).",
+  },
+  {
+    file: 'src/db/rls-runtime-role.ts', fn: 'applyCrossTenantRole', access: 'role-switch', count: 2,
+    why: "Takes the attributed rls_cross_tenant role, the helper itself: SET LOCAL ROLE inside the caller's BEGIN (behind a savepoint, so an unprovisioned role degrades to the principal), or session-level SET ROLE (cleared by clearTenantContext). No tenant GUC.",
+  },
+  {
+    file: 'src/db/rls-runtime-role.ts', fn: 'clearTenantContext', access: 'role-switch', count: 1,
+    why: "RESET ROLE before release: a session-level runtime or cross-tenant role goes back to the connection principal, so it cannot leak to the pool's next checkout.",
   },
   {
     file: 'src/db/rls-runtime-role.ts', fn: 'withTenantSession', access: 'pool.connect', count: 1,
@@ -129,6 +169,10 @@ export const SANCTIONED_HELPERS: readonly SanctionedHelper[] = [
     file: 'src/db/rls-runtime-role.ts', fn: 'verifyRlsRuntimeRole', access: 'pool.connect', count: 1,
     handsOffTo: ['probeRoleAssumable'],
     why: 'Boot probe: probeRoleAssumable runs SET ROLE / RESET ROLE for the two runtime roles on one client. No table is read.',
+  },
+  {
+    file: 'src/db/rls-runtime-role.ts', fn: 'probeRoleAssumable', access: 'role-switch', count: 2,
+    why: "The boot probe's SET ROLE then RESET ROLE for each runtime role, on verifyRlsRuntimeRole's own checkout with no statement between them and no table read.",
   },
   {
     file: 'src/db/schema.ts', fn: 'setTenantContext', access: 'guc-only', count: 1,
@@ -145,9 +189,25 @@ export const SANCTIONED_HELPERS: readonly SanctionedHelper[] = [
     why: "The savepoint/advisory-lock unit of work: BEGIN + applyTenantContext, then the client goes into the TenantContext object published to tenantContextStore for the repositories inside fn, and the TransactionScope's lock/savepoint closures run their SQL on it inside fn.",
   },
   {
+    file: 'src/demo/reset.ts', fn: 'fenced', access: 'role-switch', count: 1,
+    why: "clearTenantContext(client) in the finally before release, on fenced's own pool.connect checkout (its global_table entry hands the client to clearTenantContext), after the step's COMMIT / ROLLBACK already ended any transaction-local context it took (fencedTenant's applyTenantContext): no statement runs after it, it only keeps a role from reaching the pool's next checkout.",
+  },
+  {
+    file: 'src/demo/seed-pool.ts', fn: 'seedDemoTenantPool', access: 'role-switch', count: 1,
+    why: "clearTenantContext(client) in each slot's finally before release, on that slot's own pool.connect checkout (its global_table entry hands the client to clearTenantContext), after the COMMIT / ROLLBACK already ended seedDemoTenantFromFixture's transaction-local context; the next slot checks out a new client.",
+  },
+  {
     file: 'src/middleware/tenant-context.ts', fn: 'withTenantTransaction', access: 'pool.connect', count: 1,
     contextFirst: true, handsOffTo: ['<closure>', '<object>'],
     why: "The /api request middleware: checks out the request client, BEGIN + applyTenantContext, then publishes it in the TenantContext object to tenantContextStore; the COMMIT/ROLLBACK + release closures (cleanup, releaseOnce) run from res.end and the response's finish/close listeners. The same file also holds a listed pre-tenant lookup.",
+  },
+  {
+    file: 'src/workers/geocode-locations-sweep.ts', fn: 'listPendingLocations', access: 'role-switch', count: 2,
+    why: "Both on this function's own pool.connect checkout (its cross_tenant_intentional entry, which hands the client to clearTenantContext): applyCrossTenantRole(client, { transactional: true }) after BEGIN for the cross-tenant pending-locations read, and clearTenantContext(client) in the finally before release. No tenant session is open on it.",
+  },
+  {
+    file: 'src/workers/payment-link-reconciliation-sweep.ts', fn: 'listCollectOnSiteTenantIds', access: 'role-switch', count: 2,
+    why: "Both on each page's own pool.connect checkout (its cross_tenant_intentional entry, which hands the client to clearTenantContext): applyCrossTenantRole(client, { transactional: true }) after BEGIN for the keyset-paged enumeration, and clearTenantContext(client) in the finally before release. No tenant session is open on it.",
   },
   {
     file: 'src/workers/tenant-query.ts', fn: 'tenantQuery', access: 'pool.connect', count: 1,
@@ -165,10 +225,11 @@ export const TABLES_WITHOUT_MIGRATION: ReadonlyArray<{ readonly table: string; r
 ];
 
 /**
- * The `tenant_filtered_no_rls` debt, frozen. Migrating one means deleting its
- * entry and LOWERING this number; adding one means raising it, in review.
+ * The `tenant_filtered_no_rls` debt: cleared (batches 1-4 of the raw-pg audit
+ * 2026-10-23 §4 took it from 41 to 0). The ceiling now only stops new debt:
+ * adding an entry means raising this number, in review.
  */
-export const TFNR_CEILING = 12;
+export const TFNR_CEILING = 0;
 
 export const RAW_PG_SITES: readonly RawPgSite[] = [
   // ── ai/ ────────────────────────────────────────────────────────────────
@@ -230,13 +291,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/auth/platform-admin.ts', fn: 'revokePlatformAdmin', access: 'pool.connect', count: 1,
     category: 'global_table', tables: ['platform_admins'],
     why: 'Revoke from the global platform_admins table. No caller outside tests (audit §1.3 dead-code candidate, P4.2); no tenant data either way.',
-  },
-
-  // ── availability/ ──────────────────────────────────────────────────────
-  {
-    file: 'src/availability/seed-from-google.ts', fn: 'seedAvailabilityFromGoogle', access: 'ambient-or-pool', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P2.5',
-    why: 'Called only from the unauthenticated Google OAuth callback with the raw pool. The tenant is the server-minted, browser-bound OAuth state (F7 fix); UPDATE tenant_settings … WHERE tenant_id = $1 is the only boundary.',
   },
 
   // ── billing/ ───────────────────────────────────────────────────────────
@@ -363,24 +417,23 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
   {
     file: 'src/demo/reset.ts', fn: 'fenced', access: 'pool.connect', count: 1,
     category: 'global_table', tables: ['demo_tenant_leases'], handsOffTo: ['clearTenantContext'],
-    why: "Raw-checkout helper: BEGIN, the FOR SHARE fence read on the RLS-exempt demo_tenant_leases row, then fn(client); clearTenantContext before release. The steps' tenant SQL is runSteps' checkout-callback entry.",
+    why: "Raw-checkout helper: BEGIN, the FOR SHARE fence read on the RLS-exempt demo_tenant_leases row (rls_app_runtime holds no grant on it, migration 317, so the fence runs on the principal before any context), then fn(client); clearTenantContext before release. Its callers are runSteps' and fencedTenant's checkout-callback entries.",
   },
   {
-    file: 'src/demo/reset.ts', fn: 'runSteps', access: 'checkout-callback', count: 7,
-    category: 'tenant_filtered_no_rls', tables: ['_queue_messages', 'demo_inflight_jobs', 'proposals', 'files', 'demo_tenant_leases'],
-    handsOffTo: ['drainPredicate', 'queueStatement', 'reseed'], migrateBy: 'audit 2026-10-23 §4 P1.12',
-    why: "Six fenced(…) steps and the purgeTenantRows beforeStep fence, all on the fenced principal client: queue purges, the drain count over demo_inflight_jobs/proposals and the files read (WHERE tenant_id = the lease tenant, GUC without the role), the object deletes, and reseed (seedDemoTenantFromFixture applies context itself). Demo tenants only (readIdentity refuses others).",
+    file: 'src/demo/reset.ts', fn: 'fencedTenant', access: 'checkout-callback', count: 1,
+    category: 'global_table', tables: [],
+    why: "fenced(…) for the steps that read the tenant's own rows: the callback runs the caller's principal phase (runSteps' entry lists its SQL), then applyTenantContext (the lease tenant's GUC + rls_app_runtime, transaction-local) before the caller's tenant phase, so the drain's executing-proposals count and the stored-object files read run under the policies. It runs no table SQL itself.",
+  },
+  {
+    file: 'src/demo/reset.ts', fn: 'runSteps', access: 'checkout-callback', count: 6,
+    category: 'global_table', tables: ['_queue_messages', 'demo_inflight_jobs', 'demo_tenant_leases'],
+    handsOffTo: ['inFlightJobCount', 'queueStatement', 'reseed'],
+    why: "What the reset steps run on the fenced principal client, none of it on an RLS table: the queue cancel and purge (_queue_messages: no tenant_id, no RLS; the tenant is in the server-built payload), the drain's principal phase (the in-flight registry, RLS-exempt and ungranted to the role, read before fencedTenant applies context), a stored-object batch (no SQL), the walk's per-batch fence (purgeTenantRows beforeStep; the walk is deleteBatch's entry), and reseed (seedDemoTenantFromFixture applies the tenant's context itself). Demo tenants only (readIdentity refuses others).",
   },
   {
     file: 'src/demo/reset.ts', fn: 'startHeartbeat', access: 'pool.query', count: 1,
     category: 'global_table', tables: ['demo_tenant_leases'],
     why: 'Reset heartbeat UPDATE on the RLS-exempt demo_tenant_leases platform table, keyed by lease id and reset token.',
-  },
-  {
-    file: 'src/demo/reset.ts', fn: 'runSteps', access: 'guc-only', count: 2,
-    category: 'tenant_filtered_no_rls', tables: ['proposals', 'demo_inflight_jobs', 'files'],
-    migrateBy: 'audit 2026-10-23 §4 P1.12',
-    why: "The drain and object_delete steps set only set_config('app.current_tenant_id') on the fenced principal client before reading proposals/demo_inflight_jobs/files WHERE tenant_id = the lease tenant: GUC without the role, so RLS does not bind.",
   },
   {
     file: 'src/demo/reset.ts', fn: 'readIdentity', access: 'pool.query', count: 1,
@@ -576,11 +629,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     why: "Raw-checkout helper: a session advisory lock keyed by sha256(tenantId\\0idempotencyKey) on a directPool checkout (no table), watchSessionLease on the client's error/end (its stopWatching closure detaches them), then runWithSessionLease(lease, () => fn(client, lease)) — the caller's callback, listed per caller (IdempotencyGuard.checkAndExecute).",
   },
   {
-    file: 'src/public-intake/public-business-info.ts', fn: 'resolvePublicBusinessPhone', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_integrations'], migrateBy: 'audit 2026-10-23 §4 P2.6',
-    why: "Public intake / tenant site fallback for the tenant's own public phone: provider_data->>'phoneE164' FROM tenant_integrations WHERE tenant_id = $1 (UUID-validated, tenantRepo-checked URL tenant), as the principal.",
-  },
-  {
     file: 'src/push/pg-device-token-repository.ts', fn: 'PgDeviceTokenRepository.register', access: 'guc-only', count: 2,
     category: 'cross_tenant_intentional', tables: ['device_tokens'],
     migrateBy: 'audit 2026-10-23 §1.4 device_tokens (move the cleanup to withCrossTenantSweep, §4 P3.2 pattern)',
@@ -675,40 +723,17 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     category: 'tenant_context_applied', tables: ['tenant_settings'],
     why: 'Owner-only request-client UPDATE of calendar_provider under the /api withTenantTransaction middleware, tenant from req.auth.tenantId. The pool fallback is latent only.',
   },
-  {
-    file: 'src/routes/public-intake.ts', fn: 'createPublicIntakeRouter', access: 'pool.query', count: 2,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_settings', 'google_reviews'], migrateBy: 'audit 2026-10-23 §4 P2.6',
-    why: "Unauthenticated GET /:tenantId (UUID-validated, tenantRepo-checked): business_hours FROM tenant_settings and AVG/COUNT FROM google_reviews WHERE tenant_id = $1, the URL tenant's own public header data, on the raw pool.",
-  },
 
   // ── seed/ ──────────────────────────────────────────────────────────────
-  {
-    file: 'src/seed/seed-runner.ts', fn: 'insertOwnerUser', access: 'pool.connect', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['users'], migrateBy: 'audit 2026-10-23 §4 P2.9',
-    why: 'Operator CLI seed: INSERT INTO users (FORCE RLS) on a raw client with only a hand-set session GUC and no role, so WITH CHECK never applies. tenant_id is the id PgTenantRepository.create just returned.',
-  },
-  {
-    file: 'src/seed/seed-runner.ts', fn: 'insertOwnerUser', access: 'guc-only', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['users'], migrateBy: 'audit 2026-10-23 §4 P2.9',
-    why: "Session-level set_config('app.current_tenant_id', $1, false) outside any transaction (unsafe under PgBouncer transaction pooling), with no SET ROLE: not applyTenantContext. Operator CLI only.",
-  },
   {
     file: 'src/seed/seed-runner.ts', fn: 'cleanSeed', access: 'pool.query', count: 1,
     category: 'global_table', tables: ['tenants'],
     why: "seed --clean enumerates seeded tenants from the non-RLS tenants registry by owner_email LIKE 'owner@seed-tenant-%' (audit F11: the marker is only a prefix). Operator CLI.",
   },
   {
-    file: 'src/seed/seed-runner.ts', fn: 'cleanSeed', access: 'pool.connect', count: 1,
-    category: 'tenant_filtered_no_rls', dynamicSql: true,
-    tables: ['appointments', 'estimates', 'jobs', 'service_locations', 'customers', 'audit_events', 'users', 'tenants'],
-    migrateBy: 'audit 2026-10-23 §4 P2.9',
-    why: 'Per seeded tenant: dynamic DELETE FROM <table> WHERE tenant_id = $1 over a hardcoded child-table list, then DELETE FROM tenants, on a raw client with only a hand-set GUC (no role). The tenant comes from the cleanSeed enumeration; operator CLI.',
-  },
-  {
-    file: 'src/seed/seed-runner.ts', fn: 'cleanSeed', access: 'guc-only', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['appointments', 'estimates', 'jobs', 'service_locations', 'customers', 'audit_events', 'users'],
-    migrateBy: 'audit 2026-10-23 §4 P2.9',
-    why: 'Hand-set session GUC before BEGIN with no role switch, so the following child-table DELETEs run as the principal; isolation is their WHERE tenant_id = $1. Operator CLI.',
+    file: 'src/seed/seed-runner.ts', fn: 'cleanSeed', access: 'role-switch', count: 1,
+    category: 'principal_inside_tenant_session', tables: ['tenants'],
+    why: "In each seeded tenant's withTenantSession, after the seven child DELETEs ran as rls_app_runtime, SET LOCAL ROLE NONE drops to the connection principal for the one statement left: the tenants registry DELETE (no tenant_id, no RLS), as it always ran. Transaction-local, so the COMMIT ends it and children and registry row still go together. Operator CLI.",
   },
 
   // ── shared/ ────────────────────────────────────────────────────────────
@@ -766,16 +791,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
   },
 
   // ── tenants/ ───────────────────────────────────────────────────────────
-  {
-    file: 'src/tenants/deprovision.ts', fn: 'readTwilioIntegration', access: 'pool.connect', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_integrations'], migrateBy: 'audit 2026-10-23 §4 P2.8',
-    why: "Reads the tenant's own twilio tenant_integrations row before releasing its subaccount, with only set_config and no role, so the policy does not bind the principal. Tenant is the UUID-validated admin/queue/script payload.",
-  },
-  {
-    file: 'src/tenants/deprovision.ts', fn: 'readTwilioIntegration', access: 'guc-only', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_integrations'], migrateBy: 'audit 2026-10-23 §4 P2.8',
-    why: "set_config('app.current_tenant_id', $1, true) as the only 'context' for the deprovision credential read: GUC without the runtime role. Swap for applyTenantContext inside the existing BEGIN.",
-  },
   {
     file: 'src/tenants/deprovision.ts', fn: 'deprovisionTenant', access: 'pool.query', count: 2,
     category: 'global_table', tables: ['tenants', 'platform_deprovision_log'],
@@ -985,11 +1000,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/workers/overage-settlement-reconciliation.ts', fn: 'listGapTenants', access: 'pool.query', count: 1,
     category: 'global_table', tables: ['tenants'],
     why: 'Subscribed, non-demo starter/growth tenants with a mirrored billing period, from the tenants registry (no tenant_id column, no RLS); ids and period columns only.',
-  },
-  {
-    file: 'src/workers/overage-settlement-reconciliation.ts', fn: 'runOverageSettlementReconciliation', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['call_usage_settlements'], migrateBy: 'audit 2026-10-23 §4 P2.7',
-    why: "The gap backfill's covering-settlement read: call_usage_settlements WHERE tenant_id = $1 (a listGapTenants row) on the raw pool, as the principal; the tenant predicate is the only boundary.",
   },
   {
     file: 'src/workers/payment-link-reconciliation-sweep.ts', fn: 'listCollectOnSiteTenantIds', access: 'pool.connect', count: 1,

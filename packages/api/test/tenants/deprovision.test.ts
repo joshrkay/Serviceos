@@ -1,6 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createLogger } from '../../src/logging/logger';
 import { deprovisionTenant } from '../../src/tenants/deprovision';
+import { fakeTenantPool } from '../helpers/fake-tenant-pool';
 
 // The stored Twilio auth token is decrypted before the release call; stub it
 // so the test fixtures don't need real ciphertext.
@@ -300,5 +301,83 @@ describe('C6 stored-object cleanup', () => {
     );
     expect(result.storageObjectsDeleted).toBe(1);
     expect(result.storageObjectErrors).toBe(1);
+  });
+});
+
+// ─── Raw-pg audit 2026-10-23 §4 P2.8 — the credential read under the runtime role ───
+// readTwilioIntegration set only the tenant GUC (set_config) inside its own
+// BEGIN, with no role, so the tenant_integrations policy did not bind the
+// principal. It now runs in a tenant session (applyTenantContext: the GUC and
+// rls_app_runtime in one statement). Real Postgres:
+// test/integration/deprovision-tenant-context.test.ts.
+
+describe('deprovisionTenant — the Twilio credential read is a tenant session', () => {
+  const ORIGINAL_ENV = { ...process.env };
+  const CREDENTIAL = /SELECT subaccount_sid, auth_token_primary_enc, provider_data/;
+
+  beforeEach(() => {
+    process.env.RLS_RUNTIME_ROLE = 'true';
+    process.env.TENANT_ENCRYPTION_KEY = 'a'.repeat(64);
+    process.env.TWILIO_ACCOUNT_SID = 'ACmaster';
+    process.env.TWILIO_AUTH_TOKEN = 'mastertoken';
+  });
+
+  afterEach(() => {
+    process.env = { ...ORIGINAL_ENV };
+  });
+
+  function credentialPool(opts: { failRead?: boolean } = {}) {
+    return fakeTenantPool((sql) => {
+      if (/SELECT id FROM tenants WHERE id/.test(sql)) return { rows: [{ id: TENANT }] };
+      if (CREDENTIAL.test(sql)) {
+        if (opts.failRead) throw new Error('credential read failed');
+        return { rows: [{ subaccount_sid: 'ACsub', auth_token_primary_enc: 'enc', provider_data: { phoneNumberSid: 'PNabc' } }] };
+      }
+      if (/information_schema\.columns/.test(sql)) return { rows: [{ table_name: 'customers' }] };
+      return undefined;
+    });
+  }
+
+  it('one checkout: BEGIN, the GUC and rls_app_runtime in one statement, the read, COMMIT — before Twilio and the purge', async () => {
+    const fake = credentialPool();
+    const twilio = twilioMock();
+
+    const result = await deprovisionTenant(
+      { pool: fake.pool, logger, twilio },
+      { tenantId: TENANT, reason: 'manual_admin', actorId: 'admin-1' },
+    );
+
+    expect(result.twilioReleased).toBe(true);
+    expect(twilio.closeSubaccount).toHaveBeenCalledWith('ACmaster', 'mastertoken', 'ACsub');
+    // Checkout 0 is the existence check; 1 the credential session; 2 the purge; 3 the log.
+    const session = fake.statements.filter((s) => s.checkout === 1);
+    expect(session.map((s) => s.sql.replace(/\s+/g, ' ').trim())).toEqual([
+      'BEGIN',
+      "SELECT set_config('app.current_tenant_id', $1, true), set_config('role', 'rls_app_runtime', true)",
+      expect.stringMatching(CREDENTIAL),
+      'COMMIT',
+    ]);
+    expect(session[1].values).toEqual([TENANT]);
+    expect(session[2].values).toEqual([TENANT]);
+    expect(fake.statements.find((s) => s.checkout === 2)?.sql).toBe('BEGIN');
+    expect(fake.open()).toBe(0);
+  });
+
+  it('a failed credential read rolls back, releases the client and aborts before Twilio and the purge', async () => {
+    const fake = credentialPool({ failRead: true });
+    const twilio = twilioMock();
+
+    await expect(
+      deprovisionTenant(
+        { pool: fake.pool, logger, twilio },
+        { tenantId: TENANT, reason: 'manual_admin', actorId: 'admin-1' },
+      ),
+    ).rejects.toThrow('credential read failed');
+
+    expect(fake.statements.filter((s) => s.checkout === 1).map((s) => s.sql)).toContain('ROLLBACK');
+    expect(fake.checkouts()).toBe(2);
+    expect(fake.open()).toBe(0);
+    expect(twilio.closeSubaccount).not.toHaveBeenCalled();
+    expect(fake.statements.some((s) => /DELETE FROM|platform_deprovision_log/.test(s.sql))).toBe(false);
   });
 });

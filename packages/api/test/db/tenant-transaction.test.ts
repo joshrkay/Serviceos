@@ -5,9 +5,11 @@ import {
   InMemoryTransactionRunner,
   withTenantConnection,
   withTenantClient,
+  withTenantScope,
 } from '../../src/db/tenant-transaction';
 import { tenantContextStore } from '../../src/middleware/tenant-context';
 import { PgBaseRepository } from '../../src/db/pg-base';
+import { fakeTenantPool } from '../helpers/fake-tenant-pool';
 
 const tenantId = '550e8400-e29b-41d4-a716-446655440000';
 
@@ -254,6 +256,87 @@ describe('withTenantClient', () => {
 
     expect(request.calls).toEqual([]);
     expect(own.calls.map((c) => c.text)).toContain('BEGIN');
+  });
+});
+
+describe('withTenantScope', () => {
+  const otherTenant = '6ba7b810-9dad-41d1-80b4-00c04fd430c8';
+
+  class SettingsLikeRepo extends PgBaseRepository {
+    read(t: string): Promise<unknown> {
+      return this.withTenant(t, (client) => client.query('SELECT * FROM tenant_settings WHERE tenant_id = $1', [t]));
+    }
+  }
+
+  /** A repository read and a withTenantClient read, as two modules of one public page make them. */
+  async function twoReads(pool: Pool, t: string): Promise<string> {
+    await new SettingsLikeRepo(pool).read(t);
+    await withTenantClient(pool, t, (client) => client.query('SELECT 1 FROM google_reviews WHERE tenant_id = $1', [t]));
+    return 'page';
+  }
+
+  it('outside a request, both reads join ONE tenant transaction: one checkout, one BEGIN / context / COMMIT', async () => {
+    const fake = fakeTenantPool();
+
+    const result = await withTenantScope(fake.pool, tenantId, () => twoReads(fake.pool, tenantId));
+
+    expect(result).toBe('page');
+    expect(fake.checkouts()).toBe(1);
+    expect(fake.open()).toBe(0);
+    expect(fake.statements.map((s) => s.sql)).toEqual([
+      'BEGIN',
+      expect.stringContaining("set_config('app.current_tenant_id'"),
+      'SELECT * FROM tenant_settings WHERE tenant_id = $1',
+      'SELECT 1 FROM google_reviews WHERE tenant_id = $1',
+      'COMMIT',
+    ]);
+    expect(fake.statements[1].values).toEqual([tenantId]);
+  });
+
+  it('inside a request for the same tenant, both reads ride the request client: no checkout, no BEGIN / COMMIT', async () => {
+    const own = fakeTenantPool();
+    const request = fakePool();
+    const requestClient = await request.pool.connect();
+
+    await tenantContextStore.run({ client: requestClient, tenantId }, () =>
+      withTenantScope(own.pool, tenantId, () => twoReads(own.pool, tenantId)),
+    );
+
+    expect(own.checkouts()).toBe(0);
+    expect(request.calls.map((c) => c.text)).toEqual([
+      'SELECT * FROM tenant_settings WHERE tenant_id = $1',
+      'SELECT 1 FROM google_reviews WHERE tenant_id = $1',
+    ]);
+  });
+
+  it('never rides a request client scoped to a different tenant, or one already settling (TI-01)', async () => {
+    for (const ctx of [{ tenantId: otherTenant }, { tenantId, closed: true }]) {
+      const own = fakeTenantPool();
+      const request = fakePool();
+      const requestClient = await request.pool.connect();
+
+      await tenantContextStore.run({ client: requestClient, ...ctx }, () =>
+        withTenantScope(own.pool, tenantId, () => twoReads(own.pool, tenantId)),
+      );
+
+      expect(request.calls).toEqual([]);
+      expect(own.checkouts()).toBe(1);
+      expect(own.statements[1].values).toEqual([tenantId]);
+    }
+  });
+
+  it('rolls back, rethrows and releases when the work throws', async () => {
+    const fake = fakeTenantPool();
+
+    await expect(
+      withTenantScope(fake.pool, tenantId, async () => {
+        throw new Error('read failed');
+      }),
+    ).rejects.toThrow('read failed');
+
+    expect(fake.statements.map((s) => s.sql)).toContain('ROLLBACK');
+    expect(fake.statements.map((s) => s.sql)).not.toContain('COMMIT');
+    expect(fake.open()).toBe(0);
   });
 });
 

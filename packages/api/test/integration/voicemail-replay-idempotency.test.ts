@@ -17,15 +17,29 @@
  *      `recordReceipt` with the same (provider, eventId) inserts once —
  *      pinned here against the real `idx_webhook_idempotency` unique index.
  *
+ *   3. PRIV-2 — the notify-only branch with no Twilio credentials records the
+ *      Twilio copy it cannot delete as one `webhook_events` row (real columns),
+ *      and a replayed callback does not add a second.
+ *
  * Runs only under `npm run test:integration` (vitest globalSetup starts the
  * Postgres testcontainer and sets TEST_DB_URL) — Docker-gated, CI only.
  */
 import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { Pool } from 'pg';
+import express from 'express';
+import request from 'supertest';
+import twilio from 'twilio';
 import { getSharedTestDb, createTestTenant, closeSharedTestDb } from './shared';
 import { recordInboundCall } from '../../src/voice/voice-service';
 import { PgWebhookEventRepository } from '../../src/webhooks/pg-webhook-event';
-import { buildVoicemailStorageKey } from '../../src/telephony/voicemail-status-route';
+import {
+  buildVoicemailStorageKey,
+  createVoicemailStatusRouter,
+  TWILIO_ORPHANED_COPY_PROVIDER,
+} from '../../src/telephony/voicemail-status-route';
+import { VoiceSessionStore } from '../../src/ai/agents/customer-calling/voice-session-store';
+import { InMemoryLeadRepository } from '../../src/leads/in-memory-lead';
+import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { classifyRecordingProvenance } from '../../src/ai/content-provenance';
 
 describe('Postgres integration — U9 voicemail replay idempotency', () => {
@@ -148,5 +162,63 @@ describe('Postgres integration — U9 voicemail replay idempotency', () => {
     );
     expect(tx.inserted).toBe(true);
     expect(await repo.findById('twilio_voicemail_transcription', eventId)).toBeTruthy();
+  });
+
+  it('PRIV-2: a notify-only voicemail with no Twilio credentials leaves one webhook_events row naming the recording', async () => {
+    const authToken = 'int-vm-orphan-token';
+    const publicBaseUrl = 'https://api.int.test';
+    const leadRepo = new InMemoryLeadRepository();
+    const app = express();
+    app.use(
+      '/api/telephony',
+      createVoicemailStatusRouter({
+        store: new VoiceSessionStore(),
+        pool,
+        leadRepo,
+        auditRepo: new InMemoryAuditRepository(),
+        authTokenGetter: () => authToken,
+        publicBaseUrl,
+        resolveTenantIdFallback: () => tenant.tenantId,
+        webhookEventRepo: new PgWebhookEventRepository(pool),
+        // No storage and no Twilio credentials: the notify-only branch.
+      }),
+    );
+    const recordingSid = `RE-vm-orphan-${Date.now()}`;
+    const params = {
+      CallSid: 'CA-vm-orphan',
+      RecordingSid: recordingSid,
+      RecordingUrl: `https://api.twilio.com/2010-04-01/Recordings/${recordingSid}`,
+      RecordingDuration: '12',
+      RecordingStatus: 'completed',
+    };
+    const path = '/api/telephony/voicemail-status?From=%2B15125550100&To=%2B15125550199';
+    const post = () =>
+      request(app)
+        .post(path)
+        .set('X-Twilio-Signature', twilio.getExpectedTwilioSignature(authToken, `${publicBaseUrl}${path}`, params))
+        .type('form')
+        .send(params);
+
+    expect((await post()).status).toBe(200);
+    expect((await post()).status).toBe(200);
+
+    const rows = await pool.query(
+      `SELECT event_type, status, payload
+         FROM webhook_events
+        WHERE source = $1 AND idempotency_key = $2`,
+      [TWILIO_ORPHANED_COPY_PROVIDER, `${tenant.tenantId}:${recordingSid}`],
+    );
+    expect(rows.rows).toHaveLength(1);
+    expect(rows.rows[0].event_type).toBe('voicemail_twilio_copy_orphaned');
+    expect(rows.rows[0].status).toBe('received');
+    expect(rows.rows[0].payload).toEqual({
+      tenantId: tenant.tenantId,
+      callSid: 'CA-vm-orphan',
+      recordingSid,
+      recordingUrl: params.RecordingUrl,
+      reason: 'no_credentials',
+    });
+    // The lead leg is untouched: one lead, deduped across the replay.
+    expect(await leadRepo.findByTenant(tenant.tenantId)).toHaveLength(1);
   });
 });
