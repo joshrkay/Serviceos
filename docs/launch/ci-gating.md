@@ -33,7 +33,7 @@ Per-module coverage (`check-coverage.ts`) is **gating** — there is no `continu
 | Voice quality weekly trend | `voice-quality-weekly-trend.yml` | Alerting steps advisory |
 | QA matrix gate | `qa-matrix-gate.yml` | Nightly/dispatch; hard-fails early when any of its 11 `E2E_*` secrets are absent (no false green) |
 | Real-call voice smoke | `voice-smoke-real.yml` | Scheduled/dispatch; hard-fails when Twilio/staging secrets absent |
-| Redis multi-instance correctness | `redis-multi-instance.yml` | Weekly/dispatch; the gate for `numReplicas > 1` — runs the two-instance quota/fan-out/presence/connection-cap suites against a real Redis |
+| Redis multi-instance correctness | `redis-multi-instance.yml` | Weekly/dispatch; the gate for the worker's `numReplicas > 1` (call-answering services stay at one replica, LCR-05) — runs the two-instance quota/fan-out/presence/connection-cap suites against a real Redis |
 | Onboarding integration (E2E workflow) | `e2e.yml` | Skips with exit 0 when `E2E_CLERK_SECRET_KEY` unset (annotated with an explicit `::warning::`) |
 
 See `docs/launch/secret-manifest.md` for the full per-workflow secret table

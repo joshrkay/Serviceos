@@ -21,8 +21,13 @@ exhausts Postgres connections.
    transaction-pinning offender is fixed: `/api/assistant/chat` must not hold
    the request transaction across the LLM call (UC-2 in
    `docs/plans/2026-07-02-001-feat-rivet-jobber-agent-wave-plan.md`).
-3. **Raise replicas** (Phase 4 §3) with stop grace ≥ 35s (Phase 4 §4).
-   Multi-replica correctness prerequisites, tracked in the same plan:
+3. **Raise replicas** (Phase 4 §3) with stop grace ≥ 35s (Phase 4 §4) — on
+   the worker service only. Every call-answering process (every `PROCESS_ROLE`
+   except `worker`) stays at one replica until session state is externalized
+   (LCR-05), and you set `NUM_REPLICAS` to the real replica count on every
+   service so the boot guard (`validateFeatureRequiredConfig`) can refuse a
+   count it does not allow. Multi-replica correctness prerequisites, tracked in
+   the same plan:
    dispatch-board event bus/presence/revision externalized (UC-3/UC-4) and
    telephony timers made durable (UC-5 — the in-memory emergency page retry
    ladder is the highest-risk item: a deploy can drop an emergency escalation).
@@ -167,8 +172,11 @@ waiting). **Saturation signal:** `state="waiting"` persistently > 0 while
   `docs/deployment.md` "Deploy topology (web + worker)" for setup and
   `docs/prod-env-checklist.md` for the required service variables. The
   replica guidance below applies independently to each service.
-- Set replica count + autoscaling triggers (CPU / memory / request rate) in the
-  Railway **service settings** for the `api` service.
+- **Only the worker service scales out.** Every call-answering process (every
+  `PROCESS_ROLE` except `worker`) stays at one replica until session state is
+  externalized (LCR-05, Phase 4 §3 below). Set the worker's replica count +
+  autoscaling triggers (CPU / memory / request rate) in its Railway **service
+  settings**, and `NUM_REPLICAS` to the real replica count.
 - The app drains the pg pool(s) on `SIGTERM` (`app.ts` shutdown handler);
   tenant sweeps are leader-locked (advisory lock via the direct DSN) so only one
   replica runs them; the Postgres queue is multi-instance-safe (`FOR UPDATE SKIP
@@ -260,11 +268,29 @@ Code/config are in the repo; these steps are applied in the Railway account.
    advisory locks + LISTEN/NOTIFY bypass PgBouncer — see U2a). Size
    `DB_MAX_CONNECTIONS` per replica and PgBouncer's `DEFAULT_POOL_SIZE` against
    Postgres `max_connections`.
-3. **Replicas + autoscale** — raise `numReplicas` in `railway.toml` (or the
-   service settings). Configure metric-based autoscaling (CPU/memory/request
-   triggers, min/max replicas) in the Railway service settings — there is no
-   `railway.toml` key for it. Set the **min** from the steady load and the
-   **max** from the Phase 5 per-instance ceiling.
+3. **Replicas + autoscale** — only the worker service (`PROCESS_ROLE=worker`)
+   may run more than one replica. Every call-answering process (every
+   `PROCESS_ROLE` except `worker`: `web`, `voice`, or unset/`all`) stays at
+   **one replica** until session state is externalized: a live call's
+   `VoiceSession` lives in the memory of the replica that answered it, and the
+   stream connect and each Gather turn are separate requests the load balancer
+   can send to a replica without it (the stream is refused with 403, or the
+   call starts over). Redis and PgBouncer do not change that. Raise
+   call-answering capacity with a larger instance. For the worker, raise
+   `numReplicas` in `railway.worker.toml` (or the service settings), and
+   configure metric-based autoscaling (CPU/memory/request triggers, min/max
+   replicas) in the Railway service settings — there is no config-file key for
+   it. Set the **min** from the steady load and the **max** from the Phase 5
+   per-instance ceiling.
+
+   **Set `NUM_REPLICAS` to the real replica count** (the autoscale max when
+   autoscaling) on every service whose replica count you change. It is the only
+   replica count the app sees: the boot guard (`validateFeatureRequiredConfig`,
+   `packages/api/src/shared/config.ts`) refuses to start in prod/staging with
+   `NUM_REPLICAS > 1` on any role but `worker` (LCR-05), and with
+   `NUM_REPLICAS > 1` and no `REDIS_URL` on any role (ARCH-01). Left unset it
+   reads as one replica, and the guard cannot refuse a scale-out it is not told
+   about.
 4. **Graceful drain** — ensure Railway's stop grace period exceeds
    `SHUTDOWN_FORCE_EXIT_MS` (default 30s) so a draining replica can finish live
    calls. The app flips `/ready` → 503 and rejects new WS upgrades on SIGTERM,
