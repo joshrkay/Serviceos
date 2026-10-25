@@ -168,7 +168,7 @@ export const TABLES_WITHOUT_MIGRATION: ReadonlyArray<{ readonly table: string; r
  * The `tenant_filtered_no_rls` debt, frozen. Migrating one means deleting its
  * entry and LOWERING this number; adding one means raising it, in review.
  */
-export const TFNR_CEILING = 10;
+export const TFNR_CEILING = 9;
 
 export const RAW_PG_SITES: readonly RawPgSite[] = [
   // ── ai/ ────────────────────────────────────────────────────────────────
@@ -230,13 +230,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/auth/platform-admin.ts', fn: 'revokePlatformAdmin', access: 'pool.connect', count: 1,
     category: 'global_table', tables: ['platform_admins'],
     why: 'Revoke from the global platform_admins table. No caller outside tests (audit §1.3 dead-code candidate, P4.2); no tenant data either way.',
-  },
-
-  // ── availability/ ──────────────────────────────────────────────────────
-  {
-    file: 'src/availability/seed-from-google.ts', fn: 'seedAvailabilityFromGoogle', access: 'ambient-or-pool', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P2.5',
-    why: 'Called only from the unauthenticated Google OAuth callback with the raw pool. The tenant is the server-minted, browser-bound OAuth state (F7 fix); UPDATE tenant_settings … WHERE tenant_id = $1 is the only boundary.',
   },
 
   // ── billing/ ───────────────────────────────────────────────────────────
