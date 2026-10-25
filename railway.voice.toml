@@ -22,11 +22,18 @@ healthcheckPath = "/health"
 healthcheckTimeout = 60
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
-# Single voice replica. Unlike the worker service, this one DOES need a
-# stable public domain (Twilio's phone-number webhooks point at it), so
-# scale it up only alongside the same Redis/PgBouncer prerequisites called
-# out in railway.toml — WS-caps / voice fan-out / rate limits need
-# cluster-wide state before numReplicas > 1 is safe here.
+# Single voice replica, and it stays that way: this service answers phone
+# calls, and a live call's session lives in the memory of the replica that
+# took it, so a second replica drops calls at the stream connect or on the
+# next Gather turn. Every call-answering process (every PROCESS_ROLE except
+# worker) stays at ONE replica until session state is externalized (LCR-05);
+# Redis and PgBouncer do not make a second replica safe. Boot guard:
+# validateFeatureRequiredConfig (packages/api/src/shared/config.ts) refuses
+# NUM_REPLICAS > 1 on this role in prod/staging, and it only sees that
+# service variable, so set NUM_REPLICAS to the real replica count whenever the
+# replica count changes. Leave autoscaling off. Unlike the worker service,
+# this one also needs a stable public domain (Twilio's phone-number webhooks
+# point at it).
 numReplicas = 1
 # Zero-downtime rollout: keep the old replica serving until the new one is
 # healthy. THIS SERVICE DOES drain live calls — that is the entire point of
