@@ -91,8 +91,10 @@ The audit found 12 high, 16 medium and 6 low issues across those areas, all inde
 - **Migrations are a merge-time concern.**
   - `getMigrationSQL()` concatenates every migration in insertion order on every boot, and the
     migration-immutability test requires each new key to be greater than every existing key.
-  - Each batch that needs a migration takes the next free key at the time it is written; the current
-    max on 20637e004 is `313_onboarding_drafts_owner_phone`.
+  - Each batch that needs a migration takes the next free key at the time it is written; the max
+    on 20637e004 was `313_onboarding_drafts_owner_phone`. On `main` at `58383e730` (2026-10-25) it
+    is `353_shadow_comparisons_created_index`, so the next free key is 354. U7 and U8 both take
+    keys from there, at merge time.
   - The batch merged second renumbers before merge. Its migration is pre-deploy, so this is allowed.
     Update the immutability snapshot in that same commit.
   - Every migration must be idempotent (`IF NOT EXISTS`).

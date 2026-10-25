@@ -5,10 +5,20 @@
 Decisions (durable, resumable jobs; limits serialized with their consumers) and its owner
 decisions apply here. U7 and U8 refer to each other by name; both live next to this file.
 
+**Revised 2026-10-25** against `main` at `58383e730`. The implementation planning and its
+critique re-checked the code references here and found gaps. Their corrections are folded in
+below, each where its rule lives. The design named no build order, so the corrected slice list is
+its own last section, "Slices and order". U7 owns the primitives the two units share (the two-key
+lock class ids, the dedicated side pool, the lock-order flags, the sink registry and the sweep-key
+block before U8's); this unit imports them. The owner sub-choices the design leaves open are
+listed in
+[`docs/plans/2026-10-25-002-u7-u8-owner-decision-packet.md`](2026-10-25-002-u7-u8-owner-decision-packet.md).
+
 ## U8. Money cap on AI spend per tenant (the GATEWAY-05 follow-up) — after U3, needs an owner decision
 
 - **Goal:** a tenant's AI spend can be capped in money, which the token buckets cannot do.
-- **Dependencies:** U3, plus owner decision 2 below.
+- **Dependencies:** U3 (merged, #1699), plus owner decision 2 below, and the primitives U7 owns
+  (see "Slices and order").
 - **Design rules:** both rules under Key Technical Decisions apply. In this unit:
   - **Durable, resumable jobs:** each attempt's reservation (reserve, dispatch, settle, with the
     lease reaper as its resume), repricing, the 80% alert, the bound-breach alert, and the Vapi
@@ -19,7 +29,12 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
 - **Approach:**
   - A nullable `tenant_settings` monthly ceiling in whole cents, as `BIGINT` (new idempotent
     migration). Null means no cap is enforced. `billing/overage-cap.ts`'s column is `INTEGER`
-    (`schema.ts:7122`); this one isn't, for the reason in "Keep the ledger in micro-cents" below.
+    (`schema.ts:7121-7122`, migration 286); this one isn't, for the reason in "Keep the ledger in
+    micro-cents" below.
+    - **What null means waits on the owner.** If the owner sets a platform default ceiling
+      (owner packet item 1), null means "the platform default", and "no cap" becomes an
+      explicit opt-out the owner sets. Without one, null means no cap. The migration that adds
+      the column can't be written until that is answered.
   - **One module writes the ceiling, so no write can skip the spend lock.** `tenant_settings` has a
     generic key-to-column updater. `PgSettingsRepository.update` maps each key through `fieldMap`
     (`settings/pg-settings.ts:421`) into one `UPDATE tenant_settings` (`:696`), with no spend lock
@@ -31,16 +46,22 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
     - The ceiling has its own store module, the way `ai_overage_cap_cents` has
       `billing/overage-cap.ts`. Its write takes the spend lock and runs the checks below. Its read
       is the one the reserve runs under the lock.
+      - Only the store module's shape is copied. The overage cap's route
+        (`routes/billing.ts:87-121`) uses `requirePermission('tenant:manage')` and writes its audit
+        outside the transaction, which this cap must not. Its card is `AiMinutesCard.tsx`, so the
+        settings page shows two caps, the Stripe-billed AI-minute overage and this AI spend
+        ceiling, and names them apart.
     - The ceiling is kept out of `fieldMap` and off `TenantSettings`, so the generic updater can't
       name it. The settings page sends a cap change to that module.
     - A structural test in `packages/api/test/invariants/` (the
       `i9-one-totals-engine.structural.test.ts` pattern) scans `packages/api/src`. It fails on any
       SQL that names the ceiling column outside that module and its migration.
   - **The cap is the owner's, and every change is audited.** Most settings routes require only
-    `requirePermission('settings:update')` (`routes/settings.ts:419`), while some also require
-    `requireRole('owner')` (`:789`). A cap route on the common pattern would let a non-owner clear
+    `requirePermission('settings:update')` (`PUT /` at `routes/settings.ts:508-512`, and `:438`,
+    `:702`, `:783`), while some also require `requireRole('owner')` (`PUT /e1-script` at `:862`,
+    `DELETE /e1-script` at `:925`). A cap route on the common pattern would let a non-owner clear
     or raise the cap, with no record. So:
-    - The cap route is owner-only, with `requireRole('owner')`.
+    - The cap route is owner-only, with `requireRole('owner')`, on a router of its own.
     - The module writes an audit event (actor, old value, new value) in the same transaction as
       the change, under the spend lock.
     - No proposal handler can reach it. The structural test also fails on an import of the
@@ -53,6 +74,25 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
       null ceiling, the reserve step skips only the comparison. It still takes the spend lock and
       reads the ceiling under it (see "A ceiling change and a reservation take the same lock"
       below).
+    - **Platform calls bypass the ledger, as they bypass the breaker.** `SYSTEM_TENANT_ID` is
+      `'system'` (`ai/gateway/gateway.ts:150`), not a UUID. The readiness probe uses it
+      (`ai/gateway/readiness.ts:132`), and so does the non-strict production fallback for a
+      tenant-scoped call that has no `tenantId` (`gateway.ts:283-300`, which logs it). A reserve
+      keyed on it fails the UUID cast, and failing closed would refuse the probe and every such
+      call. This is an engineering decision, not an owner choice, and it follows the precedent
+      `ProviderBreakerWrapper` already sets: it passes `'system'` calls straight through
+      (`ai/gateway/compose-resilience.ts:252-257`). So:
+      - The spend wrapper passes a `'system'` call through with no reservation, and the
+        platform surface is registered `spend_exempt` with that reason.
+      - The fallback is counted, so a tenant call that lost its `tenantId` can't hide spend.
+        Strict tenant-id mode already turns it into an error.
+      - Their `ai_runs` insert already fails, best-effort, on the UUID `tenant_id` column, so
+        they never reach the tripwire.
+      - **The harness gateways get a spend seam, as they have a quota seam.**
+        `createHarnessLLMGateway` (`ai/gateway/harness-gateway.ts:32`) injects a no-op quota
+        store through `opts.resilience.quota`. It injects a no-op spend module the same way, so
+        an eval or voice-quality run never touches the ledger. Tests: the readiness probe and the
+        harness gateways write no reservation and are never refused.
     - **Caps start in the first full calendar month after a recorded legacy shutdown, so no
       pre-ledger spend has to be estimated.** Every attempt to reconcile old-version spend inside a month
       left a race. A seed missed late writes. A reconcile on an interval went stale. Even a
@@ -61,23 +101,43 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
       proven gone either, because they predate any heartbeat, so a month rollover is never taken
       as proof that they are. So:
       - Every ledger-era `ai_runs` row carries a ledger tag from the moment it is inserted, from
-        the day the ledger ships. The `ai_runs` repository's insert writes `ledger_era = true`, in
-        a column whose default is `false` and that old code never names.
+        the day the ledger ships. The gateway that owns the spend wrapper passes
+        `ledger_era = true` into `PgAiRunRepository.create()`, in a column whose default is
+        `false` and that old code never names.
+        - **The tag comes from the gateway, never from a global env read in the repository.** A
+          repository that tagged every row while `AI_SPEND_LEDGER_ENABLED` was on would also tag
+          the rows of gateways built without the spend wrapper: `createHarnessLLMGateway`
+          (`ai/gateway/harness-gateway.ts:32`), the Layer 2 gateway
+          (`ai/gateway/real-layer-two-factory.ts:326`) and the mock gateways in
+          `ai/gateway/factory.ts`. Those rows would be tagged but never reserved, and the
+          tripwire below would be blind to them. So the flag arrives with the wrapper (slice
+          G1b), not with the tag, and a gateway without the wrapper writes the column's
+          default.
         - The tag can't be the reservation's `attempt_id`. The gateway inserts the pending
-          `ai_runs` row before dispatch (`gateway.ts:568-588`), the reservations wrap each attempt
+          `ai_runs` row before dispatch (`gateway.ts:633-661`), the reservations wrap each attempt
           inside the retry loop after that, and no `ai_runs` write runs under the spend lock. So a
           run's own pending row would still be untagged when its first reserve checks the
           tripwire below, and every capped request would refuse itself. The attempt link stays on
           `ai_spend_reservations.ai_run_id`.
+        - **A run can have no `ai_runs` row.** The pending `create()` (`gateway.ts:654`) is
+          best-effort: a failure is logged and the call goes on. So a reservation's `ai_run_id`
+          can stay null, the write-back and the tripwire tolerate a run with no row, and the
+          gateway passes `ai_run_id` down to each attempt's reserve (it is not on the request
+          today).
         - A cache hit still writes an `ai_runs` audit row (`ai/gateway/cache.ts:191-224`), through
-          the same insert, so it carries the tag too. It costs nothing and has no reservation.
+          the same insert, so it carries the tag too. It costs nothing and has no reservation, so
+          it is written with `cost_micro_cents = 0`. Nothing would ever write a cost back for it,
+          and the failure monitor's rule 6 (see "The gateway stops writing the cost" below) would
+          count a null as unpriced for good.
       - **A cap can be enabled only after a recorded legacy-shutdown confirmation, and only in a
         month that began after it.** One platform-wide `ai_spend_cutover` row holds the confirming
         operator, `confirmed_at`, the ledger release (the first release id and git sha that carry
         the ledger) and a note on how the shutdown was verified (the orchestrator's instance
         listing shows no pre-ledger release running). Only an operator-only path writes or
         revokes it, with an audit event each time, as a deploy step after the old release's last
-        instance has stopped. No timer, month change or app code writes it. The cap-enable path reads it under
+        instance has stopped. `audit_events.tenant_id` is `NOT NULL` with a foreign key to
+        `tenants` (`schema.ts:63`), so those events go on the hidden platform tenant, as
+        `demo/platform-audit.ts` writes its own (`DEMO_PLATFORM_TENANT_ID`). No timer, month change or app code writes it. The cap-enable path reads it under
         the spend lock, as it reads the ceiling. Like `ai_spend_bound_breaches`, it is global,
         holds no subject content, and is classified `keep` in the U7 manifest.
         - The calendar can't stand in for it. If the ledger deploy crosses a month boundary, an old
@@ -94,13 +154,29 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           "paused: a pre-ledger release may be running" or "available from <date>".
         - **A rollback to a pre-ledger release revokes the confirmation first.** The documented
           rollback (`railway rollback --service api --to <previous-release-id>`,
-          `docs/runbooks/rollback.md` step 2) can start a pre-ledger release after caps are
+          `docs/runbooks/rollback.md` step 2, `:29-32`) can start a pre-ledger release after caps are
           active, and the old code can't check anything itself, so the fence has to sit in the
           rollback path. This unit's scope therefore includes the runbook change and a rollback
           wrapper script that step 2 names in place of the raw command.
           - The wrapper compares the target release with the recorded ledger release. It refuses
             a pre-ledger target while the cutover is active, until the operator has revoked it
             through the operator-only path. A target at or after the ledger release goes through.
+          - **It covers all three services.** Production runs api (`railway.toml`, whose
+            pre-deploy command runs the migrations), worker (`railway.worker.toml`) and voice
+            (`railway.voice.toml`) from one image. An old worker (embedding ingestion) or voice
+            instance (speech-to-text and speech) is a pre-ledger writer too. So the wrapper, the
+            cutover script's checks and the confirmation's list of services name all three.
+          - **The cutover waits out the replica overlap.** `overlapSeconds = 35` in
+            `railway.toml` and `railway.voice.toml` keeps the old instance serving for 35 seconds
+            after each deploy. The confirmation is recorded only after that window has passed on
+            every service, and the cutover script checks it.
+          - **Turning the flag off is a rollback too.** Code running with
+            `AI_SPEND_LEDGER_ENABLED=false` doesn't reserve, so it is a pre-ledger writer, and a
+            rollback that only turned the flag off would void every cap after the cutover. So
+            boot refuses `AI_SPEND_LEDGER_ENABLED=false` while a cutover confirmation is active,
+            and the cutover script checks that the flag is on for api, worker and voice before it
+            records the confirmation. Turning the flag off afterwards needs the revoke first, like
+            any rollback.
           - **Revoking is immediate and fail-safe.** Cap enforcement is suspended: the reserve
             under the spend lock skips the comparison when no confirmation is active, as it does
             for a null ceiling, and keeps writing the reservation. Ledger-era instances keep
@@ -113,7 +189,15 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
             and no code prevents it. The runbook forbids it, and the tripwire stays as detection.
       - **A tripwire stays in place, as detection and not enforcement.** A capped tenant's reserve transaction checks a partial index
         for the current month:
-        `ai_runs (tenant_id, created_at) WHERE NOT ledger_era`.
+        `ai_runs (tenant_id, created_at) WHERE NOT ledger_era AND created_at >= <ship date>`.
+        - **The lower bound is mandatory.** The corpus runs as one implicit transaction
+          (`db/migrate.ts:169-170` sets `lock_timeout` 5 s and `statement_timeout` 25 s around
+          it), and a `CREATE INDEX` holds a `SHARE` lock on `ai_runs` until that transaction
+          commits. The old release's pre-dispatch `ai_runs` inserts wait behind it for the whole
+          deploy. With the bound, the build writes only rows from the ship date on. It still reads
+          the table once, so the PR sizes that read against the statement timeout, or the index is
+          built `CONCURRENTLY` out of band first and the migration no-ops (the precedent at
+          `schema.ts:6787-6798`). The probe reads only the current month, so it loses nothing.
         - An untagged row means an old-version writer is still alive, so the confirmation was
           wrong or a rollback bypassed the wrapper. The capped reservation is then refused, and `alertOperator` fires. The old
           writer's own charge has already happened, which is why the confirmation gates the
@@ -142,6 +226,31 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           its own, never under the spend lock (see "One lock order with U7" below). It is guarded
           on a charge stamp (see "A later change to a charge is written back too" below). A crash
           between the two leaves the cost unwritten, and the sweep's next pass writes it.
+        - **The gateway stops writing the cost while the ledger is on, in the same PR as the
+          write-back.** Two other writers set `ai_runs.cost_micro_cents` today:
+          - The gateway's completion write (`gateway.ts:745`, into `updateStatus`,
+            `pg-ai-run.ts:161`). A late completion would overwrite the stamp-guarded figure with
+            the final attempt's cost alone.
+          - `create()`'s upsert. Its `ON CONFLICT DO UPDATE` sets `cost_micro_cents =
+            EXCLUDED.cost_micro_cents` (`pg-ai-run.ts:50-65`), so a replayed upsert can null a
+            cost that was written back.
+          So with the flag on, the completion write leaves the column alone, and the upsert's
+          `SET` of the column is guarded on `cost_stamp` like the write-back. The stop can't ship
+          before the write-back: OBS-4's rule 6 (`monitoring/pg-failure-monitor.ts:115`) counts
+          `status = 'completed' AND cost_micro_cents IS NULL AND created_by = 'gateway'` as
+          unpriced, so every ledger-era run would read as unpriced until its write-back. G1's
+          cost-write stop and G3 land together (see "Slices and order").
+        - **The write-back lands inside the monitor's settle window.** Rule 6 waits
+          `FAILURE_MONITOR_SETTLE_MIN` (default 5 minutes, `shared/config.ts:234`) before it
+          counts a run. A test pins that the lag from a run's last settle to its written cost
+          stays under that window at the sweep's interval.
+        - The re-write-back mark lives on the reservation row (`writeback_pending`), not on
+          `ai_runs`, so nothing under the spend lock writes a fenced table.
+        - **The column's meaning changes, and its readers' numbers move.**
+          `ai_runs.cost_micro_cents` becomes the sum over all of the run's attempts, worst-case
+          charges included, not the final attempt's cost. The spend report and its unpriced
+          count (`admin/pg-tenant-usage.ts:125-126`) and the failure monitor's spend alert read
+          it. The PR that turns the flag on says so.
         - **The write-back waits for no open reservation, not for every one to be priced.** A
           `released` reservation has no snapshot and is never repriced, so "every reservation of
           the run is priced" would never hold for an unpriced attempt that failed before
@@ -224,16 +333,23 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
       - **One per-tenant spend lock.** Every transaction that inserts a reservation, transitions
         one, changes the ledger or writes the ceiling first takes `pg_advisory_xact_lock` on the
         tenant's spend key, in the two-key form with the spend class id (see U7's "Stripes and
-        the spend lock have key spaces of their own"). That covers reserve, settle, release,
+        the spend lock have key spaces of their own"). U7 owns the class ids, and this module
+        imports them. The `(int4, int4)` space already has four users, each taking its first key
+        from a hash: `TransactionScope.lock` (`db/tenant-transaction.ts:179`), the session-level
+        `PgIdempotencyLockProvider` (`proposals/execution/idempotency-lock.ts:65`),
+        `withMigrationAdvisoryLock` (`db/migrate.ts:51`) and the assignment triggers
+        (`db/schema.ts:8682`, `:8803`). A collision with a fixed class id needs both halves to
+        match, and it is a false serialization, not a deadlock. That covers reserve, settle, release,
         expiry, reconciliation and repricing. The lock is per tenant, not per tenant-month, so a
         cap written in the last second of a month still serializes with a reservation that lands
         in the next one.
       - **The spend module's transactions never join an ambient one.** Repositories here are
         `PgBaseRepository`s, which join any open tenant transaction: the request transaction,
-        `executeAudited`, or `PgTenantTransactionRunner.run` (`db/tenant-transaction.ts:96`).
+        `executeAudited`, or `PgTenantTransactionRunner.run` (`db/tenant-transaction.ts:166`; the
+        class is at `:163`, and open #1830 edits this file).
         Suppose a gateway call runs inside one, on an `/api` route missing from the hand-kept
         `LLM_LONG_CALL_ROUTES` or in a proposal handler. The pending `ai_runs` insert
-        (`gateway.ts:568-588`) would join it and its erasure trigger would set the stripe flag,
+        (`gateway.ts:633-661`) would join it and its erasure trigger would set the stripe flag,
         so the spend module would raise on entry and every AI call on that path would fail
         closed. Or, with no stripe taken first, the reservation and the spend lock would last
         until the outer COMMIT, across the dispatch, and every reserve and settle in the tenant,
@@ -241,22 +357,29 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         roll the reservation back after the provider had billed. So:
         - Reserve, settle, release, expiry, reconciliation, repricing and the ceiling write each
           run in their own transaction, outside any ambient one (`runOutsideRequestTransaction`,
-          `middleware/tenant-context.ts:676`), and commit before the module returns.
+          `middleware/tenant-context.ts:732`), and commit before the module returns.
         - **They run on a small dedicated pool, not the main one.** A caller inside a request
           transaction holds one main-pool client, and each reserve and settle would await a
           second from the same pool. `runOutsideRequestTransaction`'s own comment says a request
-          must never await it on its routine path, and `middleware/tenant-context.ts:222-226`
-          records the incident: in-app voice turns that each held two connections "deadlocked on
-          checkout and 500'd every tenant's /api". `POST /api/tenant-site/about/draft`
-          (`routes/tenant-site.ts:279`) had the same shape: it calls the gateway inside the
-          request transaction. U1 owns that fix, as mandatory scope that doesn't wait on this
-          unit, and it lands in #1811. At the default `DB_MAX_CONNECTIONS` of 20
+          must never await it on its routine path, and `middleware/tenant-context.ts:250-253`
+          (inside `LLM_LONG_CALL_ROUTES`, `:242`) records the incident: in-app voice turns that
+          each held two connections "deadlocked on checkout and 500'd every tenant's /api".
+          `POST /api/tenant-site/about/draft` (`routes/tenant-site.ts:302`) had the same shape: it
+          called the gateway inside the request transaction. U1 owned that fix, and #1811
+          (merged, `8cf29060f`) moved the route onto `LLM_LONG_CALL_ROUTES`
+          (`middleware/tenant-context.ts:273`) and added `refuseCallInsideTransaction`
+          (`ai/gateway/gateway.ts:348`, called at `:552`). That guard throws only under
+          `NODE_ENV=test`. In production it logs and counts, and #1833 adds a page, so it doesn't
+          stop a production call made inside a transaction, and this module still needs its own
+          pool and `runOutsideRequestTransaction`. At the default `DB_MAX_CONNECTIONS` of 20
           (`db/pool.ts:110`), 20 such callers at once would each hold a client and wait for a
           second, every reserve would fail closed after the 5-second `connectionTimeoutMillis`,
           and the rest of `/api` would wait on the pool. So:
           - The spend module, and U7's claim, flip and terminal writes, use a dedicated pool
             with its own size, as the session-lock holders use the direct pool
-            (`db/pool.ts:155-175`).
+            (`db/pool.ts:155-175`). The pool is `db/side-pool.ts`, which U7 owns. Its size counts
+            against PgBouncer's budget, and PR-2 measures the reserve's p99 at #1831's
+            concurrency.
           - Its transactions wait only on the spend lock, a stripe, or a row that only they
             write, and each sets a `lock_timeout`. A caller holding a main-pool client never
             waits on the main pool through them.
@@ -265,10 +388,10 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           shared stripes until the request commits, across the whole LLM call, and an erase's
           phase 1 times out behind it while a draft is in flight. So every route and proposal
           handler that calls the gateway moves onto `LLM_LONG_CALL_ROUTES`, or makes its gateway
-          call before it opens its transaction. U1 moves `POST /tenant-site/about/draft` and adds
-          the guard that fails tests on a gateway call made while a request transaction is held;
-          this unit relies on both and doesn't repeat them.
-        - Entering the spend module while `currentTenantContext()` (`:619`) is present throws
+          call before it opens its transaction. U1 moved `POST /tenant-site/about/draft` and added
+          the guard that fails tests on a gateway call made while a request transaction is held
+          (#1811); this unit relies on both and doesn't repeat them.
+        - Entering the spend module while `currentTenantContext()` (`:675`) is present throws
           under test and logs its caller in production. A structural test fails on a gateway or
           provider-sink call reachable from `executeAudited`, `PgTenantTransactionRunner.run`,
           or an `/api` route not on the no-transaction list.
@@ -326,8 +449,9 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
             integration test that exercises a violating path then fails loudly.
         - Any write to a fenced table that goes with a spend change runs in its own transaction,
           outside the spend lock. That covers the `ai_runs` cost write-back (see "Repricing
-          reconciles the ledger" above). The gateway's completion write (`gateway.ts:679`) is
-          already its own call.
+          reconciles the ledger" above). The gateway's completion write (`gateway.ts:745`) is
+          already its own call, and while the ledger is on it no longer writes the cost (see "The
+          gateway stops writing the cost while the ledger is on" above).
       - **The reserve reads the ceiling under the lock.** It reads `tenant_settings` in a statement
         that runs after the lock is granted, never a value read earlier or passed in, and compares
         against that. Under `READ COMMITTED` each statement sees every transaction committed before
@@ -412,9 +536,21 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         multiplies. A conversion in JS checks `Number.isSafeInteger` first.
       - Every `BIGINT` the spend module reads (`spent`, `reserved`, each `*_micro_cents`) goes
         through an explicit safe-integer parse, like `toSafeInteger`
-        (`admin/tenant-usage.ts:70`, used by `admin/pg-tenant-usage.ts`).
-      - **Every reserve error fails closed.** A reserve that throws returns the typed refusal,
-        and the call is never dispatched.
+        (`admin/tenant-usage.ts:70`, used by `admin/pg-tenant-usage.ts`), but one that keeps null
+        distinct. `toSafeInteger` maps `NULL` to 0 (`:70-77`), and for `reserved_micro_cents`
+        and `charged_micro_cents` a null means "no amount", while 0 is exactly the charges-zero
+        bug.
+      - **A reserve error fails closed once caps can be on, and open before.** A reserve that
+        throws returns the typed refusal, and the call is never dispatched, with two exceptions,
+        each of which alerts:
+        - While no cutover confirmation is active, no month can gate a cap. A reserve
+          infrastructure error (pool exhaustion, a `lock_timeout`, a database blip) then fails
+          open, so a ledger hiccup during the rollout never refuses AI work.
+        - After the confirmation, it fails open only for a tenant whose ceiling read null at a
+          recent read, and that call's `ai_runs` row is written with `ledger_era = false`. The
+          tripwire then blocks enabling a cap for that tenant for the rest of the month, since
+          its spend can no longer be fully counted.
+        - A capped tenant's reserve error is always a refusal.
       - **A reserve the caller gave up on is released, even when it commits later.** A reserve's
         COMMIT can succeed while its caller never sees the result: a connection error after the
         COMMIT, the caller's own deadline, or a Deepgram renewal that commits just after the
@@ -447,8 +583,9 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         never undercounts.
     - **Bound the final wire payload, not the gateway's view of it.** For a `responseFormat: 'json'`
       request whose messages don't mention JSON, the provider adapter injects
-      `JSON_MODE_SYSTEM_INSTRUCTION` downstream of the gateway (`openai-compatible.ts:63-69`,
-      `:369-372`). A bound computed from the original messages misses that text and its framing.
+      `JSON_MODE_SYSTEM_INSTRUCTION` downstream of the gateway (the constant at
+      `openai-compatible.ts:54-55`, `ensureJsonModeMessages` at `:71-74`, the injection at
+      `:396-399`). A bound computed from the original messages misses that text and its framing.
       - Each provider adapter therefore exposes the payload it will actually send, with every
         injected instruction, transformation and framing included, for example through a
         `buildWireRequest()` it also uses itself.
@@ -462,9 +599,9 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
       - The reserve takes the wire request, computes the bound from it, and returns it frozen
         inside the `ActiveReservation`. The dispatch method sends only `reservation.wireRequest`.
       - `maxTokens` is required on the reserve input. It is optional today in `LLMRequest`,
-        `RoutingDecision` and `TaskRouteConfig` (`ai/gateway/gateway.ts:75`,
+        `RoutingDecision` and `TaskRouteConfig` (`ai/gateway/gateway.ts:77`,
         `ai/gateway/router.ts:55`, `ai/gateway/routing-config.ts:16`), and only the default tier
-        table fills it in. When a request leaves it out, the reserve resolves it from the model's
+        table fills it in (`config/ai-routing.ts:269-271`: 1,024, 4,096 and 8,192). When a request leaves it out, the reserve resolves it from the model's
         maximum output and puts that value in the wire request.
       - Test: an adapter that changes the payload after building it fails.
     - **`max_tokens` bounds billed output only where the provider says so.** The adapter serves any
@@ -489,8 +626,10 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         - An `ai_spend_bound_breaches` row, keyed by model and pricing-source version, records
           the bound that was exceeded. It holds no tenant data and has no `tenant_id`, so the
           table sits on U7's pinned global list, with that reason (see U7's "The global list is
-          pinned and constrained").
-        - Settle writes it, with an audit event, in its own transaction under the spend lock.
+          pinned and constrained"), and has a `global_table` entry in the raw-pool allowlist (see
+          "The two global tables are `global_table` entries" below).
+        - Settle writes it, with an audit event on the settling tenant, in its own transaction
+          under the spend lock.
         - The capped reserve reads it in a statement that runs after the spend lock is granted,
           as it reads the ceiling. A breach refuses the reserve while the current pricing
           entry's declared bound is no higher than the bound it recorded. Only a pricing version
@@ -533,12 +672,19 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
           that price is then written into its snapshot.
           - **A routed endpoint's rate is bounded in the request, or it is unpriced.** OpenRouter
             is the documented fallback, or the primary in Profile B
-            (`ai/gateway/factory.ts:36-57`). Its provider routing load-balances one model id
+            (`ai/gateway/factory.ts:36-57`). `.env.production.example:105` makes OpenRouter (Llama
+            and Qwen) the primary, while code comments say production runs api.openai.com with
+            `gpt-4o-mini`. If OpenRouter is live, this bound is on the critical path to enabling
+            any cap, and slice V1 moves ahead of C3 (see "Slices and order"). Which profile is
+            live is an owner action in the packet. Its provider routing load-balances one model id
             across upstream providers at different per-token prices. A failover hop to
             `meta-llama/llama-3.1-8b-instruct` routed to a pricier provider is billed above the
             snapshot rate while its tokens stay inside the bound, so the ledger records less than
             OpenRouter charged, and N such calls near the ceiling pass the cap with no alert. So:
-            - Pricing entries are keyed by endpoint as well as model.
+            - Pricing entries are keyed by endpoint as well as model. Today's lookup drops the
+              provider namespace (`lastSegment`, `ai/gateway/model-pricing.ts:113-115`), so
+              `openai/gpt-4o` and `gpt-4o` price alike. The endpoint key keeps both forms
+              working, and a test pins that.
             - For an OpenRouter endpoint, the wire request the reserve freezes carries
               `provider.max_price` set to the snapshot rates, so OpenRouter refuses any route
               that would bill above the reservation. That refusal is a definitive no-dispatch
@@ -667,6 +813,15 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         the runtime role with no tenant context sees no rows, so expired reservations would stay
         `reserved` for good, with no alert: a priced one holding its worst case in the month's
         `reserved`, an unpriced one keeping the cap-enable check refusing. So:
+        - Each sweep is a leader-gated tick (`runLeaderGatedTick`, `workers/leader-tick.ts`) with a
+          key of its own in `SWEEP_LOCK` (`app.ts:2603-2685`). Keys in use on `main` are 590001 to
+          590036, 590044, 590046 and 590047. U7 holds 590048 to 590057, so U8 starts at 590058:
+          the lease reaper 590058, repricing 590059, the breach alert 590060, the 80% alert
+          590061 and the Vapi settle 590062. The sweeps register after the WS2 interval baseline,
+          so the web role runs none (#1833 edits that block).
+        - The spend pool bypasses `PgBaseRepository`'s session-lease fencing
+          (`assertAmbientSessionLeaseHeld`, `db/pg-base.ts:69`), so the spend-pool code calls the
+          assert itself. The guarded transitions already make a double sweep harmless.
         - Each sweep selects the due rows' `(tenant_id, attempt_id)` across tenants, the way U4's
           purge selects tenants (PRIV-1).
         - It then runs one transaction per tenant that sets that tenant's context, takes its spend
@@ -688,7 +843,8 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
       instead, and repricing charges it.
       This is the same definitive-no-call rule as the onboarding plan's demo-call budget (D11).
     - **A success with no usage block is charged like an ambiguous outcome, never at zero.**
-      `ai/providers/openai-compatible.ts:430-440` turns a missing `usage` into zero tokens. That
+      `ai/providers/openai-compatible.ts:430-440` turns a missing `usage` into zero tokens, and
+      `createEmbedding` does the same (`response.usage?.total_tokens ?? 0`, `:376`). That
       adapter targets any OpenAI-compatible endpoint, and some omit `usage`. A settle at
       `computeCostMicroCents(…, 0)` would release the worst case while the provider billed the
       tokens, and a capped tenant's real spend could pass the cap while the ledger showed headroom.
@@ -699,18 +855,31 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         settles it through the guarded `charged_unreconciled → settled`.
       - Unit test: a success with no usage object leaves the worst-case charge in `spent`.
     - **Reserve every physical dispatch, not every logical call.** `ProviderRetryDeadlineWrapper`
-      can send another attempt to the same provider after a timeout
-      (`compose-resilience.ts:167-182`). The first attempt may already have been billed, and if the
-      retry succeeds, only the retry's usage comes back.
+      can send another attempt to the same provider after a timeout (the class at
+      `compose-resilience.ts:192`, `complete()` at `:203-223`). The first attempt may already have
+      been billed, and if the retry succeeds, only the retry's usage comes back.
       - The reservation, and the ambiguous-failure charge, wrap each attempt inside the retry loop.
       - A failover hop reserves again at the fallback model's price.
+      - **The wrapper sits beneath `settleByDeadline`, in both wrappers that use it.**
+        `settleByDeadline` (`:155`) drops an abandoned attempt's late result, so it never reaches
+        the breaker, the quota lease or `ai_runs`. A spend wrapper above it would never see the
+        late usage that moves `charged_unreconciled → settled`. So it wraps the raw provider
+        inside each attempt, in `ProviderRetryDeadlineWrapper` (`:208-213`) and in
+        `ProviderFailoverWrapper` (`:361`).
     - **The compiler ties every model dispatch to a reservation.** Unit tests of today's retry and
       failover paths, and a tripwire that sees only untagged `ai_runs` rows, can't catch spend
       that writes no `ai_runs` row or rides a run that already has a reservation. Two paths do
       that today:
       - `createEmbedding` (`ai/providers/openai-compatible.ts:352`) is called directly by
-        `workers/transcript-ingestion-worker.ts:356` and `workers/proposal-correction-worker.ts:191`,
-        with no reservation.
+        `workers/transcript-ingestion-worker.ts:364`, `workers/proposal-correction-worker.ts:192`
+        and `ai/skills/retrieve-context.ts:65`, with no reservation. The last is the RAG query
+        embedding behind `POST /conversations/:id/suggest-reply`, wired at `app.ts:2503-2512`
+        behind `RAG_RETRIEVAL_ENABLED`.
+        - `EmbeddingProvider.createEmbedding(input)` carries no `tenantId`
+          (`openai-compatible.ts:309`), so the interface gains one, with a test.
+        - A refused embedding is deferred, never dropped. The ingestion worker is failure-soft
+          per chunk, so a chunk the cap refuses is retried on a later pass, not skipped for good.
+          A refused RAG retrieval returns "unavailable" and chat goes on.
       - `ShadowComparisonGateway.complete` (`ai/evaluation/shadow-comparison.ts:117-133`) sends a
         second request per sampled call inside the provider that the retry loop wraps
         (`ai/gateway/factory.ts:184`). One reservation, priced at the primary model, covers two
@@ -737,7 +906,8 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         - A new adapter that calls `new OpenAI({ apiKey, baseURL })` without `maxRetries: 0`
           gets the SDK's default of 2 (the repo's own warning, `openai-compatible.ts:121-123`).
           The voice-quality harness builds one with `maxRetries: config.maxRetries`, defaulting to
-          `LAYER_TWO_MAX_RETRIES = 2` (`ai/gateway/real-layer-two-factory.ts:192`, `:471-476`). A
+          `LAYER_TWO_MAX_RETRIES = 2` (`ai/gateway/real-layer-two-factory.ts:192`, and
+          `AnthropicCompatibleProvider` at `:465-476`). A
           timeout after send is then retried inside one `complete()`: billed twice, reserved
           once, and settled from the last usage only.
         - An `any`-typed value passed where an `ActiveReservation` parameter is expected needs no
@@ -757,10 +927,14 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         - The scan also fails on a reserved call site, or a `send(...)` call, that sits lexically
           inside a loop, inside a recursive function, or inside a function passed to any callee
           other than `send` itself, `runWithRetry` included.
-        - The structural test fails on any model-provider SDK client built without a literal
+        - The structural test fails on any model-provider SDK client built without
           `maxRetries: 0`, or the equivalent option on another SDK, unless its entry is
-          `spend_exempt`. It also fails on an `any`-typed argument at an `ActiveReservation`
-          parameter.
+          `spend_exempt`. The main provider builds its client with `maxRetries: config.maxRetries
+          ?? PROVIDER_SDK_MAX_RETRIES` (`openai-compatible.ts:335`; the constant is 0 at `:150`),
+          so a literal-0 rule would fail on it. The rule accepts the literal or that named
+          constant, and the `config.maxRetries ??` test hatch is removed. The voice-quality
+          harness is registered `spend_exempt` (eval only). It also fails on an `any`-typed
+          argument at an `ActiveReservation` parameter.
         - Tests: one reservation reused for a second dispatch throws. A fixture adapter with SDK
           retries left on fails the scan. A fixture adapter that wraps its call in
           `runWithRetry` after `take()` fails the scan, and a second `send` throws.
@@ -772,23 +946,48 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         OpenAI's transcription and speech endpoints on the platform key. Whisper
         (`voice/transcription-providers.ts:254`), Deepgram live STT (the `ws` stream at `:580-582`)
         and ElevenLabs TTS (`ai/tts/elevenlabs-stream.ts:119-121`) never pass through `complete` or
-        `createEmbedding`. A capped tenant at its ceiling would have its LLM calls refused while it
-        kept transcribing voicemails and synthesizing speech, none of it in `spent`. So:
+        `createEmbedding`. Three more call sites bill the same way: ElevenLabs buffered TTS
+        (`ai/tts/tts-provider.ts:203`), the one-character ElevenLabs probe (`:253`) and the
+        voice-quality Whisper transcriber
+        (`ai/voice-quality/audio/openai-whisper-buffer-transcriber.ts:17`). The probe and the eval
+        transcriber are `spend_exempt` with their reasons. Browser dictation has no server call
+        site at all: `POST /voice/stream-token` (`routes/voice.ts:179`) mints a 30-second
+        Deepgram grant (`voice/deepgram-token.ts:15-18`), and the browser streams straight to
+        Deepgram on the platform key. It can't be metered at a transport, so it is either
+        `spend_exempt` with a settings-page line, or each grant reserves a bounded dictation
+        session (owner packet item 3, slice V6). A capped tenant at its ceiling would have its
+        LLM calls refused while it kept transcribing voicemails and synthesizing speech, none of
+        it in `spent`. So:
         - `spend` is a required field on every `externalSinks` entry: `reserved` (the call site sits
           inside a dispatch method that takes an `ActiveReservation`) or `spend_exempt` with a
-          reason.
+          reason. There is one registry, U7's `externalSinks`; `spend` is a field on its entries,
+          never a second spend-only registry. If the spend scan lands before U7's scanner, it
+          creates that registry in U7's file with U7's entry shape, and U7 extends it.
+        - **A third value, `reserved_pending`, keeps an unbuilt reservation from passing as
+          exempt.** The per-use voice sinks (Whisper, speech, Deepgram, Twilio and Vapi) are
+          reserved only in the last code PR. Until then they would have to be marked
+          `spend_exempt` to pass the scan, and the enable check, which reads only `spend:
+          reserved` surfaces, would let a cap be enabled with voice spend unmetered and
+          undisclosed. So the scan accepts `reserved_pending` (this surface will be reserved and
+          isn't yet), and the enable check treats it as blocking and names it, like an unpriced
+          surface.
         - Each entry names its provider, and a checked-in table says which providers bill per use.
           The test requires `reserved`, or a `spend_exempt` with a reason, on every entry whose
           provider does.
         - U7's transport rule (see U7's "a transport value") makes the Deepgram and ElevenLabs
-          WebSockets call sites, so they need entries too.
+          WebSockets call sites, so they need entries too. The rule matches the constructor the
+          code actually uses, an aliased `WebSocketClient` (`globalThis.WebSocket ?? NodeWebSocket`)
+          given a computed URL (`new WebSocketClient(this.buildWsUrl(...))`,
+          `voice/transcription-providers.ts:582`), not only a literal
+          `new WebSocket('wss://...')`.
         - **Vapi spends with no call site to reserve.** When `VAPI_API_KEY` is set, tenant calls
           route to Vapi by number (see U7's "Vapi takes whole calls by routing"), and each Vapi
           minute, with its LLM, speech-to-text and text-to-speech, is billed on the platform key
           with no reservation. A capped tenant at its ceiling would keep spending. So the Vapi
           entry either charges each call's cost to the ledger after the fact, under the spend
           lock, keyed by the Vapi call id so the call counts once, or is `spend_exempt` with
-          that reason. Owner decision 2 picks one. Either way the settings page says that a Vapi
+          that reason. Owner decision 2 picks one. The design names no default, so it is owner
+          packet item 2 (recommended: charge it). Either way the settings page says that a Vapi
           call isn't stopped at the cap.
           - **The charge doesn't come from the end-of-call report.** A report can fail to arrive,
             and its call object can be a stale snapshot whose `cost` reads 0. Settled from the
@@ -796,7 +995,8 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
             up the call id's one count before a correct figure arrived. So, when owner decision
             2 picks charging:
             - The webhook records each Vapi call id from its first event as an open spend row,
-              in a state of its own, `vapi_pending`, under the spend lock. It has no snapshot
+              in a state of its own, `vapi_pending`, under the spend lock. The index on it is
+              `UNIQUE (tenant_id, vapi_call_id)`, so a repeated event inserts nothing. It has no snapshot
               and no amount, the reserve path never admits against it, and the cap-enable check
               doesn't count it, since the settings page already says a Vapi call isn't stopped
               at the cap.
@@ -815,8 +1015,16 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         - **The cap's own fallback spends too.** A refused renewal degrades the call to Gather.
           Twilio bills `<Gather input="speech">` speech recognition per use, and premium `<Say>`
           voices too, through TwiML returned in a webhook response, so no outbound call site
-          carries that spend. `telephony/twilio-adapter.ts:739` and `routes/telephony.ts:1423`
-          emit `<Gather input="speech">`, and the voice path speaks with Polly voices. A capped
+          carries that spend. `telephony/twilio-adapter.ts:758` and `routes/telephony.ts:1471`
+          (comment at `:1435`) emit `<Gather input="speech">`. Polly `<Say>` comes from many
+          places: `ai/skills/patch-owner-through.ts:104`,
+          `ai/voice-turn/create-voice-turn-processor.ts:3454`, `telephony/voicemail-fallback.ts:74`,
+          `routes/telephony.ts:1619`, `:1664`, `:1915` and `:1938`, the voice constants
+          `GATHER_VOICE_EN` and `GATHER_VOICE_ES` (`telephony/shared/safety-say-lines.ts:13-14`),
+          the variable-voice emitters at `telephony/twilio-adapter.ts:723` and
+          `telephony/voicemail-fallback.ts:82`, the `<Say${voiceAttr}>` builder in
+          `telephony/whisper-route.ts:126` and `:137`, and the tenant's configured voices
+          (`settings.ttsVoiceEn` and `ttsVoiceEs`). A capped
           tenant at its ceiling would have every live call degrade to Gather and keep billing
           speech recognition and speech, with no reservation, no `spend_exempt` decision and
           nothing in `spent`. So:
@@ -828,16 +1036,29 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
             count, and on refusal emits a non-speech fallback (a DTMF Gather or the hold line),
             or the entry is `spend_exempt` and the settings page says Gather speech is outside
             the cap. Owner decision 2 picks one.
+          - **Safety and hold lines are never refused.** The 911 line and the other
+            safety-priority `<Say>` lines (`telephony/shared/safety-say-lines.ts:17-48`, used by
+            the Twilio adapter and `telephony/media-streams/mediastream-adapter.ts`) and the hold
+            line itself are `spend_exempt` with that reason, so a tenant at its cap still hears
+            them. Test: at the cap, a safety line and the hold line are emitted.
           - A scan rule fails on any TwiML string that emits `<Gather input="speech…">`, or a
             `<Say voice="Polly.…">` or `<Say voice="Google.…">`, outside a builder that carries
-            that entry.
+            that entry. Every `Polly.*` and `Google.*` voice counts as premium. The rule also
+            catches a voice interpolated from a constant, a variable or the tenant's settings,
+            and a `<Say${attr}>` template, not only a literal attribute.
       - **Each price declares its billing unit.** The worst case above is defined in tokens, but
         OpenAI prices Whisper per minute of audio (the repo's own constant,
         `ai/voice-quality/audio/whisper-real-provider.ts:44`), Deepgram prices streamed audio by
         the minute, and ElevenLabs and OpenAI speech bill per character. A reserve that can't
         compute their worst case would treat them as unpriced and refuse every capped tenant's
         live-call STT. So each pricing entry declares its unit (tokens, audio seconds or
-        characters), and the reserve computes the worst case in that unit from the wire request:
+        characters), and the reserve computes the worst case in that unit from the wire request.
+        Per-unit rates already exist for voice-usage costing: `DEEPGRAM_COST_CENTS_PER_HOUR`,
+        `ELEVENLABS_COST_CENTS_PER_1000_CHARS` and `TWILIO_MEDIA_STREAMS_COST_CENTS_PER_HOUR`
+        (read at `app.ts:4423-4458`, priced by `billing/provider-costs.ts`, reconciled by
+        `workers/voice-cost-reconciliation.ts`). The spend entries derive from them, or replace
+        them, so settle and voice-usage costing never disagree. Whether Media Streams minutes
+        belong in the cap at all is owner packet item 5.
         - Whisper from the audio's duration, capped by the provider's file limit
         - ElevenLabs and OpenAI speech from the text's character count
         - a Deepgram stream as renewable chunks of audio time. A refused renewal ends the stream,
@@ -848,7 +1069,8 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         would keep reserving and settling at the old rate after the flag is added. So the
         Deepgram pricing entry is keyed on the request parameters that change its rate,
         `mip_opt_out` and any add-on Deepgram bills separately, read from the frozen wire
-        request. A unit test fails when a request sets a rate-changing flag that its pricing entry
+        request. Redaction is one already: English streams set `redact=pci`
+        (`voice/transcription-providers.ts:528`). A unit test fails when a request sets a rate-changing flag that its pricing entry
         doesn't declare.
       - **A streamed chunk is metered at the transport, and stops at its reserved end.**
         `startStream` returns a session whose `send(chunk)` calls `ws.send(chunk)` for the whole
@@ -884,6 +1106,14 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
       - The one-ceiling-writer structural test also fails on SQL that names
         `ai_spend_reservations`, `ai_spend_ledger`, `ai_spend_bound_breaches` or
         `ai_spend_cutover` outside the spend module.
+      - **The two global tables are `global_table` entries, and the cutover table is read-only to
+        the app.** `ai_spend_bound_breaches` and `ai_spend_cutover` have no `tenant_id`. They go in
+        `global_table` entries in `test/invariants/raw-pool-rls.allowlist.ts`, and on U7's
+        pinned global list. `test/fixtures/rls-exempt-tables.ts` is the wrong place: it lists
+        tables that have a `tenant_id` but no RLS, a set `test/db/schema.test.ts:203` pins.
+        Migration 217's default privileges give `rls_app_runtime` write access on every new
+        table, so the cutover migration revokes `INSERT`, `UPDATE` and `DELETE` on
+        `ai_spend_cutover` from it and keeps `SELECT`, which the reserve needs.
       - Test: with the shadow wrapper on, a capped tenant's sampled call reserves twice, and an
         embedding call reserves once. A capped tenant's voicemail transcription reserves by
         duration. A fixture `new WebSocket('wss://api.deepgram.com/...')` with no reservation and no
@@ -891,6 +1121,12 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
     - A reservation carries a lease expiry. A crashed process can't say whether its call went out, so
       an expired lease is charged at worst case and marked `charged_unreconciled`; it is not released.
       An unpriced one goes to `settled_unpriced`, as above.
+      - **Each surface's lease comes from its own timeout, on the database clock.** One lease
+        length derived from the gateway deadline (`MAX_GATEWAY_DEADLINE_MS = 60_000`,
+        `ai/gateway/deadline.ts:28`) would expire a Whisper transcription of a 25 MB file that is
+        still running, and charge its worst case while the call goes on. So each sink's entry
+        declares its lease from its client's own timeout and retries, and `lease_expires_at` is
+        set and compared with `clock_timestamp()` in the database, never with a process clock.
     - **Fail closed on unpriced models.** A worst-case reservation can't be computed without a price.
       U3 deliberately leaves unverified models unpriced (null, with a boot warning), and the default
       `gpt-4o-mini` is not in the built-in table.
@@ -912,6 +1148,16 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
         Test: enabling a cap with Deepgram unpriced is refused, and the refusal names Deepgram.
   - Reject with a typed error that the voice path turns into its existing hold-line / Gather behaviour.
     That fallback's own spend is covered in "The cap's own fallback spends too" above.
+    - **The refusal is not a transient failure.** `ai/voice-turn/classify-infra-failure.ts`
+      treats quota errors as transient (`isTransientInfraFailure`, `:62-71`), and a transient
+      failure speaks `AI_BUSY_HOLD_LINE`, "Could you please say that again?" (`:29-30`). A cap
+      refusal mapped that way loops re-prompts, and each re-prompt spends again. So the
+      classifier gains a non-transient `spend_cap` kind, and a voice turn that meets it
+      escalates once, the way a hard failure does.
+    - HTTP routes return a stable error code with plain copy.
+    - **Refused background work is deferred, never dropped.** A worker whose call the cap
+      refuses leaves the job to run after the cap clears, the way the ingestion chunk above is
+      retried.
   - **Alert at 80% through `alertOperator`, from an outbox.** A reservation can't send the alert
     inside its transaction, and a call after the commit is lost if the process exits first. The
     outbox uses integer generations, as U7's does, not a timestamp. A due timestamp from the
@@ -944,6 +1190,10 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
       With the guard, the stamp matches no row, and the next pass sends the new alert.
     - A crash between the send and the stamp sends it twice, which is harmless for an operator
       alert. A crash before the send loses nothing.
+  - **Retention of terminal spend rows.** The design defines none. Each physical attempt adds one
+    reservation row and about three audit rows. Slice R1 deletes terminal reservations older than
+    a fixed window, never `settled_unpriced` or open rows, and keeps the ledger rows. The window
+    is owner packet item 6 (recommended: 13 months).
 - **Test scenarios:**
   - **Unit:** a call is admitted under the cap and rejected over it.
   - **Unit:** failover is charged once.
@@ -1097,3 +1347,142 @@ decisions apply here. U7 and U8 refer to each other by name; both live next to t
     the build, and so does SQL that names `ai_spend_reservations`, `ai_spend_ledger`,
     `ai_spend_bound_breaches` or `ai_spend_cutover` outside the spend module. A `PUT /api/settings` body that carries a
     ceiling key leaves the ceiling unchanged.
+
+## Slices and order (2026-10-25)
+
+This replaces the single-branch plan (`fix/ai-hardening-spend-cap` with one PR per group). Each PR
+is cut from `main`, runs the E3 protocol, merges `main` in rather than rebasing, and quotes the
+owner decision it builds on. Migration keys and sweep keys below are the ones free on `main` at
+`58383e730`; migration keys are taken again at merge time.
+
+### The slices
+
+| Id | Scope |
+|---|---|
+| D0 | This design, with the 2026-10-25 corrections, on #1695. Docs only. |
+| F1 | The primitives shared with U7: the two-key lock class ids, the lock-order flags (each check reads `= '1'`) and the dedicated side pool. U7 owns them (its U7-06 and U7-15). If U8 is ready first, F1 builds them in U7's files (`db/advisory-lock-classes.ts`, `db/side-pool.ts`) under U7's names; otherwise U8 imports them. |
+| P1 | Pricing entries v2: billing unit, endpoint key (both namespace forms keep pricing), billed-output bound, rate flags (`mip_opt_out`, `redact=pci`), pricing version, derived from the provider-cost env rates. |
+| P2 | Pure worst-case and money helpers, including a BIGINT parse that keeps null distinct. |
+| L1 | Migration 354: ledger, reservations, the ceiling column, `spend_month()`, the charge-stamp sequence. Waits on owner packet item 1, which decides what a null ceiling means. |
+| L2 | Reserve under the spend lock, priced and unpriced paths, on the side pool, with the fail-open policy. |
+| L3 | Guarded transitions, release-before-reserve, and the one typed spend audit writer. |
+| T1 | Migration 355: `ledger_era`, `cost_stamp` and the bounded tripwire index. The repository takes the tag from its caller. |
+| P3 | Adapters expose the exact wire request; missing usage is reported as missing, for `complete()` and `createEmbedding`. |
+| G1a | `ActiveReservation`, the one-shot sender and the spend wrapper (unit tests). |
+| G1b | The wrapper beneath `settleByDeadline` in `ProviderRetryDeadlineWrapper` (`compose-resilience.ts:208-213`) and `ProviderFailoverWrapper` (`:361`); `ai_run_id` plumbing; `AI_SPEND_LEDGER_ENABLED`; the gateway as the tag's source; the gateway's cost-write stop. |
+| G1c | The refusal across callers: the non-transient `spend_cap` kind in `ai/voice-turn/classify-infra-failure.ts`, one escalation on a voice turn, a stable HTTP code, workers that defer. |
+| G1d | `SYSTEM_TENANT_ID` passed through, as the breaker does, and the harness spend seam (`ai/gateway/harness-gateway.ts`). |
+| G2 | The lease reaper sweep (key 590058). |
+| G3 | The repricing sweep (key 590059) and the stamp-guarded write-back, the upsert's guard included. |
+| G4 | Embeddings (all three callers, and `tenantId` on `EmbeddingProvider`), RAG retrieval, shadow comparisons, and the factory's dedicated `EmbeddingProvider`. |
+| G5a | `spend` on U7's `externalSinks` registry, with `reserved_pending`. |
+| G5b | The forgery, single-use and loop scans. |
+| G5c | The SDK `maxRetries` scan, accepting `PROVIDER_SDK_MAX_RETRIES`, and Layer 2's `AnthropicCompatibleProvider` (`ai/gateway/real-layer-two-factory.ts:465-476`). |
+| G5d | Optional: a static scan for a gateway call reachable inside a transaction. #1811's runtime guard plus #1833's page may be enough. |
+| A1 | The 80% alert outbox (key 590061). |
+| B1 | Migration 356: bound-breach rows, capped reserves gated on them, the breach alert outbox (key 590060). |
+| C1a | Migration 357: the cutover table and its revoke, the operator script, platform-tenant audits, the flag-off boot guard. |
+| C1b | The rollback wrapper over api, worker and voice, and the runbooks. Its bash test follows `scripts/ci/test/run-tests.sh` with `fake-railway` (which #1829 edits); `scripts/__tests__` holds `.mjs` tests. |
+| C1c | The tripwire. |
+| C2 | The ceiling store as the only writer, the owner-only route, the audit in the same transaction. |
+| C3 | The enable and lower checks, under the lock, with `reserved_pending` and unpriced surfaces blocking. |
+| U1 | The settings card. Its Playwright spec goes in root `e2e/` (pattern `e2e/estimate-approval-mobile.spec.ts`; `packages/web/e2e/` doesn't exist), and its shared contract is a new per-domain file under `packages/shared/src/contracts/` (there is no `contracts/index.ts`). |
+| V1 | OpenRouter: prices keyed by endpoint, and `provider.max_price` in the frozen request. |
+| V2 | Whisper, OpenAI speech and ElevenLabs buffered TTS, each with a lease from its own timeout. |
+| V3 | Metered streams: Deepgram live STT and ElevenLabs stream-input. |
+| V4a | The TwiML spend builder and its scan. |
+| V4b | Moving the emitters behind it, `telephony/whisper-route.ts`, `telephony/media-streams/mediastream-adapter.ts` and the variable-voice emitters (`telephony/twilio-adapter.ts:723`, `telephony/voicemail-fallback.ts:82`) included. |
+| V4c | The non-speech fallback, and the safety-line and hold-line exemption. |
+| V5 | Vapi charged after the fact (key 590062), only if Vapi is live. |
+| V6 | Browser dictation grants, after owner packet item 3. |
+| R1 | Retention of terminal spend rows, after owner packet item 6. |
+
+### Order
+
+1. **PR-0: D0, on #1695.** It folds in every correction above, including these:
+   - the `reserved_pending` status
+   - the flag-off boot guard
+   - the ledger tag comes from the gateway
+   - safety and hold lines are `spend_exempt`, and the non-transient `spend_cap` kind
+   - refused background work is deferred, never dropped
+   - the embedding interface carries `tenantId`
+   - a spend seam for the harness gateways
+   - the write-back's lag against the monitor's settle window, and cost 0 for cache-hit rows
+   - Deepgram keyed on `redact=pci`; scans that match aliased WebSocket constructors and computed
+     URLs
+   - the TwiML scan covers `<Say${attr}>` and configured voices
+   - `global_table` allowlist entries and the cutover revoke
+   - per-surface leases, with expiry on the database clock
+   - migration 355's bounded index
+   - the 35-second replica overlap
+   - the fail-open policy: open before the cutover; after it, open only for tenants whose
+     ceiling read null at a recent read, writing `ledger_era = false` so the tripwire blocks a
+     cap enable that month
+   - and the planner's own: the third embedding caller, browser Deepgram grants, ElevenLabs
+     buffered TTS and the probe, `SYSTEM_TENANT_ID`, the gateway's cost-write stop, the
+     write-back mark on the reservation row, all three services in the cutover and the rollback
+     wrapper, the provider-cost env rates, retention, and the primitives shared with U7.
+2. **Gate.** Before any code slice:
+   - D0 is approved and #1695 has merged.
+   - The owner has answered packet items 1 (platform default) and 2 (Vapi).
+   - One owner for F1 is agreed with U7's plan. U7 owns it (see U7's "Slices and order").
+   - #1829 to #1833 have landed (table below).
+3. **PR-1 and PR-2, stacked and merged together.** PR-1 alone would ship a spend module with no
+   production caller, which CLAUDE.md's rule against built-but-never-wired code forbids.
+   - F1 → P1 → P2 → L1 (354) → L2 → L3 → T1 (355)
+   - P3 → G2 → G1a → G1b → G1c → G1d → G3 → G4. G1b's cost-write stop and G3 are in the same
+     merge, so rule 6 never sees ledger-era runs as unpriced.
+   - V1 goes here instead of PR-5 if OpenRouter is the production primary.
+4. **PR-3:** G5a → G5b → G5c → (G5d, optional) → B1 (356) → A1.
+5. **PR-4:** C1a (357) → C1c → C1b → C2 → C3 → U1. Merging it before PR-5 is safe: enabling a
+   cap refuses and names each `reserved_pending` surface (Whisper, Deepgram and the rest).
+6. **PR-5:** V1 (if not moved) → V2 → V3 → V4a → V4b → V4c → V5 (only if Vapi is live) → V6
+   (after its decision).
+7. **PR-6:** R1.
+
+### Red tests the planner's list missed
+
+- **G1b:** the `DB_MAX_CONNECTIONS=2` test drives reserve, dispatch and settle through the
+  gateway, not reserve alone.
+- **L3:** a structural test that the spend module writes audit events only through its own writer.
+- **C3:** a priced attempt in flight when a cap is enabled keeps its worst case out of the
+  headroom until it settles.
+- **G1c:** the `spend_cap` kind is not transient; a voice turn escalates once; HTTP routes return a
+  stable code with plain copy; workers defer the work.
+- **G4:** the `EmbeddingProvider` interface change; a refused ingestion chunk is retried later,
+  not skipped for good.
+- **G1d:** the readiness probe and the harness gateways never touch the ledger.
+- **V4:** at the cap, the 911 line, the other safety-priority lines and the hold line are emitted;
+  the scan catches `<Say${voiceAttr}>` and the tenant's configured voices.
+- **V3:** the Deepgram rate is keyed on `redact=pci`; the scan matches
+  `new WebSocketClient(this.buildWsUrl(...))`.
+- **V2:** each surface's lease comes from its own timeout; a Whisper call on a 25 MB file outlives
+  60 seconds without being charged as expired.
+
+### Migrations
+
+- **Keys.** `353_shadow_comparisons_created_index` is the tail on `main`
+  (`test/db/migration-immutability.test.ts:684`), so 354 to 357 are free today. U7 takes keys from
+  the same tail, so each PR takes the next free key when it merges, and the one that merges second
+  renumbers and updates the immutability snapshot in the same commit.
+- **Idempotent as written.** `CREATE POLICY` has no `IF NOT EXISTS`, so each one is preceded by
+  `DROP POLICY IF EXISTS` and carries a `WITH CHECK`. Foreign keys are defined inline in
+  `CREATE TABLE`: `compileMigrationSQL` (`db/schema.ts:8991-9006`) puts a `DROP` in front of every
+  `ALTER TABLE … ADD CONSTRAINT` on every boot, so one added that way is dropped and revalidated
+  at each deploy.
+- **354:** the Vapi index is `UNIQUE (tenant_id, vapi_call_id)`.
+- **355:** the tripwire index has a mandatory `created_at` lower bound (see the tripwire above).
+- **356 and 357:** the two global tables get `global_table` allowlist entries, and 357 revokes
+  `INSERT`, `UPDATE` and `DELETE` on `ai_spend_cutover` from `rls_app_runtime`, keeping `SELECT`.
+
+### Open PRs to land first
+
+Land all five before G1, C1b and V2 or V4. Merge `main` in; don't rebase.
+
+| PR | Files it shares with U8 | What to do |
+|---|---|---|
+| #1830 | `db/tenant-transaction.ts`, the raw-pool guard and allowlist, the pg access scan, deprovision | Every spend-pool site and every sweep's `applyCrossTenantRole` or `clearTenantContext` becomes a sanctioned role-switch entry. If deprovision leaves replica mode, the purge-walk test must include the spend tables. |
+| #1831 | `shared/config.ts`, `ai/gateway/real-layer-two-factory.ts`, `ai/gateway/harness-gateway.ts`, the failure-rate monitor | Collides with G1, G1d and G5c. |
+| #1832 | `ai/voice-turn/create-voice-turn-processor.ts`, `inapp-adapter.ts` | G1c and V4b edit the voice-turn processor too. |
+| #1833 | `ai/gateway/gateway.ts`, `app.ts` (it moves the WS2 baseline), `docs/deployment.md` (pinned by its new `replica-guidance-docs-lcr05.test.ts`), `railway.toml`, `railway.voice.toml`, `telephony/voicemail-status-route.ts` | Overlaps C1b and V2. |
+| #1829 | the `scripts/ci` Railway wrapper and its fakes | Overlaps C1b. |
