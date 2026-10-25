@@ -23,10 +23,20 @@
 # can otherwise look like "the newest deployment" and mask this one).
 #
 # Usage: railway-deploy.sh <service-name> <environment>
-# Requires: RAILWAY_TOKEN in the environment, jq.
+# Requires: RAILWAY_TOKEN in the environment, jq, coreutils timeout.
 # On success: prints ONLY the deployment id to stdout (nothing else — safe
 # to capture directly, e.g. `id="$(railway-deploy.sh ...)"`, and never
-# echoes RAILWAY_TOKEN or raw CLI output that could carry secrets).
+# echoes RAILWAY_TOKEN or raw CLI output that could carry secrets). The
+# CLI's stderr is captured but discarded on success (Railway prints
+# progress and warnings there).
+# On a failed or timed-out upload: names which of the two it was, then
+# prints a redacted, bounded tail of the CLI's stderr as ::error:: lines on
+# stderr (railway-stderr-diagnostics.py, given at most
+# RAILWAY_DIAGNOSTICS_TIMEOUT_SECONDS to run: a positive number of seconds,
+# anything else means the default 15) — so an expired RAILWAY_TOKEN or a
+# renamed service/environment is visible in the log instead of only a
+# generic failure line. If the helper fails, overruns, or finds part of a
+# secret it could not redact, the CLI text is withheld instead.
 
 set -euo pipefail
 
@@ -42,10 +52,31 @@ stderr_capture="$(mktemp "${TMPDIR:-/tmp}/railway-deploy-stderr.XXXXXX")"
 trap 'rm -f "$stderr_capture"' EXIT
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-raw="$(python3 "$HERE/railway-command.py" "${RAILWAY_UPLOAD_TIMEOUT_SECONDS:-300}" up --service "$SERVICE" --environment "$ENVIRONMENT" --json --detach 2>/dev/null)" || {
+upload_timeout="${RAILWAY_UPLOAD_TIMEOUT_SECONDS:-300}"
+upload_rc=0
+raw="$(python3 "$HERE/railway-command.py" "$upload_timeout" up --service "$SERVICE" --environment "$ENVIRONMENT" --json --detach 2>"$stderr_capture")" || upload_rc=$?
+if [ "$upload_rc" -ne 0 ]; then
+  # 124 is railway-command.py's timeout exit (it killed the CLI).
+  if [ "$upload_rc" -eq 124 ]; then
+    echo "::error::'railway up' timed out after ${upload_timeout}s for '$SERVICE' in '$ENVIRONMENT'. What the Railway CLI printed to stderr before that (redacted, last lines only) follows." >&2
+  else
+    echo "::error::'railway up' exited with status $upload_rc for '$SERVICE' in '$ENVIRONMENT'. The Railway CLI's stderr (redacted, last lines only) follows." >&2
+  fi
+  # The helper's stdout goes to our stderr; its own stderr (e.g. a
+  # traceback) is dropped, and if it fails (it exits 1, printing nothing,
+  # when part of a secret survived redaction) or overruns its time limit
+  # (timeout exits 124), the CLI text is withheld. The limit must be a
+  # positive number: 'timeout 0' would disable it, and a value timeout
+  # rejects would withhold the text for nothing.
+  diagnostics_timeout="${RAILWAY_DIAGNOSTICS_TIMEOUT_SECONDS:-15}"
+  if ! [[ "$diagnostics_timeout" =~ ^[0-9]*\.?[0-9]+$ && "$diagnostics_timeout" =~ [1-9] ]]; then
+    diagnostics_timeout=15
+  fi
+  timeout "$diagnostics_timeout" python3 "$HERE/railway-stderr-diagnostics.py" <"$stderr_capture" >&2 2>/dev/null ||
+    echo "::error::The Railway CLI's stderr could not be redacted, so it is withheld." >&2
   echo "::error::Railway upload failed or timed out for '$SERVICE' in '$ENVIRONMENT'." >&2
   exit 1
-}
+fi
 
 # Expect exactly one JSON object on stdout (see comment above). Extract
 # .deploymentId; tolerate neither multiple lines nor a missing/null/blank
