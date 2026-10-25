@@ -84,19 +84,28 @@ Do not reintroduce migration-gated startup.
 
 ## Horizontal scaling note
 
-Scaling past one instance is supported, with prerequisites. The historical
-blockers (in-process `setInterval` sweeps duplicating per replica; no
-graceful drain) are addressed: sweeps are gated by `runAsLeader` (a Postgres
-advisory lock, so exactly one instance runs each tick) and SIGTERM triggers
-a graceful drain (`/ready` → 503, new WS upgrades rejected, active voice
-calls drained). Before raising `numReplicas` past 1:
+Only the worker service scales past one instance. Every call-answering
+process (every `PROCESS_ROLE` except `worker`) stays at one replica until
+session state is externalized (LCR-05): a live call's session lives in the
+memory of the replica that answered it, so a second web or voice replica
+drops calls. Set `NUM_REPLICAS` to the real replica count on every service:
+the boot guard (`validateFeatureRequiredConfig`, `packages/api/src/shared/config.ts`)
+refuses `NUM_REPLICAS > 1` on any role but `worker`, and can only refuse a
+count it is told. For the worker, the historical blockers (in-process
+`setInterval` sweeps duplicating per replica; no graceful drain) are
+addressed: sweeps are gated by `runAsLeader` (a Postgres advisory lock, so
+exactly one instance runs each tick) and SIGTERM triggers a graceful drain
+(`/ready` → 503, new WS upgrades rejected, active voice calls drained).
+Before raising the worker's `numReplicas` past 1:
 
-1. Provision shared Redis and set `REDIS_URL` (quotas, voice/board fan-out,
-   presence, and WS connection caps silently degrade to per-replica
-   in-memory state without it — see `railway.toml`).
+1. Provision shared Redis and set `REDIS_URL`: every shared store (quotas,
+   rate limits, fan-out) silently degrades to per-replica in-memory state
+   without it, and the boot guard refuses `NUM_REPLICAS > 1` without it
+   (ARCH-01). See `docs/runbooks/scaling.md` "Shared state across replicas
+   (Redis)". Redis does not make a second call-answering replica safe.
 2. Confirm the scheduled **Redis multi-instance correctness** workflow
    (`.github/workflows/redis-multi-instance.yml`) is green — it runs the
-   two-instance suites against a real Redis and is the gate for
+   two-instance suites against a real Redis and is the gate for the worker's
    `numReplicas > 1`.
 
 The proposal-execution worker itself is multi-instance-safe
@@ -355,7 +364,7 @@ Code/config is in-repo; these are applied in the Railway account. Order matters 
 
 1. **Redis** — add the Railway Redis plugin, set `REDIS_URL` on the API service, and set `VOICE_FANOUT_ENABLED=true`. Makes WS caps, LLM quotas, voice fan-out, and rate limits cluster-wide. Set it **before** raising `numReplicas`.
 2. **PgBouncer** — add a PgBouncer service (`pool_mode=transaction`, from `deploy/pgbouncer/pgbouncer.ini`) in front of the Postgres plugin. Point `DATABASE_URL` at PgBouncer (`:6432`) and `DATABASE_DIRECT_URL` at the Postgres plugin's direct URL (`:5432`) — session-scoped advisory locks + LISTEN/NOTIFY bypass PgBouncer. Size `DB_MAX_CONNECTIONS` per replica and PgBouncer `default_pool_size` against Postgres `max_connections`.
-3. **Autoscale + drain** — set autoscale min/max in the Railway service settings (no `railway.toml` key): min from steady load, max from the Phase 5 per-instance ceiling. Ensure the **stop grace period ≥ 35s** so a draining replica finishes live calls (`overlapSeconds = 35` in `railway.toml`; drain waits `DRAIN_TIMEOUT_MS` 25s with a `SHUTDOWN_FORCE_EXIT_MS` 30s backstop).
+3. **Autoscale + drain** — autoscale the worker service only (call-answering services stay at one replica, LCR-05; set `NUM_REPLICAS` to the real replica count): set autoscale min/max in the Railway service settings (no `railway.toml` key): min from steady load, max from the Phase 5 per-instance ceiling. Ensure the **stop grace period ≥ 35s** so a draining replica finishes live calls (`overlapSeconds = 35` in `railway.toml`; drain waits `DRAIN_TIMEOUT_MS` 25s with a `SHUTDOWN_FORCE_EXIT_MS` 30s backstop).
 
 ### Boot env
 

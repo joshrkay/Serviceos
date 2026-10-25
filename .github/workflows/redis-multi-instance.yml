@@ -18,7 +18,10 @@
 # `TEST_REDIS_URL` (they `describe.skipIf(!TEST_REDIS_URL)`), but NOTHING in CI
 # ever set that variable — so they were dead weight. This workflow provisions a
 # real Redis, sets TEST_REDIS_URL, and RUNS them. It is the gate that must be
-# GREEN before anyone sets `numReplicas > 1` in railway.toml.
+# GREEN before the worker service runs more than one replica. It does not make
+# a second call-answering replica safe: every PROCESS_ROLE except worker stays
+# at one replica until session state is externalized, and NUM_REPLICAS must be
+# the real replica count so the boot guard can refuse (docs/runbooks/scaling.md).
 #
 # It runs weekly + on demand (the seams change rarely; PR-time CI stays fast).
 # It HARD-FAILS if Redis never becomes reachable — a skipped Redis suite is not

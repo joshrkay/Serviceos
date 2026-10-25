@@ -138,6 +138,47 @@ First response:
 4. Check `docs/runbooks/voice-capacity.md` if abandonments correlate with
    call-volume spikes.
 
+### LLM call inside a tenant transaction (critical — every process, not leader-locked)
+
+| | |
+|---|---|
+| Rule | `gateway_llm_call_in_transaction` — any increase of `gateway_llm_call_in_transaction_total{task_type}` since the previous check |
+| Emitted by | `createLlmCallInTransactionCheck` (`packages/api/src/monitoring/llm-call-in-transaction-alert.ts`), registered in `app.ts` with the observability intervals, so it runs every 60 s in **every** `PROCESS_ROLE` (web and voice included), each process checking its own counter |
+| Pages via | its own `alertOperator` (Sentry `[SLO:critical] gateway_llm_call_in_transaction: ...` error event, plus the operator SMS when `ALERT_SMS_TO` is set); per-rule cooldown `SLO_ALERT_COOLDOWN_MIN`, per process |
+
+`LLMGateway.complete` checks for an open tenant transaction when a call starts
+(`refuseCallInsideTransaction`, `packages/api/src/ai/gateway/gateway.ts`).
+Under `NODE_ENV=test` it throws, so a route's own test fails; in production it
+only logs an error and increments this counter, so traffic never breaks. Each
+such call keeps a pooled connection, and under PgBouncer a server backend,
+idle in transaction for the whole call: about a pool's worth of them stall
+every tenant's `/api`. Any count is a shipped route that belongs on
+`LLM_LONG_CALL_ROUTES` (`packages/api/src/middleware/tenant-context.ts`).
+
+The counter is in-process, and in-request calls happen on web replicas, which
+the worker-only SLO monitor cannot see. That is why this check is not an SLO
+monitor rule. With a metrics backend scraping every replica's `/metrics`, the
+same rule is:
+
+```promql
+sum by (task_type) (increase(gateway_llm_call_in_transaction_total[10m])) > 0
+```
+
+First response:
+1. Find the call site: the gateway's error log `LLM call started inside a
+   tenant transaction ...` carries `taskType`, `tenantId` and a `stack`
+   naming the route or unit of work.
+2. A request route: add it to `LLM_LONG_CALL_ROUTES`, method and path
+   anchored like the existing entries, with its DB work done through repos
+   that take an explicit `tenantId` (see `docs/runbooks/scaling.md`,
+   "Guard — `gateway_llm_call_in_transaction_total`").
+3. An explicit unit of work (`runInTenantTransaction`,
+   `PgTenantTransactionRunner`): move the LLM call out of it and open a short
+   transaction for the writes after the call returns.
+4. Watch `db_pool_connections{state="waiting"}` while it is unfixed: waiting
+   above zero with `total` at `DB_MAX_CONNECTIONS` means the pool is already
+   saturating.
+
 ### 4. `voice_turn_latency_p95` (warning)
 
 | | |

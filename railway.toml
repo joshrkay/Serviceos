@@ -18,15 +18,19 @@ healthcheckPath = "/health"
 healthcheckTimeout = 60
 restartPolicyType = "ON_FAILURE"
 restartPolicyMaxRetries = 3
-# Horizontal scale (scale-to-1000 P4). Raising this past 1 REQUIRES setting both
-# REDIS_URL (so the WS caps / LLM quotas / voice fan-out / rate limits are
-# cluster-wide instead of degrading silently to per-replica in-memory) and the
-# NUM_REPLICAS env var to the same count — ARCH-01: validateFeatureRequiredConfig
-# fails boot in prod/staging when NUM_REPLICAS > 1 and REDIS_URL is unset, so the
-# degradation can't ship silently. Also front Postgres with a PgBouncer service
-# (so N pools multiplex onto a bounded max_connections). Metric-based autoscaling
-# (CPU/mem/req triggers, min/max) is configured in the Railway service settings,
-# not here. See docs/runbooks/scaling.md.
+# Horizontal scale: keep this at 1. This service answers phone calls, and a live
+# call's session lives in the memory of the replica that took it, so a second
+# replica drops calls at the stream connect or on the next Gather turn. Every
+# call-answering process (every PROCESS_ROLE except worker) stays at ONE replica
+# until session state is externalized (LCR-05). Redis and PgBouncer do not make
+# a second replica safe: Redis shares counters and call events, not calls.
+# Boot guard: validateFeatureRequiredConfig (packages/api/src/shared/config.ts)
+# refuses to start in prod/staging with NUM_REPLICAS > 1 on any role but worker,
+# and with NUM_REPLICAS > 1 and no REDIS_URL on any role (ARCH-01). It only sees
+# the NUM_REPLICAS service variable, so set NUM_REPLICAS to the real replica
+# count (this value, or the autoscale max) whenever the replica count changes.
+# Leave metric-based autoscaling (Railway service settings) off for this
+# service. See docs/runbooks/scaling.md.
 numReplicas = 1
 # Zero-downtime rollout: keep the old replica serving until the new one is
 # healthy. The app drains live voice/WS calls on SIGTERM (U-P4a) — it flips
@@ -44,10 +48,10 @@ overlapSeconds = 35
 # unset keeps the listen port and the edge target in lockstep regardless of
 # the service's PORT value.
 
-# Scaling to N replicas (scale-to-1000): add a PgBouncer service in transaction
-# mode (pool_mode=transaction) in front of the Postgres plugin, point this
-# service's DATABASE_URL at PgBouncer, and set DATABASE_DIRECT_URL to the
-# Postgres plugin's direct URL (session-scoped locks + LISTEN/NOTIFY bypass
-# PgBouncer — see .env.production.example and docs/runbooks/scaling.md). Set
-# replica count + autoscaling in the Railway service settings. The app drains
-# the pg pool(s) on SIGTERM (app.ts shutdown handler).
+# PgBouncer (scale-to-1000): add a PgBouncer service in transaction mode
+# (pool_mode=transaction) in front of the Postgres plugin, point this service's
+# DATABASE_URL at PgBouncer, and set DATABASE_DIRECT_URL to the Postgres plugin's
+# direct URL (session-scoped locks + LISTEN/NOTIFY bypass PgBouncer — see
+# .env.production.example and docs/runbooks/scaling.md). Only the worker service
+# may run more than one replica (see numReplicas above). The app drains the pg
+# pool(s) on SIGTERM (app.ts shutdown handler).
