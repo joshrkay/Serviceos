@@ -5,6 +5,7 @@ import type { AuditRepository } from '../audit/audit';
 import { createAuditEvent } from '../audit/audit';
 import type { LLMGateway } from '../ai/gateway';
 import { getSentryClient, type SentryClient } from '../monitoring/sentry';
+import { withTenantSession } from '../db/rls-runtime-role';
 
 export interface VerifyAiPayload {
   tenantId: string;
@@ -41,6 +42,12 @@ function reportVerificationFailure(
  * tenant's behalf and records pass/fail on tenant_settings so the onboarding
  * `ai_check` step can be derived without the status endpoint ever touching the
  * gateway. Idempotent — re-running after a pass is a no-op.
+ *
+ * tenant_settings is read and written under the payload tenant's context
+ * (`rls_app_runtime`, raw-pg audit 2026-10-23 §4 P1.9), one tenant session per
+ * stage: the read and the 'running' (or 'ai_config_missing') mark before the
+ * gateway call, then the outcome after it. No session is open across the LLM
+ * call, so the call never holds a pooled connection idle in transaction.
  */
 export function createVerifyAiWorker(deps: {
   pool: Pool;
@@ -57,40 +64,48 @@ export function createVerifyAiWorker(deps: {
       const { pool, gateway, auditRepo } = deps;
       const sentry = deps.sentry ?? getSentryClient();
 
-      const { rows } = await pool.query<{ ai_model: string | null; ai_verification_status: string | null }>(
-        `SELECT ai_model, ai_verification_status FROM tenant_settings WHERE tenant_id = $1`,
-        [tenantId],
-      );
-      const current = rows[0];
-
-      if (current?.ai_verification_status === 'passed') {
-        logger.info('AI verification already passed, skipping', { tenantId });
-        return;
-      }
-
-      if (!current?.ai_model) {
-        logger.warn('AI verification cannot run — no ai_model configured', { tenantId });
-        reportVerificationFailure(sentry, tenantId, 'ai_config_missing', new Error('ai_config_missing'));
-        await pool.query(
+      // Stage 1 — one session: the read, then the mark it decides on.
+      const start = await withTenantSession(pool, tenantId, async (client) => {
+        const { rows } = await client.query<{ ai_model: string | null; ai_verification_status: string | null }>(
+          `SELECT ai_model, ai_verification_status FROM tenant_settings WHERE tenant_id = $1`,
+          [tenantId],
+        );
+        const current = rows[0];
+        if (current?.ai_verification_status === 'passed') return 'already_passed' as const;
+        if (!current?.ai_model) {
+          await client.query(
+            `UPDATE tenant_settings
+                SET ai_verification_status = 'failed',
+                    ai_verification_error = 'ai_config_missing',
+                    updated_at = NOW()
+              WHERE tenant_id = $1`,
+            [tenantId],
+          );
+          return 'ai_config_missing' as const;
+        }
+        await client.query(
           `UPDATE tenant_settings
-              SET ai_verification_status = 'failed',
-                  ai_verification_error = 'ai_config_missing',
+              SET ai_verification_status = 'running',
+                  ai_verification_started_at = NOW(),
                   updated_at = NOW()
             WHERE tenant_id = $1`,
           [tenantId],
         );
+        return 'running' as const;
+      });
+
+      if (start === 'already_passed') {
+        logger.info('AI verification already passed, skipping', { tenantId });
         return;
       }
 
-      await pool.query(
-        `UPDATE tenant_settings
-            SET ai_verification_status = 'running',
-                ai_verification_started_at = NOW(),
-                updated_at = NOW()
-          WHERE tenant_id = $1`,
-        [tenantId],
-      );
+      if (start === 'ai_config_missing') {
+        logger.warn('AI verification cannot run — no ai_model configured', { tenantId });
+        reportVerificationFailure(sentry, tenantId, 'ai_config_missing', new Error('ai_config_missing'));
+        return;
+      }
 
+      // Stage 2 — the gateway call, with stage 1 committed and no session open.
       try {
         const response = await gateway.complete({
           taskType: 'intent_classification',
@@ -103,14 +118,17 @@ export function createVerifyAiWorker(deps: {
           throw new Error('Gateway returned an empty response');
         }
 
-        await pool.query(
-          `UPDATE tenant_settings
-              SET ai_verification_status = 'passed',
-                  ai_verified_at = NOW(),
-                  ai_verification_error = NULL,
-                  updated_at = NOW()
-            WHERE tenant_id = $1`,
-          [tenantId],
+        // Stage 3 — the outcome, a session of its own.
+        await withTenantSession(pool, tenantId, (client) =>
+          client.query(
+            `UPDATE tenant_settings
+                SET ai_verification_status = 'passed',
+                    ai_verified_at = NOW(),
+                    ai_verification_error = NULL,
+                    updated_at = NOW()
+              WHERE tenant_id = $1`,
+            [tenantId],
+          ),
         );
         await auditRepo.create(
           createAuditEvent({
@@ -128,13 +146,15 @@ export function createVerifyAiWorker(deps: {
         const error = err instanceof Error ? err.message : String(err);
         logger.error('AI verification failed', { tenantId, error });
         reportVerificationFailure(sentry, tenantId, error, err);
-        await pool.query(
-          `UPDATE tenant_settings
-              SET ai_verification_status = 'failed',
-                  ai_verification_error = $1,
-                  updated_at = NOW()
-            WHERE tenant_id = $2`,
-          [error, tenantId],
+        await withTenantSession(pool, tenantId, (client) =>
+          client.query(
+            `UPDATE tenant_settings
+                SET ai_verification_status = 'failed',
+                    ai_verification_error = $1,
+                    updated_at = NOW()
+              WHERE tenant_id = $2`,
+            [error, tenantId],
+          ),
         ).catch(() => {});
         await auditRepo.create(
           createAuditEvent({

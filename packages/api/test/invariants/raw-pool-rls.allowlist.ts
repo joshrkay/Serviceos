@@ -168,7 +168,7 @@ export const TABLES_WITHOUT_MIGRATION: ReadonlyArray<{ readonly table: string; r
  * The `tenant_filtered_no_rls` debt, frozen. Migrating one means deleting its
  * entry and LOWERING this number; adding one means raising it, in review.
  */
-export const TFNR_CEILING = 29;
+export const TFNR_CEILING = 21;
 
 export const RAW_PG_SITES: readonly RawPgSite[] = [
   // ── ai/ ────────────────────────────────────────────────────────────────
@@ -568,36 +568,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     category: 'tenant_filtered_no_rls', tables: ['lifecycle_emails'], migrateBy: 'audit 2026-10-23 §4 P2.4',
     why: 'Transport-failure release: DELETE FROM lifecycle_emails WHERE tenant_id = $1 AND kind = $2 for the tenant that just claimed it, as the principal.',
   },
-  {
-    file: 'src/notifications/send-claim-ledger.ts', fn: 'claimSend', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['send_claims'], migrateBy: 'audit 2026-10-23 §4 P1.6',
-    why: 'The SMS send-claim ledger under every proposal-execution, drip, thank-you and transactional send: a bare pool.query keyed by (tenant_id, claim_key) with a server-derived tenant. It commits independently of the request on purpose (P1.6 decision pending).',
-  },
-  {
-    file: 'src/notifications/send-claim-ledger.ts', fn: 'markSendClaimSending', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['send_claims'], migrateBy: 'audit 2026-10-23 §4 P1.6',
-    why: 'Send-claim state flip WHERE tenant_id = $1 AND claim_key = $2 on FORCE-RLS send_claims, as the principal, with the same server-derived tenant as claimSend.',
-  },
-  {
-    file: 'src/notifications/send-claim-ledger.ts', fn: 'markSendClaimComplete', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['send_claims'], migrateBy: 'audit 2026-10-23 §4 P1.6',
-    why: 'Marks a send claim complete, tenant-filtered by the internal tenantId (withSendClaim, outbound-messaging), outside RLS.',
-  },
-  {
-    file: 'src/notifications/send-claim-ledger.ts', fn: 'releaseSendClaim', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['send_claims'], migrateBy: 'audit 2026-10-23 §4 P1.6',
-    why: 'Tenant-filtered DELETE of a send claim from withSendClaim on failure, as the principal (FORCE-RLS send_claims).',
-  },
-  {
-    file: 'src/notifications/send-claim-ledger.ts', fn: 'findStuckSendClaims', access: 'pool.query', count: 1,
-    category: 'cross_tenant_intentional', tables: ['send_claims'], migrateBy: 'audit 2026-10-23 §4 P3.4',
-    why: 'Operator-monitor sweep across all tenants with deliberately no tenant filter. It has no production caller (tests only): delete it, or wire it under withCrossTenantSweep (P3.4).',
-  },
-  {
-    file: 'src/notifications/send-claim-ledger.ts', fn: 'readSendClaimStatus', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['send_claims'], migrateBy: 'audit 2026-10-23 §4 P1.6',
-    why: 'Reads a send claim WHERE tenant_id = $1 AND claim_key = $2 with an internal tenantId (sendText, duplicateOutcome), as the principal.',
-  },
 
   // ── onboarding/ ────────────────────────────────────────────────────────
   {
@@ -614,13 +584,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/onboarding/choices/price-tiers.ts', fn: 'PgRegionalPriceTierRepository.upsert', access: 'pool.query', count: 1,
     category: 'global_table', tables: ['regional_price_tiers'],
     why: 'Admin write path into the platform regional_price_tiers table (no tenant_id, no RLS). No src or script caller, only integration tests (P4.2 dead-code candidate).',
-  },
-  {
-    file: 'src/onboarding/load-facts.ts', fn: 'loadOnboardingFacts', access: 'ambient-or-pool', count: 7,
-    category: 'tenant_filtered_no_rls',
-    tables: ['tenant_integrations', 'tenants', 'voice_sessions', 'tenant_settings', 'pack_activations', 'onboarding_drafts', 'proposals'],
-    migrateBy: 'audit 2026-10-23 §4 P1.11',
-    why: 'db = currentTenantContext()?.client ?? pool: requests get the RLS request client, but the setup-reminder sweep has no context and falls back to the raw pool, so its seven reads rest only on WHERE tenant_id = $1 for a sweep-row tenant.',
   },
 
   // ── portal/ proposals/ public-intake/ push/ ────────────────────────────
@@ -1024,9 +987,9 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     why: "user.deleted soft-deletes every membership row of the Svix-verified Clerk user id across tenants (UPDATE users … WHERE clerk_user_id = $1). Intentional, but unattributed; under rls_app_runtime it would match 0 rows.",
   },
   {
-    file: 'src/webhooks/routes.ts', fn: 'POST /stripe', access: 'pool.query', count: 5,
-    category: 'tenant_filtered_no_rls', tables: ['tenants', 'tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P1.10',
-    why: 'Signed Stripe events: four tenants-registry lookups/updates by session or customer id (no RLS) plus the AI-model seed UPDATE tenant_settings WHERE tenant_id = $1 (FORCE RLS) as the principal; that one is the debt.',
+    file: 'src/webhooks/routes.ts', fn: 'POST /stripe', access: 'pool.query', count: 4,
+    category: 'global_table', tables: ['tenants'],
+    why: "Signed Stripe events: the tenants-registry reads and writes keyed by the event's own ids (no RLS): the expired checkout's pending-session clear, and the customer-id lookups for usage settlement, the AI-model seed / self-check and the deprovision enqueue. The seed UPDATE itself runs in a withTenantSession (P1.10).",
   },
   {
     file: 'src/webhooks/routes.ts', fn: 'POST /stripe', access: 'pool.connect', count: 1,
@@ -1104,10 +1067,5 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/workers/trial-reminder-sweep.ts', fn: 'runTrialReminderSweep', access: 'pool.query', count: 1,
     category: 'global_table', tables: ['tenants'],
     why: "Trial-ending scan of the tenants registry (no RLS); each email goes to that tenant's own owner_email.",
-  },
-  {
-    file: 'src/workers/verify-ai.ts', fn: 'createVerifyAiWorker.handle', access: 'pool.query', count: 5,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P1.9',
-    why: 'The LLM verification worker reads and updates tenant_settings WHERE tenant_id = $1 with the server-set payload tenant (Stripe-resolved or req.auth retry), on the raw pool. One withTenantSession per stage.',
   },
 ];

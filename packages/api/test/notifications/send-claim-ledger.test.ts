@@ -1,27 +1,54 @@
 /**
- * Unit tests for the shared claim-before-send ledger (T4-F01). Mocked Pool —
- * asserts the SQL shape (query text + params) and withSendClaim's
+ * Unit tests for the shared claim-before-send ledger (T4-F01). Fake tenant
+ * pool (test/helpers/fake-tenant-pool.ts) — asserts the SQL shape (query text
+ * + params), that every statement runs in a tenant session of its own
+ * (raw-pg audit 2026-10-23 §4 P1.6), and withSendClaim's
  * compose/release/finalize control flow. Per CLAUDE.md, a mocked-Pool test is
  * never the only proof the SQL is valid against real Postgres — see
  * test/integration/send-claim-ledger.test.ts for the Docker-gated proof of
- * the actual constraint/UPSERT semantics.
+ * the actual constraint/UPSERT semantics, and
+ * test/integration/send-claim-ledger-tenant-context.test.ts for the role,
+ * the RLS backstop and the commit points.
  */
 import { describe, it, expect, vi } from 'vitest';
-import type { Pool, QueryResult } from 'pg';
+import type { PoolClient, QueryResult } from 'pg';
 import {
   claimSend,
-  findStuckSendClaims,
   markSendClaimComplete,
   markSendClaimSending,
+  readSendClaimStatus,
   releaseSendClaim,
   withSendClaim,
 } from '../../src/notifications/send-claim-ledger';
+import { tenantContextStore } from '../../src/middleware/tenant-context';
+import { fakeTenantPool } from '../helpers/fake-tenant-pool';
 
-const TENANT = 'tenant-1';
+const TENANT = '11111111-1111-4111-8111-111111111111';
 
-function fakePool(rowCount: number): { pool: Pool; query: ReturnType<typeof vi.fn> } {
-  const query = vi.fn(async () => ({ rowCount, rows: [] }) as unknown as QueryResult);
-  return { pool: { query } as unknown as Pool, query };
+/** Transaction control and the tenant context statement: the session around each ledger statement. */
+const SESSION = /^\s*(BEGIN|COMMIT|ROLLBACK|SELECT set_config\()/;
+
+type LedgerQuery = (sql: string, params: unknown[]) => unknown;
+
+/**
+ * A fake tenant pool whose `query` sees only the ledger's own statements (the
+ * session around each one is answered by the fake), so the assertions below
+ * read the ledger's SQL in order.
+ */
+function tenantPool<Q extends LedgerQuery>(query: Q) {
+  const fake = fakeTenantPool((sql, values) =>
+    SESSION.test(sql) ? undefined : (query(sql, values ?? []) as Promise<{ rows?: unknown[]; rowCount?: number }>),
+  );
+  return { ...fake, query };
+}
+
+function fakePool(rowCount: number) {
+  return tenantPool(vi.fn(async (_sql: string, _params: unknown[]) => ({ rowCount, rows: [] }) as unknown as QueryResult));
+}
+
+/** A statement's verb, with the tenant context statement read as CONTEXT. */
+function verbOf(sql: string): string {
+  return /set_config\('app\.current_tenant_id'/.test(sql) ? 'CONTEXT' : sql.trim().split(/\s+/)[0]!;
 }
 
 describe('claimSend', () => {
@@ -89,24 +116,6 @@ describe('releaseSendClaim', () => {
   });
 });
 
-describe('findStuckSendClaims', () => {
-  it('selects rows stuck at "sending" older than the given window', async () => {
-    const query = vi.fn(async () => ({
-      rowCount: 1,
-      rows: [{ tenant_id: TENANT, claim_key: 'k', claimed_at: new Date('2026-07-18T00:00:00Z') }],
-    }) as unknown as QueryResult);
-    const pool = { query } as unknown as Pool;
-    const stuck = await findStuckSendClaims(pool, 60);
-    const [sql, params] = query.mock.calls[0];
-    expect(sql).toMatch(/WHERE status = 'sending'/);
-    expect(sql).toMatch(/claimed_at < NOW\(\) - \(\$1 \|\| ' minutes'\)::interval/);
-    expect(params).toEqual(['60']);
-    expect(stuck).toEqual([
-      { tenantId: TENANT, claimKey: 'k', claimedAt: new Date('2026-07-18T00:00:00Z') },
-    ]);
-  });
-});
-
 describe('withSendClaim', () => {
   it('claims, transitions to sending, sends, finalizes — returns {outcome: "sent", result}', async () => {
     const { pool, query } = fakePool(1);
@@ -140,7 +149,7 @@ describe('withSendClaim', () => {
       .fn()
       .mockResolvedValueOnce({ rowCount: 0, rows: [] }) // claim miss
       .mockResolvedValueOnce({ rowCount: 1, rows: [{ status: 'sent' }] }); // status read
-    const pool = { query } as unknown as Pool;
+    const { pool } = tenantPool(query);
     const sendFn = vi.fn(async () => 'ok');
     const result = await withSendClaim(pool, TENANT, 'k', sendFn);
     expect(result).toEqual({ outcome: 'duplicate', priorStatus: 'sent' });
@@ -153,7 +162,7 @@ describe('withSendClaim', () => {
       .fn()
       .mockResolvedValueOnce({ rowCount: 0, rows: [] })
       .mockResolvedValueOnce({ rowCount: 1, rows: [{ status: 'claimed' }] });
-    const pool = { query } as unknown as Pool;
+    const { pool } = tenantPool(query);
     const sendFn = vi.fn(async () => 'ok');
     const result = await withSendClaim(pool, TENANT, 'k', sendFn);
     expect(result).toEqual({ outcome: 'duplicate', priorStatus: 'claimed' });
@@ -165,7 +174,7 @@ describe('withSendClaim', () => {
       .fn()
       .mockResolvedValueOnce({ rowCount: 0, rows: [] }) // claim miss
       .mockResolvedValueOnce({ rowCount: 1, rows: [{ status: 'sending' }] }); // status read
-    const pool = { query } as unknown as Pool;
+    const { pool } = tenantPool(query);
     const sendFn = vi.fn(async () => 'ok');
     const result = await withSendClaim(pool, TENANT, 'k', sendFn);
     expect(result).toEqual({ outcome: 'duplicate', priorStatus: 'sending' });
@@ -177,7 +186,7 @@ describe('withSendClaim', () => {
       .fn()
       .mockResolvedValueOnce({ rowCount: 0, rows: [] })
       .mockResolvedValueOnce({ rowCount: 0, rows: [] }); // concurrent release deleted it
-    const pool = { query } as unknown as Pool;
+    const { pool } = tenantPool(query);
     const sendFn = vi.fn(async () => 'ok');
     const result = await withSendClaim(pool, TENANT, 'k', sendFn);
     expect(result).toEqual({ outcome: 'duplicate', priorStatus: 'unknown' });
@@ -194,7 +203,7 @@ describe('withSendClaim', () => {
       .mockResolvedValueOnce({ rowCount: 1, rows: [] }) // claim INSERT — we won a claim
       .mockResolvedValueOnce({ rowCount: 0, rows: [] }) // sending UPDATE — lost the CAS
       .mockResolvedValueOnce({ rowCount: 1, rows: [{ status: 'sending' }] }); // status read
-    const pool = { query } as unknown as Pool;
+    const { pool } = tenantPool(query);
     const sendFn = vi.fn(async () => 'ok');
     const result = await withSendClaim(pool, TENANT, 'k', sendFn);
     expect(result).toEqual({ outcome: 'duplicate', priorStatus: 'sending' });
@@ -225,7 +234,7 @@ describe('withSendClaim', () => {
       .mockResolvedValueOnce({ rowCount: 1, rows: [] }) // claim INSERT
       .mockResolvedValueOnce({ rowCount: 1, rows: [] }) // sending UPDATE
       .mockRejectedValueOnce(new Error('db down on release')); // release DELETE
-    const pool = { query } as unknown as Pool;
+    const { pool } = tenantPool(query);
     const sendFn = vi.fn(async () => {
       throw new Error('provider down');
     });
@@ -265,7 +274,7 @@ describe('withSendClaim', () => {
         .mockResolvedValueOnce({ rowCount: 1, rows: [] }) // claim INSERT
         .mockResolvedValueOnce({ rowCount: 1, rows: [] }) // sending UPDATE
         .mockRejectedValueOnce(new Error('db down on finalize')); // finalize UPDATE ('sent')
-      const pool = { query } as unknown as Pool;
+      const { pool } = tenantPool(query);
       const sendFn = vi.fn(async (markProviderAccepted: () => void) => {
         markProviderAccepted();
         throw new Error('dispatch-row write failed');
@@ -290,7 +299,7 @@ describe('withSendClaim + claimSend — three-state crash-safety lifecycle', () 
     claimedAt: number;
   }
 
-  function simulatedPool(rows = new Map<string, SimRow>()): { pool: Pool; rows: Map<string, SimRow> } {
+  function simulatedPool(rows = new Map<string, SimRow>()) {
     const query = vi.fn(async (sql: string, params: unknown[]) => {
       const key = `${params[0]}::${params[1]}`;
       const trimmed = sql.trim();
@@ -338,7 +347,7 @@ describe('withSendClaim + claimSend — three-state crash-safety lifecycle', () 
       }
       throw new Error(`unhandled sql in simulatedPool: ${sql}`);
     });
-    return { pool: { query } as unknown as Pool, rows };
+    return { pool: tenantPool(query).pool, rows, query };
   }
 
   it('happy path: row ends at "sent" and a subsequent claimSend never reclaims it', async () => {
@@ -369,7 +378,7 @@ describe('withSendClaim + claimSend — three-state crash-safety lifecycle', () 
   });
 
   it('Codex P1 — stale-reclaim race: A passes claimSend then stalls >staleMinutes; B reclaims + fully sends; A\'s sending CAS loses, so A aborts to duplicate and the provider is called exactly ONCE', async () => {
-    const { pool: basePool, rows } = simulatedPool();
+    const { pool: basePool, rows, query: baseQuery } = simulatedPool();
     let aProvider = 0;
     let bProvider = 0;
 
@@ -378,20 +387,18 @@ describe('withSendClaim + claimSend — three-state crash-safety lifecycle', () 
     // and let a SECOND process B run a full withSendClaim in that gap. B
     // reclaims the now-stale 'claimed' row, wins the sending CAS, sends, and
     // tombstones as 'sent' — all before A resumes to its own sending CAS.
-    const aPool = {
-      query: vi.fn(async (sql: string, params: unknown[]) => {
-        const res = await (basePool.query as unknown as (s: string, p: unknown[]) => Promise<QueryResult>)(sql, params);
-        if (sql.trim().startsWith('INSERT')) {
-          rows.get(`${TENANT}::k`)!.claimedAt = Date.now() - 60 * 60_000;
-          const bOutcome = await withSendClaim(basePool, TENANT, 'k', async () => {
-            bProvider++;
-            return 'B-sent';
-          });
-          expect(bOutcome).toEqual({ outcome: 'sent', result: 'B-sent' });
-        }
-        return res;
-      }),
-    } as unknown as Pool;
+    const { pool: aPool } = tenantPool(async (sql: string, params: unknown[]) => {
+      const res = await baseQuery(sql, params);
+      if (sql.trim().startsWith('INSERT')) {
+        rows.get(`${TENANT}::k`)!.claimedAt = Date.now() - 60 * 60_000;
+        const bOutcome = await withSendClaim(basePool, TENANT, 'k', async () => {
+          bProvider++;
+          return 'B-sent';
+        });
+        expect(bOutcome).toEqual({ outcome: 'sent', result: 'B-sent' });
+      }
+      return res;
+    });
 
     const aOutcome = await withSendClaim(aPool, TENANT, 'k', async () => {
       aProvider++;
@@ -549,5 +556,118 @@ describe('withSendClaim + claimSend — three-state crash-safety lifecycle', () 
     expect(aProvider).toBe(0);
     expect(bProvider).toBe(1); // exactly one real send despite two claim winners
     expect(rows.get(`${TENANT}::k`)?.status).toBe('sent');
+  });
+});
+
+describe('tenant sessions — raw-pg audit 2026-10-23 §4 P1.6', () => {
+  it('each primitive runs its one statement in a session of its own: BEGIN, the tenant context, the statement, COMMIT', async () => {
+    const calls: Array<[string, (p: ReturnType<typeof fakePool>['pool']) => Promise<unknown>, string]> = [
+      ['claimSend', (p) => claimSend(p, TENANT, 'k'), 'INSERT'],
+      ['markSendClaimSending', (p) => markSendClaimSending(p, TENANT, 'k'), 'UPDATE'],
+      ['markSendClaimComplete', (p) => markSendClaimComplete(p, TENANT, 'k'), 'UPDATE'],
+      ['releaseSendClaim', (p) => releaseSendClaim(p, TENANT, 'k'), 'DELETE'],
+      ['readSendClaimStatus', (p) => readSendClaimStatus(p, TENANT, 'k'), 'SELECT'],
+    ];
+    for (const [name, call, verb] of calls) {
+      const fake = fakePool(1);
+      await call(fake.pool);
+      expect({ name, ran: fake.statements.map((st) => [st.checkout, verbOf(st.sql)]) }).toEqual({
+        name,
+        ran: [[0, 'BEGIN'], [0, 'CONTEXT'], [0, verb], [0, 'COMMIT']],
+      });
+      expect(fake.statements[1]!.values).toEqual([TENANT]);
+      expect(fake.open()).toBe(0);
+    }
+  });
+
+  it('never runs on a request client: inside a request transaction every step takes a checkout of its own', async () => {
+    const requestClient = {
+      query: vi.fn(async () => {
+        throw new Error('ran on the request client');
+      }),
+      release: vi.fn(),
+    };
+    const fake = fakePool(1);
+
+    const outcome = await tenantContextStore.run(
+      { client: requestClient as unknown as PoolClient, tenantId: TENANT },
+      () => withSendClaim(fake.pool, TENANT, 'k', async () => 'ok'),
+    );
+
+    expect(outcome).toEqual({ outcome: 'sent', result: 'ok' });
+    expect(requestClient.query).not.toHaveBeenCalled();
+    expect(fake.checkouts()).toBe(3);
+    expect(fake.query.mock.calls.map((c) => verbOf(c[0]))).toEqual(['INSERT', 'UPDATE', 'UPDATE']);
+  });
+
+  it('no session is open while sendFn runs: the claim and the CAS have committed and been released before it', async () => {
+    const fake = fakePool(1);
+    let openDuringSend = -1;
+    let ranBeforeSend: string[] = [];
+
+    await withSendClaim(fake.pool, TENANT, 'k', async () => {
+      openDuringSend = fake.open();
+      ranBeforeSend = fake.statements.map((st) => verbOf(st.sql));
+      return 'ok';
+    });
+
+    expect(openDuringSend).toBe(0);
+    expect(ranBeforeSend).toEqual(['BEGIN', 'CONTEXT', 'INSERT', 'COMMIT', 'BEGIN', 'CONTEXT', 'UPDATE', 'COMMIT']);
+  });
+
+  it('deferred: markProviderStarting commits the CAS before it returns, and no session is open at the provider call', async () => {
+    const fake = fakePool(1);
+    let openAtProvider = -1;
+    let lastBeforeProvider = '';
+
+    await withSendClaim(
+      fake.pool,
+      TENANT,
+      'k',
+      async (_accepted, markProviderStarting) => {
+        await markProviderStarting();
+        openAtProvider = fake.open();
+        lastBeforeProvider = verbOf(fake.statements.at(-1)!.sql);
+        return 'ok';
+      },
+      undefined,
+      { deferSendingUntilProviderStart: true },
+    );
+
+    expect(openAtProvider).toBe(0);
+    expect(lastBeforeProvider).toBe('COMMIT');
+    expect(fake.checkouts()).toBe(3);
+  });
+
+  it('a failing statement rolls its own session back and releases the client; the send error still propagates', async () => {
+    const query = vi
+      .fn()
+      .mockResolvedValueOnce({ rowCount: 1, rows: [] }) // claim INSERT
+      .mockResolvedValueOnce({ rowCount: 1, rows: [] }) // sending UPDATE
+      .mockRejectedValueOnce(new Error('db down on release')); // release DELETE
+    const fake = tenantPool(query);
+
+    await expect(
+      withSendClaim(fake.pool, TENANT, 'k', async () => {
+        throw new Error('provider down');
+      }),
+    ).rejects.toThrow('provider down');
+
+    expect(fake.statements.filter((st) => st.checkout === 2).map((st) => verbOf(st.sql))).toEqual([
+      'BEGIN',
+      'CONTEXT',
+      'DELETE',
+      'ROLLBACK',
+    ]);
+    expect(fake.open()).toBe(0);
+  });
+
+  it('a malformed tenant id throws before any ledger statement runs', async () => {
+    const fake = fakePool(1);
+
+    await expect(claimSend(fake.pool, 'tenant-1', 'k')).rejects.toThrow(/Invalid tenant ID/);
+
+    expect(fake.query).not.toHaveBeenCalled();
+    expect(fake.open()).toBe(0);
   });
 });
