@@ -137,7 +137,7 @@ The six link kinds are the design's: direct (`customer_id` foreign key), bare co
 | `shadow_comparisons` | 8938 | `ai_run_id` 8941 | `primary_response_text` 8946, `shadow_response_text` 8947 | blank, by `ai_run_id` with the subject's runs |
 | `retrieval_eval_runs` | 1577 | `ai_run_id` 1580 | `query_text` 1581 | blank (proposed) |
 | `knowledge_chunks` | 1654 | `source_type` 1658, `source_id` 1659 | `content` 1661, `content_scrubbed` 1662, `embedding` 1663, `metadata` 1666 | delete by source |
-| `llm_cache` | 788 | `cache_key` 790 | `response` 793 | delete the tenant's entries for customer-content task types (proposed); entries also expire by `ttl_ms` |
+| `llm_cache` | 788 | `cache_key` 790 | `response` 793 | none: the table is unused on `main`, where nothing reads or writes it (`grep -rn llm_cache packages/api/src` matches only `db/schema.ts`), so it needs no erase step. The live response cache is the gateway's, under "Payload stores with no tenant column". |
 
 ## Tables matched by content or by identifier only
 
@@ -166,6 +166,7 @@ These hold the subject's name, phone, email or address with no link to the `cust
 | `_queue_dlq` | `queues/pg-queue.ts:51` | the same payloads, plus handler error text | the same step, plus an age-bounded purge (owner packet item 17) with errors stored as codes |
 | `_feature_flags` | `flags/pg-feature-flags.ts:27` | none | moves into `MIGRATIONS`; no erase step |
 | `idempotency_keys` | `schema.ts:7434`; `response_body` 7441 | cached API responses, such as a customer create, for 24 hours | a step waits out the lifetime plus the prune interval |
+| Gateway response cache | in-process, or Redis when `REDIS_URL` is set (`ai/gateway/factory.ts:268-322`; `ai/gateway/redis-cache-store.ts:36` stores the whole entry with `PX` set to its TTL). It is on only when `AI_CACHE_ENABLED=true` (`ai/gateway/factory.ts:236-241`): `scripts/env-allowlist.json:22` records it as off in production, and `docs/runbooks/scaling.md:15-17` tells operators to turn it on with Redis. | the whole `LLMResponse` (`ai/gateway/cache.ts:15-19`) for `classify_intent` and `extract_categories` (`ai/gateway/factory.ts:253-256`), keyed by a sha256 of the model, messages, task type and tenant (`ai/gateway/cache.ts:36-44`), for 1 hour (`ai/gateway/factory.ts:274`). A `classify_intent` reply carries extracted entities such as `customerName`, `email`, `phone` and `address` (`ai/orchestration/intent-classifier.ts:786-810`). | no erase step: entries expire by TTL, and the result lists the cache as holding the subject's data for at most 1 hour. Redis drops an entry at its TTL. The in-process map stops serving an entry after 1 hour but keeps it until its 5,000-entry FIFO bound evicts it or the process restarts (`ai/gateway/cache.ts:53-78`), so it must delete expired entries for that 1 hour to hold (proposed). A tenant-scoped flush is the alternative, but the key has no tenant prefix to flush by. |
 
 ## External providers
 
@@ -196,13 +197,14 @@ These hold the subject's name, phone, email or address with no link to the `cust
 | PostHog | product events built from audit events (`analytics/posthog.ts:120`; `analytics/audit-event-mapping.ts` keeps them to ids and enums) | `provider_retained`; check that no event carries a subject value |
 | Pendo (web) | staff sessions in the browser (`packages/web/src/main.tsx:39-40`, `packages/web/src/components/auth/AnalyticsIdentityBridge.tsx:66`) | not the subject's data unless page text is captured; check Pendo's capture setting |
 | Cloudflare Turnstile | a webchat visitor's challenge token (`webchat/webchat-guard.ts:46`) | none expected; check |
+| Expo push (to APNs/FCM) | push titles and bodies sent to staff devices through `https://exp.host/--/api/v2/push/send` (`notifications/expo-push-service.ts:8`, wired at `app.ts:1475`). In `notifications/owner-notification-service.ts`: a customer's name with an inbound text's preview (`:126-127`), customer names on appointment, assignment, payment and invoice pushes (`:139`, `:151`, `:167`, `:182`, `:194`, `:206`), the caller's name or raw number on an incoming call (`:112`, built at `telephony/twilio-adapter.ts:604-608`), a lead's name or phone (`:218`), and a quoted feedback comment (`:232-236`). The voice E1 emergency push carries the keyword and a masked number (`ai/voice-turn/create-voice-turn-processor.ts:3757-3768`). | `provider_retained`: there is no per-message delete. Messages are transient at Expo; copies stay in staff devices' notification history. |
 | Clerk | staff accounts only | outside this unit's subject |
 
 ## Logs and backups
 
 | Store | Where | Erase action |
 |---|---|---|
-| Application logs | JSON to stdout (`logging/logger.ts:32`), with secret redaction only; the hosting provider keeps them | `provider_retained` under the hosting provider's log retention; no per-entry delete |
+| Application logs | JSON to stdout (`logging/logger.ts:32`) with secret and URL-token redaction, plus masking of the `from`, `to`, `transcript`, `speechResult` and `text` keys (`logging/redact.ts:29`); keys such as `customerName`, `phone` or `email` are masked only at the strict tier Sentry uses, so they can reach stdout. The hosting provider keeps them. | `provider_retained` under the hosting provider's log retention; no per-entry delete |
 | Postgres backups | the managed database's backups | `provider_retained` until their retention dates; a restore needs the runbook's re-erase step (design, "Backups keep what the erase removes") |
 | Bucket versions and backups | the storage provider | covered by the S3 step's version-aware deletes; backups are `provider_retained` |
 | Provider-side copies | Twilio backups (30 days), the QuickBooks Audit Log, the Google Calendar bin, Stripe charge records | `provider_retained`, listed in the result with each provider's period |

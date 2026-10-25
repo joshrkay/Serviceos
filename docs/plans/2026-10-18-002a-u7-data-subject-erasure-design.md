@@ -1208,6 +1208,12 @@ the owner sub-choices the design leaves open are in
           (`analytics/posthog.ts`, kept to ids and enums by `analytics/audit-event-mapping.ts`)
           and the hosting provider's log retention are retention entries in the result. Each is
           checked, not assumed.
+        - Expo push (`notifications/expo-push-service.ts:8`, wired at `app.ts:1475`) relays the
+          owner and staff pushes to APNs and FCM. Their titles and bodies carry customer names,
+          inbound-text previews and quoted feedback comments
+          (`notifications/owner-notification-service.ts:126-236`). Expo has no per-message delete,
+          so it is a retention entry, `provider_retained`: transient at Expo, with copies kept in
+          staff devices' notification history.
         - Clerk webhook payloads in `webhook_events` (below) are staff data, outside this unit's
           subject, but its global-list entry classifies them.
         - `technician_location_pings` (`schema.ts:989-1002`), GPS points linked through
@@ -3561,7 +3567,7 @@ rather than rebasing.
    kept-keys shape and stamps `content_purged_at`, so U4 skips those rows.
 9. **U7-14a**: the call-site scanner and its debt snapshot. **U7-14b**: classify the sinks the
    first draft missed, or give each an erase step (Google Maps, Business Profile, Anthropic,
-   Sentry, PostHog, Clerk, provisioning).
+   Sentry, PostHog, Clerk, provisioning, Expo push).
 10. **U7-15**: `withErasureFence` and the side pool.
 11. **U7-16a**: the SMS write-ahead at the `GatedMessageDelivery` → `PerTenantTwilioDeliveryProvider`
     boundary, on the new `outbound_claims` table. **U7-16b**: the source keys from the roughly 40
