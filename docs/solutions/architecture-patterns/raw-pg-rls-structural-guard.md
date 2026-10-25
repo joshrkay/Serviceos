@@ -242,7 +242,11 @@ deliberate cross-tenant sweep, a platform-constant write) add an entry:
   `WHERE NOT EXISTS (… tenant_id = $1 …)` by widening it: as the principal it
   sees the subject's membership in another tenant and silently skips the
   insert (the Clerk owner row, P2.2,
-  `test/integration/clerk-webhook-tenant-context.test.ts`).
+  `test/integration/clerk-webhook-tenant-context.test.ts`). The same swap on
+  a read whose answer drives an external side effect: deprovision's Twilio
+  credential read (P2.8) picks the subaccount to close, and widened as the
+  principal it hands another tenant's SID to `closeSubaccount`
+  (`test/integration/deprovision-tenant-context.test.ts`).
 
 ### Checkouts and callbacks: who gets the client
 

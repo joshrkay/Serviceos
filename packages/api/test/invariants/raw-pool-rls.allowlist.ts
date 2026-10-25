@@ -168,7 +168,7 @@ export const TABLES_WITHOUT_MIGRATION: ReadonlyArray<{ readonly table: string; r
  * The `tenant_filtered_no_rls` debt, frozen. Migrating one means deleting its
  * entry and LOWERING this number; adding one means raising it, in review.
  */
-export const TFNR_CEILING = 8;
+export const TFNR_CEILING = 6;
 
 export const RAW_PG_SITES: readonly RawPgSite[] = [
   // ── ai/ ────────────────────────────────────────────────────────────────
@@ -749,16 +749,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
   },
 
   // ── tenants/ ───────────────────────────────────────────────────────────
-  {
-    file: 'src/tenants/deprovision.ts', fn: 'readTwilioIntegration', access: 'pool.connect', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_integrations'], migrateBy: 'audit 2026-10-23 §4 P2.8',
-    why: "Reads the tenant's own twilio tenant_integrations row before releasing its subaccount, with only set_config and no role, so the policy does not bind the principal. Tenant is the UUID-validated admin/queue/script payload.",
-  },
-  {
-    file: 'src/tenants/deprovision.ts', fn: 'readTwilioIntegration', access: 'guc-only', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_integrations'], migrateBy: 'audit 2026-10-23 §4 P2.8',
-    why: "set_config('app.current_tenant_id', $1, true) as the only 'context' for the deprovision credential read: GUC without the runtime role. Swap for applyTenantContext inside the existing BEGIN.",
-  },
   {
     file: 'src/tenants/deprovision.ts', fn: 'deprovisionTenant', access: 'pool.query', count: 2,
     category: 'global_table', tables: ['tenants', 'platform_deprovision_log'],
