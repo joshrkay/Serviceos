@@ -60,6 +60,26 @@ export async function withTenantClient<T>(
 }
 
 /**
+ * Run `fn` so that every tenant read inside it — repository calls
+ * (PgBaseRepository.withTenant) and `withTenantClient` alike — joins ONE
+ * tenant-scoped transaction: the request's when the caller is inside a request
+ * scoped to `tenantId`, and otherwise a `PgTenantTransactionRunner`
+ * transaction of its own, published to `tenantContextStore` for the code
+ * inside. For a page that reads several of a tenant's rows through different
+ * modules (its settings row, then a phone fallback, …): one checkout and one
+ * BEGIN / context / COMMIT for all of them, instead of a session each.
+ *
+ * Keep out of `fn` anything that takes a checkout of its own from the pool (a
+ * global-table `withClient` read, a bare `pool.query`): inside the session it
+ * would hold a second connection beside it.
+ */
+export async function withTenantScope<T>(pool: Pool, tenantId: string, fn: () => Promise<T>): Promise<T> {
+  const ctx = currentTenantContext();
+  if (ctx && ctx.tenantId === tenantId) return fn();
+  return new PgTenantTransactionRunner(pool).run(tenantId, () => fn());
+}
+
+/**
  * A single tenant-scoped transaction. Repositories that honor
  * `tenantContextStore` (PgBaseRepository) automatically reuse this
  * transaction's client, so multiple repo writes inside `run` commit or roll

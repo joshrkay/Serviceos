@@ -59,11 +59,23 @@
  *    `pool-escape` site, listed like any other; a `pool.on('connect', …)`
  *    listener (`pool['on']`, `pool[K]`, `(pool.on)`, `pool.on!` too) is a
  *    `checkout-callback` site.
- * 9. Meta: reasons ≥ 40 chars, enums, real table names, unique keys.
+ * 9. R-role: a literal that switches or resets the role (`SET [LOCAL|SESSION]
+ *    ROLE`, `RESET ROLE`, `set_config('role', …)`, `SESSION AUTHORIZATION`,
+ *    `DISCARD ALL`), and a call to `clearTenantContext` (a drop) or
+ *    `applyCrossTenantRole` (takes `rls_cross_tenant`), is a `role-switch`
+ *    site. Inside a tenant session it takes the client off `rls_app_runtime`,
+ *    and nothing else would see it: the session's callback is not a site.
+ *    Outside the sanctioned helpers in `db/rls-runtime-role.ts` and their
+ *    sanctioned callers (each on its own checkout) it must be listed as
+ *    `principal_inside_tenant_session`, it must drop to the connection
+ *    principal (never take a role: that is `applyTenantContext` /
+ *    `applyCrossTenantRole`'s), and the SQL after it in its function (from the
+ *    start of a loop around it) is the entry's SQL, on no FORCE-RLS table.
+ * 10. Meta: reasons ≥ 40 chars, enums, real table names, unique keys.
  *
- * `indirect` (`.bind`, assignment, destructuring, a pg member or raw-checkout
- * helper taken by reference) and `any-receiver` accesses are never
- * allowlistable.
+ * `indirect` (`.bind`, assignment, destructuring, a pg member, raw-checkout
+ * helper or role helper taken by reference) and `any-receiver` accesses are
+ * never allowlistable.
  *
  * Evidence class: STRUCTURAL. The negative controls plant each evasion the
  * audit names into a temp tree with real `@types/pg` and show the guard
@@ -145,6 +157,7 @@ interface Report {
   readonly categories: string[];
   readonly order: string[];
   readonly handoffs: string[];
+  readonly roles: string[];
 }
 
 /** Access kinds whose sites carry R-order (a checkout, or a callback run on one). */
@@ -157,7 +170,7 @@ function evaluate(
   helpers: readonly SanctionedHelper[] = SANCTIONED_HELPERS,
 ): Report {
   const report: Report = {
-    forbidden: [], unlisted: [], counts: [], stale: [], tables: [], categories: [], order: [], handoffs: [],
+    forbidden: [], unlisted: [], counts: [], stale: [], tables: [], categories: [], order: [], handoffs: [], roles: [],
   };
 
   const groups = new Map<string, PgAccessSite[]>();
@@ -234,12 +247,13 @@ function evaluate(
       report.tables.push(`${k}: entry sets dynamicSql but no SQL here builds a table name or is non-literal`);
     }
 
-    // Category claims, against the census.
+    // Category claims, against the census. A drop to the principal is held to
+    // global_table's rule for the SQL after it.
     const rls = entry.tables.filter((t) => census.forced.has(t));
-    if (entry.category === 'global_table') {
-      if (rls.length) report.categories.push(`${k}: global_table names FORCE-RLS table(s) ${rls.join(', ')}`);
+    if (entry.category === 'global_table' || entry.category === 'principal_inside_tenant_session') {
+      if (rls.length) report.categories.push(`${k}: ${entry.category} names FORCE-RLS table(s) ${rls.join(', ')}`);
       const unexempt = entry.tables.filter((t) => census.tenantScoped.has(t) && !RLS_EXEMPT_TABLES_SHARED.has(t));
-      if (unexempt.length) report.categories.push(`${k}: global_table names tenant_id table(s) ${unexempt.join(', ')} that are not RLS-exempt`);
+      if (unexempt.length) report.categories.push(`${k}: ${entry.category} names tenant_id table(s) ${unexempt.join(', ')} that are not RLS-exempt`);
     } else if (!entry.dynamicSql && entry.access !== 'guc-only' && rls.length === 0) {
       // Exempt: dynamic SQL (its tables are only known at runtime) and a GUC
       // literal (it scopes the statements its checkout entry lists).
@@ -271,6 +285,21 @@ function evaluate(
           report.order.push(`${cite(s)}: claims tenant_context_applied but ${why}`);
         } else if (entry.category === 'cross_tenant_intentional' && !entry.migrateBy) {
           report.order.push(`${cite(s)}: cross-tenant checkout on the principal (${why}); apply applyCrossTenantRole first, or name the attribution item in migrateBy`);
+        }
+      }
+    }
+
+    // R-role: outside the sanctioned helpers, a role switch only drops back to
+    // the connection principal, and only as principal_inside_tenant_session.
+    if (entry.access === 'role-switch' || entry.category === 'principal_inside_tenant_session') {
+      if (entry.access !== 'role-switch') {
+        report.roles.push(`${k}: principal_inside_tenant_session is the category of a role-switch entry only`);
+      } else if (entry.category !== 'principal_inside_tenant_session') {
+        report.roles.push(`${k}: a role switch outside db/rls-runtime-role.ts is principal_inside_tenant_session (a drop to the connection principal), not ${entry.category}`);
+      }
+      for (const s of group) {
+        if (s.access === 'role-switch' && !s.roleDrop) {
+          report.roles.push(`${cite(s)}: takes a role (or one the scan cannot read) instead of dropping to the connection principal; outside db/rls-runtime-role.ts take a role only through applyTenantContext / applyCrossTenantRole`);
         }
       }
     }
@@ -348,6 +377,49 @@ describe('raw pg access vs. RLS (STRUCTURAL) — the reviewed allowlist', () => 
       report.handoffs,
       format(report.handoffs, 'Handoff drift: review what the new callee runs on the principal client, then list it (or delete the stale name).'),
     ).toEqual([]);
+  });
+
+  it('R-role: a role switch outside the sanctioned helpers drops to the principal, is listed as principal_inside_tenant_session, and the SQL after it is on no FORCE-RLS table', () => {
+    expect(
+      report.roles,
+      format(
+        report.roles,
+        'Role switch: take a role only through applyTenantContext / applyCrossTenantRole. A drop back to the connection principal inside a tenant session is listed as principal_inside_tenant_session, with the tables of the SQL after it.',
+      ),
+    ).toEqual([]);
+    // Every place src switches the role: the four helpers in db/rls-runtime-role.ts
+    // and each call to clearTenantContext / applyCrossTenantRole on its caller's
+    // own checkout (sanctioned), and cleanSeed's drop for the tenants registry
+    // DELETE (listed).
+    expect([...new Set(sites.filter((s) => s.access === 'role-switch').map(keyOf))].sort()).toEqual([
+      'src/db/pg-base.ts :: PgBaseRepository.withCrossTenantSweep :: role-switch',
+      'src/db/pg-base.ts :: PgBaseRepository.withTenantTransaction :: role-switch',
+      'src/db/rls-runtime-role.ts :: applyCrossTenantRole :: role-switch',
+      'src/db/rls-runtime-role.ts :: applyTenantContext :: role-switch',
+      'src/db/rls-runtime-role.ts :: clearTenantContext :: role-switch',
+      'src/db/rls-runtime-role.ts :: probeRoleAssumable :: role-switch',
+      'src/demo/reset.ts :: fenced :: role-switch',
+      'src/demo/seed-pool.ts :: seedDemoTenantPool :: role-switch',
+      'src/seed/seed-runner.ts :: cleanSeed :: role-switch',
+      'src/workers/geocode-locations-sweep.ts :: listPendingLocations :: role-switch',
+      'src/workers/payment-link-reconciliation-sweep.ts :: listCollectOnSiteTenantIds :: role-switch',
+    ]);
+    // The helper calls: a clearTenantContext is a drop, an applyCrossTenantRole takes a role.
+    expect(
+      sites.filter((s) => s.access === 'role-switch' && s.owner !== 'literal').map((s) => `${keyOf(s)} ${s.owner} drop=${s.roleDrop}`),
+    ).toEqual([
+      'src/db/pg-base.ts :: PgBaseRepository.withTenantTransaction :: role-switch clearTenantContext drop=true',
+      'src/db/pg-base.ts :: PgBaseRepository.withCrossTenantSweep :: role-switch applyCrossTenantRole drop=false',
+      'src/db/pg-base.ts :: PgBaseRepository.withCrossTenantSweep :: role-switch clearTenantContext drop=true',
+      'src/demo/reset.ts :: fenced :: role-switch clearTenantContext drop=true',
+      'src/demo/seed-pool.ts :: seedDemoTenantPool :: role-switch clearTenantContext drop=true',
+      'src/workers/geocode-locations-sweep.ts :: listPendingLocations :: role-switch applyCrossTenantRole drop=false',
+      'src/workers/geocode-locations-sweep.ts :: listPendingLocations :: role-switch clearTenantContext drop=true',
+      'src/workers/payment-link-reconciliation-sweep.ts :: listCollectOnSiteTenantIds :: role-switch applyCrossTenantRole drop=false',
+      'src/workers/payment-link-reconciliation-sweep.ts :: listCollectOnSiteTenantIds :: role-switch clearTenantContext drop=true',
+    ]);
+    const drop = sites.find((s) => keyOf(s) === 'src/seed/seed-runner.ts :: cleanSeed :: role-switch');
+    expect(drop && { roleDrop: drop.roleDrop, tables: sqlTables(drop.sql, census.known) }).toEqual({ roleDrop: true, tables: ['tenants'] });
   });
 
   it('tenant_filtered_no_rls is frozen debt: the count equals TFNR_CEILING and each names its migration', () => {
@@ -451,28 +523,93 @@ describe('raw pg access vs. RLS (STRUCTURAL) — the tables check reads SQL', ()
 
 /** Minimal stand-ins at the real relative paths, so the sanctioned records apply. */
 const PLANT_SUPPORT: Record<string, string> = {
+  // The real file's shape: withTenant through withTenantTransaction (context
+  // first, clearTenantContext before release), withClient, and
+  // withCrossTenantSweep (applyCrossTenantRole first, clearTenantContext before
+  // release), each on its own checkout.
   'src/db/pg-base.ts': [
     "import type { Pool, PoolClient } from 'pg';",
+    "import { applyCrossTenantRole, applyTenantContext, clearTenantContext } from './rls-runtime-role';",
     'export class PgBaseRepository {',
     '  constructor(protected readonly pool: Pool) {}',
+    '  protected async withTenant<T>(tenantId: string, fn: (c: PoolClient) => Promise<T>): Promise<T> {',
+    '    return this.withTenantTransaction(tenantId, fn);',
+    '  }',
+    '  protected async withTenantTransaction<T>(tenantId: string, fn: (c: PoolClient) => Promise<T>): Promise<T> {',
+    '    const client = await this.pool.connect();',
+    '    try {',
+    "      await client.query('BEGIN');",
+    '      await applyTenantContext(client, tenantId, { transactional: true });',
+    '      const result = await fn(client);',
+    "      await client.query('COMMIT');",
+    '      return result;',
+    '    } catch (err) {',
+    "      await client.query('ROLLBACK').catch(() => undefined);",
+    '      throw err;',
+    '    } finally {',
+    '      await clearTenantContext(client);',
+    '      client.release();',
+    '    }',
+    '  }',
     '  protected async withClient<T>(fn: (c: PoolClient) => Promise<T>): Promise<T> {',
     '    const c = await this.pool.connect();',
     '    try { return await fn(c); } finally { c.release(); }',
     '  }',
+    '  protected async withCrossTenantSweep<T>(fn: (c: PoolClient) => Promise<T>): Promise<T> {',
+    '    const client = await this.pool.connect();',
+    '    try {',
+    "      await client.query('BEGIN');",
+    '      await applyCrossTenantRole(client, { transactional: true });',
+    '      const result = await fn(client);',
+    "      await client.query('COMMIT');",
+    '      return result;',
+    '    } catch (err) {',
+    "      await client.query('ROLLBACK').catch(() => undefined);",
+    '      throw err;',
+    '    } finally {',
+    '      await clearTenantContext(client);',
+    '      client.release();',
+    '    }',
+    '  }',
     '}',
     '',
   ].join('\n'),
+  // The real file's shape: two set_config literals and two role switches in
+  // applyTenantContext, two in applyCrossTenantRole, one RESET ROLE, and the
+  // withTenantSession checkout (context first, then the caller's callback).
   'src/db/rls-runtime-role.ts': [
-    "import type { PoolClient } from 'pg';",
-    'export async function applyTenantContext(client: PoolClient, tenantId: string, _o: { transactional?: boolean } = {}): Promise<void> {',
-    "  if (process.env.RLS_RUNTIME_ROLE === 'true') {",
-    "    await client.query(\"SELECT set_config('app.current_tenant_id', $1, true), set_config('role', 'rls_app_runtime', true)\", [tenantId]);",
-    '  } else {',
-    "    await client.query(\"SELECT set_config('app.current_tenant_id', $1, true)\", [tenantId]);",
+    "import type { Pool, PoolClient } from 'pg';",
+    'export async function applyTenantContext(client: PoolClient, tenantId: string, o: { transactional?: boolean } = {}): Promise<void> {',
+    '  if (o.transactional) {',
+    "    if (process.env.RLS_RUNTIME_ROLE === 'true') {",
+    "      await client.query(\"SELECT set_config('app.current_tenant_id', $1, true), set_config('role', 'rls_app_runtime', true)\", [tenantId]);",
+    '    } else {',
+    "      await client.query(\"SELECT set_config('app.current_tenant_id', $1, true)\", [tenantId]);",
+    '    }',
+    "  } else if (process.env.RLS_RUNTIME_ROLE === 'true') {",
+    "    await client.query('SET ROLE rls_app_runtime');",
     '  }',
     '}',
-    'export async function applyCrossTenantRole(client: PoolClient, _o: { transactional?: boolean } = {}): Promise<void> {',
-    "  await client.query('SET LOCAL ROLE rls_cross_tenant');",
+    'export async function applyCrossTenantRole(client: PoolClient, o: { transactional?: boolean } = {}): Promise<void> {',
+    "  await client.query(o.transactional ? 'SET LOCAL ROLE rls_cross_tenant' : 'SET ROLE rls_cross_tenant');",
+    '}',
+    'export async function clearTenantContext(client: PoolClient): Promise<void> {',
+    "  await client.query('RESET ROLE');",
+    '}',
+    'export async function withTenantSession<T>(pool: Pool, tenantId: string, fn: (client: PoolClient) => Promise<T>): Promise<T> {',
+    '  const client = await pool.connect();',
+    '  try {',
+    "    await client.query('BEGIN');",
+    '    await applyTenantContext(client, tenantId, { transactional: true });',
+    '    const result = await fn(client);',
+    "    await client.query('COMMIT');",
+    '    return result;',
+    '  } catch (err) {',
+    "    await client.query('ROLLBACK').catch(() => undefined);",
+    '    throw err;',
+    '  } finally {',
+    '    client.release();',
+    '  }',
     '}',
     '',
   ].join('\n'),
@@ -645,13 +782,23 @@ describe('raw pg access vs. RLS (STRUCTURAL) — negative controls', () => {
   it('sanity: `pg` resolves to the real typings in the plant (a planted pool is a Pool, not `any`)', () => {
     const c1 = inFile('src/c1-plain.ts');
     expect(c1.map((s) => [s.access, s.owner])).toEqual([['pool.query', 'Pool']]);
-    // The stand-in helpers carry the real sanctioned keys (withClient's
-    // checkout, applyTenantContext's GUC), so the real records apply to them.
+    // The stand-in helpers carry the real sanctioned keys (the repository
+    // checkouts and their clearTenantContext / applyCrossTenantRole calls,
+    // applyTenantContext's GUC, the helpers' role switches, withTenantSession's
+    // checkout), so the real records apply to them.
     const support = planted.filter((s) => s.file.startsWith('src/db/'));
     const theirs = SANCTIONED_HELPERS.filter((h) => support.some((s) => keyOf(s) === keyOf(h)));
     expect(theirs.map(keyOf)).toEqual([
+      'src/db/pg-base.ts :: PgBaseRepository.withTenantTransaction :: pool.connect',
+      'src/db/pg-base.ts :: PgBaseRepository.withTenantTransaction :: role-switch',
       'src/db/pg-base.ts :: PgBaseRepository.withClient :: pool.connect',
+      'src/db/pg-base.ts :: PgBaseRepository.withCrossTenantSweep :: pool.connect',
+      'src/db/pg-base.ts :: PgBaseRepository.withCrossTenantSweep :: role-switch',
       'src/db/rls-runtime-role.ts :: applyTenantContext :: guc-only',
+      'src/db/rls-runtime-role.ts :: applyTenantContext :: role-switch',
+      'src/db/rls-runtime-role.ts :: applyCrossTenantRole :: role-switch',
+      'src/db/rls-runtime-role.ts :: clearTenantContext :: role-switch',
+      'src/db/rls-runtime-role.ts :: withTenantSession :: pool.connect',
     ]);
     expect(evaluate(support, [], census, theirs)).toEqual(clean());
   });
@@ -1043,11 +1190,12 @@ describe('raw pg access vs. RLS (STRUCTURAL) — negative controls, round 2', ()
     expect(evaluate([], [], census, sanctionedIn(f)).stale).toHaveLength(1);
   });
 
-  it('R-guc: upper-case set_config, SET SESSION and a quoted GUC name are caught; RESET and SET LOCAL ROLE are not', () => {
+  it("R-guc: upper-case set_config, SET SESSION and a quoted GUC name are caught; RESET is not, and SET LOCAL ROLE is R-role's (a role-switch), not R-guc's", () => {
     expect(inFile('src/r2-guc-variants.ts').map((s) => `${s.access}:${s.line} ${s.fn}`)).toEqual([
       'guc-only:2 upper',
       'guc-only:3 session',
       'guc-only:4 quoted',
+      'role-switch:7 notGuc',
     ]);
   });
 
@@ -1659,7 +1807,173 @@ const PLANTS_R4: Record<string, string> = {
   ].join('\n'),
 };
 
-describe('raw pg access vs. RLS (STRUCTURAL) — negative controls, rounds 3 and 4', () => {
+// ─── Negative controls, R-role: a role switch inside a tenant session ───────
+
+/** One tenant session that switches the role with `sql` (its JS source text), then deletes the registry row. */
+const switchThenRegistry = (fn: string, sql: string): string =>
+  `export async function ${fn}(pool: Pool, t: string) { await withTenantSession(pool, t, async (c) => { await c.query(${sql}); await c.query(REGISTRY, [t]); }); }`;
+
+/** Drops back to the connection principal: every spelling R-role reads (lines 6–24 of the plant). */
+const ROLE_DROPS: ReadonlyArray<readonly [string, string]> = [
+  ['setLocalNone', "'SET LOCAL ROLE NONE'"],
+  ['setNone', '"SET ROLE NONE"'],
+  ['sessionNone', '`set session role none`'],
+  ['resetRole', "'RESET ROLE'"],
+  ['resetQuoted', "'reset \"role\"'"],
+  ['toDefault', "'SET ROLE TO DEFAULT'"],
+  ['equalsNone', '"SET LOCAL role = \'none\'"'],
+  ['configNone', '"SELECT set_config(\'role\', \'none\', true)"'],
+  ['configUpper', '"SELECT pg_catalog.SET_CONFIG ( \'ROLE\' , \'none\', true)"'],
+  ['configSqlQuoted', '`SELECT "set_config"("role", \'none\', true)`'],
+  ['commentInside', "'SET /* scope */ LOCAL ROLE NONE'"],
+  ['lineComment', "'SET LOCAL -- scope\\n  ROLE NONE'"],
+  ['afterBegin', "'BEGIN; SET LOCAL ROLE NONE'"],
+  ['inDoBlock', "'DO $$ BEGIN SET LOCAL ROLE NONE; END $$'"],
+  ['executeInDo', '"DO $$ BEGIN EXECUTE \'SET LOCAL ROLE NONE\'; END $$"'],
+  ['sessionAuthDefault', "'SET SESSION AUTHORIZATION DEFAULT'"],
+  ['resetSessionAuth', "'RESET SESSION AUTHORIZATION'"],
+  ['discardAll', "'DISCARD ALL'"],
+  ['templateNone', '`SET LOCAL ROLE NONE`'],
+];
+/** Takes a role, or one the scan cannot read (lines 26–29 of the plant). */
+const ROLE_TAKES: ReadonlyArray<readonly [string, string]> = [
+  ['takeRuntime', "'SET LOCAL ROLE rls_app_runtime'"],
+  ['takeViaConfig', '"SELECT set_config(\'role\', \'rls_cross_tenant\', true)"'],
+  // eslint-disable-next-line no-template-curly-in-string -- planted source text: the substitution is the point
+  ['takeTemplate', '`SET ROLE ${NONE}`'],
+  ['takeUser', '"SET SESSION AUTHORIZATION \'someone\'"'],
+];
+
+/** cleanSeed as it ships in seed/seed-runner.ts (`session` is its tenant session's body), so a copy can carry one injected change. */
+const cleanSeedPlant = (session: readonly string[]): string =>
+  [
+    "import type { Pool } from 'pg';",
+    "import { withTenantSession } from '../db/rls-runtime-role';",
+    "const SEED_OWNER_EMAIL_LIKE = 'owner@seed-tenant-%';",
+    "const SEED_CHILD_TABLES = ['appointments', 'estimates', 'jobs', 'service_locations', 'customers', 'audit_events', 'users'] as const;",
+    'export async function cleanSeed(pool: Pool): Promise<number> {',
+    "  const { rows } = await pool.query<{ id: string }>('SELECT id FROM tenants WHERE owner_email LIKE $1', [SEED_OWNER_EMAIL_LIKE]);",
+    '  for (const { id: tenantId } of rows) {',
+    '    await withTenantSession(pool, tenantId, async (client) => {',
+    ...session.map((l) => `      ${l}`),
+    '    });',
+    '  }',
+    '  return rows.length;',
+    '}',
+  ].join('\n');
+const SEED_CHILD_DELETES = [
+  'for (const table of SEED_CHILD_TABLES) {',
+  // eslint-disable-next-line no-template-curly-in-string -- planted source text: the substitution is the point
+  '  await client.query(`DELETE FROM ${table} WHERE tenant_id = $1`, [tenantId]);',
+  '}',
+];
+const SEED_DROP = "await client.query('SET LOCAL ROLE NONE');";
+const SEED_REGISTRY_DELETE = "await client.query('DELETE FROM tenants WHERE id = $1', [tenantId]);";
+
+const PLANTS_ROLE: Record<string, string> = {
+  'src/r5-role-variants.ts': [
+    "import type { Pool } from 'pg';",
+    "import { withTenantSession } from './db/rls-runtime-role';",
+    "const REGISTRY = 'DELETE FROM tenants WHERE id = $1';",
+    "const NONE = 'NONE';",
+    '// Drops back to the connection principal, in every spelling R-role reads.',
+    ...ROLE_DROPS.map(([fn, sql]) => switchThenRegistry(fn, sql)),
+    '// Takes a role (or one the scan cannot read): never allowlistable outside db/rls-runtime-role.ts.',
+    ...ROLE_TAKES.map(([fn, sql]) => switchThenRegistry(fn, sql)),
+    '// Not a role switch: a column named role, a GUC reset, RESET ALL (role is GUC_NO_RESET_ALL), role DDL, a type, a comment.',
+    'export async function notSwitches(pool: Pool, t: string) {',
+    '  await withTenantSession(pool, t, async (c) => {',
+    "    await c.query('UPDATE users SET role = $1 WHERE id = $2', ['owner', t]);",
+    "    await c.query('INSERT INTO users (id, role) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET role = EXCLUDED.role', [t, 'owner']);",
+    "    await c.query('RESET app.current_tenant_id');",
+    "    await c.query('RESET ALL');",
+    "    await c.query('SET LOCAL statement_timeout = 0');",
+    "    await c.query(\"SELECT set_config('app.role', 'x', true), rolname FROM pg_roles WHERE rolname = 'role'\");",
+    "    await c.query('GRANT rls_app_runtime TO app');",
+    "    // await c.query('SET LOCAL ROLE NONE');",
+    '  });',
+    '}',
+    "export const ddl = ['CREATE ROLE rls_x NOLOGIN', 'ALTER DEFAULT PRIVILEGES FOR ROLE app GRANT SELECT ON TABLES TO rls_x'];",
+    "export type Picked = Pick<{ role: string }, 'role'>;",
+    "export const field = { role: 'role' };",
+  ].join('\n'),
+  // The migrated module, at its real path so its real entries apply, and copies with one change each.
+  'src/seed/seed-runner.ts': cleanSeedPlant([...SEED_CHILD_DELETES, SEED_DROP, SEED_REGISTRY_DELETE]),
+  'src/seed/r5-gains-table.ts': cleanSeedPlant([
+    ...SEED_CHILD_DELETES, SEED_DROP, SEED_REGISTRY_DELETE,
+    "await client.query('DELETE FROM customers WHERE tenant_id = $1', [tenantId]);",
+  ]),
+  'src/seed/r5-drop-in-loop.ts': cleanSeedPlant([
+    ...SEED_CHILD_DELETES,
+    'for (const id of [tenantId]) {',
+    "  await client.query('DELETE FROM customers WHERE id = $1', [id]);",
+    `  ${SEED_DROP}`,
+    '}',
+    SEED_REGISTRY_DELETE,
+  ]),
+  'src/seed/r5-takes-role.ts': cleanSeedPlant([
+    ...SEED_CHILD_DELETES, "await client.query('SET LOCAL ROLE rls_cross_tenant');", SEED_REGISTRY_DELETE,
+  ]),
+  // The sanctioned helpers called inside a tenant session (round 5): each call
+  // is a role-switch site at the call, read with the SQL after it.
+  'src/r5-role-helpers.ts': [
+    "import type { Pool } from 'pg';",
+    "import { PgBaseRepository } from './db/pg-base';",
+    "import * as rls from './db/rls-runtime-role';",
+    "import { applyCrossTenantRole, clearTenantContext, withTenantSession } from './db/rls-runtime-role';",
+    "import { clearTenantContext as resetContext } from './db/rls-runtime-role';",
+    "import { dropContext } from './r5-role-reexport';",
+    "const REGISTRY = 'DELETE FROM tenants WHERE id = $1';",
+    "const FORCED = 'SELECT subaccount_sid FROM tenant_integrations WHERE tenant_id = $1';",
+    '// Inside withTenantSession, and inside a repository\'s withTenant.',
+    'export async function clearInSession(pool: Pool, t: string) { await withTenantSession(pool, t, async (c) => { await clearTenantContext(c); await c.query(REGISTRY, [t]); }); }',
+    'export async function clearInSessionForced(pool: Pool, t: string) { await withTenantSession(pool, t, async (c) => { await clearTenantContext(c); await c.query(FORCED, [t]); }); }',
+    'export async function crossInSession(pool: Pool, t: string) { await withTenantSession(pool, t, async (c) => { await applyCrossTenantRole(c, { transactional: true }); await c.query(REGISTRY, [t]); }); }',
+    'export class PgPlantRepository extends PgBaseRepository {',
+    '  async clearInWithTenant(t: string) { return this.withTenant(t, async (c) => { await clearTenantContext(c); return c.query(REGISTRY, [t]); }); }',
+    '  async clearInWithTenantForced(t: string) { return this.withTenant(t, async (c) => { await clearTenantContext(c); return c.query(FORCED, [t]); }); }',
+    '  async crossInWithTenant(t: string) { return this.withTenant(t, async (c) => { await applyCrossTenantRole(c, { transactional: true }); return c.query(REGISTRY, [t]); }); }',
+    '}',
+    '// The same calls through an import alias, a namespace import, a literal key, a destructured dynamic import, a parenthesised cast, a re-export.',
+    'export async function viaImportAlias(pool: Pool, t: string) { await withTenantSession(pool, t, async (c) => { await resetContext(c); await c.query(REGISTRY, [t]); }); }',
+    'export async function viaNamespace(pool: Pool, t: string) { await withTenantSession(pool, t, async (c) => { await rls.clearTenantContext(c); await c.query(REGISTRY, [t]); }); }',
+    "export async function viaKey(pool: Pool, t: string) { await withTenantSession(pool, t, async (c) => { await rls['applyCrossTenantRole'](c); await c.query(REGISTRY, [t]); }); }",
+    "export async function viaImport(pool: Pool, t: string) { const { clearTenantContext: reset } = await import('./db/rls-runtime-role'); await withTenantSession(pool, t, async (c) => { await reset(c); await c.query(REGISTRY, [t]); }); }",
+    'export async function viaCast(pool: Pool, t: string) { await withTenantSession(pool, t, async (c) => { await (clearTenantContext as typeof clearTenantContext)(c); await c.query(REGISTRY, [t]); }); }',
+    'export async function viaReexport(pool: Pool, t: string) { await withTenantSession(pool, t, async (c) => { await dropContext(c); await c.query(REGISTRY, [t]); }); }',
+    '// Taken without being called (or through a key of several names): what runs after it cannot be read, so it is indirect.',
+    'export async function aliasRef(pool: Pool, t: string) { const reset = clearTenantContext; await withTenantSession(pool, t, async (c) => { await reset(c); await c.query(REGISTRY, [t]); }); }',
+    'export async function callRef(pool: Pool, t: string) { await withTenantSession(pool, t, async (c) => { await clearTenantContext.call(undefined, c); await c.query(REGISTRY, [t]); }); }',
+    'export async function callbackRef(pool: Pool, t: string) { await withTenantSession(pool, t, async (c) => { await Promise.all([c].map(clearTenantContext)); await c.query(REGISTRY, [t]); }); }',
+    "export async function unionKey(pool: Pool, t: string, k: 'clearTenantContext' | 'applyCrossTenantRole') { await withTenantSession(pool, t, async (c) => { await rls[k](c); await c.query(REGISTRY, [t]); }); }",
+    'export const exported = { applyCrossTenantRole };',
+  ].join('\n'),
+  'src/r5-role-reexport.ts': "export { clearTenantContext as dropContext } from './db/rls-runtime-role';\n",
+  // Not the helpers: a same-named local function and a same-named property elsewhere.
+  'src/r5-role-lookalike.ts': [
+    "import type { Pool, PoolClient } from 'pg';",
+    "import { withTenantSession } from './db/rls-runtime-role';",
+    'async function clearTenantContext(_c: PoolClient): Promise<void> { return undefined; }',
+    'const other = { applyCrossTenantRole: async (_c: PoolClient): Promise<void> => undefined };',
+    "export async function lookalikes(pool: Pool, t: string) { await withTenantSession(pool, t, async (c) => { await clearTenantContext(c); await other.applyCrossTenantRole(c); await c.query('DELETE FROM tenants WHERE id = $1', [t]); }); }",
+  ].join('\n'),
+  // Where the SQL after a switch is not read.
+  'src/r5-role-limits.ts': [
+    "import type { Pool, PoolClient } from 'pg';",
+    "import { withTenantSession } from './db/rls-runtime-role';",
+    "const DROP_ROLE = 'SET LOCAL ROLE NONE';",
+    "export async function viaConst(pool: Pool, t: string) { await withTenantSession(pool, t, async (c) => { await c.query(DROP_ROLE); await c.query('DELETE FROM customers WHERE tenant_id = $1', [t]); }); }",
+    '// Known limits (see the doc): a switch in a helper reads nothing after its call; the statement split across literals; a substituted verb.',
+    "async function dropRole(c: PoolClient) { await c.query('SET LOCAL ROLE NONE'); }",
+    "export async function viaHelper(pool: Pool, t: string) { await withTenantSession(pool, t, async (c) => { await dropRole(c); await c.query('DELETE FROM customers WHERE tenant_id = $1', [t]); }); }",
+    "export async function split(pool: Pool, t: string) { await withTenantSession(pool, t, async (c) => { await c.query('SET LOCAL ' + 'ROLE NONE'); await c.query('DELETE FROM customers WHERE tenant_id = $1', [t]); }); }",
+    "const VERB = 'SET';",
+    // eslint-disable-next-line no-template-curly-in-string -- planted source text: the substitution is the point
+    "export async function verbSub(pool: Pool, t: string) { await withTenantSession(pool, t, async (c) => { await c.query(`${VERB} LOCAL ROLE NONE`); await c.query('DELETE FROM customers WHERE tenant_id = $1', [t]); }); }",
+  ].join('\n'),
+};
+
+describe('raw pg access vs. RLS (STRUCTURAL) — negative controls, rounds 3 and 4, and R-role', () => {
   let plantDir = '';
   let planted: PgAccessSite[] = [];
   const inFile = (file: string): PgAccessSite[] => planted.filter((s) => s.file === file);
@@ -1668,7 +1982,7 @@ describe('raw pg access vs. RLS (STRUCTURAL) — negative controls, rounds 3 and
   const clean = (): Report => evaluate([], [], census, []);
 
   beforeAll(() => {
-    plantDir = plantTree('raw-pg-guard-r3', { ...PLANT_SUPPORT, ...PLANTS_R3, ...PLANTS_R4 });
+    plantDir = plantTree('raw-pg-guard-r3', { ...PLANT_SUPPORT, ...PLANTS_R3, ...PLANTS_R4, ...PLANTS_ROLE });
     const { rootNames, compilerOptions } = plantProgramInputs(plantDir, API_DIR);
     planted = findPgAccess(rootNames, compilerOptions, { baseDir: plantDir });
   }, 120_000);
@@ -2053,5 +2367,161 @@ describe('raw pg access vs. RLS (STRUCTURAL) — negative controls, rounds 3 and
       'ctxDirect [] contextFirst=true',
       'ctxTernaryDirect [] contextFirst=true',
     ]);
+  });
+
+  // ── R-role ──────────────────────────────────────────────────────────────
+
+  const roleVariants = 'src/r5-role-variants.ts';
+  const drops = ROLE_DROPS.map(([fn]) => fn);
+  const takes = ROLE_TAKES.map(([fn]) => fn);
+  const roleEntry = (file: string, fn: string, over: Partial<RawPgSite> = {}): RawPgSite =>
+    entry({ file, fn, access: 'role-switch', category: 'principal_inside_tenant_session', tables: ['tenants'], ...over });
+
+  it('R-role: each spelling of a role switch (any case, quoted, commented, after BEGIN or in a DO block, a template) is a role-switch site read with the SQL after it; a role column, a GUC reset, RESET ALL, role DDL and a type are not', () => {
+    const found = inFile(roleVariants);
+    expect(found.map((s) => `${s.access}:${s.line} ${s.fn} drop=${s.roleDrop}`)).toEqual([
+      ...drops.map((fn, i) => `role-switch:${6 + i} ${fn} drop=true`),
+      // Fails closed: SET ROLE ${NONE} names a role the scan cannot read.
+      ...takes.map((fn, i) => `role-switch:${26 + i} ${fn} drop=false`),
+    ]);
+    // The SQL after each switch in its function is the site's SQL: the registry DELETE.
+    expect([...new Set(found.map((s) => sqlTables(s.sql, census.known).join(', ')))]).toEqual(['tenants']);
+  });
+
+  it('R-role: unlisted, each switch fails; listed as principal_inside_tenant_session, each drop passes and each switch into a role still fails', () => {
+    expect(evalFile(roleVariants, []).unlisted).toHaveLength(drops.length + takes.length);
+    const r = evalFile(roleVariants, [...drops, ...takes].map((fn) => roleEntry(roleVariants, fn)));
+    expect(r.roles.map((m) => m.split(' — ')[0])).toEqual(takes.map((fn, i) => `${roleVariants}:${26 + i} [role-switch] ${fn}`));
+    expect(r.roles[0]).toContain('takes a role');
+    expect({ ...r, roles: [] }).toEqual(clean());
+  });
+
+  it('R-role: a switch listed under another category fails, and so does principal_inside_tenant_session on another access', () => {
+    const asGlobal = evalFile(roleVariants, [roleEntry(roleVariants, 'setLocalNone', { category: 'global_table' })]);
+    expect(asGlobal.roles).toEqual([
+      `${roleVariants} :: setLocalNone :: role-switch: a role switch outside db/rls-runtime-role.ts is principal_inside_tenant_session (a drop to the connection principal), not global_table`,
+    ]);
+    const onQuery = evalFile(closures, [closureEntry('anySql', { access: 'pool.query', category: 'principal_inside_tenant_session', dynamicSql: true })]);
+    expect(onQuery.roles).toEqual([`${closures} :: anySql :: pool.query: principal_inside_tenant_session is the category of a role-switch entry only`]);
+  });
+
+  it('R-role, the migrated module: cleanSeed as it ships passes with its real entries; unlisted, with a FORCE-RLS DELETE after the drop, the drop inside a loop, or a switch into a role, it fails', () => {
+    const seed = 'src/seed/seed-runner.ts';
+    const real = RAW_PG_SITES.filter((e) => e.file === seed);
+    expect(real.map(keyOf)).toEqual([`${seed} :: cleanSeed :: pool.query`, `${seed} :: cleanSeed :: role-switch`]);
+    expect(evalFile(seed, real)).toEqual(clean());
+    expect(evalFile(seed, real.filter((e) => e.access !== 'role-switch')).unlisted.map((u) => u.split(' — ')[0])).toEqual([
+      `${seed}:12 [role-switch] cleanSeed`,
+    ]);
+    /** The real entries, keyed to a copy; `over` changes the role-switch entry. */
+    const copy = (file: string, over: Partial<RawPgSite> = {}): RawPgSite[] =>
+      real.map((e) => (e.access === 'role-switch' ? { ...e, ...over, file } : { ...e, file }));
+    const gains = 'src/seed/r5-gains-table.ts';
+    expect(evalFile(gains, copy(gains)).tables).toEqual([
+      `${gains} :: cleanSeed :: role-switch: SQL touches customers not in entry.tables [tenants]`,
+    ]);
+    expect(evalFile(gains, copy(gains, { tables: ['tenants', 'customers'] })).categories).toEqual([
+      `${gains} :: cleanSeed :: role-switch: principal_inside_tenant_session names FORCE-RLS table(s) customers`,
+      `${gains} :: cleanSeed :: role-switch: principal_inside_tenant_session names tenant_id table(s) customers that are not RLS-exempt`,
+    ]);
+    // A loop runs its earlier statements again after the drop: read from the loop's start.
+    const loop = 'src/seed/r5-drop-in-loop.ts';
+    expect(evalFile(loop, copy(loop)).tables).toEqual([
+      `${loop} :: cleanSeed :: role-switch: SQL touches customers not in entry.tables [tenants]`,
+    ]);
+    const takesRole = 'src/seed/r5-takes-role.ts';
+    expect(evalFile(takesRole, copy(takesRole)).roles.map((m) => m.split(' — ')[0])).toEqual([`${takesRole}:12 [role-switch] cleanSeed`]);
+  });
+
+  const helperCalls = 'src/r5-role-helpers.ts';
+  const helperFns = {
+    drops: ['clearInSession', 'PgPlantRepository.clearInWithTenant', 'viaImportAlias', 'viaNamespace', 'viaImport', 'viaCast', 'viaReexport'],
+    forced: ['clearInSessionForced', 'PgPlantRepository.clearInWithTenantForced'],
+    takes: ['crossInSession', 'PgPlantRepository.crossInWithTenant', 'viaKey'],
+  };
+
+  it('R-role, the helpers: a call to clearTenantContext / applyCrossTenantRole inside a withTenantSession or withTenant callback (through an import alias, a namespace import, a literal key, a destructured import, a cast or a re-export too) is a role-switch site at the call, read with the SQL after it; taken without a call it is indirect; a look-alike is no site', () => {
+    expect(
+      inFile(helperCalls).map((s) =>
+        `${s.access}:${s.line} ${s.fn} ${s.owner}` +
+        (s.access === 'role-switch' ? ` drop=${s.roleDrop} [${sqlTables(s.sql, census.known).join(', ')}]` : ''),
+      ),
+    ).toEqual([
+      'role-switch:10 clearInSession clearTenantContext drop=true [tenants]',
+      'role-switch:11 clearInSessionForced clearTenantContext drop=true [tenant_integrations]',
+      'role-switch:12 crossInSession applyCrossTenantRole drop=false [tenants]',
+      'role-switch:14 PgPlantRepository.clearInWithTenant clearTenantContext drop=true [tenants]',
+      'role-switch:15 PgPlantRepository.clearInWithTenantForced clearTenantContext drop=true [tenant_integrations]',
+      'role-switch:16 PgPlantRepository.crossInWithTenant applyCrossTenantRole drop=false [tenants]',
+      'role-switch:19 viaImportAlias clearTenantContext drop=true [tenants]',
+      'role-switch:20 viaNamespace clearTenantContext drop=true [tenants]',
+      'role-switch:21 viaKey applyCrossTenantRole drop=false [tenants]',
+      'role-switch:22 viaImport clearTenantContext drop=true [tenants]',
+      'role-switch:23 viaCast clearTenantContext drop=true [tenants]',
+      'role-switch:24 viaReexport clearTenantContext drop=true [tenants]',
+      'indirect:26 aliasRef clearTenantContext',
+      'indirect:27 callRef clearTenantContext',
+      'indirect:28 callbackRef clearTenantContext',
+      'indirect:29 unionKey clearTenantContext',
+      'indirect:30 <module> applyCrossTenantRole',
+    ]);
+    expect(inFile('src/r5-role-reexport.ts')).toEqual([]);
+    expect(inFile('src/r5-role-lookalike.ts')).toEqual([]);
+  });
+
+  it('R-role, the helpers: unlisted, each call inside a tenant session fails and each reference is forbidden; listed as principal_inside_tenant_session, clearTenantContext passes with registry-only SQL after it and fails with a FORCE-RLS table after it, and applyCrossTenantRole always fails', () => {
+    const all = [...helperFns.drops, ...helperFns.forced, ...helperFns.takes];
+    const unlisted = evalFile(helperCalls, []);
+    expect(unlisted.unlisted.map((u) => u.split(' — ')[0].replace(/^.*\] /, '')).sort()).toEqual([...all].sort());
+    expect(unlisted.forbidden.map((u) => u.split(' — ')[0])).toEqual([
+      `${helperCalls}:26 [indirect] aliasRef`,
+      `${helperCalls}:27 [indirect] callRef`,
+      `${helperCalls}:28 [indirect] callbackRef`,
+      `${helperCalls}:29 [indirect] unionKey`,
+      `${helperCalls}:30 [indirect] <module>`,
+    ]);
+    const asDrop = (fn: string, over: Partial<RawPgSite> = {}): RawPgSite => roleEntry(helperCalls, fn, over);
+    // Every drop with the registry DELETE after it passes.
+    const drops = evaluate(inFile(helperCalls).filter((s) => s.access === 'role-switch'), helperFns.drops.map((fn) => asDrop(fn)), census, []);
+    expect({ ...drops, unlisted: [] }).toEqual(clean());
+    expect(drops.unlisted).toHaveLength(helperFns.forced.length + helperFns.takes.length);
+    // A FORCE-RLS read after the drop: unlisted in entry.tables, and listed it is no principal table.
+    const forced = evalFile(helperCalls, helperFns.forced.map((fn) => asDrop(fn)));
+    expect(forced.tables).toEqual(helperFns.forced.map((fn) => `${helperCalls} :: ${fn} :: role-switch: SQL touches tenant_integrations not in entry.tables [tenants]`));
+    const forcedListed = evalFile(helperCalls, helperFns.forced.map((fn) => asDrop(fn, { tables: ['tenant_integrations'] })));
+    expect(forcedListed.categories).toEqual(
+      helperFns.forced.flatMap((fn) => [
+        `${helperCalls} :: ${fn} :: role-switch: principal_inside_tenant_session names FORCE-RLS table(s) tenant_integrations`,
+        `${helperCalls} :: ${fn} :: role-switch: principal_inside_tenant_session names tenant_id table(s) tenant_integrations that are not RLS-exempt`,
+      ]),
+    );
+    // applyCrossTenantRole takes rls_cross_tenant: never allowlistable outside the sanctioned callers, in any category.
+    const takes = evalFile(helperCalls, helperFns.takes.map((fn) => asDrop(fn)));
+    expect(takes.roles.map((m) => m.split(' — ')[0])).toEqual([
+      `${helperCalls}:12 [role-switch] crossInSession`,
+      `${helperCalls}:16 [role-switch] PgPlantRepository.crossInWithTenant`,
+      `${helperCalls}:21 [role-switch] viaKey`,
+    ]);
+    expect(takes.roles[0]).toContain('takes a role');
+    const asSweep = evalFile(helperCalls, [asDrop('crossInSession', { category: 'cross_tenant_intentional' })]);
+    expect(asSweep.roles.map((m) => m.split(' — ')[0])).toEqual([
+      `${helperCalls} :: crossInSession :: role-switch: a role switch outside db/rls-runtime-role.ts is principal_inside_tenant_session (a drop to the connection principal), not cross_tenant_intentional`,
+      `${helperCalls}:12 [role-switch] crossInSession`,
+    ]);
+    expect(asSweep.roles[1]).toContain('takes a role');
+  });
+
+  it('R-role known limits: a switch outside any function is opaque (what runs after it is not read); a switch in a helper reads nothing after its call; a split statement and a substituted verb are not sites', () => {
+    const lim = 'src/r5-role-limits.ts';
+    expect(inFile(lim).map((s) => `${s.access}:${s.line} ${s.fn} opaque=${s.opaqueSql} ${JSON.stringify(s.sql)}`)).toEqual([
+      'role-switch:3 <module> opaque=true ["SET LOCAL ROLE NONE"]',
+      'role-switch:6 dropRole opaque=false ["SET LOCAL ROLE NONE"]',
+    ]);
+    const base = { file: lim, access: 'role-switch' as const, category: 'principal_inside_tenant_session' as const, tables: [] };
+    expect(evalFile(lim, [entry({ ...base, fn: '<module>' }), entry({ ...base, fn: 'dropRole' })]).tables).toEqual([
+      `${lim} :: <module> :: role-switch: runs SQL that is not a literal (caller-supplied or built), so its tables cannot be read; the entry must set dynamicSql`,
+    ]);
+    // Listed so, both pass, though viaConst and viaHelper delete customers as the principal after them.
+    expect(evalFile(lim, [entry({ ...base, fn: '<module>', dynamicSql: true }), entry({ ...base, fn: 'dropRole' })])).toEqual(clean());
   });
 });
