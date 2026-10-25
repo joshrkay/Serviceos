@@ -30,6 +30,7 @@ import { NoopBrandVoiceLoader } from '../../src/reputation/brand-voice';
 import { InMemoryServiceCreditRepository } from '../../src/reputation/service-credit';
 import type { BuildReviewResponseProposalDeps } from '../../src/reputation/build-proposal';
 import { createLogger } from '../../src/logging/logger';
+import { classifyIntent } from '../../src/ai/orchestration/intent-classifier';
 
 describe('OBS-2 — proposals.ai_run_id → the drafting run, keyed to the conversation (Postgres)', () => {
   let pool: Pool;
@@ -288,6 +289,58 @@ describe('OBS-2 — proposals.ai_run_id → the drafting run, keyed to the conve
     expect((await runsOn(reviewTenant.tenantId, review!.id)).map((r) => r.task_type).sort()).toEqual([
       'review_classify',
       'review_public_response',
+    ]);
+  });
+
+  // OBS-2 — the routing decision is found with the runs it led to: the
+  // classifier's run on a conversation carries the conversation as its
+  // correlation_id, the same key as the drafting run it routed to.
+  it("every AI run on a conversation includes the classifier's", async () => {
+    const provider: LLMProvider = {
+      name: 'stub',
+      isAvailable: async () => true,
+      complete: async (req: LLMRequest): Promise<LLMResponse> => ({
+        content:
+          req.taskType === 'classify_intent'
+            ? JSON.stringify({ intentType: 'draft_estimate', confidence: 0.95, extractedEntities: {} })
+            : JSON.stringify({
+                lineItems: [{ description: 'Capacitor replacement', quantity: 1, unitPrice: 18900 }],
+                confidence_score: 0.8,
+              }),
+        model: 'stub-model',
+        provider: 'stub',
+        tokenUsage: { input: 10, output: 5, total: 15 },
+        latencyMs: 1,
+      }),
+    };
+    const gw = new LLMGateway(
+      { defaultProvider: 'stub' },
+      new Map([['stub', provider]]),
+      undefined,
+      new PgAiRunRepository(pool),
+    );
+    const conversationId = crypto.randomUUID();
+    const classification = await classifyIntent(
+      'Quote a capacitor replacement',
+      { tenantId: tenant.tenantId, sessionId: conversationId },
+      gw,
+    );
+    expect(classification.aiRunId).toBeDefined();
+    const { proposal } = await new EstimateTaskHandler(gw).handle({
+      tenantId: tenant.tenantId,
+      userId: tenant.userId,
+      message: 'Quote a capacitor replacement',
+      conversationId,
+      customerId: crypto.randomUUID(),
+    });
+
+    const { rows } = await pool.query(
+      `SELECT id, task_type FROM ai_runs WHERE tenant_id = $1 AND correlation_id = $2 ORDER BY task_type`,
+      [tenant.tenantId, conversationId],
+    );
+    expect(rows).toEqual([
+      { id: classification.aiRunId, task_type: 'classify_intent' },
+      { id: proposal.aiRunId, task_type: 'draft_estimate' },
     ]);
   });
 });

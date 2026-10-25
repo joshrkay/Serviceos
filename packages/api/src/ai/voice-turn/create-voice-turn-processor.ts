@@ -1608,6 +1608,8 @@ export function createVoiceTurnProcessor(
           callerResponse: speechResult,
           tenantId,
           gateway: deps.gateway,
+          sessionId: session.id,
+          ...(session.callSid ? { callSid: session.callSid } : {}),
         });
       } catch (err) {
         logger.error('speechTurn: confirmIntent failed', {
@@ -4478,6 +4480,8 @@ export function createVoiceTurnProcessor(
         callerResponse: speechResult,
         tenantId,
         gateway: deps.gateway,
+        sessionId: session.id,
+        ...(session.callSid ? { callSid: session.callSid } : {}),
       });
       const capExceeded = recordCost(session, confirmation.tokenUsage);
       if (capExceeded) {
@@ -4797,6 +4801,8 @@ export function createVoiceTurnProcessor(
         callerResponse: speechResult,
         tenantId,
         gateway: deps.gateway,
+        sessionId: session.id,
+        ...(session.callSid ? { callSid: session.callSid } : {}),
       });
       // #1204 — record only. This turn never ends the call (the consent
       // answer is still recorded or declined), so it must not take the
