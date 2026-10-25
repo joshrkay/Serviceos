@@ -3,11 +3,13 @@
  *
  * Since #1431 the live voice eval (and #1426 path smoke, #1450 Layer 2) build
  * the PRODUCTION gateway. Its per-tenant token-bucket (tenant-quota.ts
- * DEFAULT_TIER_CONFIG) is a fairness cap for real tenants; a sequential eval
- * sample run on one pseudo-tenant drains the classifier bucket and dies with
+ * DEFAULT_TIER_CONFIG) is a fairness cap for real tenants. Under the
+ * pre-GATEWAY-01 bucket a sequential eval sample on one pseudo-tenant drained
+ * the classifier bucket and died with
  * "Per-tenant token budget exceeded for tenant system:classify_intent"
- * (gh run 36500073030). Harnesses inject their own quota store through
- * `opts.resilience.quota`; production keeps the default budget unchanged.
+ * (gh run 36500073030). Harnesses still inject their own quota store through
+ * `opts.resilience.quota`, so an eval never depends on the live tier table;
+ * production keeps the default budget unchanged.
  *
  * Seams: `createLLMGateway(...).complete()` (production default, unchanged),
  * `buildLiveGateway(...)` (voice-eval), `createLayer2Gateway(...)` (Layer 2),
@@ -29,12 +31,17 @@ import {
   createLayer2Gateway,
   selectLayer2Providers,
 } from '../../../src/ai/gateway/real-layer-two-factory';
+import { DEFAULT_TIER_CONFIG } from '../../../src/ai/gateway/tenant-quota';
 
 // classifier_standard (the tier an untiered classify_intent call lands in)
-// holds 600,000 tokens. Each call below is estimated — and billed by the stub
-// — at ~190,000 tokens, so the production bucket admits exactly 3 calls; the
-// 4th and 5th are rejected (refill at 1,000 tok/s is negligible in-test).
-const PROMPT_CHARS = 760_000; // chars/4 → 190,000 estimated tokens
+// holds bucketCapacity tokens. Each call below is estimated — and billed by
+// the stub — at capacity / 3.5 tokens, so the production bucket admits
+// exactly 3 calls; the 4th and 5th are rejected (refilling the half-call
+// shortfall takes seconds at the tier's refill rate; the test takes
+// milliseconds). Derived, so a resize of the tier does not break the pin.
+const CLASSIFIER_TIER = DEFAULT_TIER_CONFIG.classifier_standard;
+const CALL_TOKENS = Math.floor(CLASSIFIER_TIER.bucketCapacity / 3.5);
+const PROMPT_CHARS = CALL_TOKENS * 4; // chars/4 → CALL_TOKENS estimated tokens
 const CALLS = 5;
 
 function startStub(): Promise<{ server: Server; baseUrl: string; hits: () => number }> {
@@ -57,7 +64,7 @@ function startStub(): Promise<{ server: Server; baseUrl: string; hits: () => num
               finish_reason: 'stop',
             },
           ],
-          usage: { prompt_tokens: 190_000, completion_tokens: 10, total_tokens: 190_010 },
+          usage: { prompt_tokens: CALL_TOKENS, completion_tokens: 10, total_tokens: CALL_TOKENS + 10 },
         }),
       );
     });
@@ -125,6 +132,11 @@ describe('harness gateways vs the production per-tenant token budget', () => {
     server = stub.server;
     const env = prodEnv(stub.baseUrl);
     delete process.env.REDIS_URL;
+
+    // Preconditions: one call alone never trips the in-flight hard bound, and
+    // the 4th call's shortfall cannot refill while the test runs.
+    expect(CALL_TOKENS + 2_048).toBeLessThan(CLASSIFIER_TIER.hardUpperBoundTokens);
+    expect((CALL_TOKENS / 2) / CLASSIFIER_TIER.refillTokensPerSec).toBeGreaterThan(5);
 
     const { ok, firstError } = await runSequentialClassify(createLLMGateway(loadConfig(env)));
 

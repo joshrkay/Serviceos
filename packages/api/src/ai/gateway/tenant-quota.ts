@@ -6,8 +6,9 @@
  *   - TenantTokenBudgetExceededError: the rolling token bucket is empty.
  *
  * Tier-driven defaults; callers pass an estimated input+output token cost to
- * `acquire()`. After completion, `reconcile()` adjusts the bucket using the
- * actual token usage from the provider response.
+ * `acquire()`. The lease's `release()` then charges the provider's actual
+ * usage instead: it refunds an overestimate and carries an underestimate as
+ * debt. A failed call releases with no usage, so its estimate stays spent.
  */
 import { z } from 'zod';
 import { AppError } from '../../shared/errors';
@@ -40,15 +41,28 @@ export const DEFAULT_TIER_CONFIG: Record<TenantTier, TenantQuotaTierConfig> = {
     refillTokensPerSec: 100,
     hardUpperBoundTokens: 200_000,
   },
+  // Every non-classify call a tenant makes shares this bucket: chat replies,
+  // drafting, summaries, and the per-turn sentiment and vulnerability
+  // classifiers (~0.7–0.9k tokens each, every turn, when a tenant turns them
+  // on). GATEWAY-01: ten callers with both on bill ~1.6k tok/s (a turn every
+  // ~10s); at 500 tok/s that drained the bucket in about 3.5 minutes, and
+  // both classifiers then scored most turns 0 without saying so. 5,000 tok/s
+  // keeps that load under half the refill so drafting and chat keep the
+  // rest; capacity is two minutes of refill. Sized for a busy tenant, not so
+  // that concurrency binds (unlike classifier_standard below).
   standard: {
     maxConcurrency: 8,
-    bucketCapacity: 250_000,
-    refillTokensPerSec: 500,
+    bucketCapacity: 600_000,
+    refillTokensPerSec: 5_000,
     hardUpperBoundTokens: 1_000_000,
   },
-  // Classifier calls carry the full intent taxonomy (~9k input tokens). They
-  // use an isolated, bounded bucket so a valid operator burst cannot drain
-  // the ordinary task budget (or vice versa). See ProviderTenantQuotaWrapper.
+  // Classifier calls carry the intent taxonomy: ~5k tokens on a phone
+  // caller's turn (≤ the 9,000-token per-turn budget, session-cost-tracker
+  // CLASSIFY_TURN_INPUT_TOKEN_BUDGET) and ~15–19k on the operator taxonomy
+  // (owner line, in-app voice, chat, memos). They use an isolated bucket so
+  // an operator burst cannot drain the ordinary task budget (or vice versa).
+  // See ProviderTenantQuotaWrapper. Not reachable until a plan → tier
+  // resolver exists, so not resized with the tiers below.
   classifier_free: {
     maxConcurrency: 1,
     bucketCapacity: 150_000,
@@ -58,34 +72,50 @@ export const DEFAULT_TIER_CONFIG: Record<TenantTier, TenantQuotaTierConfig> = {
   // GATEWAY-01: this is the tier EVERY tenant's classify_intent runs on —
   // nothing in the product maps a tenant's plan to a quota tier yet (plans
   // differ by seats and included AI minutes only), so tenantTier is never set
-  // on gateway requests. Each live caller turn and each in-app command is one
-  // classify call, and the cap is cluster-wide per tenant. At 2, a third
-  // overlapping turn (three callers on the line, or two callers plus the owner
-  // typing) was rejected outright with no queueing. 8 matches the ordinary
-  // `standard` tier's in-flight cap: by Little's law, ~3s classify latency and
-  // a turn every ~10s per caller, 8 slots carry ~25 concurrent callers on
-  // average and 8 even when every turn runs to the 12s deadline. Sustained
-  // spend stays bounded by the bucket below (1,000 tok/s ≈ 400 classify
-  // calls/hour/tenant at ~9k tokens), not by this cap. Resize without a deploy
-  // via AI_QUOTA_TIERS_JSON.
+  // on gateway requests. One classify call per live caller turn, in-app
+  // command, chat or memo segment, and confirm read-back; the caps are
+  // cluster-wide per tenant.
+  //
+  // Concurrency: by Little's law, ~3s classify latency and a turn every ~10s
+  // per session, 8 slots carry ~25 concurrent sessions on average (and 8 even
+  // when every call runs to the 12s deadline: a session has one turn in
+  // flight at a time).
+  //
+  // Bucket: sized so that concurrency, not tokens, is the limit at that load.
+  // 8 slots / 3s ≈ 2.7 calls/s, each billing at most the 9,000-token per-turn
+  // input budget plus the 1,024-token output allowance ≈ 26.7k tok/s, rounded
+  // up to 30,000 tok/s; capacity is two minutes of refill. That is at most
+  // 108M tokens an hour per tenant, plus the 3.6M burst. It was 1,000 tok/s
+  // (≈ 400 classify calls an hour), which ten callers emptied in under three
+  // minutes. Pinned by test/ai/gateway/tenant-quota-sustained-load.test.ts.
+  // An operator-heavy mix (more than about a quarter of calls on the ~17k
+  // operator prompt) at full concurrency can still reach the bucket first.
+  // This is a fairness cap, not a spend cap: spend is for the per-tenant
+  // money cap (U8, pending) and the ai_spend_window alert.
+  //
+  // Resize without a deploy via AI_QUOTA_TIERS_JSON. Raise refillTokensPerSec
+  // with maxConcurrency (~3,750 tok/s a slot), or the bucket binds first.
   classifier_standard: {
     maxConcurrency: 8,
-    bucketCapacity: 600_000,
-    refillTokensPerSec: 1_000,
+    bucketCapacity: 3_600_000,
+    refillTokensPerSec: 30_000,
     hardUpperBoundTokens: 1_200_000,
   },
-  // Kept above classifier_standard so wiring a plan → tier resolver later can
-  // only ever raise a tenant's classify concurrency.
+  // Twice classifier_standard on concurrency and on both bucket figures (same
+  // derivation: 16 slots / 3s × 10,024 ≈ 53.5k → 60,000 tok/s), and never
+  // below it on any limit, so wiring a plan → tier resolver later can only
+  // ever raise a tenant's classify capacity.
   classifier_premium: {
     maxConcurrency: 16,
-    bucketCapacity: 1_200_000,
-    refillTokensPerSec: 4_000,
+    bucketCapacity: 7_200_000,
+    refillTokensPerSec: 60_000,
     hardUpperBoundTokens: 4_000_000,
   },
+  // Four times `standard` on concurrency and on both bucket figures.
   premium: {
     maxConcurrency: 32,
-    bucketCapacity: 1_000_000,
-    refillTokensPerSec: 2_000,
+    bucketCapacity: 2_400_000,
+    refillTokensPerSec: 20_000,
     hardUpperBoundTokens: 4_000_000,
   },
 };

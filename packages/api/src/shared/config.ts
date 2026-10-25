@@ -254,13 +254,18 @@ const configSchema = z.object({
   // OBS-4 — platform-wide ai_runs spend (integer cents) over one window above
   // which `ai_spend_window` pages. Catches a loop that re-calls the model and
   // COMPLETES every call (invisible to every failure-rate rule). 0 turns the
-  // rule off. Default 200 ($2 per 30-minute window), derived from the bucket
-  // math (review round 1): one tenant saturating its standard +
-  // classifier_standard buckets for a window spends ~3.55M tokens, ~53 cents
-  // on gpt-4o-mini, so 200 pages when about four tenants are driven to their
-  // ceiling at once — reachable at today's tenant count. The old 2000 needed
-  // ~38 saturated tenants and could never fire. Pinned in
-  // test/workers/failure-rate-monitor.test.ts; raise it as tenants grow.
+  // rule off. Default 200 ($2 per 30-minute window). It was derived (review
+  // round 1) when one tenant saturating its standard + classifier_standard
+  // buckets for a window spent ~3.55M tokens (~53 cents on gpt-4o-mini), so
+  // 200 paged at about four saturated tenants. GATEWAY-01 resized both buckets
+  // to the live load (ai/gateway/tenant-quota.ts): a saturated tenant can now
+  // spend ~67.2M tokens a window (~1,008 cents), so 200 pages at about a
+  // fifth of ONE tenant's ceiling, well before its bucket stops a loop. A
+  // tenant at the full sized classify load (~25 live sessions, ~41M tokens,
+  // ~620 cents a window) pages on its own; once production spend is priced
+  // and visible, raise this to about three times normal busy-window spend.
+  // Pinned in test/workers/failure-rate-monitor.test.ts; raise it as tenants
+  // grow.
   FAILURE_MONITOR_SPEND_MAX_CENTS: z.coerce.number().int().min(0).default(200),
   // #1813 follow-up — days a `shadow_comparisons` row (PII-scrubbed primary and
   // shadow LLM replies, written while SHADOW_LLM_ENABLED is on) is kept before
