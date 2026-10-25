@@ -168,7 +168,7 @@ export const TABLES_WITHOUT_MIGRATION: ReadonlyArray<{ readonly table: string; r
  * The `tenant_filtered_no_rls` debt, frozen. Migrating one means deleting its
  * entry and LOWERING this number; adding one means raising it, in review.
  */
-export const TFNR_CEILING = 6;
+export const TFNR_CEILING = 2;
 
 export const RAW_PG_SITES: readonly RawPgSite[] = [
   // ── ai/ ────────────────────────────────────────────────────────────────
@@ -666,32 +666,9 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
 
   // ── seed/ ──────────────────────────────────────────────────────────────
   {
-    file: 'src/seed/seed-runner.ts', fn: 'insertOwnerUser', access: 'pool.connect', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['users'], migrateBy: 'audit 2026-10-23 §4 P2.9',
-    why: 'Operator CLI seed: INSERT INTO users (FORCE RLS) on a raw client with only a hand-set session GUC and no role, so WITH CHECK never applies. tenant_id is the id PgTenantRepository.create just returned.',
-  },
-  {
-    file: 'src/seed/seed-runner.ts', fn: 'insertOwnerUser', access: 'guc-only', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['users'], migrateBy: 'audit 2026-10-23 §4 P2.9',
-    why: "Session-level set_config('app.current_tenant_id', $1, false) outside any transaction (unsafe under PgBouncer transaction pooling), with no SET ROLE: not applyTenantContext. Operator CLI only.",
-  },
-  {
     file: 'src/seed/seed-runner.ts', fn: 'cleanSeed', access: 'pool.query', count: 1,
     category: 'global_table', tables: ['tenants'],
     why: "seed --clean enumerates seeded tenants from the non-RLS tenants registry by owner_email LIKE 'owner@seed-tenant-%' (audit F11: the marker is only a prefix). Operator CLI.",
-  },
-  {
-    file: 'src/seed/seed-runner.ts', fn: 'cleanSeed', access: 'pool.connect', count: 1,
-    category: 'tenant_filtered_no_rls', dynamicSql: true,
-    tables: ['appointments', 'estimates', 'jobs', 'service_locations', 'customers', 'audit_events', 'users', 'tenants'],
-    migrateBy: 'audit 2026-10-23 §4 P2.9',
-    why: 'Per seeded tenant: dynamic DELETE FROM <table> WHERE tenant_id = $1 over a hardcoded child-table list, then DELETE FROM tenants, on a raw client with only a hand-set GUC (no role). The tenant comes from the cleanSeed enumeration; operator CLI.',
-  },
-  {
-    file: 'src/seed/seed-runner.ts', fn: 'cleanSeed', access: 'guc-only', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['appointments', 'estimates', 'jobs', 'service_locations', 'customers', 'audit_events', 'users'],
-    migrateBy: 'audit 2026-10-23 §4 P2.9',
-    why: 'Hand-set session GUC before BEGIN with no role switch, so the following child-table DELETEs run as the principal; isolation is their WHERE tenant_id = $1. Operator CLI.',
   },
 
   // ── shared/ ────────────────────────────────────────────────────────────

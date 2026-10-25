@@ -103,9 +103,9 @@ deliberate cross-tenant sweep, a platform-constant write) add an entry:
   verbatim (`queueStatement(c, sql, tenantId)`) is readable only where the
   call binds that parameter to readable SQL. Then `tables` is by review.
   Today the listed ones are `claimLease` and `PgVerticalPackRegistry.update`
-  (its `SET` list is joined at runtime), plus `cleanSeed`,
-  `deprovisionTenant`, `purgeTenantRows` and `deleteBatch` (also
-  substituted table names); the sanctioned `tenantQuery`,
+  (its `SET` list is joined at runtime), plus `deprovisionTenant`,
+  `purgeTenantRows` and `deleteBatch` (also substituted table names); the
+  sanctioned `tenantQuery`,
   `PgTenantTransactionRunner.run` (`SAVEPOINT ${name}`) and
   `verifyRlsRuntimeRole` (`SET ROLE ${role}`) are exempt from the tables
   check.
@@ -246,7 +246,20 @@ deliberate cross-tenant sweep, a platform-constant write) add an entry:
   a read whose answer drives an external side effect: deprovision's Twilio
   credential read (P2.8) picks the subaccount to close, and widened as the
   principal it hands another tenant's SID to `closeSubaccount`
-  (`test/integration/deprovision-tenant-context.test.ts`).
+  (`test/integration/deprovision-tenant-context.test.ts`). A session-level
+  `set_config(…, false)` with no `BEGIN` (the seed CLI's owner INSERT, P2.9)
+  takes the same swap: one more round trip (BEGIN and COMMIT in place of the
+  RESET), and nothing left on the connection.
+- A transaction that must keep a global-table statement beside its tenant
+  ones keeps them in one `withTenantSession` and drops back to the
+  principal for the global one, last: `cleanSeed` (P2.9) deletes each seeded
+  tenant's child rows under the role and then, after `SET LOCAL ROLE NONE`
+  (transaction-local, ended by the COMMIT like the role), the tenants
+  registry row (no tenant_id, no RLS), so children and registry row still go
+  together or not at all. The guard does not read the switch back (see
+  Known limits), so pin which statement runs as whom with
+  `probeStatementRoles`, and the atomicity with a registry DELETE that fails
+  (`test/integration/seed-runner-tenant-context.test.ts`).
 
 ### Checkouts and callbacks: who gets the client
 
@@ -378,7 +391,8 @@ Function.prototype.
   alias's own queries are not read for SQL or R-order. Only the first effect
   is checked: context that a later `COMMIT` / `ROLLBACK` ends
   (`applyTenantContext` is transaction-local) still counts for the SQL after
-  it.
+  it, and so does context a later `SET LOCAL ROLE NONE` drops (cleanSeed's
+  registry DELETE, which is meant to run as the principal).
 - **R-order evasions it does not read** (a delegate's own SQL is read through
   its named parameters, from its declared body): a rest-parameter delegate
   (`peek(...cs)` running `cs[0].query(…)`); a reassigned `let` delegate
