@@ -14,7 +14,7 @@ The implementation planning on 2026-10-25 found choices those defaults don't cov
 1. **Platform default ceiling.** Should a tenant whose owner never sets a monthly AI spend ceiling get a platform default? If so, how many dollars a month, and can an owner raise or remove it?
    - Once #1831 merges (it is still open), the token buckets no longer act as a spend limit, so without a default those tenants have no money limit.
    - A default would apply only after every AI surface is priced, starting the month after the cutover.
-   - *Recommendation: yes, with an owner able to raise or remove it. The amount is yours to set.* For scale: #1831's sized load of 25 concurrent sessions costs about $12–13 an hour on gpt-4o-mini, and a typical tenant uses a small fraction of that.
+   - *Recommendation: yes, with an owner able to raise or remove it. The amount is yours to set.* For scale: #1831's sized load of 25 concurrent sessions costs about $12–13 an hour on gpt-4o-mini. On `main` the token buckets hold one tenant to about $1 an hour on gpt-4o-mini (`packages/api/src/shared/config.ts:257-263`); #1831 raises that bound to about $19 an hour (its PR body).
    - This needs an answer before the first U8 migration, because it decides what an empty ceiling means.
 2. **Vapi.** A Vapi call can't be stopped at the cap. Should each call's cost still count toward the monthly ceiling (we'd read it from Vapi after the call ends), or stay outside the cap with the settings page saying so? And is `VAPI_API_KEY` set in production today?
    - *Recommendation: count it.*
