@@ -357,7 +357,7 @@ export function createOutboundMessaging(deps: OutboundMessagingDeps): OutboundMe
         const sent: SendOutcome = { status: 'sent', delivery: delivered };
         if (!(await finalizeClaim(text.tenantId, claimKey))) {
           // Still 'sending', which is never reclaimed, so no retry resends
-          // it; `findStuckSendClaims` surfaces the row for an operator.
+          // it; the warning below is what surfaces the row to an operator.
           deps.logger.warn('Outbound text sent but its dedupe claim is stuck at sending', {
             ...logFields(text, sent),
             claimKey,

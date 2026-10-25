@@ -26,6 +26,7 @@ import {
   createCustomerTextWording,
   InMemoryCustomerTextWordingRepository,
 } from '../../src/notifications/customer-text-wording';
+import { fakeTenantPool } from '../helpers/fake-tenant-pool';
 
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
 
@@ -41,17 +42,7 @@ interface FakePoolState {
 }
 
 function fakePool(state: FakePoolState): Pool {
-  return {
-    query: vi.fn(async (_sql: string, _params: unknown[]) => {
-      return {
-        rows: state.rows,
-        rowCount: state.rows.length,
-        command: 'SELECT',
-        oid: 0,
-        fields: [],
-      } as unknown as QueryResult;
-    }),
-  } as unknown as Pool;
+  return fakeTenantPool(async () => ({ rows: state.rows, rowCount: state.rows.length })).pool;
 }
 
 /**
@@ -122,7 +113,7 @@ function claimAwarePool(
       fields: [],
     } as unknown as QueryResult;
   });
-  return { pool: { query } as unknown as Pool, claims };
+  return { pool: fakeTenantPool(query).pool, claims };
 }
 
 function makeJob(overrides: Partial<Job>): Job {

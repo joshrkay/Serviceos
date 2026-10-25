@@ -6343,8 +6343,7 @@ export const MIGRATIONS = {
   //               auto-reclaimed by claimSend's WHERE clause, regardless of
   //               age — a resend here could duplicate an already-sent
   //               message. A possibly-stuck row is the accepted tradeoff
-  //               over a silent duplicate; see findStuckSendClaims for
-  //               observability (it reports, never auto-resolves).
+  //               over a silent duplicate; nothing auto-resolves it.
   //   'sent'    — permanent tombstone. claimSend's WHERE clause never
   //               matches it again regardless of age.
   // Purely a crash-safety layer: it does not replace or duplicate the
