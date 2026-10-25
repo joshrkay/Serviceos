@@ -1,10 +1,11 @@
 import { describe, it, expect, vi } from 'vitest';
-import type { Pool, QueryResult } from 'pg';
+import type { Pool } from 'pg';
 import { InMemorySettingsRepository } from '../../src/settings/settings';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
 import { createLogger } from '../../src/logging/logger';
 import type { QueueMessage } from '../../src/queues/queue';
+import { fakeTenantPool } from '../helpers/fake-tenant-pool';
 import {
   createLifecycleEmailWorker,
   LIFECYCLE_EMAIL_JOB_TYPE,
@@ -14,22 +15,21 @@ import {
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
 const TENANT = '11111111-1111-1111-1111-111111111111';
 
+/** The lifecycle_emails ledger on the fake tenant pool: each claim / release is a tenant session. */
 function ledgerPool(ledger = new Set<string>()): Pool {
-  return {
-    query: vi.fn(async (sql: string, params: unknown[] = []) => {
-      if (sql.includes('INSERT INTO lifecycle_emails')) {
-        const key = `${params[0]}:${params[1]}`;
-        if (ledger.has(key)) return { rows: [], rowCount: 0 } as unknown as QueryResult;
-        ledger.add(key);
-        return { rows: [{ tenant_id: params[0] }], rowCount: 1 } as unknown as QueryResult;
-      }
-      if (sql.includes('DELETE FROM lifecycle_emails')) {
-        ledger.delete(`${params[0]}:${params[1]}`);
-        return { rows: [], rowCount: 1 } as unknown as QueryResult;
-      }
-      return { rows: [], rowCount: 0 } as unknown as QueryResult;
-    }),
-  } as unknown as Pool;
+  return fakeTenantPool((sql, params = []) => {
+    if (sql.includes('INSERT INTO lifecycle_emails')) {
+      const key = `${params[0]}:${params[1]}`;
+      if (ledger.has(key)) return { rows: [], rowCount: 0 };
+      ledger.add(key);
+      return { rows: [{ tenant_id: params[0] }], rowCount: 1 };
+    }
+    if (sql.includes('DELETE FROM lifecycle_emails')) {
+      ledger.delete(`${params[0]}:${params[1]}`);
+      return { rows: [], rowCount: 1 };
+    }
+    return undefined;
+  }).pool;
 }
 
 function msg(payload: LifecycleEmailPayload): QueueMessage<LifecycleEmailPayload> {
