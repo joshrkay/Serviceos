@@ -341,23 +341,27 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
   },
   {
     file: 'src/demo/reset.ts', fn: 'claimLease', access: 'checkout-callback', count: 1,
-    category: 'platform_constant_exception', tables: ['demo_tenant_leases', 'audit_events'], handsOffTo: ['writePlatformAudit'],
+    category: 'platform_constant_exception', tables: ['demo_tenant_leases', 'audit_events'],
+    handsOffTo: ['writePlatformAudit', 'writePlatformAudit > insertAuditEventOnClient'],
     dynamicSql: true,
     why: "The reset claim on inPlatformTransaction's client: the claimSql UPDATE of the RLS-exempt lease row (by server-held lease id) and writePlatformAudit's audit_events row pinned to DEMO_PLATFORM_TENANT_ID. The SQL is dynamic only in that claimSql(source) returns it: a fixed UPDATE demo_tenant_leases plus a source-chosen literal predicate (tables by review).",
   },
   {
     file: 'src/demo/reset.ts', fn: 'takeOverStaleReset', access: 'checkout-callback', count: 1,
-    category: 'platform_constant_exception', tables: ['demo_tenant_leases', 'audit_events'], handsOffTo: ['writePlatformAudit'],
+    category: 'platform_constant_exception', tables: ['demo_tenant_leases', 'audit_events'],
+    handsOffTo: ['writePlatformAudit', 'writePlatformAudit > insertAuditEventOnClient'],
     why: "The reaper's takeover on inPlatformTransaction's client: UPDATE of the RLS-exempt lease row by id and stale heartbeat, then a platform-constant audit_events row through writePlatformAudit.",
   },
   {
     file: 'src/demo/reset.ts', fn: 'release', access: 'checkout-callback', count: 1,
-    category: 'platform_constant_exception', tables: ['demo_tenant_leases', 'audit_events'], handsOffTo: ['writePlatformAudit'],
+    category: 'platform_constant_exception', tables: ['demo_tenant_leases', 'audit_events'],
+    handsOffTo: ['writePlatformAudit', 'writePlatformAudit > insertAuditEventOnClient'],
     why: "Releases the lease on inPlatformTransaction's client (UPDATE … WHERE id AND reset_token on the RLS-exempt lease table), then a platform-constant audit_events row. hooks.insideFence is the createDemoLeaseResetter test seam (its caller passes none).",
   },
   {
     file: 'src/demo/reset.ts', fn: 'returnClaim', access: 'checkout-callback', count: 1,
-    category: 'platform_constant_exception', tables: ['demo_tenant_leases', 'audit_events'], handsOffTo: ['writePlatformAudit'],
+    category: 'platform_constant_exception', tables: ['demo_tenant_leases', 'audit_events'],
+    handsOffTo: ['writePlatformAudit', 'writePlatformAudit > insertAuditEventOnClient'],
     why: "Returns a failed reset's claim on inPlatformTransaction's client: UPDATE of the RLS-exempt lease row by id and token, then a platform-constant audit_events row through writePlatformAudit.",
   },
   {
@@ -410,7 +414,10 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
   {
     file: 'src/demo/service.ts', fn: 'settle', access: 'checkout-callback', count: 1,
     category: 'platform_constant_exception', tables: ['demo_tenant_leases', 'demo_calls', 'demo_call_budget', 'audit_events'],
-    handsOffTo: ['releaseNoCall', 'releaseNoCall > releaseOn', 'releaseNoCall > writePlatformAudit', 'writePlatformAudit'],
+    handsOffTo: [
+      'releaseNoCall', 'releaseNoCall > releaseOn', 'releaseNoCall > writePlatformAudit', 'writePlatformAudit',
+      'writePlatformAudit > insertAuditEventOnClient',
+    ],
     why: "Settles a public demo call on inPlatformTransaction's client: lease/demo_calls/demo_call_budget updates by server-held ids (releaseNoCall's releaseOn returns the allowance) and writePlatformAudit rows pinned to DEMO_PLATFORM_TENANT_ID. The visitor never supplies a tenant id.",
   },
   {
