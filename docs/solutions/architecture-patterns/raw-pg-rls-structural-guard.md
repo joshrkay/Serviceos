@@ -144,9 +144,23 @@ deliberate cross-tenant sweep, a platform-constant write) add an entry:
   `applyTenantContext((flag ? [client] : [other])[0], …)`, which may be
   another client), the helper is an unread delegate like any other, a
   required `applyTenantContext` handoff and the first effect.
-- `tenant_filtered_no_rls` is debt: it needs `migrateBy` (the audit item or an
-  issue) and raises `TFNR_CEILING`, which is visible in review. Migrating one
-  means deleting the entry and lowering the ceiling — a stale entry fails.
+- `tenant_filtered_no_rls` was debt, and it is cleared: batches 1–4 of the
+  audit (§4 P1–P2) took all 41 entries out of the category, and
+  `TFNR_CEILING` is 0. 39 were deleted, every statement in them now under
+  `rls_app_runtime` but one: `cleanSeed`'s tenants registry DELETE, which
+  drops to the connection principal after `SET LOCAL ROLE NONE`. Two stayed,
+  re-categorised `global_table` on evidence once their tenant statements had
+  moved: POST /stripe (the AI-model seed
+  moved, P1.10; its four remaining `pool.query` calls touch only the tenants
+  registry) and the demo reset's `runSteps` (the drain's executing-proposals
+  count and the stored-object files read moved into `fencedTenant`, P1.12;
+  its six remaining checkout-callbacks run no SQL on an RLS table: the
+  `_queue_messages` cancel and purge — no RLS, no policies, no tenant_id —
+  the drain's in-flight registry read, a stored-object batch, the walk's
+  per-batch fence and the re-seed). The ceiling now only stops new debt: an
+  entry in this category needs `migrateBy` (the audit item or an issue) and
+  raises `TFNR_CEILING`, which is visible in review; migrating it means
+  deleting the entry and lowering the ceiling again — a stale entry fails.
   Prove each migration at real Postgres under `RLS_RUNTIME_ROLE=true` the way
   the voice-path batch did (`test/integration/{ai-skills,telephony,
   voice-path}-tenant-context.test.ts`): `probeStatementRoles` shows every
@@ -260,6 +274,22 @@ deliberate cross-tenant sweep, a platform-constant write) add an entry:
   Known limits), so pin which statement runs as whom with
   `probeStatementRoles`, and the atomicity with a registry DELETE that fails
   (`test/integration/seed-runner-tenant-context.test.ts`).
+- The other way round — a read of an RLS-exempt table the role holds no
+  grant on, then the tenant's rows, in one transaction — puts the exempt
+  read first, on the principal, and the context after it: the demo reset's
+  drain (P1.12) counts the in-flight registry, then `fencedTenant` applies
+  the lease tenant's context and counts its executing proposals. Its fence
+  (`FOR SHARE` on the lease row, also ungranted to the role) stays first and
+  on the principal; a row lock belongs to the transaction, so it holds
+  through the tenant reads whatever role they take (a takeover UPDATE times
+  out on the lock while they run). Statements on a table with no tenant RLS
+  stay where they are and are `global_table` on evidence (`pg_class.
+  relrowsecurity`, `pg_policies`, the column list), not forced under the
+  role: the reset's `_queue_messages` cancel and purge (no tenant_id; the
+  tenant is in the server-built payload). Pin the roles, a widened predicate
+  per tenant read, the grants after 219, the fence under the role, and a
+  fault and a dead backend inside a tenant step
+  (`test/integration/demo-reset-tenant-context.test.ts`).
 
 ### Checkouts and callbacks: who gets the client
 

@@ -6,11 +6,13 @@
  * The pool here is a script that answers each statement and records which
  * connection ran it, so ordering and transaction boundaries are visible. It
  * proves nothing about the SQL itself: the claim, the fence's FOR SHARE
- * against a takeover, the walk, the re-seed and the release are proven on
- * real Postgres (test/integration/demo-reset-fencing.test.ts,
- * test/integration/demo-tenant-leases.test.ts).
+ * against a takeover, the walk, the re-seed, the release and the roles the
+ * steps run as are proven on real Postgres
+ * (test/integration/demo-reset-fencing.test.ts,
+ * test/integration/demo-tenant-leases.test.ts,
+ * test/integration/demo-reset-tenant-context.test.ts).
  */
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, it, expect } from 'vitest';
 import type { Pool, PoolClient } from 'pg';
 import {
   createDemoLeaseResetter,
@@ -36,8 +38,10 @@ interface Entry {
 interface Script {
   /** Fence answers, in order; missing entries pass. */
   fence?: number[];
-  /** drainPredicate answers, in order; missing entries are 0. */
+  /** In-flight registry counts the drain reads, in order; missing entries are 0. */
   drain?: number[];
+  /** Executing-proposal counts the drain reads, in order; missing entries are 0. */
+  executing?: number[];
   ownerId?: string;
   tables?: string[];
   files?: Array<{ s3_bucket: string; s3_key: string; thumbnail_s3_key: string | null }>;
@@ -50,6 +54,7 @@ function scriptedPool(script: Script): Pool & { log: Entry[] } {
   let conns = 0;
   let fences = 0;
   let drains = 0;
+  let executing = 0;
   const answer = (conn: number, sql: string, params: unknown[] = []) => {
     log.push({ conn, sql, params });
     const s = sql.replace(/\s+/g, ' ').trim();
@@ -67,6 +72,11 @@ function scriptedPool(script: Script): Pool & { log: Entry[] } {
     if (/FROM demo_inflight_jobs/.test(s)) {
       const n = script.drain?.[drains] ?? 0;
       drains += 1;
+      return ok([{ n }]);
+    }
+    if (/^SELECT count\(\*\) AS n FROM proposals WHERE tenant_id = \$1 AND status = 'executing'$/.test(s)) {
+      const n = script.executing?.[executing] ?? 0;
+      executing += 1;
       return ok([{ n }]);
     }
     if (/FROM files WHERE tenant_id/.test(s)) return ok(script.files ?? []);
@@ -190,7 +200,7 @@ describe('resetAndRelease — step order and the fence', () => {
       const fenceAt = tx.findIndex((e) => isFence(e.sql));
       expect(fenceAt, label(tx)).toBeGreaterThanOrEqual(0);
       expect(tx[fenceAt].params).toEqual([LEASE, TOKEN]);
-      const firstWork = tx.findIndex((e) => /^(DELETE|INSERT|UPDATE|-- reseed|SELECT \(SELECT count|SELECT s3_bucket)/.test(flat(e.sql)));
+      const firstWork = tx.findIndex((e) => /^(DELETE|INSERT|UPDATE|-- reseed|SELECT \(SELECT count|SELECT count|SELECT s3_bucket)/.test(flat(e.sql)));
       expect(firstWork, label(tx)).toBeGreaterThan(fenceAt);
     }
     // The release is a single statement fenced by the token in its own WHERE.
@@ -269,6 +279,98 @@ describe('resetAndRelease — a failed step returns the claim', () => {
     expect(out).toMatchObject({ kind: 'failed', step: 'reseed', claimReturned: true });
     expect(alerts).toHaveLength(1);
     expect(transactions(pool.log).map(label)).toEqual(['claim', 'return_claim']);
+  });
+});
+
+describe('resetAndRelease — tenant context on the steps that read tenant rows (RLS_RUNTIME_ROLE=true)', () => {
+  const ORIGINAL_FLAG = process.env.RLS_RUNTIME_ROLE;
+  beforeEach(() => {
+    process.env.RLS_RUNTIME_ROLE = 'true';
+  });
+  afterEach(() => {
+    if (ORIGINAL_FLAG === undefined) delete process.env.RLS_RUNTIME_ROLE;
+    else process.env.RLS_RUNTIME_ROLE = ORIGINAL_FLAG;
+  });
+
+  const CONTEXT = "SELECT set_config('app.current_tenant_id', $1, true), set_config('role', 'rls_app_runtime', true)";
+  const FILES = /^SELECT s3_bucket, s3_key, thumbnail_s3_key FROM files WHERE tenant_id = \$1/;
+  const stepTx = (log: Entry[], name: string) => transactions(log).filter((tx) => label(tx) === name);
+  /** A transaction's statements after BEGIN, flattened, the fence named. */
+  const shape = (tx: Entry[]) => tx.map((e) => (isFence(e.sql) ? 'FENCE' : flat(e.sql)));
+
+  it('the drain reads the in-flight registry on the principal right after the fence, then sets the tenant GUC + role, then counts executing proposals', async () => {
+    const pool = scriptedPool({});
+    await resetterOn(pool).resetAndRelease(LEASE, { source: 'callback' });
+
+    const [drain] = stepTx(pool.log, 'drain');
+    expect(shape(drain)).toEqual([
+      'FENCE',
+      'SELECT count(*) AS n FROM demo_inflight_jobs WHERE tenant_id = $1',
+      CONTEXT,
+      "SELECT count(*) AS n FROM proposals WHERE tenant_id = $1 AND status = 'executing'",
+      'COMMIT',
+    ]);
+    expect(drain[2].params).toEqual([TENANT]);
+    expect(drain[3].params).toEqual([TENANT]);
+  });
+
+  it("the stored-object read sets the tenant GUC + role right after the fence, before it reads the tenant's files", async () => {
+    const pool = scriptedPool({ files: [{ s3_bucket: 'b', s3_key: 'k', thumbnail_s3_key: null }] });
+    await resetterOn(pool).resetAndRelease(LEASE, { source: 'callback' });
+
+    const [read] = stepTx(pool.log, 'object_keys');
+    expect(shape(read).map((s) => (FILES.test(s) ? 'FILES' : s))).toEqual(['FENCE', CONTEXT, 'FILES', 'COMMIT']);
+    expect(read[1].params).toEqual([TENANT]);
+  });
+
+  it('no step sets the tenant GUC without the role', async () => {
+    const pool = scriptedPool({ files: [{ s3_bucket: 'b', s3_key: 'k', thumbnail_s3_key: null }] });
+    await resetterOn(pool).resetAndRelease(LEASE, { source: 'callback' });
+
+    const gucOnly = pool.log.filter((e) => /set_config\('app\.current_tenant_id'/.test(e.sql) && !/set_config\('role'/.test(e.sql));
+    // What is left: the claim's and the release's platform-tenant GUC (the
+    // platform-constant writes) and the walk's own batch GUC (purge-walk.ts,
+    // audit §4 P3.3), none of them a reset step's.
+    const owners = gucOnly.map((e) => (e.params[0] === TENANT ? 'tenant' : 'platform'));
+    const walkBatches = transactions(pool.log).filter((tx) => label(tx).startsWith('delete:')).length;
+    expect(owners.filter((o) => o === 'tenant')).toHaveLength(walkBatches);
+    expect(owners.filter((o) => o === 'platform')).toHaveLength(2);
+  });
+
+  it('the steps that read no tenant table take no tenant context from the reset (the re-seed applies its own)', async () => {
+    const pool = scriptedPool({ files: [{ s3_bucket: 'b', s3_key: 'k', thumbnail_s3_key: null }] });
+    await resetterOn(pool).resetAndRelease(LEASE, { source: 'callback' });
+
+    for (const name of ['queue_cancel', 'queue_purge', 'fenced', 'reseed']) {
+      const txs = stepTx(pool.log, name);
+      expect(txs.length, name).toBeGreaterThan(0);
+      for (const tx of txs) expect(tx.some((e) => flat(e.sql) === CONTEXT), name).toBe(false);
+    }
+  });
+
+  it('in-flight jobs and executing proposals each hold the drain', async () => {
+    const pool = scriptedPool({ drain: [1, 0, 0], executing: [0, 1, 0] });
+    const out = await resetterOn(pool).resetAndRelease(LEASE, { source: 'callback' });
+
+    expect(out).toMatchObject({ kind: 'released' });
+    expect(stepTx(pool.log, 'drain')).toHaveLength(3);
+  });
+
+  it('every fenced step resets the role and the GUC before its client goes back, after COMMIT and after ROLLBACK', async () => {
+    for (const script of [{}, { drain: [1, 1, 1, 1, 1, 1] }] as Script[]) {
+      const pool = scriptedPool(script);
+      await resetterOn(pool).resetAndRelease(LEASE, { source: 'callback' });
+      // The walk's batches run on purge-walk's own transactions (replica
+      // mode, transaction-local GUC), not on fenced's client.
+      const walkConns = new Set(pool.log.filter((e) => /session_replication_role/.test(e.sql)).map((e) => e.conn));
+      const fencedConns = new Set(pool.log.filter((e) => isFence(e.sql) && !walkConns.has(e.conn)).map((e) => e.conn));
+      expect(fencedConns.size).toBeGreaterThan(0);
+      for (const conn of fencedConns) {
+        const ran = pool.log.filter((e) => e.conn === conn).map((e) => flat(e.sql));
+        expect(ran.slice(-3, -2)[0], `conn ${conn}`).toMatch(/^(COMMIT|ROLLBACK)$/);
+        expect(ran.slice(-2), `conn ${conn}`).toEqual(['RESET ROLE', 'RESET app.current_tenant_id']);
+      }
+    }
   });
 });
 

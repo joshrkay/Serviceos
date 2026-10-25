@@ -165,10 +165,11 @@ export const TABLES_WITHOUT_MIGRATION: ReadonlyArray<{ readonly table: string; r
 ];
 
 /**
- * The `tenant_filtered_no_rls` debt, frozen. Migrating one means deleting its
- * entry and LOWERING this number; adding one means raising it, in review.
+ * The `tenant_filtered_no_rls` debt: cleared (batches 1-4 of the raw-pg audit
+ * 2026-10-23 §4 took it from 41 to 0). The ceiling now only stops new debt:
+ * adding an entry means raising this number, in review.
  */
-export const TFNR_CEILING = 2;
+export const TFNR_CEILING = 0;
 
 export const RAW_PG_SITES: readonly RawPgSite[] = [
   // ── ai/ ────────────────────────────────────────────────────────────────
@@ -356,24 +357,23 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
   {
     file: 'src/demo/reset.ts', fn: 'fenced', access: 'pool.connect', count: 1,
     category: 'global_table', tables: ['demo_tenant_leases'], handsOffTo: ['clearTenantContext'],
-    why: "Raw-checkout helper: BEGIN, the FOR SHARE fence read on the RLS-exempt demo_tenant_leases row, then fn(client); clearTenantContext before release. The steps' tenant SQL is runSteps' checkout-callback entry.",
+    why: "Raw-checkout helper: BEGIN, the FOR SHARE fence read on the RLS-exempt demo_tenant_leases row (rls_app_runtime holds no grant on it, migration 317, so the fence runs on the principal before any context), then fn(client); clearTenantContext before release. Its callers are runSteps' and fencedTenant's checkout-callback entries.",
   },
   {
-    file: 'src/demo/reset.ts', fn: 'runSteps', access: 'checkout-callback', count: 7,
-    category: 'tenant_filtered_no_rls', tables: ['_queue_messages', 'demo_inflight_jobs', 'proposals', 'files', 'demo_tenant_leases'],
-    handsOffTo: ['drainPredicate', 'queueStatement', 'reseed'], migrateBy: 'audit 2026-10-23 §4 P1.12',
-    why: "Six fenced(…) steps and the purgeTenantRows beforeStep fence, all on the fenced principal client: queue purges, the drain count over demo_inflight_jobs/proposals and the files read (WHERE tenant_id = the lease tenant, GUC without the role), the object deletes, and reseed (seedDemoTenantFromFixture applies context itself). Demo tenants only (readIdentity refuses others).",
+    file: 'src/demo/reset.ts', fn: 'fencedTenant', access: 'checkout-callback', count: 1,
+    category: 'global_table', tables: [],
+    why: "fenced(…) for the steps that read the tenant's own rows: the callback runs the caller's principal phase (runSteps' entry lists its SQL), then applyTenantContext (the lease tenant's GUC + rls_app_runtime, transaction-local) before the caller's tenant phase, so the drain's executing-proposals count and the stored-object files read run under the policies. It runs no table SQL itself.",
+  },
+  {
+    file: 'src/demo/reset.ts', fn: 'runSteps', access: 'checkout-callback', count: 6,
+    category: 'global_table', tables: ['_queue_messages', 'demo_inflight_jobs', 'demo_tenant_leases'],
+    handsOffTo: ['inFlightJobCount', 'queueStatement', 'reseed'],
+    why: "What the reset steps run on the fenced principal client, none of it on an RLS table: the queue cancel and purge (_queue_messages: no tenant_id, no RLS; the tenant is in the server-built payload), the drain's principal phase (the in-flight registry, RLS-exempt and ungranted to the role, read before fencedTenant applies context), a stored-object batch (no SQL), the walk's per-batch fence (purgeTenantRows beforeStep; the walk is deleteBatch's entry), and reseed (seedDemoTenantFromFixture applies the tenant's context itself). Demo tenants only (readIdentity refuses others).",
   },
   {
     file: 'src/demo/reset.ts', fn: 'startHeartbeat', access: 'pool.query', count: 1,
     category: 'global_table', tables: ['demo_tenant_leases'],
     why: 'Reset heartbeat UPDATE on the RLS-exempt demo_tenant_leases platform table, keyed by lease id and reset token.',
-  },
-  {
-    file: 'src/demo/reset.ts', fn: 'runSteps', access: 'guc-only', count: 2,
-    category: 'tenant_filtered_no_rls', tables: ['proposals', 'demo_inflight_jobs', 'files'],
-    migrateBy: 'audit 2026-10-23 §4 P1.12',
-    why: "The drain and object_delete steps set only set_config('app.current_tenant_id') on the fenced principal client before reading proposals/demo_inflight_jobs/files WHERE tenant_id = the lease tenant: GUC without the role, so RLS does not bind.",
   },
   {
     file: 'src/demo/reset.ts', fn: 'readIdentity', access: 'pool.query', count: 1,
