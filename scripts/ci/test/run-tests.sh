@@ -245,7 +245,7 @@ FAKE_UP_STDOUT='{"deploymentId":"bad\\nvalue"}' \
   "$CI_DIR/railway-deploy.sh" "@serviceos/api" Development
 
 echo
-echo "=== railway-deploy.sh: a failed upload shows the Railway CLI's redacted stderr ==="
+echo "=== railway-deploy.sh: a failed upload shows the Railway CLI's redacted stdout and stderr ==="
 
 # Runs railway-deploy.sh with stdout and stderr kept apart: the workflow
 # captures stdout as the deployment id, so diagnostics may only ever land on
@@ -312,6 +312,23 @@ expect_no_window() {
 
 GENERIC_ERROR="::error::Railway upload failed or timed out for '@serviceos/api' in 'Development'."
 WITHHELD="::error::The Railway CLI's stderr could not be redacted, so it is withheld."
+WITHHELD_STDOUT="::error::The Railway CLI's stdout could not be redacted, so it is withheld."
+NO_STDOUT="::error::Railway CLI stdout: (no output)"
+NO_STDERR="::error::Railway CLI stderr: (no output)"
+
+# Line $2 (exact) is printed, and before line $3 (exact).
+expect_before() {
+  local desc="$1" first="$2" second="$3" file="$4" a b
+  a="$(grep -nxF -- "$first" "$file" | head -n 1 | cut -d: -f1 || true)"
+  b="$(grep -nxF -- "$second" "$file" | head -n 1 | cut -d: -f1 || true)"
+  if [ -n "$a" ] && [ -n "$b" ] && [ "$a" -lt "$b" ]; then
+    echo "PASS: $desc"
+    pass=$((pass + 1))
+  else
+    echo "FAIL: $desc (expected '$first' before '$second', got lines '${a:-missing}' and '${b:-missing}')"
+    fail=$((fail + 1))
+  fi
+}
 
 echo "--- CLI error (expired/invalid token): its message is shown, on stderr only ---"
 private_tmp="$(mktemp -d "${TMPDIR:-/tmp}/rd-tmp.XXXXXX")"
@@ -320,12 +337,13 @@ FAKE_UP_EXIT_CODE=1 FAKE_UP_STDOUT='' TMPDIR="$private_tmp" RAILWAY_TOKEN="super
   run_deploy
 expect_true "CLI error exits 1" [ "$DEPLOY_RC" -eq 1 ]
 expect_line "the CLI's auth error is printed as a prefixed ::error:: line" \
-  "::error::Railway CLI: Invalid RAILWAY_TOKEN. Please check that it is valid and has access to the resource you're trying to use." "$DEPLOY_STDERR_FILE"
+  "::error::Railway CLI stderr: Invalid RAILWAY_TOKEN. Please check that it is valid and has access to the resource you're trying to use." "$DEPLOY_STDERR_FILE"
 expect_contains "the CLI's exit status is named" "'railway up' exited with status 1 for '@serviceos/api' in 'Development'" "$DEPLOY_STDERR"
 expect_not_contains "a CLI error is not reported as a timeout" "timed out after" "$DEPLOY_STDERR"
 expect_line "the existing generic error line is still printed" "$GENERIC_ERROR" "$DEPLOY_STDERR_FILE"
+expect_line "an empty CLI stdout is stated, not left out" "$NO_STDOUT" "$DEPLOY_STDERR_FILE"
 expect_true "nothing lands on stdout (the workflow captures it as the deployment id)" [ ! -s "$DEPLOY_STDOUT_FILE" ]
-expect_true "the raw stderr capture file does not outlive the script" [ -z "$(ls -A "$private_tmp")" ]
+expect_true "neither raw capture file (stdout, stderr) outlives the script" [ -z "$(ls -A "$private_tmp")" ]
 
 echo "--- the RAILWAY_TOKEN literal never appears: plain, in a URL, in a header, split across a line ---"
 # Regex metacharacters, and no 24+ char [A-Za-z0-9_-] run, so ONLY the
@@ -343,11 +361,11 @@ FAKE_UP_EXIT_CODE=1 FAKE_UP_STDOUT='' RAILWAY_TOKEN="$tok" RAILWAY_API_TOKEN="$a
     "wrapped: $tok_a" \
     "$tok_b (continued)")" \
   run_deploy
-expect_line "plain occurrence is redacted in place" "::error::Railway CLI: plain: token [REDACTED] was rejected" "$DEPLOY_STDERR_FILE"
-expect_line "URL occurrence is redacted in place" "::error::Railway CLI: url: GET https://backboard.railway.invalid/graphql/v2?token=[REDACTED]&project=p failed" "$DEPLOY_STDERR_FILE"
-expect_line "Authorization header value is redacted" "::error::Railway CLI: header: Authorization: [REDACTED]" "$DEPLOY_STDERR_FILE"
-expect_line "RAILWAY_API_TOKEN literal is redacted too" "::error::Railway CLI: api: RAILWAY_API_TOKEN is [REDACTED] here" "$DEPLOY_STDERR_FILE"
-expect_line "a token split across a line break is redacted as a whole" "::error::Railway CLI: wrapped: [REDACTED] (continued)" "$DEPLOY_STDERR_FILE"
+expect_line "plain occurrence is redacted in place" "::error::Railway CLI stderr: plain: token [REDACTED] was rejected" "$DEPLOY_STDERR_FILE"
+expect_line "URL occurrence is redacted in place" "::error::Railway CLI stderr: url: GET https://backboard.railway.invalid/graphql/v2?token=[REDACTED]&project=p failed" "$DEPLOY_STDERR_FILE"
+expect_line "Authorization header value is redacted" "::error::Railway CLI stderr: header: Authorization: [REDACTED]" "$DEPLOY_STDERR_FILE"
+expect_line "RAILWAY_API_TOKEN literal is redacted too" "::error::Railway CLI stderr: api: RAILWAY_API_TOKEN is [REDACTED] here" "$DEPLOY_STDERR_FILE"
+expect_line "a token split across a line break is redacted as a whole" "::error::Railway CLI stderr: wrapped: [REDACTED] (continued)" "$DEPLOY_STDERR_FILE"
 expect_not_contains "RAILWAY_TOKEN literal never appears" "$tok" "$DEPLOY_STDERR"
 expect_not_contains "neither half of the split RAILWAY_TOKEN appears (first half)" "$tok_a" "$DEPLOY_STDERR"
 expect_not_contains "neither half of the split RAILWAY_TOKEN appears (second half)" "$tok_b" "$DEPLOY_STDERR"
@@ -365,9 +383,9 @@ FAKE_UP_EXIT_CODE=1 FAKE_UP_STDOUT='' RAILWAY_TOKEN="Kq7.Vw3/Zx9" \
     "callback https://example.invalid/cb?access_token=short1&x=1")" \
   run_deploy
 expect_line "24+ char secret-shaped runs (incl. a UUID) are redacted, ordinary words kept" \
-  "::error::Railway CLI: Error: key [REDACTED] rejected for project [REDACTED] (service @serviceos/api)" "$DEPLOY_STDERR_FILE"
-expect_line "a bearer credential is redacted" "::error::Railway CLI: proxy said: bearer [REDACTED] denied" "$DEPLOY_STDERR_FILE"
-expect_line "a token=value query parameter is redacted" "::error::Railway CLI: callback https://example.invalid/cb?access_token=[REDACTED]&x=1" "$DEPLOY_STDERR_FILE"
+  "::error::Railway CLI stderr: Error: key [REDACTED] rejected for project [REDACTED] (service @serviceos/api)" "$DEPLOY_STDERR_FILE"
+expect_line "a bearer credential is redacted" "::error::Railway CLI stderr: proxy said: bearer [REDACTED] denied" "$DEPLOY_STDERR_FILE"
+expect_line "a token=value query parameter is redacted" "::error::Railway CLI stderr: callback https://example.invalid/cb?access_token=[REDACTED]&x=1" "$DEPLOY_STDERR_FILE"
 expect_not_contains "the long secret never appears" "fakesecret0123456789abcdefXYZ" "$DEPLOY_STDERR"
 expect_not_contains "the short bearer value never appears" "shortval9" "$DEPLOY_STDERR"
 
@@ -375,7 +393,7 @@ echo "--- ANSI escapes and control characters are stripped; a CR cannot smuggle 
 FAKE_UP_EXIT_CODE=1 FAKE_UP_STDOUT='' \
   FAKE_UP_STDERR="$(printf '\033[31m\033[1mError:\033[0m Service \033[4m@serviceos/api\033[0m not found\a\n\033]0;title\a\rspinner\r::add-mask::injected\n')" \
   run_deploy
-expect_line "ANSI-coloured error text is shown as plain text" "::error::Railway CLI: Error: Service @serviceos/api not found" "$DEPLOY_STDERR_FILE"
+expect_line "ANSI-coloured error text is shown as plain text" "::error::Railway CLI stderr: Error: Service @serviceos/api not found" "$DEPLOY_STDERR_FILE"
 expect_not_contains "no ESC byte survives" $'\033' "$DEPLOY_STDERR"
 expect_not_contains "no BEL byte survives" $'\a' "$DEPLOY_STDERR"
 expect_not_contains "no CR byte survives" $'\r' "$DEPLOY_STDERR"
@@ -386,17 +404,17 @@ echo "--- more than 20 lines: only the tail (where the error is) is shown ---"
 FAKE_UP_EXIT_CODE=1 FAKE_UP_STDOUT='' \
   FAKE_UP_STDERR="$(for i in $(seq -w 1 25); do echo "cli line $i"; done)" \
   run_deploy
-expect_line "the last line is shown" "::error::Railway CLI: cli line 25" "$DEPLOY_STDERR_FILE"
-expect_line "the 20th-from-last line is shown" "::error::Railway CLI: cli line 06" "$DEPLOY_STDERR_FILE"
+expect_line "the last line is shown" "::error::Railway CLI stderr: cli line 25" "$DEPLOY_STDERR_FILE"
+expect_line "the 20th-from-last line is shown" "::error::Railway CLI stderr: cli line 06" "$DEPLOY_STDERR_FILE"
 expect_not_contains "lines before the last 20 are dropped" "cli line 05" "$DEPLOY_STDERR"
-expect_true "exactly 20 CLI lines are printed" [ "$(grep -c '^::error::Railway CLI: ' "$DEPLOY_STDERR_FILE")" -eq 20 ]
+expect_true "exactly 20 CLI lines are printed" [ "$(grep -c '^::error::Railway CLI stderr: ' "$DEPLOY_STDERR_FILE")" -eq 20 ]
 expect_contains "the omission is stated" "5 earlier line(s) omitted" "$DEPLOY_STDERR"
 
 echo "--- a very long line is truncated ---"
 FAKE_UP_EXIT_CODE=1 FAKE_UP_STDOUT='' \
   FAKE_UP_STDERR="$(printf 'segment-%03d ' $(seq 1 100))TAIL-MARKER" \
   run_deploy
-expect_contains "the head of the long line is shown" "::error::Railway CLI: segment-001 segment-002" "$DEPLOY_STDERR"
+expect_contains "the head of the long line is shown" "::error::Railway CLI stderr: segment-001 segment-002" "$DEPLOY_STDERR"
 expect_not_contains "the end of the long line is cut" "TAIL-MARKER" "$DEPLOY_STDERR"
 expect_contains "the truncation is stated" "chars truncated]" "$DEPLOY_STDERR"
 expect_true "no printed line exceeds 400 chars" \
@@ -408,8 +426,9 @@ expect_true "timeout exits 1" [ "$DEPLOY_RC" -eq 1 ]
 expect_contains "the timeout is named as a timeout" "'railway up' timed out after 1s for '@serviceos/api' in 'Development'" "$DEPLOY_STDERR"
 expect_not_contains "a timeout is not reported as a CLI exit status" "exited with status" "$DEPLOY_STDERR"
 expect_line "the CLI's partial output is shown, without the wrapper's own timeout text glued on" \
-  "::error::Railway CLI: Indexing..." "$DEPLOY_STDERR_FILE"
+  "::error::Railway CLI stderr: Indexing..." "$DEPLOY_STDERR_FILE"
 expect_line "the existing generic error line is still printed on timeout" "$GENERIC_ERROR" "$DEPLOY_STDERR_FILE"
+expect_line "a hang before any stdout says stdout was empty" "$NO_STDOUT" "$DEPLOY_STDERR_FILE"
 
 echo "--- an escape byte right before the token cannot swallow its first char and expose the rest ---"
 # A bare ESC, and a CSI introducer, each consume the 'r' that follows them.
@@ -419,8 +438,8 @@ esc_tok='r.*[x]/&\|$^(?){1}+'
 FAKE_UP_EXIT_CODE=1 FAKE_UP_STDOUT='' RAILWAY_TOKEN="$esc_tok" \
   FAKE_UP_STDERR="$(printf 'bare: x \033%s y\ncsi: x \033[%s y\n' "$esc_tok" "$esc_tok")" \
   run_deploy
-expect_true "the bare-ESC line is still shown" grep -q '^::error::Railway CLI: bare: x ' "$DEPLOY_STDERR_FILE"
-expect_true "the CSI line is still shown" grep -q '^::error::Railway CLI: csi: x ' "$DEPLOY_STDERR_FILE"
+expect_true "the bare-ESC line is still shown" grep -q '^::error::Railway CLI stderr: bare: x ' "$DEPLOY_STDERR_FILE"
+expect_true "the CSI line is still shown" grep -q '^::error::Railway CLI stderr: csi: x ' "$DEPLOY_STDERR_FILE"
 expect_not_contains "the token minus its first char never appears" "${esc_tok#r}" "$DEPLOY_STDERR"
 expect_not_contains "no inner fragment of the token appears" '(?){1}' "$DEPLOY_STDERR"
 
@@ -429,7 +448,7 @@ tab_tok=$'tabtok.Left\t+Right'
 FAKE_UP_EXIT_CODE=1 FAKE_UP_STDOUT='' RAILWAY_TOKEN="$tab_tok" \
   FAKE_UP_STDERR="tabbed: $tab_tok here"$'\n' \
   run_deploy
-expect_line "a TAB-containing token is redacted in place" "::error::Railway CLI: tabbed: [REDACTED] here" "$DEPLOY_STDERR_FILE"
+expect_line "a TAB-containing token is redacted in place" "::error::Railway CLI stderr: tabbed: [REDACTED] here" "$DEPLOY_STDERR_FILE"
 expect_not_contains "the part before the TAB never appears" "tabtok" "$DEPLOY_STDERR"
 expect_not_contains "the part after the TAB never appears" "+Right" "$DEPLOY_STDERR"
 
@@ -452,7 +471,7 @@ for ctl in bare-ESC "ESC-'('" "ESC-'['" "unterminated ESC-']'"; do
     run_deploy
   expect_line "$ctl inside a regex-metachar token: the CLI text is withheld" "$WITHHELD" "$DEPLOY_STDERR_FILE"
   expect_true "$ctl inside a regex-metachar token: no CLI line is printed" \
-    [ "$(grep -c '^::error::Railway CLI: ' "$DEPLOY_STDERR_FILE")" -eq 0 ]
+    [ "$(grep -c '^::error::Railway CLI stderr: ' "$DEPLOY_STDERR_FILE")" -eq 0 ]
   expect_no_window "$ctl inside a regex-metachar token: no 4-char run of it is printed" "$in_tok" "$DEPLOY_STDERR_FILE"
 done
 expect_line "the generic error line is still printed after a withhold" "$GENERIC_ERROR" "$DEPLOY_STDERR_FILE"
@@ -478,7 +497,7 @@ for ctl in bare-ESC "ESC-'('" "ESC-'['" "unterminated ESC-']'"; do
     expect_line "$ctl inside a UUID-shaped token: the CLI text is withheld" "$WITHHELD" "$DEPLOY_STDERR_FILE"
   else
     expect_line "$ctl inside a UUID-shaped token: shape-redacted and shown" \
-      "::error::Railway CLI: auth failed for [REDACTED] (retry)" "$DEPLOY_STDERR_FILE"
+      "::error::Railway CLI stderr: auth failed for [REDACTED] (retry)" "$DEPLOY_STDERR_FILE"
   fi
   expect_no_window "$ctl inside a UUID-shaped token: no 4-char run of it is printed" "$uuid_tok" "$DEPLOY_STDERR_FILE"
 done
@@ -506,20 +525,20 @@ FAKE_UP_EXIT_CODE=1 FAKE_UP_STDOUT='' RAILWAY_TOKEN="$uuid_tok" RAILWAY_API_TOKE
   FAKE_UP_STDERR="Unauthorized. Please run 'railway login' or set a valid RAILWAY_TOKEN (status 401)."$'\n' \
   run_deploy
 expect_line "the benign error is shown verbatim" \
-  "::error::Railway CLI: Unauthorized. Please run 'railway login' or set a valid RAILWAY_TOKEN (status 401)." "$DEPLOY_STDERR_FILE"
+  "::error::Railway CLI stderr: Unauthorized. Please run 'railway login' or set a valid RAILWAY_TOKEN (status 401)." "$DEPLOY_STDERR_FILE"
 expect_not_contains "the benign error is not withheld" "could not be redacted" "$DEPLOY_STDERR"
 
 echo "--- the helper's own fixed text never withholds: placeholder, prefix and notes are not CLI text ---"
 # The token shares 4-char runs with '[REDACTED]', the '::error::Railway
-# CLI: ' prefix and the truncation / omitted-lines notes (whitespace
+# CLI stderr: ' prefix and the truncation / omitted-lines notes (whitespace
 # removed), but with nothing the CLI printed.
-fixed_tok='z7[REDACTED]::error::RailwayCLI:charstruncated]omitted;showingz'
+fixed_tok='z7[REDACTED]::error::RailwayCLIstderr:charstruncated]omitted;showingz'
 FAKE_UP_EXIT_CODE=1 FAKE_UP_STDOUT='' RAILWAY_TOKEN="$fixed_tok" \
   FAKE_UP_STDERR="$(for i in $(seq -w 1 20); do echo "cli line $i"; done; \
     echo "rejected: $fixed_tok retry"; printf 'segment-%03d ' $(seq 1 100))" \
   run_deploy
 expect_line "the token is redacted in place, not withheld" \
-  "::error::Railway CLI: rejected: [REDACTED] retry" "$DEPLOY_STDERR_FILE"
+  "::error::Railway CLI stderr: rejected: [REDACTED] retry" "$DEPLOY_STDERR_FILE"
 expect_contains "the truncation note is printed" "chars truncated]" "$DEPLOY_STDERR"
 expect_contains "the omitted-lines note is printed" "2 earlier line(s) omitted" "$DEPLOY_STDERR"
 expect_not_contains "nothing is withheld" "could not be redacted" "$DEPLOY_STDERR"
@@ -534,17 +553,19 @@ FAKE_UP_EXIT_CODE=1 FAKE_UP_STDOUT='' RAILWAY_TOKEN='a  b' FAKE_UP_STDERR="$host
   run_deploy timeout 10
 expect_true "the run finishes well inside the bound (exit 1, not timeout's 124)" [ "$DEPLOY_RC" -eq 1 ]
 expect_line "the CLI's lines are rendered, not withheld" \
-  "::error::Railway CLI: a$(printf '%299s' '')... [1702 chars truncated]" "$DEPLOY_STDERR_FILE"
+  "::error::Railway CLI stderr: a$(printf '%299s' '')... [1702 chars truncated]" "$DEPLOY_STDERR_FILE"
 expect_not_contains "the withheld notice is not printed" "could not be redacted" "$DEPLOY_STDERR"
 
 echo "--- a helper that overruns its bound withholds the CLI text, never prints it raw ---"
 # 1ms is far less than the helper needs to start, so it is always cut off.
-FAKE_UP_EXIT_CODE=1 FAKE_UP_STDOUT='' RAILWAY_DIAGNOSTICS_TIMEOUT_SECONDS=0.001 \
+FAKE_UP_EXIT_CODE=1 FAKE_UP_STDOUT='{"error":"raw-stdout-marker-88"}' RAILWAY_DIAGNOSTICS_TIMEOUT_SECONDS=0.001 \
   FAKE_UP_STDERR="raw-cli-marker-77 Unauthorized"$'\n' \
   run_deploy
 expect_true "an overrun helper still exits 1" [ "$DEPLOY_RC" -eq 1 ]
 expect_line "the withheld notice is printed" "$WITHHELD" "$DEPLOY_STDERR_FILE"
 expect_not_contains "the CLI text is not printed" "raw-cli-marker-77" "$DEPLOY_STDERR"
+expect_line "the stdout withheld notice is printed too" "$WITHHELD_STDOUT" "$DEPLOY_STDERR_FILE"
+expect_not_contains "the CLI's stdout is not printed" "raw-stdout-marker-88" "$DEPLOY_STDERR"
 expect_line "the existing generic error line is still printed when withheld" "$GENERIC_ERROR" "$DEPLOY_STDERR_FILE"
 expect_true "nothing lands on stdout when withheld" [ ! -s "$DEPLOY_STDOUT_FILE" ]
 
@@ -556,7 +577,7 @@ shim_dir="$(mktemp -d "${TMPDIR:-/tmp}/rd-shim.XXXXXX")"
 real_timeout="$(command -v timeout)"
 cat >"$shim_dir/timeout" <<EOF
 #!/usr/bin/env bash
-printf '%s %s\n' "\$1" "\${3##*/}" >>"$shim_dir/bounds"
+printf '%s %s %s\n' "\$1" "\${3##*/}" "\${4:-}" >>"$shim_dir/bounds"
 exec "$real_timeout" "\$@"
 EOF
 chmod +x "$shim_dir/timeout"
@@ -565,19 +586,189 @@ for bad in 0 abc -1; do
   FAKE_UP_EXIT_CODE=1 FAKE_UP_STDOUT='' RAILWAY_DIAGNOSTICS_TIMEOUT_SECONDS="$bad" PATH="$shim_dir:$PATH" \
     FAKE_UP_STDERR="bound-marker Unauthorized"$'\n' \
     run_deploy
-  expect_true "RAILWAY_DIAGNOSTICS_TIMEOUT_SECONDS=$bad: the helper still runs under 'timeout 15'" \
-    [ "$(cat "$shim_dir/bounds")" = "15 railway-stderr-diagnostics.py" ]
+  expect_true "RAILWAY_DIAGNOSTICS_TIMEOUT_SECONDS=$bad: the helper still runs under 'timeout 15', once per stream" \
+    [ "$(cat "$shim_dir/bounds")" = "$(printf '%s\n' '15 railway-cli-diagnostics.py stdout' '15 railway-cli-diagnostics.py stderr')" ]
   expect_line "RAILWAY_DIAGNOSTICS_TIMEOUT_SECONDS=$bad: the CLI's error is still shown" \
-    "::error::Railway CLI: bound-marker Unauthorized" "$DEPLOY_STDERR_FILE"
+    "::error::Railway CLI stderr: bound-marker Unauthorized" "$DEPLOY_STDERR_FILE"
 done
 
+echo "--- a helper run that fails for one stream withholds only that stream ---"
+# The shim stands in for coreutils timeout and fails (as an overrun would,
+# exit 124) only the helper run for FAIL_STREAM, running the other normally.
+cat >"$shim_dir/timeout" <<SHIM
+#!/usr/bin/env bash
+if [ "\${4:-}" = "\$FAIL_STREAM" ]; then exit 124; fi
+exec "$real_timeout" "\$@"
+SHIM
+chmod +x "$shim_dir/timeout"
+for failed in stdout stderr; do
+  FAIL_STREAM="$failed" FAKE_UP_EXIT_CODE=1 FAKE_UP_STDOUT='{"error":"one-stream-stdout-55"}' PATH="$shim_dir:$PATH" \
+    FAKE_UP_STDERR="one-stream-stderr-66 Unauthorized"$'\n' \
+    run_deploy
+  expect_true "$failed helper fails: the run still exits 1" [ "$DEPLOY_RC" -eq 1 ]
+  if [ "$failed" = stdout ]; then
+    expect_line "stdout helper fails: the stdout withheld notice is printed" "$WITHHELD_STDOUT" "$DEPLOY_STDERR_FILE"
+    expect_not_contains "stdout helper fails: the CLI's stdout is not printed" "one-stream-stdout-55" "$DEPLOY_STDERR"
+    expect_line "stdout helper fails: stderr is still shown" \
+      "::error::Railway CLI stderr: one-stream-stderr-66 Unauthorized" "$DEPLOY_STDERR_FILE"
+    expect_not_contains "stdout helper fails: stderr is not reported withheld" "$WITHHELD" "$DEPLOY_STDERR"
+  else
+    expect_line "stderr helper fails: the stderr withheld notice is printed" "$WITHHELD" "$DEPLOY_STDERR_FILE"
+    expect_not_contains "stderr helper fails: the CLI's stderr is not printed" "one-stream-stderr-66" "$DEPLOY_STDERR"
+    expect_line "stderr helper fails: stdout is still shown" \
+      '::error::Railway CLI stdout: {"error":"one-stream-stdout-55"}' "$DEPLOY_STDERR_FILE"
+    expect_not_contains "stderr helper fails: stdout is not reported withheld" "$WITHHELD_STDOUT" "$DEPLOY_STDERR"
+  fi
+  expect_line "$failed helper fails: the generic error line is still printed" "$GENERIC_ERROR" "$DEPLOY_STDERR_FILE"
+  expect_true "$failed helper fails: nothing lands on stdout" [ ! -s "$DEPLOY_STDOUT_FILE" ]
+done
+
+echo
+echo "=== railway-deploy.sh: the CLI's stdout (where --json puts its errors) is shown too ==="
+
+echo "--- a --json error object on stdout, nothing on stderr (main's deploy run 40160646701) ---"
+# Verbatim what @railway/cli 5.49.6 prints for 'up --json --detach' when it
+# cannot authenticate: one JSON object on stdout, exit 1, stderr empty.
+na_json='{"code":"NOT_AUTHENTICATED","error":"Not signed in.","hint":"Run `railway login` to authenticate, then re-run."}'
+private_tmp="$(mktemp -d "${TMPDIR:-/tmp}/rd-tmp.XXXXXX")"
+FAKE_UP_EXIT_CODE=1 FAKE_UP_STDOUT="$na_json"$'\n' TMPDIR="$private_tmp" RAILWAY_TOKEN="$uuid_tok" \
+  run_deploy
+expect_true "a stdout-only CLI error exits 1" [ "$DEPLOY_RC" -eq 1 ]
+expect_line "the CLI's JSON error is printed whole, as a stdout-labelled ::error:: line" \
+  "::error::Railway CLI stdout: $na_json" "$DEPLOY_STDERR_FILE"
+expect_line "the empty stderr is stated, labelled" "$NO_STDERR" "$DEPLOY_STDERR_FILE"
+expect_before "stdout is shown before stderr" "::error::Railway CLI stdout: $na_json" "$NO_STDERR" "$DEPLOY_STDERR_FILE"
+expect_contains "the header names both streams" \
+  "'railway up' exited with status 1 for '@serviceos/api' in 'Development'. The Railway CLI's stdout and stderr (redacted, last lines only) follow." "$DEPLOY_STDERR"
+expect_not_contains "nothing is withheld" "could not be redacted" "$DEPLOY_STDERR"
+expect_line "the generic error line is still printed last" "$GENERIC_ERROR" "$DEPLOY_STDERR_FILE"
+expect_true "nothing lands on stdout" [ ! -s "$DEPLOY_STDOUT_FILE" ]
+expect_true "neither capture file outlives a failed run" [ -z "$(ls -A "$private_tmp")" ]
+
+echo "--- stdout gets the same redaction: token literals (whole, in a URL, in a header, wrapped) and secret shapes ---"
+FAKE_UP_EXIT_CODE=1 RAILWAY_TOKEN="$tok" RAILWAY_API_TOKEN="$api_tok" \
+  FAKE_UP_STDOUT="$(printf '%s\n' \
+    "{\"code\":\"UNAUTHORIZED\",\"error\":\"token $tok was rejected\"}" \
+    "url: https://backboard.railway.invalid/graphql/v2?token=$tok&project=p" \
+    "header: Authorization: Bearer $tok" \
+    "{\"error\":\"key fakesecret0123456789abcdefXYZ rejected\",\"hint\":\"bearer shortval9\"}" \
+    "api: $api_tok" \
+    "wrapped: $tok_a" \
+    "$tok_b (continued)")" \
+  run_deploy
+expect_line "stdout: a token inside the JSON error is redacted in place" \
+  '::error::Railway CLI stdout: {"code":"UNAUTHORIZED","error":"token [REDACTED] was rejected"}' "$DEPLOY_STDERR_FILE"
+expect_line "stdout: a URL token is redacted" \
+  "::error::Railway CLI stdout: url: https://backboard.railway.invalid/graphql/v2?token=[REDACTED]&project=p" "$DEPLOY_STDERR_FILE"
+expect_line "stdout: an Authorization header value is redacted" \
+  "::error::Railway CLI stdout: header: Authorization: [REDACTED]" "$DEPLOY_STDERR_FILE"
+expect_line "stdout: 24+ char runs and bearer values are redacted" \
+  '::error::Railway CLI stdout: {"error":"key [REDACTED] rejected","hint":"bearer [REDACTED]"}' "$DEPLOY_STDERR_FILE"
+expect_line "stdout: the RAILWAY_API_TOKEN literal is redacted" "::error::Railway CLI stdout: api: [REDACTED]" "$DEPLOY_STDERR_FILE"
+expect_line "stdout: a token wrapped across a line break is redacted whole" \
+  "::error::Railway CLI stdout: wrapped: [REDACTED] (continued)" "$DEPLOY_STDERR_FILE"
+expect_not_contains "stdout: no prefix of RAILWAY_TOKEN appears" "rwtok" "$DEPLOY_STDERR"
+expect_not_contains "stdout: no part of the second half appears" "Omega" "$DEPLOY_STDERR"
+expect_not_contains "stdout: RAILWAY_API_TOKEN never appears" "apitok" "$DEPLOY_STDERR"
+expect_not_contains "stdout: the long secret never appears" "fakesecret" "$DEPLOY_STDERR"
+expect_not_contains "stdout: the bearer value never appears" "shortval9" "$DEPLOY_STDERR"
+expect_no_window "stdout: no 4-char run of RAILWAY_TOKEN is printed" "$tok" "$DEPLOY_STDERR_FILE"
+
+echo "--- stdout that cannot be redacted is withheld, and only stdout: stderr is still shown ---"
+FAKE_UP_EXIT_CODE=1 RAILWAY_TOKEN="$in_tok" \
+  FAKE_UP_STDOUT="{\"error\":\"auth failed for ${in_tok:0:11}"$'\033'"${in_tok:11}\"}"$'\n' \
+  FAKE_UP_STDERR="stderr-shown-marker Unauthorized"$'\n' \
+  run_deploy
+expect_line "the stdout withheld notice is printed" "$WITHHELD_STDOUT" "$DEPLOY_STDERR_FILE"
+expect_true "no stdout CLI line is printed" \
+  [ "$(grep -c '^::error::Railway CLI stdout: ' "$DEPLOY_STDERR_FILE")" -eq 0 ]
+expect_no_window "no 4-char run of the token is printed" "$in_tok" "$DEPLOY_STDERR_FILE"
+expect_line "stderr is still shown" "::error::Railway CLI stderr: stderr-shown-marker Unauthorized" "$DEPLOY_STDERR_FILE"
+expect_not_contains "stderr is not withheld" "$WITHHELD" "$DEPLOY_STDERR"
+expect_line "the generic error line is still printed" "$GENERIC_ERROR" "$DEPLOY_STDERR_FILE"
+
+echo "--- stderr that cannot be redacted is withheld, and only stderr: stdout is still shown ---"
+FAKE_UP_EXIT_CODE=1 RAILWAY_TOKEN="$in_tok" FAKE_UP_STDOUT="$na_json"$'\n' \
+  FAKE_UP_STDERR="auth failed for ${in_tok:0:11}"$'\033'"${in_tok:11} (retry)"$'\n' \
+  run_deploy
+expect_line "the stderr withheld notice is printed" "$WITHHELD" "$DEPLOY_STDERR_FILE"
+expect_line "stdout is still shown" "::error::Railway CLI stdout: $na_json" "$DEPLOY_STDERR_FILE"
+expect_not_contains "stdout is not withheld" "$WITHHELD_STDOUT" "$DEPLOY_STDERR"
+expect_no_window "no 4-char run of the token is printed" "$in_tok" "$DEPLOY_STDERR_FILE"
+
+echo "--- a hung upload shows what the CLI had already written to stdout ---"
+FAKE_UP_EARLY_STDOUT='{"progress":"early-stdout-marker"' FAKE_UP_STDERR='Indexing...' FAKE_UP_SLEEP=5 \
+  RAILWAY_UPLOAD_TIMEOUT_SECONDS=1 run_deploy
+expect_true "timeout exits 1" [ "$DEPLOY_RC" -eq 1 ]
+expect_contains "the timeout header names both streams" \
+  "'railway up' timed out after 1s for '@serviceos/api' in 'Development'. What the Railway CLI printed to stdout and stderr before that (redacted, last lines only) follows." "$DEPLOY_STDERR"
+expect_line "the CLI's partial stdout is shown" '::error::Railway CLI stdout: {"progress":"early-stdout-marker"' "$DEPLOY_STDERR_FILE"
+expect_line "the CLI's partial stderr is shown" "::error::Railway CLI stderr: Indexing..." "$DEPLOY_STDERR_FILE"
+expect_before "stdout is shown before stderr on timeout too" \
+  '::error::Railway CLI stdout: {"progress":"early-stdout-marker"' "::error::Railway CLI stderr: Indexing..." "$DEPLOY_STDERR_FILE"
+expect_not_contains "the wrapper's own timeout text is shown on neither stream" "Railway command timed out" "$DEPLOY_STDERR"
+expect_true "nothing lands on stdout on timeout" [ ! -s "$DEPLOY_STDOUT_FILE" ]
+
+echo "--- a huge stdout is bounded: last 20 lines, each cut to the printed width ---"
+# ~90KB: 2500 short lines, then one 50,000-char line of ordinary words.
+huge_stdout="$(for i in $(seq -w 1 2500); do echo "stdout line $i"; done; printf 'seg-%05d ' $(seq 1 5000))"
+FAKE_UP_EXIT_CODE=1 FAKE_UP_STDOUT="$huge_stdout" FAKE_UP_STDERR="small stderr"$'\n' \
+  run_deploy timeout 30
+expect_true "a huge stdout still exits 1 (not timeout's 124)" [ "$DEPLOY_RC" -eq 1 ]
+expect_true "exactly 20 stdout lines are printed" \
+  [ "$(grep -c '^::error::Railway CLI stdout: ' "$DEPLOY_STDERR_FILE")" -eq 20 ]
+expect_contains "the stdout omission is stated, naming the stream" \
+  "(Railway CLI stdout: 2481 earlier line(s) omitted; showing the last 20)" "$DEPLOY_STDERR"
+expect_line "the last short line before the long one is shown" "::error::Railway CLI stdout: stdout line 2500" "$DEPLOY_STDERR_FILE"
+expect_not_contains "lines before the last 20 are dropped" "stdout line 2480" "$DEPLOY_STDERR"
+expect_contains "the long stdout line is truncated, and says so" "seg-00030 ... [49699 chars truncated]" "$DEPLOY_STDERR"
+expect_not_contains "the end of the long stdout line is cut" "seg-05000" "$DEPLOY_STDERR"
+expect_true "no printed line exceeds 400 chars" \
+  [ "$(awk '{ if (length($0) > m) m = length($0) } END { print m + 0 }' "$DEPLOY_STDERR_FILE")" -le 400 ]
+expect_true "the whole diagnostic stays small (at most 50 lines)" [ "$(wc -l <"$DEPLOY_STDERR_FILE")" -le 50 ]
+expect_line "stderr is still shown after a huge stdout" "::error::Railway CLI stderr: small stderr" "$DEPLOY_STDERR_FILE"
+
+echo "--- exit 0 but no deployment id: what the CLI printed is shown, not discarded ---"
+FAKE_UP_STDOUT='{"code":"UNEXPECTED","error":"no-id-marker"}' FAKE_UP_STDERR="warning: no-id-stderr-marker"$'\n' \
+  run_deploy
+expect_true "a missing id still exits 1" [ "$DEPLOY_RC" -eq 1 ]
+expect_contains "the missing id is named" "returned no deployment ID" "$DEPLOY_STDERR"
+expect_line "the CLI's stdout is shown" '::error::Railway CLI stdout: {"code":"UNEXPECTED","error":"no-id-marker"}' "$DEPLOY_STDERR_FILE"
+expect_line "the CLI's stderr is shown" "::error::Railway CLI stderr: warning: no-id-stderr-marker" "$DEPLOY_STDERR_FILE"
+expect_true "nothing lands on stdout" [ ! -s "$DEPLOY_STDOUT_FILE" ]
+FAKE_UP_STDOUT="$(printf '{"deploymentId":"dep-1"}\n{"deploymentId":"dep-2"}\n')" run_deploy
+expect_contains "more than one line is named" "got 2. Cannot determine a unique deployment ID." "$DEPLOY_STDERR"
+expect_line "the ambiguous stdout is shown (line 1)" '::error::Railway CLI stdout: {"deploymentId":"dep-1"}' "$DEPLOY_STDERR_FILE"
+expect_line "the ambiguous stdout is shown (line 2)" '::error::Railway CLI stdout: {"deploymentId":"dep-2"}' "$DEPLOY_STDERR_FILE"
+expect_true "nothing lands on stdout" [ ! -s "$DEPLOY_STDOUT_FILE" ]
+
+echo "--- railway-cli-diagnostics.py: the stream word is required, and only 'stdout' or 'stderr' ---"
+HELPER="$CI_DIR/railway-cli-diagnostics.py"
+for args in "" "stdin" "stdout extra"; do
+  set +e
+  # shellcheck disable=SC2086 # word-splitting the cases is the point
+  helper_out="$(printf 'some cli text\n' | env -u RAILWAY_TOKEN -u RAILWAY_API_TOKEN python3 "$HELPER" $args 2>/dev/null)"
+  helper_rc=$?
+  set -e
+  expect_true "helper args '$args': a usage error (exit 2)" [ "$helper_rc" -eq 2 ]
+  expect_true "helper args '$args': prints nothing" [ -z "$helper_out" ]
+done
+
+echo "--- only stderr carries railway-command.py's timeout notice: the same text on stdout is CLI text ---"
+notice_out="$(printf 'Railway command timed out\n' | env -u RAILWAY_TOKEN -u RAILWAY_API_TOKEN python3 "$HELPER" stdout || true)"
+expect_true "on stdout it is shown" [ "$notice_out" = "::error::Railway CLI stdout: Railway command timed out" ]
+notice_out="$(printf 'Railway command timed out\n' | env -u RAILWAY_TOKEN -u RAILWAY_API_TOKEN python3 "$HELPER" stderr || true)"
+expect_true "on stderr it is taken off" [ "$notice_out" = "::error::Railway CLI stderr: (no output)" ]
+
 echo "--- success path is unchanged: stdout is exactly the id, the CLI's stderr is not echoed ---"
-FAKE_UP_DEPLOYMENT_ID="dep-abc-123" RAILWAY_TOKEN="super-secret-token-marker" \
+private_tmp="$(mktemp -d "${TMPDIR:-/tmp}/rd-tmp.XXXXXX")"
+FAKE_UP_DEPLOYMENT_ID="dep-abc-123" RAILWAY_TOKEN="super-secret-token-marker" TMPDIR="$private_tmp" \
   FAKE_UP_STDERR="Indexing... progress-marker-42"$'\n'"warning: something non-fatal"$'\n' \
   run_deploy
 expect_true "success exits 0" [ "$DEPLOY_RC" -eq 0 ]
 expect_true "stdout is byte-for-byte 'dep-abc-123\\n'" cmp -s "$DEPLOY_STDOUT_FILE" <(printf 'dep-abc-123\n')
 expect_true "stderr is empty (a successful run's CLI stderr is not printed)" [ ! -s "$DEPLOY_STDERR_FILE" ]
+expect_true "neither capture file outlives a successful run" [ -z "$(ls -A "$private_tmp")" ]
 
 echo
 echo "=== Results: $pass passed, $fail failed ==="
