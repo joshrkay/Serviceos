@@ -3,7 +3,7 @@
 **Created:** 2026-10-25
 **Slice:** U7-00, Gate 0 of [`docs/plans/2026-10-18-002a-u7-data-subject-erasure-design.md`](2026-10-18-002a-u7-data-subject-erasure-design.md)
 **Checked against:** `main` at `58383e730`
-**Status:** for review on its own docs PR, before any erase code
+**Status:** for review in the docs-only PR #1695, before any erase code
 
 ## What this is
 
@@ -21,8 +21,10 @@ linked to the customer, and what the erase does to it.
   number is the line that defines it there, inside the `CREATE TABLE` or in the `ALTER TABLE … ADD
   COLUMN` that added it later. A provider entry cites its call site under `packages/api/src/`.
 - **The corpus has 160 tables**, and three more are created outside it at runtime (see "Payload
-  stores with no tenant column"). Every one of the 163 is listed below exactly once, either as a
-  store, as checked with no subject data, or as outside this unit's subject.
+  stores with no tenant column"). Every one of the 163 is placed below, once, either as a store,
+  as checked with no subject data, or as outside this unit's subject. `leads` alone has two rows,
+  one for a lead converted into the subject and one for a lead that only matches the subject's
+  identifiers.
 - **Erase actions** follow the design's Scrub, Anonymize and Keep lists and its manifest rules. A
   store the design doesn't name has its action marked *proposed*, for review. The erase-coverage
   manifest and its catalog test (slices U7-02 and U7-03) are the proof; this list is where they
