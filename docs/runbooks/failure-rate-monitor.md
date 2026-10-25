@@ -86,9 +86,10 @@ loop but **completing** every call — the supervisor_annotate storm shape,
 succeeding — keeps every failure-rate rule at 0%; only the bill moves. The page
 names the top three tenants and task types by spend. Unpriced runs (an unknown
 model price, `cost_micro_cents` NULL) count 0, so the rule can under-count but
-never fabricate. It keys on the cross-tenant total because per-tenant spend is
-already bounded by the gateway's quota buckets; a loop that fans out across
-tenants is not.
+never fabricate. It keys on the cross-tenant total, which also catches a
+single-tenant loop: the gateway's quota buckets bound one tenant's spend only at
+their load-sized ceiling (about 1,008 cents a window on gpt-4o-mini since
+GATEWAY-01), and the per-tenant money cap is not built yet (U8).
 
 ### 6. `ai_spend_unpriced` — warning (OBS-4)
 
@@ -190,9 +191,10 @@ runs platform-wide to judge (often this tenant is its only traffic) or the
 platform read failed — the task may be broken for every tenant, so run the
 platform query above too. Then check `error_message` for that tenant's runs: quota / token-budget
 strings mean the tenant has outgrown the standard classify bucket (every
-tenant currently gets `classifier_standard` — concurrency 2 — because nothing
-sets `tenantTier`); anything else is specific to that tenant's data or
-configuration.
+tenant currently gets `classifier_standard` — concurrency 8, 30,000 tokens/s,
+sized for about 25 live sessions — because nothing sets `tenantTier`; resize
+it with `AI_QUOTA_TIERS_JSON`); anything else is specific to that tenant's
+data or configuration.
 
 ```sql
 SELECT task_type, status, LEFT(error_message, 60) AS error, COUNT(*)
@@ -242,12 +244,15 @@ low-traffic task pages on small denominators; raise `FAILURE_MONITOR_RATE_MAX`
 only with a recorded reason — healthy task types sit near 0, and the incidents
 this exists for were 0.85 and 1.00. Raise `FAILURE_MONITOR_TENANT_MIN_RUNS` if a
 small tenant pages on a handful of calls. `FAILURE_MONITOR_SPEND_MAX_CENTS`
-defaults to 200 cents per window, derived from the quota buckets: one tenant
-driven to its `standard` + `classifier_standard` ceiling for a 30-minute window
-spends about 3.55M tokens, roughly 53 cents on gpt-4o-mini (priced through
-`AI_MODEL_PRICING_JSON`, rule 6), so the default
-pages when about four tenants are saturated at once. That is the cross-tenant
-loop this rule exists for, at today's tenant count. If normal busy-half-hour
-spend approaches 200 cents as tenants grow, raise it to roughly three times
-that spend. 0 turns the spend rule off, which also stops the
+defaults to 200 cents per window. It was derived when one tenant driven to its
+`standard` + `classifier_standard` ceiling for a 30-minute window spent about
+3.55M tokens (roughly 53 cents on gpt-4o-mini, priced through
+`AI_MODEL_PRICING_JSON`, rule 6), so the default paged at about four saturated
+tenants. GATEWAY-01 resized both buckets to the live load they carry: one
+saturated tenant can now spend about 67.2M tokens a window (about 1,008 cents),
+so 200 pages at about a fifth of ONE tenant's ceiling, before its bucket would
+stop a loop. A tenant running the full sized classify load (about 25 live
+sessions, roughly 620 cents a window) pages on its own. Once production spend
+is priced and visible, set it to roughly three times normal busy-half-hour
+spend. 0 turns the spend rule off, which also stops the
 `ai_spend_window_micro_cents` gauge updating.

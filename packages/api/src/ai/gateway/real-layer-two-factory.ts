@@ -231,8 +231,10 @@ export function createLayer2Gateway(deps: Layer2GatewayDeps): LLMGateway {
       maxRetries,
     });
   }
-  // Harness quota, not the per-tenant fairness bucket: 40 scripts x many turns
-  // on one pseudo-tenant would drain it. The suite cost cap bounds spend.
+  // Harness quota, not the per-tenant fairness bucket: the suite must not
+  // depend on the live tenant quota table (40 scripts x many turns on one
+  // pseudo-tenant drained the pre-GATEWAY-01 bucket). The suite cost cap bounds
+  // spend.
   const production = createHarnessLLMGateway(loadConfig(deps.env), {
     resilience: { retryPolicy: { ...DEFAULT_RETRY, maxAttempts: 1 + maxRetries } },
   });

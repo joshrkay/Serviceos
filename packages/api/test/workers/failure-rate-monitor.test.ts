@@ -918,16 +918,17 @@ describe('evaluateUnpricedSpend', () => {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // OBS-4 review round 1 — the SHIPPED default spend threshold must be
-// reachable at today's scale. Per-tenant spend is capped by the gateway's
-// token buckets, so the only loop this rule exists for is one that fans
-// out across tenants; the default must page when a handful of tenants are
-// driven to their bucket ceiling at production prices.
+// reachable at today's scale: it must page when a handful of tenants are
+// driven to their bucket ceiling at production prices. GATEWAY-01 then sized
+// the buckets to the live load they carry (not to spend), so one tenant's
+// ceiling is now above the default too: until the per-tenant money cap (U8)
+// lands, this rule is also the earliest signal for a single-tenant loop.
 // ─────────────────────────────────────────────────────────────────────────────
 describe('ai_spend_window — the shipped default is reachable at current scale', () => {
   /** Few tenants today; a cross-tenant loop saturating this many must page. */
   const CURRENT_SCALE_TENANTS = 4;
 
-  it('N tenants saturating their standard + classifier buckets on gpt-4o-mini breach the default; one tenant does not', async () => {
+  it('N tenants saturating their standard + classifier buckets on gpt-4o-mini breach the default; so does one', async () => {
     const { loadConfig } = await import('../../src/shared/config');
     const { DEFAULT_TIER_CONFIG } = await import('../../src/ai/gateway/tenant-quota');
     // OpenAI models are unpriced by default (GATEWAY-04, #1699); production
@@ -954,11 +955,13 @@ describe('ai_spend_window — the shipped default is reachable at current scale'
         sum + DEFAULT_TIER_CONFIG[tier].bucketCapacity + DEFAULT_TIER_CONFIG[tier].refillTokensPerSec * windowSec,
       0,
     );
-    expect(saturatedTokens).toBe(3_550_000);
+    // standard 600,000 + 5,000 × 1,800 and classifier_standard
+    // 3,600,000 + 30,000 × 1,800 (it was 3,550,000 before GATEWAY-01).
+    expect(saturatedTokens).toBe(67_200_000);
     // Price every token as INPUT on the live primary — the cheapest case,
-    // so the bound is conservative: 3,550,000 × 15 = 53,250,000 micro-cents.
+    // so the bound is conservative: 67,200,000 × 15 = 1,008,000,000 micro-cents.
     const perTenantMicroCents = computeCostMicroCents('gpt-4o-mini-2024-07-18', { input: saturatedTokens })!;
-    expect(perTenantMicroCents).toBe(53_250_000);
+    expect(perTenantMicroCents).toBe(1_008_000_000);
 
     const defaults = {
       spendMaxCents: config.FAILURE_MONITOR_SPEND_MAX_CENTS,
@@ -968,8 +971,9 @@ describe('ai_spend_window — the shipped default is reachable at current scale'
       tenantCounts({ tenantId: `tenant-${i}`, taskType: 'supervisor_annotate', costMicroCents: perTenantMicroCents }),
     );
     expect(evaluateWindowSpend(loopRows, defaults)!.breached).toBe(true);
-    // One tenant at its ceiling is the per-tenant quota's job, not a page.
-    expect(evaluateWindowSpend(loopRows.slice(0, 1), defaults)!.breached).toBe(false);
+    // One tenant at its ceiling (~1,008 cents a window) pages on its own: the
+    // bucket no longer holds a tenant near the old ~53 cents.
+    expect(evaluateWindowSpend(loopRows.slice(0, 1), defaults)!.breached).toBe(true);
   });
 });
 

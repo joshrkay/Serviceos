@@ -207,8 +207,9 @@ export async function buildLiveGateway(
   env: NodeJS.ProcessEnv = process.env,
 ): Promise<LLMGateway> {
   if (selection.kind === 'production') {
-    // Harness quota (not the per-tenant fairness bucket): a sequential sample
-    // on one pseudo-tenant would otherwise drain the classifier budget.
+    // Harness quota (not the per-tenant fairness bucket): an eval must not
+    // depend on the live tenant quota table (a sequential sample on one
+    // pseudo-tenant drained the pre-GATEWAY-01 classifier budget).
     const { createHarnessLLMGateway } = await import('../api/src/ai/gateway/harness-gateway');
     const { loadConfig } = await import('../api/src/shared/config');
     const { withPathSmokeSpendTracking } = await import('../api/src/ai/voice-quality/path-smoke/provider');
