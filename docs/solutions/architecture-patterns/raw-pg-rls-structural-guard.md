@@ -161,6 +161,39 @@ deliberate cross-tenant sweep, a platform-constant write) add an entry:
   to a lone read, so fold neighbouring reads into the one tenant session
   instead of wrapping each.
 - `why` is ≥ 40 characters and says why it is acceptable *today*.
+- Keep the commit point the raw statement had. A bare `pool.query` commits on
+  a connection of its own, even inside a request; `withTenantClient` would
+  move it into the request transaction. Where that matters — the send-claim
+  ledger (batch 2, P1.6): a claim stands if the request rolls back, and
+  `'sending'` is durable before the provider call — use `withTenantSession`
+  / `withTenantConnection`, and pin it: another connection sees each step's
+  row before the next step, the rows survive the request's ROLLBACK, the
+  request client runs none of the statements
+  (`test/integration/send-claim-ledger-tenant-context.test.ts`).
+- An INSERT has no `tenant_id = $n` pin to widen; its backstop is the
+  policy's WITH CHECK. Probe it by re-stamping the VALUES tenant with the
+  other tenant (`restampClaims` in the same suite): refused under the role,
+  landed as the principal (the control).
+- Never hold a tenant session across an LLM/gateway call. The gateway's
+  in-transaction guard reads `tenantContextStore` only, and a
+  `withTenantSession` / `withTenantConnection` callback does not publish
+  there: a gateway call inside one holds a pooled connection idle in
+  transaction where the guard cannot see it. Split the work into one session
+  per stage around the call (the verify-ai worker, P1.9) and pin that no
+  checkout is open when the gateway is called
+  (`test/integration/verify-ai-tenant-context.test.ts`).
+- One entry can hold statements of different categories. Migrate the tenant
+  ones and re-categorise what is left: POST /stripe's remaining four
+  `pool.query` calls touch only the tenants registry, so after the AI-model
+  seed moved into a session (P1.10) the entry is `global_table`, not debt.
+- A `currentTenantContext()?.client ?? pool` fallback becomes
+  `withTenantClient(pool, tenantId, fn)`: the request client when the
+  request's tenant matches (it did not check that), one tenant session
+  otherwise. Run a repository read the function also makes before the
+  session, not beside it in a `Promise.all`, so off-request it never holds
+  two connections; and await the session's own reads one after another: a
+  pg client runs one query at a time, so a `Promise.all` on it gains nothing
+  and pg 8 deprecates it (loadOnboardingFacts, P1.11).
 
 ### Checkouts and callbacks: who gets the client
 

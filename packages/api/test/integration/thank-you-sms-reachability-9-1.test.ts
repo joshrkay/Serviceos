@@ -538,21 +538,43 @@ describe('9.1 reachability — thank-you SMS through the REAL block-mode consent
       const messaging = realGateMessaging(base);
       const auditKey = `thank_you_sms_audit:${seed.jobId}`;
       // The real pool, except the audit claim's completion UPDATE fails once
-      // (a transient DB error after the audit row committed).
+      // (a transient DB error after the audit row committed). The ledger runs
+      // each statement in a tenant session of its own, so the failure is
+      // injected on the session's client as well as on a one-shot query.
       let completionFailures = 0;
-      const flakyPool = {
-        query: (sql: string, params?: unknown[]) => {
-          if (
-            completionFailures === 0 &&
-            /UPDATE send_claims SET status = 'sent'/.test(sql) &&
-            Array.isArray(params) && params[1] === auditKey
-          ) {
-            completionFailures++;
-            return Promise.reject(new Error('synthetic claim-completion failure (#1184 review)'));
+      type Query = (sql: unknown, params?: unknown[]) => Promise<unknown>;
+      const failingOnce = (run: Query): Query => (sql, params) => {
+        if (
+          completionFailures === 0 &&
+          typeof sql === 'string' &&
+          /UPDATE send_claims SET status = 'sent'/.test(sql) &&
+          Array.isArray(params) && params[1] === auditKey
+        ) {
+          completionFailures++;
+          return Promise.reject(new Error('synthetic claim-completion failure (#1184 review)'));
+        }
+        return run(sql, params);
+      };
+      const flakyPool = new Proxy(pool, {
+        get(target, prop) {
+          if (prop === 'query') return failingOnce((sql, params) => target.query(sql as string, params));
+          if (prop === 'connect') {
+            return async () => {
+              const client = await target.connect();
+              const inner = client.query.bind(client) as unknown as Query;
+              (client as unknown as { query: Query }).query = failingOnce(inner);
+              const release = client.release;
+              client.release = (err?: Error | boolean) => {
+                delete (client as unknown as { query?: Query }).query;
+                return release(err);
+              };
+              return client;
+            };
           }
-          return pool.query(sql, params as unknown[]);
+          const value = Reflect.get(target, prop, target);
+          return typeof value === 'function' ? value.bind(target) : value;
         },
-      } as unknown as Pool;
+      });
 
       await runThankYouSmsSweep({
         pool: flakyPool, jobRepo, customerRepo, settingsRepo, messaging, auditRepo, logger,

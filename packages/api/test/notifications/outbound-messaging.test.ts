@@ -1,5 +1,4 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import type { Pool } from 'pg';
 import { InMemoryCustomerRepository, type Customer } from '../../src/customers/customer';
 import { InMemoryDncRepository } from '../../src/compliance/dnc';
 import {
@@ -14,8 +13,9 @@ import {
   createOutboundMessaging,
   type OutboundText,
 } from '../../src/notifications/outbound-messaging';
+import { fakeTenantPool } from '../helpers/fake-tenant-pool';
 
-const TENANT = 'tenant-om-1';
+const TENANT = '0f0e0d0c-0000-4000-8000-00000000000a';
 
 /** The outcome as the sender sees it, without its message record's id (asserted on its own below). */
 function withoutMessageId<T extends { messageId?: string }>(outcome: T): Omit<T, 'messageId'> {
@@ -266,11 +266,9 @@ describe('outbound messaging', () => {
 
   it('reports an already-sent key as sent before looking up the recipient', async () => {
     // The customer is gone since the first send; a retry must still learn it went out.
-    const pool = {
-      query: vi.fn(async (sql: string) =>
-        sql.includes('SELECT status') ? { rows: [{ status: 'sent' }], rowCount: 1 } : { rows: [], rowCount: 0 },
-      ),
-    } as unknown as Pool;
+    const { pool } = fakeTenantPool((sql: string) =>
+      sql.includes('SELECT status') ? { rows: [{ status: 'sent' }], rowCount: 1 } : { rows: [], rowCount: 0 },
+    );
     const outbound = createOutboundMessaging({
       delivery: { sendSms, sendEmail: vi.fn() } as unknown as MessageDeliveryProvider,
       customerRepo,
@@ -290,15 +288,13 @@ describe('outbound messaging', () => {
 
   function finalizeFailingPool(failures: number) {
     let finalizeCalls = 0;
-    const pool = {
-      query: vi.fn(async (sql: string) => {
-        if (sql.includes("status = 'sent'")) {
-          finalizeCalls++;
-          if (finalizeCalls <= failures) throw new Error('connection reset');
-        }
-        return { rows: [{ claim_key: 'k' }], rowCount: 1 };
-      }),
-    } as unknown as Pool;
+    const { pool } = fakeTenantPool((sql: string) => {
+      if (sql.includes("status = 'sent'")) {
+        finalizeCalls++;
+        if (finalizeCalls <= failures) throw new Error('connection reset');
+      }
+      return { rows: [{ claim_key: 'k' }], rowCount: 1 };
+    });
     return { pool, finalizeCalls: () => finalizeCalls };
   }
 
@@ -488,11 +484,9 @@ describe('outbound messaging', () => {
 
     it('backfills a missing record when a retry finds the text already sent, and keeps a recorded one', async () => {
       // The claim says sent; the first attempt's record write never landed.
-      const pool = {
-        query: vi.fn(async (sql: string) =>
-          sql.includes('SELECT status') ? { rows: [{ status: 'sent' }], rowCount: 1 } : { rows: [], rowCount: 0 },
-        ),
-      } as unknown as Pool;
+      const { pool } = fakeTenantPool((sql: string) =>
+        sql.includes('SELECT status') ? { rows: [{ status: 'sent' }], rowCount: 1 } : { rows: [], rowCount: 0 },
+      );
       const outbound = createOutboundMessaging({
         delivery: { sendSms, sendEmail: vi.fn() } as unknown as MessageDeliveryProvider,
         customerRepo,
