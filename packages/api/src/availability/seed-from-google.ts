@@ -1,4 +1,5 @@
-import type { Pool, PoolClient } from 'pg';
+import type { Pool } from 'pg';
+import { withTenantSession } from '../db/rls-runtime-role';
 import type { GoogleFetch } from '../integrations/google-calendar';
 
 /**
@@ -54,7 +55,7 @@ export interface AvailabilityTemplate {
 }
 
 export interface SeedAvailabilityDeps {
-  pool: Pool | PoolClient;
+  pool: Pool;
   freeBusy: FreeBusyFetcher;
   accessToken: string;
   calendarId?: string;
@@ -65,6 +66,12 @@ const WINDOW_DAYS = 7;
 /**
  * Pull the next 7 days of free/busy and persist an availability template.
  * Returns the template + a count of busy blocks seeded.
+ *
+ * The free/busy fetch (network) runs first, with no connection held; the
+ * UPDATE then runs in one tenant session under the RLS runtime role
+ * (withTenantSession), committed on its own as the bare statement was. Its
+ * only caller is the unauthenticated Google OAuth callback, where the tenant
+ * is the server-minted, browser-bound OAuth state.
  */
 export async function seedAvailabilityFromGoogle(
   deps: SeedAvailabilityDeps,
@@ -84,9 +91,11 @@ export async function seedAvailabilityFromGoogle(
     busy,
   };
 
-  await deps.pool.query(
-    `UPDATE tenant_settings SET availability_template = $2::jsonb, updated_at = now() WHERE tenant_id = $1`,
-    [input.tenantId, JSON.stringify(template)],
+  await withTenantSession(deps.pool, input.tenantId, (client) =>
+    client.query(
+      `UPDATE tenant_settings SET availability_template = $2::jsonb, updated_at = now() WHERE tenant_id = $1`,
+      [input.tenantId, JSON.stringify(template)],
+    ),
   );
 
   return { template, busyCount: busy.length };
