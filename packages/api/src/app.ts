@@ -128,10 +128,9 @@ import {
   createMeRouter,
   DEFAULT_TENANT_TIMEZONE,
   InMemoryUserModeService,
-  type MeUserRecord,
-  type MeTenantSettings,
   type UserModeService,
 } from './routes/me';
+import { createPgUserModeService, createUserModeLoader } from './users/pg-user-mode-service';
 import { setUserModeLoader } from './middleware/auth';
 import {
   setSupervisorPresenceLoader,
@@ -685,7 +684,6 @@ import {
 import { requireAuth, resolveAuthorization, setAuthorizationLoader } from './middleware/auth';
 import { createAuthorizationLoader } from './auth/authorization-loader';
 import { withTenantTransaction } from './middleware/tenant-context';
-import type { TenantIntegrationStatus } from './integrations/status-machine';
 // In-memory dev fallback for the WebhookEvent idempotency repo. Extracted from
 // this composition-root into its own module so app.ts no longer carries an
 // inline repository class. Production/staging always use the Pg variant
@@ -6287,108 +6285,15 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // Pg-backed UserModeService when DATABASE_URL is set; in-memory in
   // dev / no-DB mode. The middleware-side mode loader is wired at the
   // same time so requireTenant can populate `req.auth.mode` against the
-  // same data source used by the /api/me reads.
+  // same data source used by the /api/me reads. The reads ride the request
+  // transaction's client; setMode commits on its own (users/pg-user-mode-service.ts).
   const userModeService: UserModeService = pool
-    ? {
-        async getUser(tenantId, userId) {
-          // P12-001 review fix — `userId` here is the Clerk subject
-          // (`req.auth.userId` = `payload.sub`), not the UUID PK on
-          // `users.id`. Lookup goes through `clerk_user_id`. The
-          // returned `user_id` continues to be the Clerk sub so
-          // downstream callers (the API surface) stay aligned with
-          // the auth-layer identity.
-          const r = await pool.query(
-            `SELECT id, clerk_user_id, tenant_id, role,
-                    COALESCE(can_field_serve, false) AS can_field_serve,
-                    COALESCE(current_mode, 'supervisor') AS current_mode,
-                    mode_changed_at
-             FROM users
-             WHERE tenant_id = $1 AND clerk_user_id = $2
-             LIMIT 1`,
-            [tenantId, userId],
-          );
-          if (r.rowCount === 0) return null;
-          const row = r.rows[0] as Record<string, unknown>;
-          const rec: MeUserRecord = {
-            user_id: String(row.clerk_user_id),
-            // Sweep-2 S5 — internal users.id UUID; this is what
-            // appointment_assignments.technician_id references, so the
-            // web technician surfaces resolve THIS, not the Clerk sub.
-            internal_user_id: String(row.id),
-            tenant_id: String(row.tenant_id),
-            role: String(row.role),
-            can_field_serve: Boolean(row.can_field_serve),
-            current_mode: row.current_mode as MeUserRecord['current_mode'],
-            mode_changed_at: row.mode_changed_at
-              ? new Date(row.mode_changed_at as string)
-              : null,
-          };
-          return rec;
-        },
-        async getTenantSettings(tenantId) {
-          const r = await pool.query(
-            `SELECT backup_supervisor_user_id,
-                    COALESCE(unsupervised_proposal_routing, 'queue_and_sms') AS unsupervised_proposal_routing,
-                    COALESCE(timezone, $2) AS timezone
-             FROM tenant_settings WHERE tenant_id = $1 LIMIT 1`,
-            [tenantId, DEFAULT_TENANT_TIMEZONE],
-          );
-          if (r.rowCount === 0) {
-            return {
-              backup_supervisor_user_id: null,
-              unsupervised_proposal_routing: 'queue_and_sms',
-              timezone: DEFAULT_TENANT_TIMEZONE,
-            } as MeTenantSettings;
-          }
-          const row = r.rows[0] as Record<string, unknown>;
-          return {
-            backup_supervisor_user_id: row.backup_supervisor_user_id
-              ? String(row.backup_supervisor_user_id)
-              : null,
-            unsupervised_proposal_routing:
-              row.unsupervised_proposal_routing as MeTenantSettings['unsupervised_proposal_routing'],
-            timezone: String(row.timezone),
-          };
-        },
-        async getTenantIntegrationStatuses(tenantId) {
-          const r = await pool.query(
-            `SELECT provider, status, updated_at
-             FROM tenant_integrations
-             WHERE tenant_id = $1`,
-            [tenantId],
-          );
-          return r.rows.map((row) => ({
-            provider: String(row.provider),
-            status: String(row.status) as TenantIntegrationStatus,
-            updated_at: row.updated_at ? new Date(String(row.updated_at)) : null,
-          }));
-        },
-        async setMode(tenantId, userId, mode) {
-          // P12-001 review fix — `userId` is the Clerk subject; match
-          // on `clerk_user_id`, not the UUID PK. Without this the
-          // UPDATE silently no-ops in production.
-          const now = new Date();
-          await pool.query(
-            `UPDATE users
-             SET current_mode = $1, mode_changed_at = $2, updated_at = now()
-             WHERE tenant_id = $3 AND clerk_user_id = $4`,
-            [mode, now, tenantId, userId],
-          );
-          return { modeChangedAt: now };
-        },
-      }
+    ? createPgUserModeService(pool)
     : inMemoryUserModeService!;
 
   // Wire the middleware-side mode loader. Reuses the same service so
   // we don't drift between read paths.
-  setUserModeLoader(async (userId, tenantId) => {
-    try {
-      const u = await userModeService.getUser(tenantId, userId);
-      return u ? u.current_mode : null;
-    } catch {
-      return null;
-    }
-  });
+  setUserModeLoader(createUserModeLoader(userModeService));
 
   // QUALITY-2026-07-12 WS4 — wire the DB-authoritative authorization loader.
   // Only when a real Pool exists AND dev-auth-bypass is off: dev-bypass already

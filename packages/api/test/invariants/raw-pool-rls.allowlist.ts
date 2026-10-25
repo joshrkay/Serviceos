@@ -168,7 +168,7 @@ export const TABLES_WITHOUT_MIGRATION: ReadonlyArray<{ readonly table: string; r
  * The `tenant_filtered_no_rls` debt, frozen. Migrating one means deleting its
  * entry and LOWERING this number; adding one means raising it, in review.
  */
-export const TFNR_CEILING = 21;
+export const TFNR_CEILING = 12;
 
 export const RAW_PG_SITES: readonly RawPgSite[] = [
   // ── ai/ ────────────────────────────────────────────────────────────────
@@ -188,26 +188,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/app.ts', fn: 'createApp.resolveDisplayName', access: 'pool.query', count: 1,
     category: 'global_table', tables: ['tenants'],
     why: 'Terminal router display name: SELECT name FROM tenants WHERE id = $1 with the req.auth tenant. tenants is the registry (no tenant_id column, no RLS).',
-  },
-  {
-    file: 'src/app.ts', fn: 'userModeService.getUser', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['users'], migrateBy: 'audit 2026-10-23 §4 P2.1',
-    why: 'Mode loader read on FORCE-RLS users, run on its own pooled connection outside the request transaction on every requireTenant request (60 s cache). WHERE tenant_id = $1 AND clerk_user_id = $2 with the JWT tenant/user is the only boundary.',
-  },
-  {
-    file: 'src/app.ts', fn: 'userModeService.getTenantSettings', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_settings'], migrateBy: 'audit 2026-10-23 §4 P2.1',
-    why: 'GET /api/me reads tenant_settings (FORCE RLS) on the raw pool, WHERE tenant_id = $1 with auth.tenantId. settingsRepo already has a withTenant path for the same table.',
-  },
-  {
-    file: 'src/app.ts', fn: 'userModeService.getTenantIntegrationStatuses', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['tenant_integrations'], migrateBy: 'audit 2026-10-23 §4 P2.1',
-    why: 'GET /api/me lists provider/status from FORCE-RLS tenant_integrations with no GUC at all; it returns rows only because the principal bypasses RLS. Isolation is WHERE tenant_id = $1 (auth tenant).',
-  },
-  {
-    file: 'src/app.ts', fn: 'userModeService.setMode', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['users'], migrateBy: 'audit 2026-10-23 §4 P2.1',
-    why: 'POST /api/me/mode UPDATEs users (FORCE RLS) outside the request transaction (it does not roll back with the request). Scoped only by WHERE tenant_id = $3 AND clerk_user_id = $4, both from req.auth.',
   },
 
   // ── auth/ ──────────────────────────────────────────────────────────────
@@ -250,11 +230,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/auth/platform-admin.ts', fn: 'revokePlatformAdmin', access: 'pool.connect', count: 1,
     category: 'global_table', tables: ['platform_admins'],
     why: 'Revoke from the global platform_admins table. No caller outside tests (audit §1.3 dead-code candidate, P4.2); no tenant data either way.',
-  },
-  {
-    file: 'src/auth/resolve-owner-email.ts', fn: 'resolveOwnerEmail', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['users', 'tenants'], migrateBy: 'audit 2026-10-23 §4 P2.3',
-    why: "Billing checkout/portal email lookup on a second pooled connection as the principal: users WHERE tenant_id = $1 AND clerk_user_id = $2, tenants WHERE id = $1, $1 = req.auth tenant. Should prefer the ambient request client.",
   },
 
   // ── availability/ ──────────────────────────────────────────────────────
@@ -555,18 +530,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/middleware/tenant-context.ts', fn: 'recoverTenantFromUsersRow', access: 'pool.query', count: 1,
     category: 'pre_tenant_lookup', tables: ['users'],
     why: "Runs before any tenant is known for a JWT without tenant_id, keyed by the verified Clerk subject; returns only that subject's own rows. Under rls_app_runtime it would see zero rows, so it must stay on the principal.",
-  },
-
-  // ── notifications/ ─────────────────────────────────────────────────────
-  {
-    file: 'src/notifications/lifecycle-email.ts', fn: 'claimLifecycleEmail', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['lifecycle_emails'], migrateBy: 'audit 2026-10-23 §4 P2.4',
-    why: 'Raw INSERT into FORCE-RLS lifecycle_emails stamping tenant_id = $1 from a server-derived id (queue payload or sweep row); WITH CHECK is not enforced for the principal.',
-  },
-  {
-    file: 'src/notifications/lifecycle-email.ts', fn: 'releaseLifecycleEmail', access: 'pool.query', count: 1,
-    category: 'tenant_filtered_no_rls', tables: ['lifecycle_emails'], migrateBy: 'audit 2026-10-23 §4 P2.4',
-    why: 'Transport-failure release: DELETE FROM lifecycle_emails WHERE tenant_id = $1 AND kind = $2 for the tenant that just claimed it, as the principal.',
   },
 
   // ── onboarding/ ────────────────────────────────────────────────────────
@@ -970,16 +933,6 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     file: 'src/webhooks/routes.ts', fn: 'resolveTenantConnectAccountId', access: 'pool.query', count: 1,
     category: 'global_table', tables: ['tenants'],
     why: 'Fallback read of tenants.stripe_connect_account_id (isValidTenantId-gated) for the #1102 event.account binding check; an unknown tenant fails closed.',
-  },
-  {
-    file: 'src/webhooks/routes.ts', fn: 'POST /clerk', access: 'pool.connect', count: 2,
-    category: 'tenant_filtered_no_rls', tables: ['users'], migrateBy: 'audit 2026-10-23 §4 P2.2',
-    why: "user.created invitee join and owner membership: each opens a client, BEGIN + set_config GUC (no role) and INSERTs into users with tenant_id = the invitation row's / bootstrap tenant, so WITH CHECK is not enforced. Swap set_config for applyTenantContext.",
-  },
-  {
-    file: 'src/webhooks/routes.ts', fn: 'POST /clerk', access: 'guc-only', count: 2,
-    category: 'tenant_filtered_no_rls', tables: ['users'], migrateBy: 'audit 2026-10-23 §4 P2.2',
-    why: "The two set_config('app.current_tenant_id', $1, true) lines of the Clerk users inserts: GUC without the runtime role, so the comment's 'fails the RLS policy without it' does not hold.",
   },
   {
     file: 'src/webhooks/routes.ts', fn: 'POST /clerk', access: 'pool.query', count: 1,

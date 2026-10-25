@@ -169,7 +169,11 @@ deliberate cross-tenant sweep, a platform-constant write) add an entry:
   / `withTenantConnection`, and pin it: another connection sees each step's
   row before the next step, the rows survive the request's ROLLBACK, the
   request client runs none of the statements
-  (`test/integration/send-claim-ledger-tenant-context.test.ts`).
+  (`test/integration/send-claim-ledger-tenant-context.test.ts`; the
+  lifecycle_emails claim/release ledger, batch 3, P2.4, the same way in
+  `test/integration/lifecycle-email-tenant-context.test.ts`). The same holds
+  for a write the owner has not yet decided should join the request: the
+  `/api/me/mode` switch (P2.1) keeps its own session.
 - An INSERT has no `tenant_id = $n` pin to widen; its backstop is the
   policy's WITH CHECK. Probe it by re-stamping the VALUES tenant with the
   other tenant (`restampClaims` in the same suite): refused under the role,
@@ -194,6 +198,29 @@ deliberate cross-tenant sweep, a platform-constant write) add an entry:
   two connections; and await the session's own reads one after another: a
   pg client runs one query at a time, so a `Promise.all` on it gains nothing
   and pg 8 deprecates it (loadOnboardingFacts, P1.11).
+- A bare `pool.query` READ on an /api request path is a second connection
+  held next to the request's. Find where it runs relative to the
+  `withTenantTransaction` middleware first: route gates such as
+  `requireTenant` are per-route, inside routers mounted after it, so the
+  request transaction is already open for `req.auth.tenantId` (except on the
+  SSE and long-LLM skip lists). `withTenantClient` then costs the read no
+  checkout and no extra round trip; off the request it is one session. One
+  trade-off to state: a read that fails on the request client aborts the
+  request's transaction, where on its own connection the failure stayed
+  local (the mode loader, P2.1, swallows its errors into the supervisor
+  default; the request then fails on its next statement). Pin both shapes
+  with an express harness in the /api order
+  (`test/integration/user-mode-tenant-context.test.ts`; resolveOwnerEmail's
+  three billing callers, P2.3, in
+  `test/integration/resolve-owner-email-tenant-context.test.ts`).
+- A hand-rolled `BEGIN` + GUC-only `set_config` block (a `pool.connect`
+  entry plus a `guc-only` one) becomes `withTenantSession`: the same four
+  round trips (the context is one statement, #1823) and now the role, so the
+  policy's WITH CHECK applies to the INSERT. Probe a guard subquery such as
+  `WHERE NOT EXISTS (… tenant_id = $1 …)` by widening it: as the principal it
+  sees the subject's membership in another tenant and silently skips the
+  insert (the Clerk owner row, P2.2,
+  `test/integration/clerk-webhook-tenant-context.test.ts`).
 
 ### Checkouts and callbacks: who gets the client
 

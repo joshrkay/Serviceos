@@ -1,9 +1,9 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { Pool, QueryResult } from 'pg';
 import { InMemorySettingsRepository } from '../../src/settings/settings';
 import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { InMemoryDeliveryProvider } from '../../src/notifications/delivery-provider';
 import { createLogger } from '../../src/logging/logger';
+import { fakeTenantPool } from '../helpers/fake-tenant-pool';
 import type { OnboardingFacts } from '../../src/onboarding/derive-status';
 import {
   runSetupReminderSweep,
@@ -49,23 +49,23 @@ function facts(overrides: Partial<OnboardingFacts> = {}): OnboardingFacts {
   };
 }
 
+/** The candidate SELECT on the pool, and the lifecycle_emails ledger (a tenant session per step) on the fake tenant pool. */
 function fakePool(candidates: Array<{ tenant_id: string; owner_email: string | null }>) {
   const ledger = new Set<string>();
-  const pool = {
-    query: vi.fn(async (sql: string, params: unknown[] = []) => {
-      if (sql.includes('INSERT INTO lifecycle_emails')) {
-        const key = `${params[0]}:${params[1]}`;
-        if (ledger.has(key)) return { rows: [], rowCount: 0 } as unknown as QueryResult;
-        ledger.add(key);
-        return { rows: [{ tenant_id: params[0] }], rowCount: 1 } as unknown as QueryResult;
-      }
-      if (sql.includes('DELETE FROM lifecycle_emails')) {
-        ledger.delete(`${params[0]}:${params[1]}`);
-        return { rows: [], rowCount: 1 } as unknown as QueryResult;
-      }
-      return { rows: candidates, rowCount: candidates.length } as unknown as QueryResult;
-    }),
-  } as unknown as Pool;
+  const { pool } = fakeTenantPool((sql, params = []) => {
+    if (sql.includes('INSERT INTO lifecycle_emails')) {
+      const key = `${params[0]}:${params[1]}`;
+      if (ledger.has(key)) return { rows: [], rowCount: 0 };
+      ledger.add(key);
+      return { rows: [{ tenant_id: params[0] }], rowCount: 1 };
+    }
+    if (sql.includes('DELETE FROM lifecycle_emails')) {
+      ledger.delete(`${params[0]}:${params[1]}`);
+      return { rows: [], rowCount: 1 };
+    }
+    if (/^\s*SELECT\b/.test(sql) && !sql.includes('set_config')) return { rows: candidates, rowCount: candidates.length };
+    return undefined;
+  });
   return { pool, ledger };
 }
 

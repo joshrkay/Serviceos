@@ -52,14 +52,8 @@ import { BillingService } from '../../src/billing/subscription';
 import type { AppConfig } from '../../src/shared/config';
 
 import { createOnboardingRouter } from '../../src/routes/onboarding';
-import {
-  createMeRouter,
-  DEFAULT_TENANT_TIMEZONE,
-  type UserModeService,
-  type MeUserRecord,
-  type MeTenantSettings,
-} from '../../src/routes/me';
-import type { TenantIntegrationStatus } from '../../src/integrations/status-machine';
+import { createMeRouter, type UserModeService } from '../../src/routes/me';
+import { createPgUserModeService } from '../../src/users/pg-user-mode-service';
 
 import { createCustomerRouter } from '../../src/routes/customers';
 import { createLocationRouter } from '../../src/routes/locations';
@@ -135,84 +129,6 @@ function scriptedGateway(responses: unknown[]): LLMGateway {
 }
 
 const logger = createLogger({ service: 'test', environment: 'test', level: 'error' });
-
-/**
- * The same small Pg-backed `UserModeService` app.ts wires for
- * `createMeRouter` in production (src/app.ts ~5148-5233), copied here rather
- * than touching app.ts — this test builds its own minimal express app from
- * real routers + real Pg repos, the established pattern in this directory
- * (see TEST-04, flow1-saas-billing-runthrough, voice-inbound-appointment).
- */
-function createPgUserModeService(pool: Pool): UserModeService {
-  return {
-    async getUser(tenantId, userId) {
-      const r = await pool.query(
-        `SELECT id, clerk_user_id, tenant_id, role,
-                COALESCE(can_field_serve, false) AS can_field_serve,
-                COALESCE(current_mode, 'supervisor') AS current_mode,
-                mode_changed_at
-           FROM users
-           WHERE tenant_id = $1 AND clerk_user_id = $2
-           LIMIT 1`,
-        [tenantId, userId],
-      );
-      if (r.rowCount === 0) return null;
-      const row = r.rows[0] as Record<string, unknown>;
-      const rec: MeUserRecord = {
-        user_id: String(row.clerk_user_id),
-        internal_user_id: String(row.id),
-        tenant_id: String(row.tenant_id),
-        role: String(row.role),
-        can_field_serve: Boolean(row.can_field_serve),
-        current_mode: row.current_mode as MeUserRecord['current_mode'],
-        mode_changed_at: row.mode_changed_at ? new Date(row.mode_changed_at as string) : null,
-      };
-      return rec;
-    },
-    async getTenantSettings(tenantId) {
-      const r = await pool.query(
-        `SELECT backup_supervisor_user_id,
-                COALESCE(unsupervised_proposal_routing, 'queue_and_sms') AS unsupervised_proposal_routing,
-                COALESCE(timezone, $2) AS timezone
-           FROM tenant_settings WHERE tenant_id = $1 LIMIT 1`,
-        [tenantId, DEFAULT_TENANT_TIMEZONE],
-      );
-      if (r.rowCount === 0) {
-        return {
-          backup_supervisor_user_id: null,
-          unsupervised_proposal_routing: 'queue_and_sms',
-          timezone: DEFAULT_TENANT_TIMEZONE,
-        } as MeTenantSettings;
-      }
-      const row = r.rows[0] as Record<string, unknown>;
-      return {
-        backup_supervisor_user_id: row.backup_supervisor_user_id ? String(row.backup_supervisor_user_id) : null,
-        unsupervised_proposal_routing:
-          row.unsupervised_proposal_routing as MeTenantSettings['unsupervised_proposal_routing'],
-        timezone: String(row.timezone),
-      };
-    },
-    async getTenantIntegrationStatuses(tenantId) {
-      const r = await pool.query(
-        `SELECT provider, status, updated_at FROM tenant_integrations WHERE tenant_id = $1`,
-        [tenantId],
-      );
-      return r.rows.map((row) => ({
-        provider: String(row.provider),
-        status: String(row.status) as TenantIntegrationStatus,
-        updated_at: row.updated_at ? new Date(String(row.updated_at)) : null,
-      }));
-    },
-    async setMode(tenantId, userId, mode) {
-      const now = new Date();
-      await pool.query(
-        `UPDATE users SET current_mode = $1, mode_changed_at = $2 WHERE tenant_id = $3 AND clerk_user_id = $4`,
-        [mode, now, tenantId, userId],
-      );
-      return { modeChangedAt: now };
-    },
-  };
-}
 
 /** Tenant-scoped write against a FORCE-RLS table, matching the
  * `insertTwilioIntegration` helper pattern already used by

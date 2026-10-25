@@ -9,8 +9,19 @@
  * webhook/queue retry can never double-send. If the transport throws, we
  * RELEASE the claim so the next attempt can re-send; if it succeeds we leave
  * the row as the permanent "already sent" marker.
+ *
+ * Each ledger step is a tenant session of its own (`withTenantSession`: BEGIN,
+ * the tenant GUC + `rls_app_runtime`, the statement, COMMIT), so the FORCE-RLS
+ * policy bounds it and its WITH CHECK refuses a claim stamped for another
+ * tenant (raw-pg audit 2026-10-23 §4 P2.4). The commit points are the ones the
+ * bare `pool.query` calls had: a session never joins a caller's transaction,
+ * so the claim is committed before the provider is called, nothing is held
+ * open across that call, and a release is committed before the error
+ * propagates — the same contract as the send-claim ledger
+ * (send-claim-ledger.ts).
  */
 import type { Pool } from 'pg';
+import { withTenantSession } from '../db/rls-runtime-role';
 import type { MessageDeliveryProvider } from './delivery-provider';
 import type { RenderedEmail } from './templates';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
@@ -60,12 +71,14 @@ export async function claimLifecycleEmail(
   tenantId: string,
   kind: LifecycleEmailKind,
 ): Promise<boolean> {
-  const res = await pool.query(
-    `INSERT INTO lifecycle_emails (tenant_id, kind)
-     VALUES ($1, $2)
-     ON CONFLICT (tenant_id, kind) DO NOTHING
-     RETURNING tenant_id`,
-    [tenantId, kind],
+  const res = await withTenantSession(pool, tenantId, (client) =>
+    client.query(
+      `INSERT INTO lifecycle_emails (tenant_id, kind)
+       VALUES ($1, $2)
+       ON CONFLICT (tenant_id, kind) DO NOTHING
+       RETURNING tenant_id`,
+      [tenantId, kind],
+    ),
   );
   return (res.rowCount ?? 0) > 0;
 }
@@ -76,10 +89,9 @@ async function releaseLifecycleEmail(
   tenantId: string,
   kind: LifecycleEmailKind,
 ): Promise<void> {
-  await pool.query(`DELETE FROM lifecycle_emails WHERE tenant_id = $1 AND kind = $2`, [
-    tenantId,
-    kind,
-  ]);
+  await withTenantSession(pool, tenantId, (client) =>
+    client.query(`DELETE FROM lifecycle_emails WHERE tenant_id = $1 AND kind = $2`, [tenantId, kind]),
+  );
 }
 
 export async function sendLifecycleEmail(
