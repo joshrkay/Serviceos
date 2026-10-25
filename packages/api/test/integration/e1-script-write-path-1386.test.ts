@@ -429,7 +429,7 @@ describe('Postgres integration — #1386 owner writes the reviewed E1 script', (
   it('ENGLISH: with NO reviewed script the gate answers (not voicemail) and an E1 call runs the full life-safety path on the hard-flagged placeholder', async () => {
     const t = await answeringTenant();
     const gate = createVoiceGate({ pool, auditRepo });
-    expect(await gate({ tenantId: t.tenantId, callSid: 'CA-1386-gate-en' })).toEqual({ allowed: true, businessHours: null });
+    expect(await gate({ tenantId: t.tenantId, callSid: 'CA-1386-gate-en' })).toEqual({ allowed: true, businessHours: null, afterHoursVoiceMode: 'ai_answering' });
 
     const c = await inboundCall(t.tenantId);
     const bookingId = await bookThroughTheCall(c);
@@ -442,7 +442,7 @@ describe('Postgres integration — #1386 owner writes the reviewed E1 script', (
   it('SPANISH: with NO reviewed script, "fuga de gas" gets the Spanish 911 line first, then the placeholder script, and the flag', async () => {
     const t = await answeringTenant();
     const gate = createVoiceGate({ pool, auditRepo });
-    expect(await gate({ tenantId: t.tenantId, callSid: 'CA-1386-gate-es' })).toEqual({ allowed: true, businessHours: null });
+    expect(await gate({ tenantId: t.tenantId, callSid: 'CA-1386-gate-es' })).toEqual({ allowed: true, businessHours: null, afterHoursVoiceMode: 'ai_answering' });
 
     const c = await inboundCall(t.tenantId);
     const bookingId = await bookThroughTheCall(c);

@@ -14,6 +14,7 @@ import {
 import type { BusinessHoursConfig } from '../compliance/business-hours';
 import { withTenantClient } from '../db/tenant-transaction';
 import { businessHoursFromSettings } from '../telephony/business-hours-loader';
+import { DEFAULT_ESCALATION_SETTINGS, type EscalationSettings } from '../settings/settings';
 import { samePhone } from './activation';
 import { isOwnerLineAttested } from '../telephony/stir-attestation';
 
@@ -57,6 +58,15 @@ export interface VoiceGateResult {
    * leaves the route to read the hours itself.
    */
   businessHours?: BusinessHoursConfig | null;
+  /**
+   * On an answer: the after-hours mode from the same row, resolved as the
+   * after-hours fork's own read resolved it (see `afterHoursVoiceModeOf`), so
+   * an answered after-hours call reads tenant_settings once, not again through
+   * settingsRepo.findByTenant. Every answer from createVoiceGate carries it;
+   * optional for a gate that does not read settings, whose answer leaves the
+   * route to read the mode itself.
+   */
+  afterHoursVoiceMode?: NonNullable<EscalationSettings['after_hours_voice_mode']>;
 }
 
 export type VoiceGate = (input: VoiceGateInput) => Promise<VoiceGateResult>;
@@ -77,12 +87,13 @@ export interface VoiceGateDeps {
  * inbound call): ONE tenant session (`withTenantClient`, so `rls_app_runtime`
  * and the RLS policies bound it). Its first statement reads the tenants
  * registry row (billing state and dunning grace) joined to the tenant_settings
- * row (go-live, the owner numbers, forward-to, the overage cap and business
- * hours); a trialing or active decision then reads the open-call count and the
- * usage ledger on the same client. Dunning grace, no_billing and not_live are
- * decided on that one row. A failed read fails the gate (the route sends the
- * call to voicemail), as a failed tenants read always did. A block's audit row
- * is written after that session has released its connection.
+ * row (go-live, the owner numbers, forward-to, the overage cap, business hours
+ * and the after-hours mode); a trialing or active decision then reads the
+ * open-call count and the usage ledger on the same client. Dunning grace,
+ * no_billing and not_live are decided on that one row. A failed read fails the
+ * gate (the route sends the call to voicemail), as a failed tenants read always
+ * did. A block's audit row is written after that session has released its
+ * connection.
  */
 export function createVoiceGate(deps: VoiceGateDeps): VoiceGate {
   return async (input) => {
@@ -100,10 +111,16 @@ interface GateSettingsRow {
   timezone: string | null;
   ai_overage_cap_cents: number | null;
   ai_overage_uncapped: boolean | null;
+  /** escalation_settings.after_hours_voice_mode as stored; undefined when the key is absent. */
+  after_hours_voice_mode: unknown;
 }
 
-/** The decision's row: the tenants columns, and the settings columns (null without a settings row). */
-type GateRow = TenantBillingRow & GateSettingsRow & { has_settings: boolean };
+/**
+ * The decision's row: the tenants columns, and the settings columns (null
+ * without a settings row). `has_after_hours_voice_mode` tells an absent key
+ * (the default) from a stored JSON null, which both arrive as null.
+ */
+type GateRow = TenantBillingRow & GateSettingsRow & { has_settings: boolean; has_after_hours_voice_mode: boolean };
 
 /**
  * The one read behind every decision. tenants has no RLS (rls_app_runtime
@@ -119,7 +136,9 @@ async function readGateRow(
             t.owner_id, t.owner_email, t.past_due_grace_until,
             s.tenant_id IS NOT NULL AS has_settings,
             s.voice_agent_live_at, s.owner_phone, s.business_phone, s.business_hours, s.timezone,
-            s.ai_overage_cap_cents, s.ai_overage_uncapped
+            s.ai_overage_cap_cents, s.ai_overage_uncapped,
+            s.escalation_settings->'after_hours_voice_mode' IS NOT NULL AS has_after_hours_voice_mode,
+            s.escalation_settings->'after_hours_voice_mode' AS after_hours_voice_mode
        FROM tenants t
        LEFT JOIN tenant_settings s ON s.tenant_id = $1
       WHERE t.id = $1`,
@@ -138,6 +157,7 @@ async function readGateRow(
           timezone: row.timezone,
           ai_overage_cap_cents: row.ai_overage_cap_cents,
           ai_overage_uncapped: row.ai_overage_uncapped,
+          after_hours_voice_mode: row.has_after_hours_voice_mode ? row.after_hours_voice_mode : undefined,
         }
       : undefined,
   };
@@ -167,6 +187,7 @@ async function decideForTenant(client: PoolClient, input: VoiceGateInput): Promi
   const answer: VoiceGateResult = {
     allowed: true,
     businessHours: settings ? businessHoursFromSettings(settings) : null,
+    afterHoursVoiceMode: afterHoursVoiceModeOf(settings),
   };
 
   // Billing resilience — dunning grace (Part A). A card that fails at
@@ -313,6 +334,21 @@ function isOwnersOwnNumber(
 ): boolean {
   if (!from || !row) return false;
   return samePhone(from, row.owner_phone) || samePhone(from, row.business_phone);
+}
+
+/**
+ * The after-hours mode the /voice fork acts on, as its own read resolved it
+ * (resolveEscalationSettings over settingsRepo.findByTenant's row, then
+ * `!== 'ai_answering'` → voicemail): no settings row, or no stored key, is the
+ * default (AI answering, #1595 / D-040); a stored 'ai_answering' answers; any
+ * other stored value — 'voicemail', or anything malformed — is voicemail.
+ */
+function afterHoursVoiceModeOf(
+  settings: Pick<GateSettingsRow, 'after_hours_voice_mode'> | undefined,
+): NonNullable<EscalationSettings['after_hours_voice_mode']> {
+  const stored = settings?.after_hours_voice_mode;
+  const mode = stored === undefined ? DEFAULT_ESCALATION_SETTINGS.after_hours_voice_mode : stored;
+  return mode === 'ai_answering' ? 'ai_answering' : 'voicemail';
 }
 
 const VALID_STATUSES = new Set(['trialing', 'active', 'past_due', 'canceled', 'incomplete']);

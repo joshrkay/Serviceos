@@ -49,12 +49,11 @@ function makeApp(opts: {
       ? { rows: [{ business_hours: ALWAYS_CLOSED, timezone: 'UTC' }] }
       : undefined,
   );
-  const settingsRepo = {
-    findByTenant: async () => ({
-      tenantId: TENANT_ID,
-      ...(opts.escalationSettings ? { escalationSettings: opts.escalationSettings } : {}),
-    }),
-  };
+  const findByTenant = vi.fn(async () => ({
+    tenantId: TENANT_ID,
+    ...(opts.escalationSettings ? { escalationSettings: opts.escalationSettings } : {}),
+  }));
+  const settingsRepo = { findByTenant };
   const app = express();
   app.use(
     '/api/telephony',
@@ -73,7 +72,7 @@ function makeApp(opts: {
       ...(opts.voiceGate ? { voiceGate: opts.voiceGate } : {}),
     }),
   );
-  return { app, handleInbound, fake };
+  return { app, handleInbound, fake, findByTenant };
 }
 
 function signedVoicePost(app: express.Application, callSid: string) {
@@ -156,5 +155,80 @@ describe('#1595 — POST /api/telephony/voice after hours', () => {
 
     expect(res.text).toContain('<Record');
     expect(fake.work().filter((s) => s.sql.includes('FROM tenant_settings'))).toHaveLength(1);
+  });
+
+  // The gate's answer also carries the after-hours mode from that same row
+  // (createVoiceGate, every answer: trial, paid, dunning grace, the #1605
+  // owner test call), so an answered after-hours call reads tenant_settings
+  // once: the fork no longer re-reads the row through settingsRepo for it.
+  const GATE_CLOSED_HOURS = { timezone: 'UTC', schedule: [1, 2, 3, 4, 5, 6, 7].map((d) => ({ dayOfWeek: d, openTime: '00:00', closeTime: '00:00' })) };
+
+  it("(f) the fork acts on the gate's 'voicemail' and never calls settingsRepo (whose row says 'ai_answering')", async () => {
+    const { app, handleInbound, fake, findByTenant } = makeApp({
+      escalationSettings: { after_hours_voice_mode: 'ai_answering' },
+      voiceGate: async () => ({ allowed: true, businessHours: GATE_CLOSED_HOURS, afterHoursVoiceMode: 'voicemail' }),
+    });
+
+    const res = await signedVoicePost(app, 'CA-1595-gate-voicemail');
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Record');
+    expect(res.text).toContain('/api/telephony/voicemail-status');
+    expect(handleInbound).not.toHaveBeenCalled();
+    expect(findByTenant).not.toHaveBeenCalled();
+    expect(fake.checkouts()).toBe(0);
+  });
+
+  it("(g) the fork acts on the gate's 'ai_answering' and never calls settingsRepo (whose row says 'voicemail')", async () => {
+    const { app, handleInbound, fake, findByTenant } = makeApp({
+      escalationSettings: { after_hours_voice_mode: 'voicemail' },
+      voiceGate: async () => ({ allowed: true, businessHours: GATE_CLOSED_HOURS, afterHoursVoiceMode: 'ai_answering' }),
+    });
+
+    const res = await signedVoicePost(app, 'CA-1595-gate-ai');
+
+    expect(res.status).toBe(200);
+    expect(res.text).not.toContain('<Record');
+    expect(handleInbound).toHaveBeenCalledWith(expect.objectContaining({ callSid: 'CA-1595-gate-ai', tenantId: TENANT_ID }));
+    expect(findByTenant).not.toHaveBeenCalled();
+    expect(fake.checkouts()).toBe(0);
+  });
+
+  it('(h) a gate answer that carries hours but no mode leaves the fork to read the mode itself, once', async () => {
+    const { app, handleInbound, findByTenant } = makeApp({
+      escalationSettings: { after_hours_voice_mode: 'voicemail' },
+      voiceGate: async () => ({ allowed: true, businessHours: GATE_CLOSED_HOURS }),
+    });
+
+    const res = await signedVoicePost(app, 'CA-1595-fork-reads-mode');
+
+    expect(res.text).toContain('<Record');
+    expect(handleInbound).not.toHaveBeenCalled();
+    expect(findByTenant).toHaveBeenCalledOnce();
+    expect(findByTenant).toHaveBeenCalledWith(TENANT_ID);
+  });
+
+  it('(i) with no gate wired the fork reads the hours and the mode itself', async () => {
+    const { app, fake, findByTenant } = makeApp({ escalationSettings: { after_hours_voice_mode: 'voicemail' } });
+
+    const res = await signedVoicePost(app, 'CA-1595-no-gate');
+
+    expect(res.text).toContain('<Record');
+    expect(fake.work().filter((s) => s.sql.includes('FROM tenant_settings'))).toHaveLength(1);
+    expect(findByTenant).toHaveBeenCalledOnce();
+  });
+
+  it("(j) in hours the gate's mode is never consulted: the AI answers, with no settings read", async () => {
+    const { app, handleInbound, fake, findByTenant } = makeApp({
+      escalationSettings: { after_hours_voice_mode: 'voicemail' },
+      voiceGate: async () => ({ allowed: true, businessHours: null, afterHoursVoiceMode: 'voicemail' }),
+    });
+
+    const res = await signedVoicePost(app, 'CA-1595-in-hours');
+
+    expect(res.text).not.toContain('<Record');
+    expect(handleInbound).toHaveBeenCalledOnce();
+    expect(findByTenant).not.toHaveBeenCalled();
+    expect(fake.checkouts()).toBe(0);
   });
 });

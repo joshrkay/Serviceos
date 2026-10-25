@@ -71,8 +71,11 @@ describe('Postgres integration — voice gate usage caps', () => {
   }
 
   const check = (tenantId: string) => gate({ tenantId, callSid: `CA${randomUUID().slice(0, 8)}` });
-  /** An answer carries the business hours the gate read; these tenants have no schedule. */
-  const ANSWERED = { allowed: true, businessHours: null };
+  /**
+   * An answer carries the business hours and the after-hours mode the gate
+   * read; these tenants have no schedule and no stored mode (the default).
+   */
+  const ANSWERED = { allowed: true, businessHours: null, afterHoursVoiceMode: 'ai_answering' };
 
   it('answers a trial under 60 minutes and forwards to the owner at 60', async () => {
     const tenantId = await liveTenant({ status: 'trialing' });

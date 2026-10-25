@@ -44,6 +44,7 @@ import { PgAuditRepository } from '../../src/audit/pg-audit';
 import { applyTenantContext } from '../../src/db/rls-runtime-role';
 import { tenantContextStore } from '../../src/middleware/tenant-context';
 import { createTelephonyRouter } from '../../src/routes/telephony';
+import { PgSettingsRepository } from '../../src/settings/pg-settings';
 
 const ORIGINAL_FLAG = process.env.RLS_RUNTIME_ROLE;
 const OWNER_PHONE = '+14805550100';
@@ -74,6 +75,10 @@ interface VoiceTenantOpts {
   nudged?: boolean;
   ownerPhone?: string | null;
   businessHours?: object;
+  /** tenant_settings.escalation_settings (default: the column default, '{}'). */
+  escalationSettings?: object;
+  /** Seed no tenant_settings row at all. */
+  noSettingsRow?: boolean;
   endedSessions?: number;
   openSessions?: number;
   billableSeconds?: number;
@@ -90,10 +95,11 @@ async function seedVoiceTenant(opts: VoiceTenantOpts = {}): Promise<string> {
   await pool.query(
     `INSERT INTO tenant_settings
        (tenant_id, business_name, owner_phone, business_phone, voice_agent_live_at, activated_at,
-        onboarding_test_call_skipped_at, onboarding_upgrade_prompt_shown_at, business_hours, timezone)
+        onboarding_test_call_skipped_at, onboarding_upgrade_prompt_shown_at, business_hours, timezone,
+        escalation_settings)
      VALUES ($1, 'Voice Path Shop', $2, '+15125550999',
              CASE WHEN $3 THEN NOW() END, CASE WHEN $4 THEN NOW() END,
-             CASE WHEN $5 THEN NOW() END, CASE WHEN $6 THEN NOW() END, $7::jsonb, 'America/Chicago')`,
+             CASE WHEN $5 THEN NOW() END, CASE WHEN $6 THEN NOW() END, $7::jsonb, 'America/Chicago', $8::jsonb)`,
     [
       tenantId,
       opts.ownerPhone === undefined ? OWNER_PHONE : opts.ownerPhone,
@@ -102,8 +108,10 @@ async function seedVoiceTenant(opts: VoiceTenantOpts = {}): Promise<string> {
       opts.testCallSkipped ?? false,
       opts.nudged ?? false,
       JSON.stringify(opts.businessHours ?? {}),
+      JSON.stringify(opts.escalationSettings ?? {}),
     ],
   );
+  if (opts.noSettingsRow) await pool.query(`DELETE FROM tenant_settings WHERE tenant_id = $1`, [tenantId]);
   for (let i = 0; i < (opts.endedSessions ?? 0); i++) {
     await pool.query(
       `INSERT INTO voice_sessions (tenant_id, channel, state, ended_at) VALUES ($1, 'voice_inbound', 'ended', NOW())`,
@@ -255,10 +263,13 @@ describe('createVoiceGate — one tenant session per decision under the RLS runt
     expect(await measure(noBilling)).toEqual({ allowed: false, checkouts: 2, statements: 10, maxOpen: 1 });
   });
 
-  it("a dunning-grace answer carries its own tenant's business hours, read as rls_app_runtime", async () => {
+  it("a dunning-grace answer carries its own tenant's business hours and after-hours mode, read as rls_app_runtime", async () => {
     const hours = { mon: { open: '08:00', close: '17:00' } };
     const tenantId = await seedVoiceTenant({ status: 'past_due', graceUntil: new Date(Date.now() + 86_400_000), live: false, businessHours: hours });
-    const other = await seedVoiceTenant({ businessHours: { tue: { open: '09:00', close: '10:00' } } });
+    const other = await seedVoiceTenant({
+      businessHours: { tue: { open: '09:00', close: '10:00' } },
+      escalationSettings: { after_hours_voice_mode: 'voicemail' },
+    });
     const probe = probeStatementRoles(pool, TENANT_TABLES);
 
     const result = await gateFor(probe.pool)({ tenantId, callSid: 'CA-gate-grace' });
@@ -266,6 +277,8 @@ describe('createVoiceGate — one tenant session per decision under the RLS runt
     expect(result).toEqual({
       allowed: true,
       businessHours: { timezone: 'America/Chicago', schedule: [{ dayOfWeek: 1, openTime: '08:00', closeTime: '17:00' }] },
+      // No key stored on the caller's row: the #1595 default (the other tenant's 'voicemail' never leaks in).
+      afterHoursVoiceMode: 'ai_answering',
     });
     expect(probe.seen.map((s) => oneLine(s.sql))).toEqual([expect.stringMatching(GATE_ROW)]);
     expectAllUnderTenant(probe.seen, tenantId);
@@ -323,12 +336,17 @@ describe('POST /api/telephony/voice — gate and after-hours fork share the one 
     });
   });
 
-  it('a dunning-grace call: the gate reads the hours in its session and the after-hours fork reads nothing itself', async () => {
+  it('a dunning-grace call: the gate reads the hours and the mode in its session and the after-hours fork reads nothing itself', async () => {
     // Base (raw pool reads): the tenants read + the fork's business-hours read = 2 checkouts / 2.
     const closedAllWeek = Object.fromEntries(
       ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'].map((d) => [d, { open: '00:00', close: '00:01' }]),
     );
-    const tenantId = await seedVoiceTenant({ status: 'past_due', graceUntil: new Date(Date.now() + 86_400_000), businessHours: closedAllWeek });
+    const tenantId = await seedVoiceTenant({
+      status: 'past_due',
+      graceUntil: new Date(Date.now() + 86_400_000),
+      businessHours: closedAllWeek,
+      escalationSettings: { after_hours_voice_mode: 'voicemail' },
+    });
     const traffic = countPoolTraffic(pool);
     let answered = 0;
     const app = express();
@@ -348,8 +366,8 @@ describe('POST /api/telephony/voice — gate and after-hours fork share the one 
         resolveTenantId: () => tenantId,
         voiceGate: createVoiceGate({ pool: traffic.pool, auditRepo: new PgAuditRepository(traffic.pool) }),
         pool: traffic.pool,
-        // After hours sends the call to voicemail: proof the fork used the gate's hours.
-        settingsRepo: { findByTenant: async () => ({ escalationSettings: { after_hours_voice_mode: 'voicemail' } }) } as never,
+        // After hours sends the call to voicemail: proof the fork used the gate's hours and mode.
+        settingsRepo: new PgSettingsRepository(traffic.pool),
       }),
     );
     const params = { CallSid: 'CA-voice-route-grace', From: '+15125550123', To: '+15125550999' };
@@ -370,6 +388,131 @@ describe('POST /api/telephony/voice — gate and after-hours fork share the one 
       statements: 4,
       maxOpen: 1,
     });
+  });
+});
+
+describe('POST /api/telephony/voice after hours — the fork acts on the gate\'s after-hours mode: tenant_settings read once (real Postgres)', () => {
+  const AUTH_TOKEN = 'voice-path-after-hours-token';
+  const BASE = 'https://api.voice-path-after-hours.test';
+  /** open === close: closed at every minute of every day, whatever the wall clock. */
+  const ALWAYS_CLOSED = Object.fromEntries(
+    ['mon', 'tue', 'wed', 'thu', 'fri', 'sat', 'sun'].map((d) => [d, { open: '00:00', close: '00:00' }]),
+  );
+  const GRACE = { status: 'past_due' as const, graceUntil: new Date(Date.now() + 86_400_000) };
+  const TRIAL = { status: 'trialing' as const };
+  const PAID = { status: 'active' as const };
+
+  /**
+   * POST /voice with the production wiring: the real gate, the real
+   * PgSettingsRepository (the fork's fallback read), both on one counted pool.
+   */
+  async function postVoice(tenantId: string, callSid: string) {
+    const traffic = countPoolTraffic(pool);
+    let answered = 0;
+    const app = express();
+    app.use(
+      '/api/telephony',
+      createTelephonyRouter({
+        adapter: {
+          handleInbound: async () => {
+            answered += 1;
+            return '<Response><Gather/></Response>';
+          },
+          handleInboundForStream: async () => '<Response/>',
+          handleGather: async () => '<Response/>',
+        } as never,
+        authTokenGetter: () => AUTH_TOKEN,
+        publicBaseUrl: BASE,
+        resolveTenantId: () => tenantId,
+        voiceGate: createVoiceGate({ pool: traffic.pool, auditRepo: new PgAuditRepository(traffic.pool) }),
+        pool: traffic.pool,
+        settingsRepo: new PgSettingsRepository(traffic.pool),
+      }),
+    );
+    const params = { CallSid: callSid, From: '+15125550123', To: '+15125550999' };
+    const sig = twilio.getExpectedTwilioSignature(AUTH_TOKEN, `${BASE}/api/telephony/voice`, params);
+    const res = await request(app).post('/api/telephony/voice').set('X-Twilio-Signature', sig).type('form').send(params);
+    expect(res.status).toBe(200);
+    const statements = traffic.statements().map(oneLine);
+    return {
+      outcome: res.text.includes('<Record') && res.text.includes('/api/telephony/voicemail-status') ? 'voicemail' : answered === 1 ? 'ai' : 'other',
+      settingsReads: statements.filter((s) => /tenant_settings/.test(s)).length,
+      checkouts: traffic.checkouts(),
+      statements: statements.length,
+      maxOpen: traffic.maxOpen(),
+    };
+  }
+
+  // Before: the gate's session, then the fork's settingsRepo.findByTenant for
+  // the mode — a second session (BEGIN, GUC+role, SELECT * FROM
+  // tenant_settings, COMMIT, RESET ROLE, RESET the GUC): grace 2 / 10, trial
+  // 2 / 12, paid 2 / 11. Now the gate's session alone.
+  const paths = [
+    // Dunning grace: BEGIN, GUC+role, the row, COMMIT (4).
+    { path: 'dunning grace', seed: GRACE, statements: 4 },
+    // BEGIN, GUC+role, the row, open calls, minutes, COMMIT (6).
+    { path: 'a live trial', seed: TRIAL, statements: 6 },
+    // BEGIN, GUC+role, the row, period minutes, COMMIT (5).
+    { path: 'a paid tenant', seed: PAID, statements: 5 },
+  ];
+  const modes: Array<{ label: string; escalationSettings: object; outcome: 'ai' | 'voicemail' }> = [
+    { label: 'no mode stored (the #1595 default)', escalationSettings: {}, outcome: 'ai' },
+    { label: "'ai_answering'", escalationSettings: { after_hours_voice_mode: 'ai_answering' }, outcome: 'ai' },
+    { label: "'voicemail'", escalationSettings: { after_hours_voice_mode: 'voicemail' }, outcome: 'voicemail' },
+  ];
+
+  for (const { path, seed, statements } of paths) {
+    for (const { label, escalationSettings, outcome } of modes) {
+      it(`${path}, ${label}: ${outcome === 'ai' ? 'the AI answers' : 'voicemail'}, one tenant session (${statements} statements)`, async () => {
+        const tenantId = await seedVoiceTenant({ ...seed, businessHours: ALWAYS_CLOSED, escalationSettings });
+
+        expect(await postVoice(tenantId, `CA-ah-${tenantId.slice(0, 8)}`)).toEqual({
+          outcome,
+          settingsReads: 1,
+          checkouts: 1,
+          statements,
+          maxOpen: 1,
+        });
+      });
+    }
+  }
+
+  // The write paths store only the enum, but a hand-written row routes as the
+  // fork's own read routed it: any stored value but 'ai_answering' (a JSON null
+  // included — a value, not an absent key) is voicemail; a blob that is not an
+  // object, or has no such key, is the default.
+  it.each([
+    ['a stored JSON null', { after_hours_voice_mode: null }, 'voicemail'],
+    ['a value outside the enum', { after_hours_voice_mode: 'forward' }, 'voicemail'],
+    ['other keys only', { channel_sms: false }, 'ai'],
+    ['an array naming the key', ['after_hours_voice_mode'], 'ai'],
+  ])('dunning grace after hours, %s: as the fork routed it, in one session', async (_label, escalationSettings, outcome) => {
+    const tenantId = await seedVoiceTenant({ ...GRACE, businessHours: ALWAYS_CLOSED, escalationSettings });
+
+    expect(await postVoice(tenantId, `CA-ah-odd-${tenantId.slice(0, 8)}`)).toEqual({
+      outcome,
+      settingsReads: 1,
+      checkouts: 1,
+      statements: 4,
+      maxOpen: 1,
+    });
+  });
+
+  it('dunning grace with no tenant_settings row: no hours, so never after hours — the AI answers, nothing re-read', async () => {
+    const tenantId = await seedVoiceTenant({ ...GRACE, noSettingsRow: true });
+
+    expect(await postVoice(tenantId, 'CA-ah-no-row')).toEqual({ outcome: 'ai', settingsReads: 1, checkouts: 1, statements: 4, maxOpen: 1 });
+  });
+
+  it('in hours (no schedule) the mode is never consulted: grace, trial and paid cost what they did', async () => {
+    const vm = { after_hours_voice_mode: 'voicemail' };
+    const grace = await seedVoiceTenant({ ...GRACE, escalationSettings: vm });
+    const trial = await seedVoiceTenant({ ...TRIAL, escalationSettings: vm });
+    const paid = await seedVoiceTenant({ ...PAID, escalationSettings: vm });
+
+    expect(await postVoice(grace, 'CA-ih-grace')).toEqual({ outcome: 'ai', settingsReads: 1, checkouts: 1, statements: 4, maxOpen: 1 });
+    expect(await postVoice(trial, 'CA-ih-trial')).toEqual({ outcome: 'ai', settingsReads: 1, checkouts: 1, statements: 6, maxOpen: 1 });
+    expect(await postVoice(paid, 'CA-ih-paid')).toEqual({ outcome: 'ai', settingsReads: 1, checkouts: 1, statements: 5, maxOpen: 1 });
   });
 });
 

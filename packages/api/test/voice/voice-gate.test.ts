@@ -29,6 +29,11 @@ interface MockOpts {
   noSettingsRow?: boolean;
   /** Any statement that reads tenant_settings throws (a database error). */
   settingsReadFails?: boolean;
+  /**
+   * escalation_settings.after_hours_voice_mode as stored (any JSON value,
+   * null included); undefined: the key is absent.
+   */
+  afterHoursVoiceMode?: unknown;
 }
 
 /**
@@ -59,6 +64,8 @@ function mockFake(opts: MockOpts): FakeTenantPool {
         timezone: opts.timezone === undefined ? 'America/Chicago' : opts.timezone,
         ai_overage_cap_cents: null,
         ai_overage_uncapped: false,
+        has_after_hours_voice_mode: opts.afterHoursVoiceMode !== undefined,
+        after_hours_voice_mode: opts.afterHoursVoiceMode === undefined ? null : opts.afterHoursVoiceMode,
       };
   return fakeTenantPool((sql) => {
     if (opts.settingsReadFails && sql.includes('tenant_settings')) throw new Error('connection reset');
@@ -76,6 +83,8 @@ function mockFake(opts: MockOpts): FakeTenantPool {
             timezone: null,
             ai_overage_cap_cents: null,
             ai_overage_uncapped: null,
+            has_after_hours_voice_mode: false,
+            after_hours_voice_mode: null,
             ...(settingsCols ?? {}),
           },
         ],
@@ -405,6 +414,7 @@ describe('createVoiceGate — one tenant session per decision', () => {
     expect(result).toEqual({
       allowed: true,
       businessHours: { timezone: 'America/Chicago', schedule: [{ dayOfWeek: 1, openTime: '08:00', closeTime: '17:00' }] },
+      afterHoursVoiceMode: 'ai_answering',
     });
   });
 
@@ -413,7 +423,7 @@ describe('createVoiceGate — one tenant session per decision', () => {
       tenantId: T1,
       callSid: 'CA1',
     });
-    expect(noSchedule).toEqual({ allowed: true, businessHours: null });
+    expect(noSchedule).toEqual({ allowed: true, businessHours: null, afterHoursVoiceMode: 'ai_answering' });
   });
 
   describe('dunning grace answers with the business hours too, so /voice reads nothing itself', () => {
@@ -430,6 +440,7 @@ describe('createVoiceGate — one tenant session per decision', () => {
       expect(result).toEqual({
         allowed: true,
         businessHours: { timezone: 'America/Chicago', schedule: [{ dayOfWeek: 1, openTime: '08:00', closeTime: '17:00' }] },
+        afterHoursVoiceMode: 'ai_answering',
       });
       expect(audit.create).not.toHaveBeenCalled();
       expect(fake.checkouts()).toBe(1);
@@ -447,7 +458,7 @@ describe('createVoiceGate — one tenant session per decision', () => {
         tenantId: T1,
         callSid: 'CA1',
       });
-      expect(result).toEqual({ allowed: true, businessHours: null });
+      expect(result).toEqual({ allowed: true, businessHours: null, afterHoursVoiceMode: 'ai_answering' });
     });
 
     it('a failed read fails the gate closed (it throws; /voice sends voicemail), as a failed tenants read always did', async () => {
@@ -487,5 +498,82 @@ describe('createVoiceGate — one tenant session per decision', () => {
     expect(fake.checkouts()).toBe(1);
     expect(tablesRead(fake)).toEqual(['tenants']);
     expect(audit.create).toHaveBeenCalledOnce();
+  });
+});
+
+/**
+ * The /voice after-hours fork acts on tenant_settings.escalation_settings
+ * .after_hours_voice_mode. Every answer carries it from the decision's own
+ * row, so an answered after-hours call reads tenant_settings once (the fork
+ * used to re-read the whole row through settingsRepo.findByTenant — a second
+ * tenant session — for that one key). The mode is the one the fork's own read
+ * resolved: resolveEscalationSettings over the repo's row, then
+ * `!== 'ai_answering'` → voicemail.
+ */
+describe('createVoiceGate — an answer carries the after-hours mode from the same row', () => {
+  const tablesRead = (fake: FakeTenantPool) => fake.work().map((s) => s.sql.match(/FROM (\w+)/)?.[1]);
+  const answeredPaths: Array<{ path: string; opts: MockOpts; call?: { from: string; stirVerstat: string }; tables: string[] }> = [
+    { path: 'a live trial', opts: { subscriptionStatus: 'trialing' }, tables: ['tenants', 'voice_sessions', 'call_usage_events'] },
+    { path: 'a paid tenant', opts: { subscriptionStatus: 'active', period: true }, tables: ['tenants', 'call_usage_events'] },
+    {
+      path: 'dunning grace',
+      opts: { subscriptionStatus: 'past_due', pastDueGraceUntil: new Date(Date.now() + 60_000) },
+      tables: ['tenants'],
+    },
+    {
+      path: 'the #1605 owner test call while not_live',
+      opts: { subscriptionStatus: 'trialing', voiceAgentLiveAt: null, ownerPhone: '+14805550100' },
+      call: { from: '+14805550100', stirVerstat: 'TN-Validation-Passed-A' },
+      tables: ['tenants'],
+    },
+  ];
+  // Stored value → the mode the fork acts on (the default when no key is stored).
+  const modes: Array<{ stored: unknown; label: string; expected: 'ai_answering' | 'voicemail' }> = [
+    { stored: undefined, label: 'no key stored (the #1595 default)', expected: 'ai_answering' },
+    { stored: 'ai_answering', label: "'ai_answering'", expected: 'ai_answering' },
+    { stored: 'voicemail', label: "'voicemail'", expected: 'voicemail' },
+  ];
+
+  for (const { path, opts, call, tables } of answeredPaths) {
+    for (const { stored, label, expected } of modes) {
+      it(`${path}, ${label} → ${expected}, on the decision's one statement (no extra read)`, async () => {
+        const fake = mockFake({ ...opts, afterHoursVoiceMode: stored });
+        const result = await createVoiceGate({ pool: fake.pool, auditRepo: mockAudit() })({ tenantId: T1, callSid: 'CA1', ...call });
+
+        expect(result).toMatchObject({ allowed: true, afterHoursVoiceMode: expected });
+        expect(fake.checkouts()).toBe(1);
+        expect(tablesRead(fake)).toEqual(tables);
+        expect(fake.work()[0]!.sql).toContain("s.escalation_settings->'after_hours_voice_mode'");
+      });
+    }
+  }
+
+  it('no tenant_settings row (dunning grace answers without one) → the default, as resolveEscalationSettings(null)', async () => {
+    const result = await createVoiceGate({
+      pool: mockPool({ subscriptionStatus: 'past_due', pastDueGraceUntil: new Date(Date.now() + 60_000), noSettingsRow: true }),
+      auditRepo: mockAudit(),
+    })({ tenantId: T1, callSid: 'CA1' });
+    expect(result).toEqual({ allowed: true, businessHours: null, afterHoursVoiceMode: 'ai_answering' });
+  });
+
+  // The fork sent every stored value but 'ai_answering' to voicemail; the
+  // write paths only store the enum, but a hand-written row must route the same.
+  it.each([
+    ['a value outside the enum', 'forward'],
+    ['a stored JSON null (a value, not an absent key)', null],
+    ['a non-string value', 1],
+  ])('%s → voicemail, as the fork routed it', async (_label, stored) => {
+    const result = await createVoiceGate({
+      pool: mockPool({ subscriptionStatus: 'active', afterHoursVoiceMode: stored }),
+      auditRepo: mockAudit(),
+    })({ tenantId: T1, callSid: 'CA1' });
+    expect(result).toMatchObject({ allowed: true, afterHoursVoiceMode: 'voicemail' });
+  });
+
+  it('a block carries no mode (the route answers it before the after-hours fork)', async () => {
+    const fake = mockFake({ subscriptionStatus: 'trialing', openCalls: 2, afterHoursVoiceMode: 'voicemail' });
+    const result = await createVoiceGate({ pool: fake.pool, auditRepo: mockAudit() })({ tenantId: T1, callSid: 'CA1' });
+    expect(result).toMatchObject({ allowed: false, reason: 'trial_cap_concurrent' });
+    expect(result).not.toHaveProperty('afterHoursVoiceMode');
   });
 });
