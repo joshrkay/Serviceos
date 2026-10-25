@@ -3490,6 +3490,75 @@ recorded in `docs/solutions/workflow-issues/main-merge-damage-on-long-lived-bran
 PR is cut from `main` after the one before it merges, runs the E3 protocol, and merges `main` in
 rather than rebasing.
 
+### The slices
+
+The 2026-10-25 planning pass cut U7 into slices U7-00 to U7-49. Its review split U7-04, U7-10,
+U7-14, U7-16, U7-25, U7-26 and U7-32, widened U7-05 to U7-05+, and added U7-50. The gates and the
+order are below the table.
+
+| Id | Scope |
+|---|---|
+| U7-00 | The inventory, [`docs/plans/2026-10-25-001-u7-erasure-inventory.md`](2026-10-25-001-u7-erasure-inventory.md): every table, payload store, external provider, log and backup that can hold the subject's data on `main`. Docs only. |
+| U7-01 | `_queue_messages` (with its `last_error` column), `_queue_dlq` and `_feature_flags` move into `MIGRATIONS`, and a structural test fails on any `CREATE TABLE` outside `db/schema.ts`. |
+| U7-02 | The erase-coverage manifest: table classes, link methods, key mappings (`id` included) and the pinned global list, with a catalog closure test. |
+| U7-03 | Per-column classification: declared scrubbed values, the blank or delete method, foreign-key handling for delete-method tables, and a text and JSON safe list read from `CHECK` constraints. |
+| U7-04a | The four raw `INSERT INTO audit_events` move onto an on-client repository insert, with a structural ban on new ones. No behaviour change. |
+| U7-04b | The `(event_type, key)` pair registry as data, and a ratchet test whose ceiling is today's untyped sites. |
+| U7-04c to U7-04g | `createAuditEvent` call sites move onto the registry by module, about 40 files per PR. |
+| U7-04h | `createAuditEvent` requires the union of registered pairs. |
+| U7-05+ | Twilio, SendGrid and Vapi webhook receipts store ids only, the Stripe receipt keeps an allowlist of keys, and a one-time backfill strips the stored rows. |
+| U7-06 | The advisory-lock class ids (shared with U8), the stripe helper, keyed recipient hashing with a key id and normalization version, and a wall-clock deadline helper. Merges with U7-07. |
+| U7-07 | The erasure core schema (jobs, steps, identifiers, tombstones, start failures, hash keys) with forced RLS, revoked grants, never-lifted triggers and the job-lock trigger. |
+| U7-08 | The step-target, candidate and membership, late-link inbox and storage-cleanup tables; statement-level re-open triggers; the re-arm guard; the `u7_written` flags. |
+| U7-09 | The job-lock helper (ascending, `FOR NO KEY UPDATE`), the lease claim, renew-first checkpoints, and the step-generation and close guards. |
+| U7-10a | The fence trigger functions, tested on fixture tables: the `BEFORE` fence for scrub tables, with shared stripes, a probe in a later statement and the erasure SQLSTATE. |
+| U7-10b | The fence triggers attached to production tables in batches, with the first-deploy lock plan and a numeric p95 budget; writers drop content on the erasure SQLSTATE. |
+| U7-11 | Anonymize tables: the trigger blanks designated columns instead of raising. The `ai_runs` scrub writes U4's kept-keys shape and stamps `content_purged_at`. |
+| U7-12 | The `AFTER` late-link trigger: it tombstones the written row's id and writes a late-link inbox row for every job holding the key. |
+| U7-13 | The `audit_events` trigger: it blanks PII pairs on rows keyed by a tombstone key, never refuses, and takes a stripe only when a PII pair is set. |
+| U7-14a | The external-sink call-site scanner, the `externalSinks` registry, the pinned exempt, cleanup, record and no-subject-data snapshot, CODEOWNERS, and the frozen unfenced-debt ceiling. |
+| U7-14b | Each sink the first draft missed (Google Maps, Business Profile, Anthropic, Sentry, PostHog, Clerk, provisioning, Expo push) is classified, or given an erase step. |
+| U7-15 | `withErasureFence` on a dedicated side pool: shared stripes, a probe in a later statement, a write-ahead claim, a guarded claimed-to-sending flip, a `deadline_at` abort signal and one retry on `40P01`. |
+| U7-16a | The SMS write-ahead at the `GatedMessageDelivery` → `PerTenantTwilioDeliveryProvider` boundary, on a new `outbound_claims` table: recipient hash, account, sender and body hash; fenced and ambiguous states; a per-send status callback; `ValidityPeriod` and `SmartEncoded=false`. |
+| U7-16b | Source keys passed from the roughly 40 SMS senders, in batches. |
+| U7-17 | The email write-ahead, with the row id in `custom_args`; a signature-checked SendGrid and Twilio Email event handler links the provider id. |
+| U7-18 | The outbound-call write-ahead with `StatusCallbackEvent=initiated`; the bridge callback records the SID; deadline data for the unlinked fallback. |
+| U7-19 | The direct Send Estimate and Send Invoice routes run with no request transaction, and claims repositories never join `tenantContextStore`. |
+| U7-20 | QuickBooks: `?requestid=` idempotency, stored and rotated after a definite Fault; the realm on the sync log and the claims; a serialized token refresh; a typed revoked grant; fenced creates. |
+| U7-21 | The Stripe saved-card fence, an append-only payment-link mint log scoped by Stripe-Account, and Product names without the customer's display name. |
+| U7-22 | Google Calendar and Wisetack fences: calendar claims record the Google account and the concrete calendar, and Wisetack's `external_reference` links ambiguous creates. |
+| U7-23 | Storage fences (an expiry and a signed size on each claim) and refusal registration: the refused recording, voicemail (#1833's notify-only branch included), Vapi, image post-process and customer MMS callbacks register their external copies, and Vapi ids are recorded from the first event. |
+| U7-24 | AI-content fences (the `ai_runs` completion, transcript append, summary and knowledge chunks); a send-boundary drop and a non-shutdown drain in the trace exporter; capture-on and endpoint-host intervals. |
+| U7-25a | The phase-1 transaction: collection to a fixed point, ascending exclusive stripes with restart, a deadline below `deadlock_timeout`, the tombstone, job, identifiers, steps and queue wake in one commit, and the fence-key collection that fences every sink's claims. |
+| U7-25b | The owner-only routes behind `CUSTOMER_ERASURE_ENABLED` (default off), a typed 409 with a start-failure alert, and the boot completeness check. |
+| U7-26a | The durable phase-2 engine: a leader-gated sweep (key 590048) plus a queue wake; cross-tenant selection, then per-tenant or per-job transactions; a runner with a bound identifier reader; attempts, backoff, waits, gates and deadlines; a guarded close; the daily retry. |
+| U7-26b | The alert outboxes and identifier retention. |
+| U7-27 | The `erase_record` step (an idempotent PUT to a dedicated bucket, confirmed by GET), and its restore step in the rollback runbook. |
+| U7-28 | The snapshot step: batched targets with provider-scoped ids, account and realm; encrypted S3 keys, prefixes and `To` numbers; #1833's orphaned-copy rows as recording targets. |
+| U7-29 | The manifest-driven local scrub: blank or delete per table, null-link or keep-link, child-first foreign-key deletes, the `files` blank fallback with cleanup rows, and own-id tombstones for null-link rows under exclusive stripes. |
+| U7-30 | The identifier-linked lead and callback step: it records sources under exclusive stripes, fences their claimed, held and released claims, and targets their post-phase-1 sends. |
+| U7-31 | `ai_runs`: linked rows by correlation, session or call id; a batched historical content scan (phones, emails, full name, subject UUIDs) with corroboration and candidates; `shadow_comparisons` by `ai_run_id`; a Langfuse target for each scrubbed run. |
+| U7-32a | `audit_events`: the strip by link, and the value pass over spans with an ordered, locked scrub. |
+| U7-32b | The late audit-write probe in the repository insert, with audit-value inbox rows and a metric for dropped missing keys. |
+| U7-33 | Tenantless payload stores: an erase step for the queue tables and `webhook_events` (Twilio, SendGrid, Vapi, Stripe PII sub-keys, #1833's orphaned-copy rows); leader-gated purges of the DLQ and the non-Stripe webhook payloads; the `idempotency_keys` gate. |
+| U7-34 | The late-link inbox mover (one transaction per job, collection to a fixed point under exclusive stripes, snapshot re-open), audit-value rows without collection, versioned late candidates, and the owner-only confirm and dismiss routes. |
+| U7-35 | Held customerless sends: the encrypted message and `hold_expires_at`; owner-only release (checked against every tombstone) and drop; a release sweep through the fence; expiry. |
+| U7-36 | The Twilio messages step: DELETE plus a 404 confirm on the target's own account, Media deletes, the redaction fallback, waits on 20009 and 429, the legacy-SID account lookup, the sending-to-ambiguous resume and a strict content-match fallback. |
+| U7-37 | The Twilio recordings step: per-account deleters on U4's seam, which also fix #1833's notify-only 404; `Recordings?CallSid=` after the `not_before` gate; refused-callback and #1833 orphaned-copy targets; the legal-hold choice. |
+| U7-38 | The Twilio calls step: child legs through `ParentCallSid`, an in-progress wait up to the `timeLimit` maximum, the delete after the recordings step, Vapi CallSids and the outbound fallback listing. |
+| U7-39 | The Stripe step: the Customer deleted on its Stripe-Account, reconciliation by listing over the created window, payment-link Products renamed through their line items, Checkout line items `provider_retained`. |
+| U7-40 | The QuickBooks step: a realm-guarded anonymize of every name and contact field, `PrintOnCheckName` included, with read-back; SalesReceipts found from the log and by `CustomerRef` and `DocNumber` queries, then rewritten; lost creates found by `LIKE` queries with `(deleted)` stripped; legacy rows. |
+| U7-41 | The Google Calendar step: a `privateExtendedProperty` listing per recorded account and calendar; every match deleted, with 410 or cancelled counting as done; an account guard; the bin's retention. |
+| U7-42 | The S3 step core: cleanup rows gated by `not_before`, re-delete and HEAD, version-aware deletes, replica cleanup, Object Lock ending `provider_retained`, and the storage boot guards (versioning, replication, R2's NotImplemented). |
+| U7-43 | S3 late objects: the object-created notification worker and the two-phase backstop listing with no end date. |
+| U7-44 | CDN purge for public storage URLs, confirmed by the CDN's completion signal, and a boot guard for `STORAGE_PUBLIC_URL` without purge credentials. |
+| U7-45 | The Langfuse step: delete, wait and re-check per project; a second delete at `not_before`; a backstop re-query; batched multi-trace deletes; versioned blob storage ends `provider_retained`. |
+| U7-46 | The Vapi step (owner packet item 9): each subject Vapi call deleted and re-checked, a backstop listing on the tenant's `phoneNumberId`, late targets from the webhook; or the recording-off boot guard instead. |
+| U7-47 | The email step: ambiguous rows end `provider_retained` after the event window; bounces, blocks and invalid emails are deleted with read-back; spam reports and unsubscribes are kept. |
+| U7-48 | Speech and model provider retention: ElevenLabs (owner packet item 10: a Zero Retention guard or a history-deletion step), Deepgram's `mip_opt_out` (item 11), and Wisetack `provider_retained` after its webhook window. |
+| U7-49 | The erase result (GET) with per-store outcomes, candidates and the `provider_retained` list keyed by endpoint-host interval; the full seed-and-erase acceptance test; the runbook and the enable checklist. |
+| U7-50 | The owner screen, only if owner packet item 15 asks for one now. |
+
 ### Rules that hold for every slice
 
 - **Shared primitives are U7's.** U7 owns the two-key lock class ids
@@ -3607,7 +3676,7 @@ rather than rebasing.
       Twilio returns for a tenant-owned account that isn't a subaccount before relying on it.
     - Red test for U7-37: #1833's rows with reason `no_recording_url` carry no `recordingUrl`, so
       the account is found by looking up the `RecordingSid` across the tenant's known accounts.
-17. **Other providers:** U7-39 to U7-45.
+17. **Other providers:** U7-39 to U7-45, and U7-47 (email).
     - U7-43 runs on the backstop listing alone until the notification queue is provisioned.
     - U7-46 (Vapi) and U7-48 (ElevenLabs, Deepgram) wait for owner packet items 9 to 11.
 18. **U7-49**: the result, the acceptance test and the runbook. **U7-50** is the owner screen, only
