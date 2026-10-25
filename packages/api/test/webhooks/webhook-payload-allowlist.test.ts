@@ -365,6 +365,19 @@ describe('Clerk, Twilio, SendGrid and the id-only sources', () => {
         voiceRecordingId: 'vr',
       }),
     ).toEqual({ callSid: 'CA', recordingSid: 'RE', voiceRecordingId: 'vr' });
+    const orphanedCopy = {
+      tenantId: TENANT,
+      callSid: 'CA',
+      recordingSid: 'RE',
+      recordingUrl: 'https://api.twilio.com/2010-04-01/Accounts/AC1/Recordings/RE',
+      reason: 'no_credentials',
+    };
+    expect(
+      minimizeWebhookPayload('twilio_voicemail_orphaned_copy', 'voicemail_twilio_copy_orphaned', {
+        ...orphanedCopy,
+        From: '+15125550147',
+      }),
+    ).toEqual(orphanedCopy);
     expect(minimizeWebhookPayload('one_tap_approve', 'one_tap_approve_nonce', { leaked: 'x' })).toEqual({});
     expect(minimizeWebhookPayload('one_tap_undo', 'one_tap_undo_nonce', {})).toEqual({});
   });

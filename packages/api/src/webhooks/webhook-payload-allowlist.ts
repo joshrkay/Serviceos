@@ -306,7 +306,9 @@ const keep =
 /**
  * One policy per `webhook_events.source`. The id-only sources (LSA, the
  * voicemail legs, the one-tap nonces) already wrote ids; their policy pins
- * that. `vapi` once stored the caller's `fromE164`.
+ * that. `vapi` once stored the caller's `fromE164`. The orphaned-copy record
+ * keeps the Twilio recording URL: deleting the copy later needs it, and it
+ * carries only the account and recording SIDs.
  */
 const POLICIES: Readonly<Record<string, Minimizer>> = {
   stripe: minimizeStripe,
@@ -317,6 +319,7 @@ const POLICIES: Readonly<Record<string, Minimizer>> = {
   lsa: keep(['tenantId', 'leadId']),
   twilio_voicemail_lead: keep(['callSid', 'recordingSid']),
   twilio_voicemail_transcription: keep(['callSid', 'recordingSid', 'voiceRecordingId']),
+  twilio_voicemail_orphaned_copy: keep(['tenantId', 'callSid', 'recordingSid', 'recordingUrl', 'reason']),
   one_tap_approve: keep([]),
   one_tap_undo: keep([]),
 };
