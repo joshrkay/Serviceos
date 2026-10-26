@@ -128,7 +128,7 @@ describe('Postgres integration — B1: SMS replies approve as the sender’s rea
         sent.push({ to, body });
       },
       // The LLM seam: "EDIT labor $200/hr", interpreted as a payload delta.
-      interpretEdit: async () => ({ lineItems: [labor(20000)] }),
+      interpretEdit: async () => ({ delta: { lineItems: [labor(20000)] } }),
     };
   }
 

@@ -233,7 +233,7 @@ async function runReviewReply(
   gateway: LLMGateway,
   c: Extract<DraftingGoldenCase, { task: 'review_public_response' }>,
 ): Promise<DraftingGoldenCheck[]> {
-  const reply = await draftPublicResponse(
+  const { text: reply } = await draftPublicResponse(
     {
       review: {
         id: `golden-${c.id}`,

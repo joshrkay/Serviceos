@@ -263,7 +263,8 @@ describe('intent-classifier — classifyIntent', () => {
 
   // U10 — session grouping for LLM trace export (the Langfuse sessionId).
   // Carried in request.metadata ONLY, never in the prompt, so voice-quality
-  // cassette hashes and gateway cache keys are unaffected.
+  // cassette hashes and gateway cache keys are unaffected. OBS-2 — the
+  // session is also the run's correlation id (classifierRunMetadata).
   it('passes sessionId and callSid to the gateway in request metadata when the context supplies them', async () => {
     const gateway = mockGateway(
       JSON.stringify({ intentType: 'create_invoice', confidence: 0.9 })
@@ -278,6 +279,7 @@ describe('intent-classifier — classifyIntent', () => {
       tenantId: 'tenant-xyz',
       sessionId: 'voice-sess-1',
       callSid: 'CA0123456789',
+      correlationId: 'voice-sess-1',
     });
   });
 

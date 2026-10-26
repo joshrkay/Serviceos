@@ -139,7 +139,7 @@ function ctx(body: string, fromE164: string): InboundSmsContext {
 
 /** "EDIT labor $200/hr and the capacitor $60", interpreted as a payload delta. */
 const priceEdit: ProposalSmsReplyDeps['interpretEdit'] = async () => ({
-  lineItems: [labor(20000), capacitor(6000)],
+  delta: { lineItems: [labor(20000), capacitor(6000)] },
 });
 
 /** Execute (succeeded, at the approved payload) and run the lesson recorder. */

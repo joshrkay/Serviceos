@@ -916,6 +916,13 @@ export async function editProposal(
   // #1405 — when supplied, the card's pick of "which accepted estimate?"
   // re-drafts a draft_invoice's lines, discount and tax from that estimate.
   estimateRepo?: Pick<EstimateRepository, 'findById'>,
+  // OBS-2 — when the edits are a model run's interpretation of the owner's
+  // instruction (the SMS and voice edit paths), the run that authored the
+  // payload this writes: ai_run_id is re-pointed to it in the same write, as
+  // the chat correction does. `aiRunId` undefined (no persisted run) clears
+  // the link rather than leave it naming a run that did not author the
+  // payload. Omitted — an edit typed through the API — the link is untouched.
+  editRun?: { aiRunId?: string },
 ): Promise<{ proposal: Proposal; editedFields: string[] }> {
   if (!hasPermission(actorRole, 'proposals:edit')) {
     throw new ForbiddenError();
@@ -1039,6 +1046,7 @@ export async function editProposal(
     payload: updatedPayload,
     ...(preserveOriginal ? { originalPayload: read.payload } : {}),
     ...(sourceContextUpdate ? { sourceContext: sourceContextUpdate } : {}),
+    ...(editRun ? { aiRunId: editRun.aiRunId } : {}),
   });
   if (!updated) {
     throw new ConflictError(EDIT_RACED, { status: proposal.status });

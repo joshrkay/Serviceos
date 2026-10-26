@@ -293,3 +293,197 @@ describe('OBS-2 — chat and memo surfaces persist both runs', () => {
     expect(stored.sourceContext?.classifierAiRunId).toBe('run-classify_intent');
   });
 });
+
+// OBS-2 — the two review_response_proposal creators. The payload is assembled
+// from up to three runs (the review classification, the public reply, the
+// private follow-up). Every one of them carries the creator's join key, and the
+// proposal links the PUBLIC-REPLY run: the one component every review response
+// has, and the text that is posted to Google as written.
+describe('OBS-2 — review_response_proposal: every run in the pipeline keyed, the public-reply run linked', () => {
+  const NOW = new Date('2026-11-01T12:00:00Z');
+  const REVIEW_COMMENT = 'It was okay I suppose'; // no regex hit at 2★ → the review classifier asks the model
+
+  function reviewGateway(withRunId = true): { gateway: LLMGateway; requests: LLMRequest[] } {
+    const requests: LLMRequest[] = [];
+    const replies: Record<string, string> = {
+      review_classify: JSON.stringify({ classification: 'vague_complaint', confidence: 0.9 }),
+      review_public_response: 'Sorry the visit fell short — please reach out so we can make it right.',
+      review_private_followup: 'Hi Maria, sorry the visit fell short. What could we have done better?',
+    };
+    const gateway = {
+      complete: vi.fn(async (req: LLMRequest): Promise<LLMResponse> => {
+        requests.push(req);
+        return {
+          content: replies[req.taskType] ?? '{}',
+          model: 'mock',
+          provider: 'mock',
+          tokenUsage: { input: 1, output: 1, total: 2 },
+          latencyMs: 1,
+          ...(withRunId ? { aiRunId: `run-${req.taskType}` } : {}),
+        };
+      }),
+    } as unknown as LLMGateway;
+    return { gateway, requests };
+  }
+
+  async function draftDeps(gateway: LLMGateway) {
+    const { NoopBrandVoiceLoader } = await import('../../../src/reputation/brand-voice');
+    const { InMemoryServiceCreditRepository } = await import('../../../src/reputation/service-credit');
+    // A confident match, so the private follow-up is drafted too.
+    return {
+      llmGateway: gateway,
+      customerLoader: {
+        findRecentCustomersWithName: async () => [
+          { id: CUSTOMER, firstName: 'Maria', lastName: 'Alvarez', lastVisitAt: new Date('2026-10-20T12:00:00Z') },
+        ],
+      },
+      brandVoiceLoader: new NoopBrandVoiceLoader(),
+      serviceCreditRepo: new InMemoryServiceCreditRepository(),
+    };
+  }
+
+  async function respondToReview(gateway: LLMGateway, context: Partial<TaskContext>): Promise<Proposal> {
+    const { RespondToReviewTaskHandler } = await import('../../../src/ai/tasks/review-response-task');
+    const { InMemoryProposalRepository } = await import('../../../src/proposals/proposal');
+    const { InMemoryReviewRepository } = await import('../../../src/reputation/review');
+    const reviewRepo = new InMemoryReviewRepository();
+    await reviewRepo.upsert({
+      id: 'review-obs2',
+      tenantId: TENANT,
+      externalReviewId: 'accounts/A/locations/L/reviews/R1',
+      locationId: 'accounts/A/locations/L',
+      reviewerDisplayName: 'Maria Alvarez',
+      reviewerProfileUrl: null,
+      rating: 2,
+      commentText: REVIEW_COMMENT,
+      createTime: new Date(NOW.getTime() - 24 * 60 * 60 * 1000),
+      updateTime: null,
+      firstFetchedAt: NOW,
+      lastFetchedAt: NOW,
+    });
+    const handler = new RespondToReviewTaskHandler(
+      new InMemoryProposalRepository(),
+      reviewRepo,
+      await draftDeps(gateway),
+      () => NOW,
+    );
+    const { proposal } = await handler.handle({
+      tenantId: TENANT,
+      userId: 'user-obs2',
+      message: 'Respond to that 2-star review',
+      existingEntities: { reviewReference: 'that 2-star review' },
+      intent: 'respond_to_review',
+      ...context,
+    });
+    return proposal;
+  }
+
+  const TASK_TYPES = ['review_classify', 'review_public_response', 'review_private_followup'];
+
+  it('the spoken/chat on-ramp keys every run to the conversation and links the public-reply run', async () => {
+    const { gateway, requests } = reviewGateway();
+    const proposal = await respondToReview(gateway, { conversationId: 'conv-obs2' });
+
+    expect(proposal.proposalType).toBe('review_response_proposal');
+    expect(requests.map((r) => r.taskType)).toEqual(TASK_TYPES);
+    for (const req of requests) {
+      expect(req.metadata?.correlationId, `${req.taskType} correlationId`).toBe('conv-obs2');
+      expect(req.metadata?.sessionId, `${req.taskType} sessionId`).toBe('conv-obs2');
+    }
+    expect(proposal.aiRunId).toBe('run-review_public_response');
+  });
+
+  it('on a live call (no conversation) every run is keyed to the voice session, like the classifier', async () => {
+    const { gateway, requests } = reviewGateway();
+    const proposal = await respondToReview(gateway, { voiceSessionId: 'voice-sess-obs2' });
+
+    expect(requests.length).toBe(3);
+    for (const req of requests) {
+      expect(req.metadata?.correlationId, `${req.taskType} correlationId`).toBe('voice-sess-obs2');
+      expect(req.metadata?.sessionId, `${req.taskType} sessionId`).toBe('voice-sess-obs2');
+    }
+    expect(proposal.aiRunId).toBe('run-review_public_response');
+  });
+
+  it('with no conversation, call or recording the runs are keyed to the review, never a random id', async () => {
+    const { gateway, requests } = reviewGateway();
+    await respondToReview(gateway, {});
+    for (const req of requests) {
+      expect(req.metadata?.correlationId, `${req.taskType} correlationId`).toBe('review-obs2');
+    }
+  });
+
+  it('the spoken/chat on-ramp: no persisted run → no aiRunId (the FK needs a real row)', async () => {
+    const { gateway } = reviewGateway(false);
+    const proposal = await respondToReview(gateway, { conversationId: 'conv-obs2' });
+    expect(proposal.proposalType).toBe('review_response_proposal');
+    expect(proposal.aiRunId).toBeUndefined();
+  });
+
+  async function pollOneReview(gateway: LLMGateway): Promise<Proposal[]> {
+    const { runGoogleReviewsSweep } = await import('../../../src/workers/google-reviews');
+    const { InMemoryReviewRepository } = await import('../../../src/reputation/review');
+    const { InMemoryReviewPollStateRepository } = await import('../../../src/reputation/poll-state');
+    const { InMemoryProposalRepository } = await import('../../../src/proposals/proposal');
+    const { createLogger } = await import('../../../src/logging/logger');
+    const proposalRepo = new InMemoryProposalRepository();
+    const result = await runGoogleReviewsSweep({
+      reviewRepo: new InMemoryReviewRepository(),
+      pollStateRepo: new InMemoryReviewPollStateRepository(() => NOW),
+      credentialResolver: {
+        async getCredential(tenantId: string) {
+          return {
+            tenant_id: tenantId,
+            provider: 'google_business',
+            credentials: { accessToken: 'at', providerData: { accountId: 'A', locationId: 'L' } },
+            credential_version: 1,
+          };
+        },
+        async close() {},
+      },
+      listTenantIds: async () => [TENANT],
+      logger: createLogger({ service: 'test', environment: 'test', level: 'error' }),
+      now: () => NOW,
+      fetchFn: async () =>
+        new Response(
+          JSON.stringify({
+            reviews: [
+              {
+                name: 'accounts/A/locations/L/reviews/R1',
+                reviewer: { displayName: 'Maria Alvarez' },
+                starRating: 'TWO',
+                comment: REVIEW_COMMENT,
+                createTime: '2026-10-31T10:00:00Z',
+                updateTime: '2026-10-31T10:00:00Z',
+              },
+            ],
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+      proposalEmission: { proposalRepo, buildProposalDeps: await draftDeps(gateway) },
+    });
+    expect(result.proposalsEmitted).toBe(1);
+    return proposalRepo.findByTenant(TENANT);
+  }
+
+  it('the polling worker keys every run to the review and links the public-reply run', async () => {
+    const { gateway, requests } = reviewGateway();
+    const [proposal] = await pollOneReview(gateway);
+
+    expect(proposal.proposalType).toBe('review_response_proposal');
+    expect(proposal.targetEntityId).toBeDefined();
+    expect(requests.map((r) => r.taskType)).toEqual(TASK_TYPES);
+    for (const req of requests) {
+      // The review row's id: the proposal's targetEntityId and payload.reviewId.
+      expect(req.metadata?.correlationId, `${req.taskType} correlationId`).toBe(proposal.targetEntityId);
+      expect((proposal.payload as { reviewId?: string }).reviewId).toBe(proposal.targetEntityId);
+    }
+    expect(proposal.aiRunId).toBe('run-review_public_response');
+  });
+
+  it('the polling worker: no persisted run → no aiRunId', async () => {
+    const { gateway } = reviewGateway(false);
+    const [proposal] = await pollOneReview(gateway);
+    expect(proposal.aiRunId).toBeUndefined();
+  });
+});

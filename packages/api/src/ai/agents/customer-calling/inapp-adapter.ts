@@ -21,7 +21,6 @@ import type { LLMGateway } from '../../gateway/gateway';
 import type { TtsProvider } from '../../tts/tts-provider';
 import type { ProposalRepository } from '../../../proposals/proposal';
 import { createProposal as buildProposal, missingFieldsFor } from '../../../proposals/proposal';
-import type { ProposalType } from '../../../proposals/proposal';
 import type { ProposalSurface } from '../../../proposals/surface';
 import {
   askForExecutabilityGaps,
@@ -2698,6 +2697,8 @@ export class InAppVoiceAdapter {
           ...(typeof payload.conversationId === 'string'
             ? { conversationId: payload.conversationId }
             : {}),
+          // OBS-2 — the draft's runs are keyed to this call, like its classifier's.
+          voiceSessionId: session.id,
           existingEntities: entities,
           userId: this.proposalActorId(session),
           intent: 'respond_to_review',
