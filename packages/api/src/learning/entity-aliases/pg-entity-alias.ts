@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import type { Pool, PoolClient } from 'pg';
-import { createAuditEvent, type AuditEvent } from '../../audit/audit';
+import { createAuditEvent } from '../../audit/audit';
+import { insertAuditEventOnClient } from '../../audit/pg-audit';
 import { PgBaseRepository } from '../../db/pg-base';
 import { adoptEntityAliasPayloadSchema } from '../../proposals/contracts/adopt-entity-alias';
 import { ConflictError, ValidationError } from '../../shared/errors';
@@ -86,27 +87,6 @@ function parsePayload(payload: unknown) {
     });
   }
   return parsed.data;
-}
-
-async function insertAudit(client: PoolClient, event: AuditEvent): Promise<void> {
-  await client.query(
-    `INSERT INTO audit_events
-       (id, tenant_id, actor_id, actor_role, event_type, entity_type,
-        entity_id, correlation_id, metadata, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)`,
-    [
-      event.id,
-      event.tenantId,
-      event.actorId,
-      event.actorRole,
-      event.eventType,
-      event.entityType,
-      event.entityId,
-      event.correlationId ?? null,
-      JSON.stringify(event.metadata ?? {}),
-      event.createdAt,
-    ],
-  );
 }
 
 async function assertTenantActor(
@@ -281,7 +261,7 @@ export class PgEntityAliasRepository
         return mapRow(raced);
       }
 
-      await insertAudit(
+      await insertAuditEventOnClient(
         client,
         createAuditEvent({
           tenantId: input.tenantId,
@@ -330,7 +310,7 @@ export class PgEntityAliasRepository
       }
 
       const deactivated = mapRow(result.rows[0]);
-      await insertAudit(
+      await insertAuditEventOnClient(
         client,
         createAuditEvent({
           tenantId: input.tenantId,

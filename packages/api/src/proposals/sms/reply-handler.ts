@@ -56,7 +56,7 @@ import {
 } from '../actions';
 import { confidenceMetaBlocksAutoApprove } from '../auto-approve';
 import { voidsCustomerAcceptance } from '../acceptance-void';
-import { chainRefFieldsTouchedByDelta } from '../edit-interpreter';
+import { chainRefFieldsTouchedByDelta, type ProposalEditInterpreter } from '../edit-interpreter';
 import type { SettingsRepository } from '../../settings/settings';
 import type { AppointmentRepository } from '../../appointments/appointment';
 import type { UserRepository } from '../../users/user';
@@ -68,9 +68,7 @@ import { resolveApproverRole } from '../approver-identity';
 import { STOP_KEYWORDS, START_KEYWORDS } from '../../compliance/stop-reply';
 import {
   type ProposalSmsEventRepository,
-  type ProposalSmsEvent,
   createProposalSmsEvent,
-  parseDigestApproveAllIds,
 } from './sms-event';
 import { renderReapprovalSms } from './render';
 
@@ -110,12 +108,10 @@ export interface ProposalSmsReplyDeps {
    * `editProposal` (which Zod-validates the result — a bad delta can
    * never corrupt a proposal). Absent or returning null: the change is
    * recorded as an `edit_request` event + audit and the owner is told,
-   * truthfully, to finish it in the review queue.
+   * truthfully, to finish it in the review queue. OBS-2 — an applied edit
+   * links the run that interpreted it (proposals.ai_run_id).
    */
-  interpretEdit?: (args: {
-    proposal: Proposal;
-    instruction: string;
-  }) => Promise<Record<string, unknown> | null>;
+  interpretEdit?: ProposalEditInterpreter;
   now?: () => Date;
 }
 
@@ -528,14 +524,6 @@ function approvalConfirmation(
   );
 }
 
-
-/** seq-aware recency: createdAt first, the monotonic seq breaks ms ties. */
-function isNewerThan(a: ProposalSmsEvent, b: ProposalSmsEvent): boolean {
-  const byTime = a.createdAt.getTime() - b.createdAt.getTime();
-  if (byTime !== 0) return byTime > 0;
-  return (a.seq ?? 0) > (b.seq ?? 0);
-}
-
 /**
  * Post-mutation audit + confirmation SMS. Best-effort by design: the
  * state change is already committed, so a provider hiccup here must not
@@ -826,8 +814,9 @@ async function applyEditInstruction(
 
   if (deps.interpretEdit) {
     try {
-      const edits = await deps.interpretEdit({ proposal, instruction });
-      if (edits && Object.keys(edits).length > 0) {
+      const edit = await deps.interpretEdit({ proposal, instruction });
+      if (edit && Object.keys(edit.delta).length > 0) {
+        const edits = edit.delta;
         // Track E — chain-ref guard: a chained dependent's payload can hold
         // unresolved `$ref:chain[N].…` tokens (filled from the parent's
         // resultEntityId at execution time). A delta that touches one of
@@ -859,6 +848,11 @@ async function applyEditInstruction(
           approver.role,
           edits,
           deps.auditRepo,
+          undefined,
+          undefined,
+          undefined,
+          // OBS-2 — the payload is now the edit run's output: link that run.
+          { aiRunId: edit.aiRunId },
         );
         // Shared with the voice-edit re-render (proposal-approval-task):
         // echoes the owner's instruction so the change is explicit and the

@@ -509,7 +509,7 @@ describe('edit session flow', () => {
 
   it('applies an interpreted delta and re-renders for re-approval', async () => {
     const h = makeHarness({
-      interpretEdit: async () => ({ customerName: 'Mr Chen' }),
+      interpretEdit: async () => ({ delta: { customerName: 'Mr Chen' } }),
     });
     const proposal = await seedPendingProposal(h);
     await handleProposalSmsReply(ctx('EDIT'), h.deps);
@@ -638,7 +638,7 @@ describe('edit session flow', () => {
   });
 
   it('a failed re-approval send keeps approval blocked (edit applied, never delivered)', async () => {
-    const h = makeHarness({ interpretEdit: async () => ({ customerName: 'Mr Chen' }) });
+    const h = makeHarness({ interpretEdit: async () => ({ delta: { customerName: 'Mr Chen' } }) });
     const proposal = await seedPendingProposal(h);
     await handleProposalSmsReply(ctx('EDIT'), h.deps);
     // The re-approval send (and only it) fails — e.g. Twilio outage.
@@ -664,7 +664,7 @@ describe('edit session flow', () => {
   });
 
   it('a successful SMS edit re-render unblocks approval', async () => {
-    const h = makeHarness({ interpretEdit: async () => ({ customerName: 'Mr Chen' }) });
+    const h = makeHarness({ interpretEdit: async () => ({ delta: { customerName: 'Mr Chen' } }) });
     await seedPendingProposal(h);
     await handleProposalSmsReply(ctx('EDIT'), h.deps);
     await handleProposalSmsFallback(ctx('change to Mr Chen'), h.deps);
@@ -677,7 +677,7 @@ describe('edit session flow', () => {
   it('unblocks even when the clock ticks between edit_request and reapproval', async () => {
     // Production clocks advance between the two rows; a stale reapproval
     // timestamp would leave hasUnappliedEditRequest() true forever.
-    const h = makeHarness({ interpretEdit: async () => ({ customerName: 'Mr Chen' }) });
+    const h = makeHarness({ interpretEdit: async () => ({ delta: { customerName: 'Mr Chen' } }) });
     let tick = new Date('2026-06-11T15:00:00Z').getTime();
     h.deps.now = () => new Date((tick += 1)); // every clock read is 1ms later
     await seedPendingProposal(h);
@@ -690,7 +690,7 @@ describe('edit session flow', () => {
   });
 
   it('the session window is fixed — a message after expiry is not an edit', async () => {
-    const h = makeHarness({ interpretEdit: async () => ({ customerName: 'X' }) });
+    const h = makeHarness({ interpretEdit: async () => ({ delta: { customerName: 'X' } }) });
     const proposal = await seedPendingProposal(h);
     const opened = new Date('2026-06-11T15:00:00Z');
     h.deps.now = () => opened;
@@ -714,7 +714,7 @@ describe('edit session flow', () => {
     const h = makeHarness({
       interpretEdit: async ({ instruction }) => {
         expect(instruction).toBe('change it to Mr Chen');
-        return { customerName: 'Mr Chen' };
+        return { delta: { customerName: 'Mr Chen' } };
       },
     });
     const proposal = await seedPendingProposal(h);
@@ -731,7 +731,7 @@ describe('edit session flow', () => {
 
   it('applies an inline "EDIT <instruction>" without a round trip', async () => {
     const h = makeHarness({
-      interpretEdit: async () => ({ customerName: 'Mr Chen' }),
+      interpretEdit: async () => ({ delta: { customerName: 'Mr Chen' } }),
     });
     const proposal = await seedPendingProposal(h);
 
@@ -758,7 +758,7 @@ describe('edit session flow', () => {
         // backup approves as that role.
         findById: async () => ({ id: 'u-backup', tenantId: TENANT, role: 'dispatcher', mobileNumber: BACKUP_PHONE }),
       } as unknown as UserRepository,
-      interpretEdit: async () => ({ customerName: 'X' }),
+      interpretEdit: async () => ({ delta: { customerName: 'X' } }),
     });
     const proposal = await seedPendingProposal(h);
     await handleProposalSmsReply(ctx('EDIT'), h.deps); // owner opens a session
@@ -790,7 +790,7 @@ describe('edit session flow', () => {
     const h = makeHarness({
       interpretEdit: async ({ instruction }) => {
         expect(instruction).toBe('START at 9 tomorrow');
-        return { customerName: 'Mr Chen' };
+        return { delta: { customerName: 'Mr Chen' } };
       },
     });
     const proposal = await seedPendingProposal(h);
@@ -805,7 +805,7 @@ describe('edit session flow', () => {
   });
 
   it('a newer proposal SMS supersedes an open edit session — Y approves the new proposal', async () => {
-    const h = makeHarness({ interpretEdit: async () => ({ message: 'X' }) });
+    const h = makeHarness({ interpretEdit: async () => ({ delta: { message: 'X' } }) });
     const older = await seedPendingProposal(h, TENANT, {}, new Date('2026-06-11T15:00:00Z'));
     h.deps.now = () => new Date('2026-06-11T15:01:00Z');
     await handleProposalSmsReply(ctx('EDIT'), h.deps); // session opens for `older`
@@ -831,7 +831,7 @@ describe('edit session flow', () => {
   });
 
   it('free text after a superseding render becomes clarification, not an edit', async () => {
-    const h = makeHarness({ interpretEdit: async () => ({ message: 'X' }) });
+    const h = makeHarness({ interpretEdit: async () => ({ delta: { message: 'X' } }) });
     await seedPendingProposal(h, TENANT, {}, new Date('2026-06-11T15:00:00Z'));
     h.deps.now = () => new Date('2026-06-11T15:01:00Z');
     await handleProposalSmsReply(ctx('EDIT'), h.deps);
@@ -896,7 +896,7 @@ describe('R2-2 — a text edit recorded as a note keeps what landed while it ran
   });
 
   it("a pick that lands between the edit's read and its write refuses the edit; the note is added and the pick kept", async () => {
-    const h = makeHarness({ interpretEdit: async () => ({ customerName: 'Mr Chen' }) });
+    const h = makeHarness({ interpretEdit: async () => ({ delta: { customerName: 'Mr Chen' } }) });
     const proposal = await seedPendingProposal(h, TENANT, { sourceContext: PICKER });
     const realUpdateIfUnchanged = h.proposalRepo.updateIfUnchanged.bind(h.proposalRepo);
     vi.spyOn(h.proposalRepo, 'updateIfUnchanged').mockImplementationOnce(async (...args) => {
@@ -938,7 +938,7 @@ describe('clarification flow (fallback)', () => {
   });
 
   it('a failed edit-prompt send opens no session and leaves approval unblocked', async () => {
-    const h = makeHarness({ interpretEdit: async () => ({ customerName: 'X' }) });
+    const h = makeHarness({ interpretEdit: async () => ({ delta: { customerName: 'X' } }) });
     const proposal = await seedPendingProposal(h);
     h.deps.sendSms = async () => {
       throw new Error('twilio down');
@@ -1121,7 +1121,7 @@ describe('RV-074 — review_required_rendered (low-confidence) anchoring', () =>
   });
 
   it('a review_required render supersedes an open edit session — Y targets the LOW proposal (and is blocked)', async () => {
-    const h = makeHarness({ interpretEdit: async () => ({ message: 'X' }) });
+    const h = makeHarness({ interpretEdit: async () => ({ delta: { message: 'X' } }) });
     const older = await seedPendingProposal(h, TENANT, {}, new Date('2026-06-11T15:00:00Z'));
     h.deps.now = () => new Date('2026-06-11T15:01:00Z');
     await handleProposalSmsReply(ctx('EDIT'), h.deps); // session opens for `older`
@@ -1150,7 +1150,7 @@ describe('RV-074 — review_required_rendered (low-confidence) anchoring', () =>
   });
 
   it('N after a superseding review_required render rejects the LOW proposal', async () => {
-    const h = makeHarness({ interpretEdit: async () => ({ message: 'X' }) });
+    const h = makeHarness({ interpretEdit: async () => ({ delta: { message: 'X' } }) });
     const older = await seedPendingProposal(h, TENANT, {}, new Date('2026-06-11T15:00:00Z'));
     h.deps.now = () => new Date('2026-06-11T15:01:00Z');
     await handleProposalSmsReply(ctx('EDIT'), h.deps);
@@ -1248,7 +1248,7 @@ describe('Track E — SMS Y blocked for non-capture action classes', () => {
 describe('Track E — SMS edit refused when the delta touches an unresolved chain ref', () => {
   it('refuses with "waiting on an earlier step — approval by text is paused until then" copy, audits, and leaves the token in place', async () => {
     const h = makeHarness({
-      interpretEdit: async () => ({ invoiceId: 'INV-1024' }),
+      interpretEdit: async () => ({ delta: { invoiceId: 'INV-1024' } }),
     });
     const proposal = await seedPendingProposal(h, TENANT, {
       proposalType: 'issue_invoice',
@@ -1285,7 +1285,7 @@ describe('Track E — SMS edit refused when the delta touches an unresolved chai
 
   it('a delta NOT touching the token field still applies normally (plain-string contract)', async () => {
     const h = makeHarness({
-      interpretEdit: async () => ({ paymentTermDays: 30 }),
+      interpretEdit: async () => ({ delta: { paymentTermDays: 30 } }),
     });
     const proposal = await seedPendingProposal(h, TENANT, {
       proposalType: 'issue_invoice',
@@ -1308,7 +1308,7 @@ describe('Track E — SMS edit refused when the delta touches an unresolved chai
     // behavior the chain-ref guard does NOT change).
     const h = makeHarness({
       interpretEdit: async () => ({
-        lineItems: [{ description: 'Service', quantity: 1, unitPrice: 20000 }],
+        delta: { lineItems: [{ description: 'Service', quantity: 1, unitPrice: 20000 }] },
       }),
     });
     const proposal = await seedPendingProposal(h, TENANT, {

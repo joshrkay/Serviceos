@@ -757,6 +757,8 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     let webhookEvent: { id: string } | undefined;
 
     try {
+      // The receipt keeps the user id only (staff PII — U7-05+); the
+      // handlers below read names and emails from this request.
       const result = await handleWebhookEvent(
         'clerk',
         eventType,
@@ -1389,6 +1391,9 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     // above), which the id-keyed updateStatus silently no-op'd, so rows
     // stayed at status='received' and our new status-aware dedup re-ran
     // the handler on retries.
+    // The receipt keeps the per-event-type allowlist of event.data (ids,
+    // amounts, statuses, our metadata ids — U7-05+); the handlers below read
+    // the full event from this request.
     const { event: webhookEvent, duplicate } = await handleWebhookEvent(
       'stripe',
       event.type,
@@ -3287,6 +3292,8 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     const eventId = (req.body?.MessageSid as string | undefined) ?? (req.body?.CallSid as string | undefined);
     if (!eventId) return res.status(400).json({ error: 'Missing MessageSid/CallSid' });
     if (deps.webhookEventRepo) {
+      // The repository stores the SIDs and statuses only (U7-05+): From, To,
+      // Body and MediaUrlN are read from this request below, never stored.
       const rec = await deps.webhookEventRepo.recordReceipt('twilio', eventId, kind, req.body ?? {});
       // Short-circuit ONLY on a fully-processed duplicate. A row that exists
       // but was never marked processed means an earlier delivery died between
@@ -3480,7 +3487,10 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
     const first = (Array.isArray(body) ? body[0] : body) as Record<string, unknown> | undefined;
     const eventId = (first?.sg_event_id as string | undefined) ?? (first?.sg_message_id as string | undefined);
     if (deps.webhookEventRepo && eventId) {
-      const rec = await deps.webhookEventRepo.recordReceipt('sendgrid', eventId, 'event', { events: req.body });
+      // The parsed batch, not the raw-mounted Buffer (which serialized as a
+      // byte array). The repository keeps each event's sg ids, type and
+      // timestamp only (U7-05+): no recipient email or bounce text.
+      const rec = await deps.webhookEventRepo.recordReceipt('sendgrid', eventId, 'event', { events: body });
       if (!rec.inserted) return res.status(200).json({ received: true, duplicate: true });
       await deps.webhookEventRepo.markProcessed('sendgrid', eventId);
     }

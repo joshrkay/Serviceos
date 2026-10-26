@@ -1608,6 +1608,8 @@ export function createVoiceTurnProcessor(
           callerResponse: speechResult,
           tenantId,
           gateway: deps.gateway,
+          sessionId: session.id,
+          ...(session.callSid ? { callSid: session.callSid } : {}),
         });
       } catch (err) {
         logger.error('speechTurn: confirmIntent failed', {
@@ -2509,6 +2511,8 @@ export function createVoiceTurnProcessor(
           ...(typeof fx.payload.conversationId === 'string'
             ? { conversationId: fx.payload.conversationId }
             : {}),
+          // OBS-2 — the draft's runs are keyed to this call, like its classifier's.
+          voiceSessionId: session.id,
           existingEntities: entities,
           userId:
             typeof fx.payload.customerId === 'string'
@@ -4476,6 +4480,8 @@ export function createVoiceTurnProcessor(
         callerResponse: speechResult,
         tenantId,
         gateway: deps.gateway,
+        sessionId: session.id,
+        ...(session.callSid ? { callSid: session.callSid } : {}),
       });
       const capExceeded = recordCost(session, confirmation.tokenUsage);
       if (capExceeded) {
@@ -4795,6 +4801,8 @@ export function createVoiceTurnProcessor(
         callerResponse: speechResult,
         tenantId,
         gateway: deps.gateway,
+        sessionId: session.id,
+        ...(session.callSid ? { callSid: session.callSid } : {}),
       });
       // #1204 — record only. This turn never ends the call (the consent
       // answer is still recorded or declined), so it must not take the

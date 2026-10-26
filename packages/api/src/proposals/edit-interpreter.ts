@@ -20,12 +20,25 @@
  * layer; a delta that violates the contract is rejected at step 3. Any
  * failure (provider, JSON, empty delta) returns null — the caller records
  * the request and tells the owner to finish in the review queue.
+ *
+ * OBS-2 — the interpreted edit carries the id of the run that produced it.
+ * Once the delta is applied the payload is that run's output over the row it
+ * read (its input snapshot holds that payload and the instruction), so both
+ * callers re-point proposals.ai_run_id to it through `editProposal`, as the
+ * chat correction does (routes/assistant.ts).
  */
 import type { LLMGateway } from '../ai/gateway/gateway';
 import type { Proposal } from './proposal';
 import { isChainRefToken } from './chain';
 
 export const PROPOSAL_SMS_EDIT_TASK_TYPE = 'proposal_sms_edit';
+
+/** An interpreted edit: the payload delta and the run that produced it. */
+export interface ProposalEdit {
+  delta: Record<string, unknown>;
+  /** The ai_runs row, when the gateway persisted one (the FK needs a real row). */
+  aiRunId?: string;
+}
 
 /**
  * The shared interpreter shape both channels depend on. Kept structural
@@ -34,12 +47,19 @@ export const PROPOSAL_SMS_EDIT_TASK_TYPE = 'proposal_sms_edit';
 export type ProposalEditInterpreter = (args: {
   proposal: Proposal;
   instruction: string;
-}) => Promise<Record<string, unknown> | null>;
+  /**
+   * OBS-2 — the edit run's correlation id: the call the edit was spoken on
+   * (the voice dialogue passes its session). Absent — a texted edit, which
+   * has no call or conversation — the proposal's own id, which also groups
+   * successive edits whose re-points would otherwise orphan the earlier runs.
+   */
+  correlationId?: string;
+}) => Promise<ProposalEdit | null>;
 
 export function createLlmEditInterpreter(
   gateway: Pick<LLMGateway, 'complete'>,
 ): ProposalEditInterpreter {
-  return async ({ proposal, instruction }) => {
+  return async ({ proposal, instruction, correlationId }) => {
     try {
       const response = await gateway.complete({
         taskType: PROPOSAL_SMS_EDIT_TASK_TYPE,
@@ -47,6 +67,7 @@ export function createLlmEditInterpreter(
         responseFormat: 'json',
         temperature: 0,
         maxTokens: 600,
+        metadata: { correlationId: correlationId || proposal.id },
         messages: [
           {
             role: 'system',
@@ -93,7 +114,8 @@ export function createLlmEditInterpreter(
           delta[key] = value;
         }
       }
-      return Object.keys(delta).length > 0 ? delta : null;
+      if (Object.keys(delta).length === 0) return null;
+      return { delta, ...(response.aiRunId ? { aiRunId: response.aiRunId } : {}) };
     } catch {
       return null;
     }

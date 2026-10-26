@@ -177,7 +177,7 @@ describe('R2-2 — an edit recorded as a note keeps a pick that landed while it 
         auditRepo,
         settingsRepo,
         smsEventRepo: new InMemoryProposalSmsEventRepository(),
-        editInterpreter: async () => ({ transcript: 'invoice Bob for the water heater and the filter' }),
+        editInterpreter: async () => ({ delta: { transcript: 'invoice Bob for the water heater and the filter' } }),
       },
       { tenantId: tenant.tenantId, sessionId: 'sess-r2-2', ownerSession: true, reference: 'it', instruction },
     );

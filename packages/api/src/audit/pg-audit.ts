@@ -1,4 +1,4 @@
-import { Pool } from 'pg';
+import { Pool, type PoolClient } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
 import {
   AuditEvent,
@@ -33,6 +33,40 @@ function mapRow(row: Record<string, unknown>): AuditEvent {
     metadata: row.metadata as Record<string, unknown> | undefined,
     createdAt: new Date(row.created_at as string),
   };
+}
+
+/**
+ * U7-04a — the on-client audit insert: writes `event` on a client the caller
+ * already holds, so the row commits or rolls back with the caller's own
+ * transaction (a transcript rewrite, a purge DELETE, the demo platform
+ * transaction, an alias change). `PgAuditRepository.create` checks out its
+ * own tenant-scoped client instead. These two are the only statements that
+ * write `audit_events`
+ * (test/invariants/audit-events-raw-insert.structural.test.ts).
+ *
+ * The caller's client carries the transaction's tenant context. The SQL and
+ * values are those of the raw inserts this replaced: an absent metadata is
+ * stored as `{}` and an absent correlation id as NULL.
+ */
+export async function insertAuditEventOnClient(client: PoolClient, event: AuditEvent): Promise<void> {
+  await client.query(
+    `INSERT INTO audit_events
+       (id, tenant_id, actor_id, actor_role, event_type, entity_type,
+        entity_id, correlation_id, metadata, created_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)`,
+    [
+      event.id,
+      event.tenantId,
+      event.actorId,
+      event.actorRole,
+      event.eventType,
+      event.entityType,
+      event.entityId,
+      event.correlationId ?? null,
+      JSON.stringify(event.metadata ?? {}),
+      event.createdAt,
+    ],
+  );
 }
 
 export class PgAuditRepository extends PgBaseRepository implements AuditRepository {

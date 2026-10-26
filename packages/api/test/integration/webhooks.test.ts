@@ -19,7 +19,7 @@ function makeEvent(over: Partial<WebhookEvent> = {}): WebhookEvent {
     source: 'stripe',
     eventType: 'checkout.session.completed',
     idempotencyKey: `evt_${randomUUID()}`,
-    payload: { hello: 'world' },
+    payload: { object: { id: 'cs_test_1', amount_total: 100, customer_email: 'jane@example.com' } },
     status: 'received',
     createdAt: new Date(),
     ...over,
@@ -44,7 +44,8 @@ describe('Postgres integration — webhooks', () => {
     await repo.create(event);
     const found = await repo.findByIdempotencyKey(event.source, event.idempotencyKey);
     expect(found?.id).toBe(event.id);
-    expect(found?.payload).toEqual({ hello: 'world' });
+    // U7-05+ — stored minimized: the allowlisted keys stay, the email does not.
+    expect(found?.payload).toEqual({ object: { id: 'cs_test_1', amount_total: 100 } });
     expect(found?.status).toBe('received');
   });
 

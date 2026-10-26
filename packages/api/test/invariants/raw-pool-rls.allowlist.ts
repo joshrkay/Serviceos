@@ -395,23 +395,27 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
   },
   {
     file: 'src/demo/reset.ts', fn: 'claimLease', access: 'checkout-callback', count: 1,
-    category: 'platform_constant_exception', tables: ['demo_tenant_leases', 'audit_events'], handsOffTo: ['writePlatformAudit'],
+    category: 'platform_constant_exception', tables: ['demo_tenant_leases', 'audit_events'],
+    handsOffTo: ['writePlatformAudit', 'writePlatformAudit > insertAuditEventOnClient'],
     dynamicSql: true,
     why: "The reset claim on inPlatformTransaction's client: the claimSql UPDATE of the RLS-exempt lease row (by server-held lease id) and writePlatformAudit's audit_events row pinned to DEMO_PLATFORM_TENANT_ID. The SQL is dynamic only in that claimSql(source) returns it: a fixed UPDATE demo_tenant_leases plus a source-chosen literal predicate (tables by review).",
   },
   {
     file: 'src/demo/reset.ts', fn: 'takeOverStaleReset', access: 'checkout-callback', count: 1,
-    category: 'platform_constant_exception', tables: ['demo_tenant_leases', 'audit_events'], handsOffTo: ['writePlatformAudit'],
+    category: 'platform_constant_exception', tables: ['demo_tenant_leases', 'audit_events'],
+    handsOffTo: ['writePlatformAudit', 'writePlatformAudit > insertAuditEventOnClient'],
     why: "The reaper's takeover on inPlatformTransaction's client: UPDATE of the RLS-exempt lease row by id and stale heartbeat, then a platform-constant audit_events row through writePlatformAudit.",
   },
   {
     file: 'src/demo/reset.ts', fn: 'release', access: 'checkout-callback', count: 1,
-    category: 'platform_constant_exception', tables: ['demo_tenant_leases', 'audit_events'], handsOffTo: ['writePlatformAudit'],
+    category: 'platform_constant_exception', tables: ['demo_tenant_leases', 'audit_events'],
+    handsOffTo: ['writePlatformAudit', 'writePlatformAudit > insertAuditEventOnClient'],
     why: "Releases the lease on inPlatformTransaction's client (UPDATE … WHERE id AND reset_token on the RLS-exempt lease table), then a platform-constant audit_events row. hooks.insideFence is the createDemoLeaseResetter test seam (its caller passes none).",
   },
   {
     file: 'src/demo/reset.ts', fn: 'returnClaim', access: 'checkout-callback', count: 1,
-    category: 'platform_constant_exception', tables: ['demo_tenant_leases', 'audit_events'], handsOffTo: ['writePlatformAudit'],
+    category: 'platform_constant_exception', tables: ['demo_tenant_leases', 'audit_events'],
+    handsOffTo: ['writePlatformAudit', 'writePlatformAudit > insertAuditEventOnClient'],
     why: "Returns a failed reset's claim on inPlatformTransaction's client: UPDATE of the RLS-exempt lease row by id and token, then a platform-constant audit_events row through writePlatformAudit.",
   },
   {
@@ -463,7 +467,10 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
   {
     file: 'src/demo/service.ts', fn: 'settle', access: 'checkout-callback', count: 1,
     category: 'platform_constant_exception', tables: ['demo_tenant_leases', 'demo_calls', 'demo_call_budget', 'audit_events'],
-    handsOffTo: ['releaseNoCall', 'releaseNoCall > releaseOn', 'releaseNoCall > writePlatformAudit', 'writePlatformAudit'],
+    handsOffTo: [
+      'releaseNoCall', 'releaseNoCall > releaseOn', 'releaseNoCall > writePlatformAudit', 'writePlatformAudit',
+      'writePlatformAudit > insertAuditEventOnClient',
+    ],
     why: "Settles a public demo call on inPlatformTransaction's client: lease/demo_calls/demo_call_budget updates by server-held ids (releaseNoCall's releaseOn returns the allowance) and writePlatformAudit rows pinned to DEMO_PLATFORM_TENANT_ID. The visitor never supplies a tenant id.",
   },
   {
@@ -905,19 +912,19 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     why: 'Status flip on the global webhook_events table, keyed by the verified (source, provider event id) used at receipt.',
   },
   {
-    file: 'src/webhooks/pg-webhook-event.ts', fn: 'PgWebhookEventRepository.markFailed', access: 'withClient', count: 1,
-    category: 'global_table', tables: ['webhook_events'],
-    why: 'Status flip to failed on the global webhook_events table. No production caller (tests only): a dead-code candidate.',
-  },
-  {
     file: 'src/webhooks/pg-webhook-event.ts', fn: 'PgWebhookEventRepository.findById', access: 'withClient', count: 1,
     category: 'global_table', tables: ['webhook_events'],
     why: 'Point read of a receipt by (source, key) on the global webhook_events table (the voicemail status route).',
   },
   {
-    file: 'src/webhooks/pg-webhook-event.ts', fn: 'PgWebhookEventRepository.findUnprocessed', access: 'withClient', count: 1,
+    file: 'src/webhooks/webhook-payload-backfill.ts', fn: 'PgWebhookPayloadBackfillStore.readPage', access: 'withClient', count: 1,
     category: 'global_table', tables: ['webhook_events'],
-    why: "Retry-worker scan of received rows across the global webhook_events table. No production caller (tests and the in-memory twin only); wiring it to a tenant surface would leak.",
+    why: 'U7-05+ operator backfill (scripts/backfill-webhook-events-minimize.ts): keyset page of the global webhook_events table by id, with md5(payload) for the rewrite guard. No tenant_id, no RLS.',
+  },
+  {
+    file: 'src/webhooks/webhook-payload-backfill.ts', fn: 'PgWebhookPayloadBackfillStore.rewrite', access: 'withClient', count: 1,
+    category: 'global_table', tables: ['webhook_events'],
+    why: "U7-05+ operator backfill: one UPDATE per page setting only payload to the source's allowlist, by id and only where md5(payload) still matches the read. Global table, no RLS.",
   },
   {
     file: 'src/webhooks/pg-webhook.ts', fn: 'PgWebhookRepository.findByIdempotencyKey', access: 'withClient', count: 1,

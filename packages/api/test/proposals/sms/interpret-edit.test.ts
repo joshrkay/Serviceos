@@ -35,7 +35,7 @@ describe('createLlmEditInterpreter', () => {
     const interpret = createLlmEditInterpreter(gatewayReturning('{"totalCents": 20000}'));
     await expect(
       interpret({ proposal: proposal(), instruction: 'make it $200' }),
-    ).resolves.toEqual({ totalCents: 20000 });
+    ).resolves.toEqual({ delta: { totalCents: 20000 } });
   });
 
   it('drops keys the payload does not already have', async () => {
@@ -44,7 +44,7 @@ describe('createLlmEditInterpreter', () => {
     );
     await expect(
       interpret({ proposal: proposal(), instruction: 'make it $200 with a discount' }),
-    ).resolves.toEqual({ totalCents: 20000 });
+    ).resolves.toEqual({ delta: { totalCents: 20000 } });
   });
 
   it.each([
@@ -68,7 +68,7 @@ describe('createLlmEditInterpreter', () => {
     );
     await expect(
       interpret({ proposal: proposal(), instruction: 'make it $200' }),
-    ).resolves.toEqual({ totalCents: 20000 });
+    ).resolves.toEqual({ delta: { totalCents: 20000 } });
   });
 
   it('strips any _-prefixed key from the delta', async () => {
@@ -77,7 +77,7 @@ describe('createLlmEditInterpreter', () => {
     );
     await expect(
       interpret({ proposal: proposal(), instruction: 'make it $200' }),
-    ).resolves.toEqual({ totalCents: 20000 });
+    ).resolves.toEqual({ delta: { totalCents: 20000 } });
   });
 
   it('returns null when the only delta key is _-prefixed', async () => {
