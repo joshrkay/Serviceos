@@ -10,6 +10,7 @@
  */
 import type { PoolClient } from 'pg';
 import { createAuditEvent } from '../audit/audit';
+import { insertAuditEventOnClient } from '../audit/pg-audit';
 import { DEMO_PLATFORM_TENANT_ID } from './platform-tenant';
 
 /** The actor on every platform-level demo audit row. */
@@ -30,24 +31,7 @@ export async function writePlatformAudit(client: PoolClient, input: PlatformAudi
     actorRole: 'system',
     ...input,
   });
-  await client.query(
-    `INSERT INTO audit_events
-       (id, tenant_id, actor_id, actor_role, event_type, entity_type,
-        entity_id, correlation_id, metadata, created_at)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)`,
-    [
-      event.id,
-      event.tenantId,
-      event.actorId,
-      event.actorRole,
-      event.eventType,
-      event.entityType,
-      event.entityId,
-      event.correlationId ?? null,
-      JSON.stringify(event.metadata ?? {}),
-      event.createdAt,
-    ],
-  );
+  await insertAuditEventOnClient(client, event);
 }
 
 /**

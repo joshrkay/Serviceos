@@ -1,6 +1,7 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
 import { createAuditEvent } from '../audit/audit';
+import { insertAuditEventOnClient } from '../audit/pg-audit';
 import { CARD_NUMBER_PLACEHOLDER } from '../ai/privacy/pan-redact';
 import {
   CARD_NUMBER_SPLIT_REDACTED_EVENT,
@@ -322,24 +323,7 @@ export class PgCallTranscriptTurnRepository
         entityId: sessionId,
         metadata: { callSid, turnIndexes: rewritten, rows: rewritten.length },
       });
-      await client.query(
-        `INSERT INTO audit_events
-           (id, tenant_id, actor_id, actor_role, event_type, entity_type,
-            entity_id, correlation_id, metadata, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)`,
-        [
-          event.id,
-          event.tenantId,
-          event.actorId,
-          event.actorRole,
-          event.eventType,
-          event.entityType,
-          event.entityId,
-          event.correlationId ?? null,
-          JSON.stringify(event.metadata ?? {}),
-          event.createdAt,
-        ],
-      );
+      await insertAuditEventOnClient(client, event);
       return rewritten.length;
     });
   }

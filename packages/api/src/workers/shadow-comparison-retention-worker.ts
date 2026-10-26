@@ -81,6 +81,7 @@
 import type { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
 import { createAuditEvent, type AuditEvent } from '../audit/audit';
+import { insertAuditEventOnClient } from '../audit/pg-audit';
 import type { Logger } from '../logging/logger';
 import { PLACEHOLDER_TENANT_ID } from '../ai/evaluation/pg-shadow-comparison';
 import { shadowComparisonsPurgedTotal } from '../monitoring/metrics';
@@ -216,25 +217,7 @@ export class PgShadowComparisonRetentionRepository
       // the batch commits unaudited instead of failing on the FK every sweep.
       const tenant = await client.query('SELECT 1 FROM tenants WHERE id = $1', [tenantId]);
       if (tenant.rowCount === 0) return { rows: purged, audited: false };
-      const event = audit(purged);
-      await client.query(
-        `INSERT INTO audit_events
-           (id, tenant_id, actor_id, actor_role, event_type, entity_type,
-            entity_id, correlation_id, metadata, created_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10)`,
-        [
-          event.id,
-          event.tenantId,
-          event.actorId,
-          event.actorRole,
-          event.eventType,
-          event.entityType,
-          event.entityId,
-          event.correlationId ?? null,
-          JSON.stringify(event.metadata ?? {}),
-          event.createdAt,
-        ],
-      );
+      await insertAuditEventOnClient(client, audit(purged));
       return { rows: purged, audited: true };
     });
   }
