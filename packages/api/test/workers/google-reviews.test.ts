@@ -600,7 +600,7 @@ function makeEmissionDeps(): {
       serviceCreditRepo: new StubServiceCreditRepo(),
       // Inject a deterministic public-response composer so the test
       // doesn't depend on prompt drift in the production composer.
-      draftPublic: async () => 'Thanks for the review!',
+      draftPublic: async () => ({ text: 'Thanks for the review!' }),
     },
   };
 }
@@ -678,7 +678,7 @@ describe('P7-026 runGoogleReviewsSweep — ingestion → proposal bridge', () =>
     emission.buildProposalDeps.draftPublic = async () => {
       calls++;
       if (calls === 1) throw new Error('LLM down');
-      return 'Thanks!';
+      return { text: 'Thanks!' };
     };
 
     const fetchFn = async (): Promise<Response> =>

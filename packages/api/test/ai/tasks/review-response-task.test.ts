@@ -66,7 +66,7 @@ function draftDeps(overrides: Partial<BuildReviewResponseProposalDeps> = {}): Bu
     serviceCreditRepo: { sumIssuedInLast12Months: vi.fn(async () => 0) } as never,
     classifier: async () => ({ classification: 'vague_complaint', confidence: 1, source: 'regex' }) as never,
     matcher: async () => null,
-    draftPublic: vi.fn(async () => 'We are sorry — please reach out so we can make it right.'),
+    draftPublic: vi.fn(async () => ({ text: 'We are sorry — please reach out so we can make it right.' })),
     ...overrides,
   };
 }

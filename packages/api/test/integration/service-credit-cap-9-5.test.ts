@@ -184,7 +184,7 @@ describe(provesExecution('review_response_proposal') + 'Postgres integration —
       lastVisitAt: new Date(Date.now() - 5 * DAY_MS),
       matchScore: 0.99,
     };
-    return buildReviewResponseProposal(await seedReview(seeded), {
+    const { payload } = await buildReviewResponseProposal(await seedReview(seeded), {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       llmGateway: {} as unknown as LLMGateway,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -197,9 +197,10 @@ describe(provesExecution('review_response_proposal') + 'Postgres integration —
         source: 'llm' as const,
       }),
       matcher: async () => matched,
-      draftPublic: async () => 'We are sorry we missed your window.',
+      draftPublic: async () => ({ text: 'We are sorry we missed your window.' }),
       draftPrivate: async () => 'Please let us make this right.',
     });
+    return payload;
   }
 
   /**

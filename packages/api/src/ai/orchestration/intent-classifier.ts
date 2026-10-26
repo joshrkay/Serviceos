@@ -1218,6 +1218,13 @@ export interface ClassifyContext {
   sessionId?: string;
   callSid?: string;
   /**
+   * OBS-2 — the run's `ai_runs.correlation_id`, when it is not the session:
+   * the memo router passes the recording id for a memo with no conversation
+   * (its drafting run's key). Absent → the session, else the call sid; see
+   * `classifierRunMetadata`. Metadata only, like the two above.
+   */
+  correlationId?: string;
+  /**
    * #894 (review) — the transcript is caller-authored (untrusted, I13) even
    * though the surface classifies on the OPERATOR taxonomy. Set by the
    * voice-action-router for `sourceChannel: 'voicemail'` jobs: a voicemail
@@ -2892,6 +2899,28 @@ export function isInventoryLoggingPhrasing(transcript: string): boolean {
   return INVENTORY_LOGGING_PATTERNS.some((rx) => rx.test(transcript));
 }
 
+/**
+ * OBS-2 — the classify call's gateway metadata. `correlationId` keys the
+ * ai_runs row to the surface's stable id, so "every AI run on this call /
+ * conversation" finds the routing decision with the drafting runs it led to
+ * (`draftingRunMetadata` carries the same key on each surface): the voice
+ * session on a call (telephony, the Gather seam, in-app), the conversation in
+ * chat and memos, the recording for a memo with no conversation. Without it
+ * the gateway minted a random correlation id per classify. Metadata only —
+ * never in the prompt, so cassette hashes and cache keys are unchanged.
+ */
+export function classifierRunMetadata(
+  context: Pick<ClassifyContext, 'tenantId' | 'sessionId' | 'callSid' | 'correlationId'>,
+): Record<string, unknown> {
+  const correlationId = context.correlationId || context.sessionId || context.callSid;
+  return {
+    tenantId: context.tenantId,
+    ...(context.sessionId ? { sessionId: context.sessionId } : {}),
+    ...(context.callSid ? { callSid: context.callSid } : {}),
+    ...(correlationId ? { correlationId } : {}),
+  };
+}
+
 export async function classifyIntent(
   transcript: string,
   context: ClassifyContext,
@@ -3248,12 +3277,9 @@ async function classifyIntentRaw(
     // Kept in metadata too: some downstream logging/consumers still read
     // tenantId from here (see gateway.ts correlationId/promptVersionId
     // metadata reads for the pattern this follows).
-    // U10 — session identifiers ride in metadata only (trace grouping).
-    metadata: {
-      tenantId: context.tenantId,
-      ...(context.sessionId ? { sessionId: context.sessionId } : {}),
-      ...(context.callSid ? { callSid: context.callSid } : {}),
-    },
+    // U10 — session identifiers ride in metadata only (trace grouping);
+    // OBS-2 — so does the run's correlation id.
+    metadata: classifierRunMetadata(context),
   });
 
   trace.fallbackModel = !PRIMARY_MODEL_STAGES.has(response.fallbackStage);

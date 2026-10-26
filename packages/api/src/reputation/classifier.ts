@@ -47,6 +47,13 @@ export interface ClassificationResult {
 
 export interface ClassifyReviewDeps {
   llmGateway: LLMGateway;
+  /**
+   * OBS-2 — the run's join keys (`correlationId`, `sessionId`), set by the
+   * proposal creator (`buildReviewResponseProposal`'s `runMetadata`) so the
+   * ai_runs row is found with the rest of the pipeline's. Metadata only —
+   * never in the prompt.
+   */
+  runMetadata?: Record<string, unknown>;
 }
 
 /**
@@ -197,6 +204,7 @@ async function classifyViaLlm(
       ],
       responseFormat: 'json',
       tenantId: review.tenantId,
+      ...(deps.runMetadata ? { metadata: deps.runMetadata } : {}),
     });
     const parsed = safeParseJson(response.content);
     if (parsed) {

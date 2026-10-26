@@ -1806,8 +1806,14 @@ export async function startVoiceEdit(
 
   if (deps.editInterpreter) {
     try {
-      const delta = await deps.editInterpreter({ proposal, instruction: input.instruction });
-      if (delta && Object.keys(delta).length > 0) {
+      const edit = await deps.editInterpreter({
+        proposal,
+        instruction: input.instruction,
+        // OBS-2 — the edit run is keyed to this call, like the call's other runs.
+        correlationId: input.sessionId,
+      });
+      if (edit && Object.keys(edit.delta).length > 0) {
+        const delta = edit.delta;
         // Track E — chain-ref guard: a chained dependent can hold unresolved
         // `$ref:chain[N].…` tokens (resolved from the parent's resultEntityId
         // at execution time). A delta touching one of those fields would
@@ -1844,6 +1850,11 @@ export async function startVoiceEdit(
           lineActor(input).role,
           delta,
           deps.auditRepo,
+          undefined,
+          undefined,
+          undefined,
+          // OBS-2 — the payload is now the edit run's output: link that run.
+          { aiRunId: edit.aiRunId },
         );
         const speak = composeEditedReadback(updated);
         // Clears hasUnappliedEditRequest (insertion order decides). When the
