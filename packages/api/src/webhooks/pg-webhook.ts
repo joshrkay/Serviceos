@@ -1,6 +1,7 @@
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
 import { WebhookEvent, WebhookRepository } from './webhook-handler';
+import { minimizeWebhookPayload } from './webhook-payload-allowlist';
 
 function mapRow(row: Record<string, unknown>): WebhookEvent {
   return {
@@ -43,8 +44,13 @@ export class PgWebhookRepository extends PgBaseRepository implements WebhookRepo
    * `handleWebhookEvent` detects the id mismatch to recognise that it lost
    * the insert race and re-applies its status-based dedup, which is what
    * makes its read-then-create flow safe under concurrent delivery.
+   *
+   * U7-05+ — the payload is stored minimized (webhook-payload-allowlist.ts):
+   * Stripe's per-event-type allowlist of `event.data`, Clerk's ids. The route
+   * keeps acting on the request's full body; nothing reads it back.
    */
   async create(event: WebhookEvent): Promise<WebhookEvent> {
+    const stored = minimizeWebhookPayload(event.source, event.eventType, event.payload);
     return this.withClient(async (client) => {
       const inserted = await client.query(
         `INSERT INTO webhook_events (id, source, event_type, idempotency_key, payload, status, error_message, processed_at, created_at)
@@ -56,7 +62,7 @@ export class PgWebhookRepository extends PgBaseRepository implements WebhookRepo
           event.source,
           event.eventType,
           event.idempotencyKey,
-          JSON.stringify(event.payload),
+          JSON.stringify(stored),
           event.status,
           event.errorMessage ?? null,
           event.processedAt ?? null,

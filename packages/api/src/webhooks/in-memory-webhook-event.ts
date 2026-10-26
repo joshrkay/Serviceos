@@ -7,8 +7,8 @@
  * cannot edit any pg-* source file. To keep the `pool ? Pg : InMemory`
  * wiring pattern consistent across all six newly wired entities, a minimal
  * Map-backed stub lives here. It mirrors PgWebhookEventRepository's public
- * surface (recordReceipt / markProcessed / markFailed / findById /
- * findUnprocessed) so dev runs without DATABASE_URL still type-check.
+ * surface (recordReceipt / markProcessed / findById) so dev runs without
+ * DATABASE_URL still type-check.
  *
  * Production and staging ALWAYS use the Pg variant — `createApp()` throws
  * if DATABASE_URL is missing in those environments. So this stub is a
@@ -16,7 +16,11 @@
  *
  * Extracted from app.ts (composition-root decomposition) so the application
  * factory no longer carries an inline repository class.
+ *
+ * Stores the same minimized payload as the Pg variant (U7-05+).
  */
+
+import { minimizeWebhookPayload } from './webhook-payload-allowlist';
 
 interface WebhookEventRecord {
   id: string;
@@ -44,6 +48,7 @@ export class InMemoryWebhookEventRepository {
   ): Promise<{ inserted: boolean; record: WebhookEventRecord }> {
     if (!provider) throw new Error('provider is required');
     if (!eventId) throw new Error('eventId is required');
+    const stored = minimizeWebhookPayload(provider, eventType, payload);
     const k = this.key(provider, eventId);
     const existing = this.events.get(k);
     if (existing) {
@@ -54,7 +59,7 @@ export class InMemoryWebhookEventRepository {
       provider,
       eventId,
       eventType,
-      payload,
+      payload: stored,
       receivedAt: new Date(),
       processedAt: null,
       processingError: null,
@@ -71,23 +76,8 @@ export class InMemoryWebhookEventRepository {
     }
   }
 
-  async markFailed(provider: string, eventId: string, error: string): Promise<void> {
-    const r = this.events.get(this.key(provider, eventId));
-    if (r) {
-      r.processingError = error;
-    }
-  }
-
   async findById(provider: string, eventId: string) {
     const r = this.events.get(this.key(provider, eventId));
     return r ? { ...r } : null;
-  }
-
-  async findUnprocessed(limit = 100) {
-    return Array.from(this.events.values())
-      .filter((r) => r.processedAt === null && r.processingError === null)
-      .sort((a, b) => a.receivedAt.getTime() - b.receivedAt.getTime())
-      .slice(0, limit)
-      .map((r) => ({ ...r }));
   }
 }

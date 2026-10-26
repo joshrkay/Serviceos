@@ -25,10 +25,15 @@
  * (no tenant GUC) — same pattern as `platform_admins`. The unique index
  * on (source, idempotency_key) is what prevents duplicate processing,
  * including across tenants.
+ *
+ * U7-05+ — `payload` is stored minimized: `recordReceipt` keeps only the
+ * source's allowlist (webhook-payload-allowlist.ts), never the caller's
+ * name, phone, email or message, whatever the caller passes.
  */
 
 import { Pool } from 'pg';
 import { PgBaseRepository } from '../db/pg-base';
+import { minimizeWebhookPayload } from './webhook-payload-allowlist';
 
 export interface WebhookEventRecord {
   id: string;
@@ -76,6 +81,8 @@ export class PgWebhookEventRepository extends PgBaseRepository {
    * Uses INSERT ... ON CONFLICT (source, idempotency_key) DO NOTHING. If
    * the row already exists we return inserted=false plus the existing
    * row, so the caller can skip processing without a second round-trip.
+   * The payload is minimized first; a provider with no payload policy
+   * throws before anything is written.
    */
   async recordReceipt(
     provider: string,
@@ -85,6 +92,7 @@ export class PgWebhookEventRepository extends PgBaseRepository {
   ): Promise<RecordReceiptResult> {
     if (!provider) throw new Error('provider is required');
     if (!eventId) throw new Error('eventId is required');
+    const stored = minimizeWebhookPayload(provider, eventType, payload);
 
     return this.withClient(async (client) => {
       const insertResult = await client.query(
@@ -93,7 +101,7 @@ export class PgWebhookEventRepository extends PgBaseRepository {
          ) VALUES ($1, $2, $3, $4, 'received', NOW())
          ON CONFLICT (source, idempotency_key) DO NOTHING
          RETURNING *`,
-        [provider, eventType, eventId, JSON.stringify(payload)],
+        [provider, eventType, eventId, JSON.stringify(stored)],
       );
 
       if (insertResult.rowCount && insertResult.rowCount > 0) {
@@ -126,18 +134,6 @@ export class PgWebhookEventRepository extends PgBaseRepository {
     });
   }
 
-  async markFailed(provider: string, eventId: string, error: string): Promise<void> {
-    await this.withClient(async (client) => {
-      await client.query(
-        `UPDATE webhook_events
-            SET status = 'failed',
-                error_message = $3
-          WHERE source = $1 AND idempotency_key = $2`,
-        [provider, eventId, error],
-      );
-    });
-  }
-
   async findById(provider: string, eventId: string): Promise<WebhookEventRecord | null> {
     return this.withClient(async (client) => {
       const result = await client.query(
@@ -146,25 +142,6 @@ export class PgWebhookEventRepository extends PgBaseRepository {
       );
       if (result.rows.length === 0) return null;
       return mapRow(result.rows[0]);
-    });
-  }
-
-  /**
-   * Returns rows in `received` status (never processed, never failed) in
-   * arrival order — the natural input for a retry worker. The supporting
-   * partial index `idx_webhook_unprocessed` makes this scan cheap.
-   */
-  async findUnprocessed(limit = 100): Promise<WebhookEventRecord[]> {
-    const safeLimit = Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : 100;
-    return this.withClient(async (client) => {
-      const result = await client.query(
-        `SELECT * FROM webhook_events
-          WHERE status = 'received'
-          ORDER BY created_at ASC
-          LIMIT $1`,
-        [safeLimit],
-      );
-      return result.rows.map(mapRow);
     });
   }
 }
