@@ -41,7 +41,7 @@
     "expo-splash-screen": "~57.0.10",
     "expo-status-bar": "~57.0.1",
     "nativewind": "4.2.7",
-    "query-string": "9.5.1",
+    "query-string": "10.0.0",
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "react-native": "0.86.3",
