@@ -27,8 +27,9 @@ Critical slots: `name, address, service_type, time_window, problem_description`.
   shared with the real-LLM path smoke (`ai/voice-quality/path-smoke/provider.ts`).
   It is built via `createHarnessLLMGateway` (`ai/gateway/harness-gateway.ts`),
   which swaps the production per-tenant token bucket (a fairness cap between
-  real tenants) for a no-op harness quota — a sequential sample on one
-  pseudo-tenant would otherwise drain it; the cost caps bound spend.
+  real tenants) for a no-op harness quota, so a run never depends on the live
+  tenant quota table (a sequential sample on one pseudo-tenant drained the
+  pre-GATEWAY-01 classifier budget); the cost caps bound spend.
   `ANTHROPIC_API_KEY` (Layer-2 harness, Haiku) is an explicit local fallback
   only and is logged as NOT the production provider. With `--gate`,
   enforces the goal thresholds (intent ≥ 92%, slot micro-F1 ≥ 0.88); without it,

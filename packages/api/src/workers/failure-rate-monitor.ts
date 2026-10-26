@@ -59,8 +59,12 @@
  *      COMPLETING every call (the supervisor_annotate storm shape, succeeding)
  *      keeps rule 1 at 0% and is invisible to it; only the bill moves. The
  *      page names the top tenants and task types by spend. Keyed on the
- *      cross-tenant total because per-tenant spend is already bounded by the
- *      gateway's quota buckets; a loop that fans out across tenants is not.
+ *      cross-tenant total, which also catches a single-tenant loop: the
+ *      gateway's quota buckets bound one tenant's spend only at their
+ *      load-sized ceiling (~1,008 cents a window on gpt-4o-mini since
+ *      GATEWAY-01, about five times the 200-cent default), and the
+ *      per-tenant money cap is the pending U8 decision. A loop that fans out
+ *      across tenants is bounded by no per-tenant limit at all.
  *   6. ai_spend_unpriced — OBS-4 review round 1. Rule 5 sums
  *      cost_micro_cents, and an unpriced model stores NULL (summed as 0), so
  *      a window whose completed runs are mostly unpriced makes rule 5 blind.
