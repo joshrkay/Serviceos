@@ -217,7 +217,12 @@ describe('handleVapiCallEvent', () => {
     const res = await handleVapiCallEvent(deps, { tenantId: TENANT, ...signed(body) });
     expect(res.status).toBe(200);
     expect((res.body as { activated: boolean }).activated).toBe(true);
-    expect(webhookRepo.recordReceipt).toHaveBeenCalledWith('vapi', 'call_real', 'call.ended', expect.any(Object));
+    // U7-05+ — the receipt holds the ids only: the caller's number is read
+    // from the request for activation and never stored in webhook_events.
+    expect(webhookRepo.recordReceipt).toHaveBeenCalledWith('vapi', 'call_real', 'call.ended', {
+      tenantId: TENANT,
+      callId: 'call_real',
+    });
     // inbound voice_session recorded (drives test-call detection)
     expect(txnClient.query).toHaveBeenCalled();
     // Receipt is stamped processed only after the work above succeeded.

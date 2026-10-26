@@ -950,6 +950,7 @@ describe('PRIV-2 — the notify-only branch never leaves the Twilio copy unaccou
   it('a replayed notify-only callback keeps one lead and one durable record, counted once', async () => {
     const before = await orphanedCount('no_credentials');
     const h = buildHarness({ sessionCallSid: 'CA-vm-1', withTranscriptionLeg: false });
+    const recordReceipt = vi.spyOn(h.webhookEventRepo, 'recordReceipt');
 
     const first = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
     const replay = await signedVoicemailRequest(h.app, FINAL_PARAMS, CALLER_QUERY);
@@ -957,10 +958,13 @@ describe('PRIV-2 — the notify-only branch never leaves the Twilio copy unaccou
     expect(first.status).toBe(200);
     expect(replay.status).toBe(200);
     expect(await h.leadRepo.findByTenant(TENANT_ID)).toHaveLength(1);
-    const orphans = (await h.webhookEventRepo.findUnprocessed()).filter(
-      (e) => e.provider === TWILIO_ORPHANED_COPY_PROVIDER,
+    // Both callbacks write the same orphan key; only the first inserts.
+    const orphanWrites = recordReceipt.mock.calls.flatMap((args, i) =>
+      args[0] === TWILIO_ORPHANED_COPY_PROVIDER ? [{ eventId: args[1], result: recordReceipt.mock.results[i].value }] : [],
     );
-    expect(orphans.map((e) => e.eventId)).toEqual([ORPHAN_KEY]);
+    expect(orphanWrites.map((w) => w.eventId)).toEqual([ORPHAN_KEY, ORPHAN_KEY]);
+    expect((await Promise.all(orphanWrites.map((w) => w.result))).map((r) => r.inserted)).toEqual([true, false]);
+    expect(await h.webhookEventRepo.findById(TWILIO_ORPHANED_COPY_PROVIDER, ORPHAN_KEY)).not.toBeNull();
     expect(await orphanedCount('no_credentials')).toBe(before + 1);
   });
 

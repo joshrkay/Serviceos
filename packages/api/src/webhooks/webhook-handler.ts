@@ -1,5 +1,6 @@
 import * as crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
+import { minimizeWebhookPayload } from './webhook-payload-allowlist';
 
 export interface WebhookEvent {
   id: string;
@@ -257,9 +258,14 @@ export class InMemoryWebhookRepository implements WebhookRepository {
     return null;
   }
 
+  /** Stores the same minimized payload as PgWebhookRepository (U7-05+). */
   async create(event: WebhookEvent): Promise<WebhookEvent> {
-    this.events.set(event.id, { ...event });
-    return event;
+    const stored: WebhookEvent = {
+      ...event,
+      payload: minimizeWebhookPayload(event.source, event.eventType, event.payload),
+    };
+    this.events.set(event.id, stored);
+    return { ...stored };
   }
 
   async updateStatus(id: string, status: WebhookEvent['status'], error?: string): Promise<void> {
