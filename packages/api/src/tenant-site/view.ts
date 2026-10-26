@@ -3,6 +3,7 @@
  * page follows the settings with nothing to re-publish.
  */
 import type { Pool } from 'pg';
+import { withTenantScope } from '../db/tenant-transaction';
 import type { SettingsRepository } from '../settings/settings';
 import type { VerticalPackRegistry } from '../shared/vertical-pack-registry';
 import { formatBusinessHoursSummary } from '../public-intake/format-business-hours';
@@ -23,21 +24,33 @@ export function publicFormUrls(webOrigin: string, tenantId: string): { requestUr
   return { requestUrl: `${webOrigin}/intake?t=${t}`, bookUrl: `${webOrigin}/book?t=${t}` };
 }
 
-/** Null when the tenant has no settings row (no business name to show). */
+/**
+ * Null when the tenant has no settings row (no business name to show).
+ *
+ * The settings row and the phone fallback are read in one tenant transaction
+ * under the RLS runtime role (withTenantScope): the request's on
+ * /api/tenant-site/preview and /publish, one session of its own on the public
+ * host page. The service list comes after it, never beside it: the pack
+ * catalog is a global table read on a checkout of its own.
+ */
 export async function loadTenantSiteView(
   deps: TenantSiteViewDeps,
   tenantId: string,
 ): Promise<TenantSiteView | null> {
-  const settings = await deps.settingsRepo.findByTenant(tenantId);
-  if (!settings?.businessName?.trim()) return null;
+  const readTenantRows = async () => {
+    const found = await deps.settingsRepo.findByTenant(tenantId);
+    const businessName = found?.businessName?.trim();
+    if (!found || !businessName) return null;
+    return { settings: found, businessName, phone: await resolvePublicBusinessPhone(found, tenantId, deps.pool) };
+  };
+  const rows = deps.pool ? await withTenantScope(deps.pool, tenantId, readTenantRows) : await readTenantRows();
+  if (!rows) return null;
+  const { settings, businessName, phone } = rows;
 
-  const [serviceTypes, phone] = await Promise.all([
-    resolvePublicServiceTypes(settings, deps.packRegistry),
-    resolvePublicBusinessPhone(settings, tenantId, deps.pool),
-  ]);
+  const serviceTypes = await resolvePublicServiceTypes(settings, deps.packRegistry);
 
   return {
-    businessName: settings.businessName.trim(),
+    businessName,
     services: serviceTypes.map((s) => s.displayName),
     serviceArea: settings.serviceAreaText?.trim() || null,
     hoursSummary: formatBusinessHoursSummary(settings.businessHours, settings.timezone),

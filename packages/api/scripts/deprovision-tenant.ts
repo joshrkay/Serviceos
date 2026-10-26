@@ -14,6 +14,10 @@
  * Notes:
  * - DATABASE_URL must point at a role that can `SET session_replication_role`
  *   (the migration/admin role) — required to bypass FK triggers + RLS.
+ * - With RLS_RUNTIME_ROLE=true that role must also be able to assume
+ *   `rls_app_runtime` (a superuser, or a member of it): the Twilio credential
+ *   is read in a tenant session under it, and otherwise the read fails and the
+ *   deprovision aborts before Twilio and the purge.
  * - --confirm is mandatory (guards against fat-finger deletes).
  * - --force purges the DB even if the Twilio release fails.
  */

@@ -1,4 +1,5 @@
 import type { Pool } from 'pg';
+import { withTenantSession } from '../db/rls-runtime-role';
 import type { Logger } from '../logging/logger';
 import type { StorageProvider } from '../files/file-service';
 import { decrypt } from '../integrations/crypto';
@@ -67,14 +68,13 @@ async function readTwilioIntegration(
   pool: Pool,
   tenantId: string,
 ): Promise<TwilioIntegrationRow | null> {
-  // tenant_integrations is FORCE RLS — read it under the tenant's own GUC in a
-  // short transaction (matches the worker pattern), so this works without
-  // relying on the connection role bypassing RLS.
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    await client.query("SELECT set_config('app.current_tenant_id', $1, true)", [tenantId]);
-    const { rows } = await client.query<{
+  // tenant_integrations is FORCE RLS — read it in a tenant session under the
+  // RLS runtime role (the GUC alone does not bind the privileged principal),
+  // so the policy, not only the WHERE clause, decides whose subaccount this
+  // returns. A failed read rolls back and aborts the deprovision before
+  // Twilio or the purge.
+  const rows = await withTenantSession(pool, tenantId, async (client) => {
+    const result = await client.query<{
       subaccount_sid: string | null;
       auth_token_primary_enc: string | null;
       provider_data: { phoneNumberSid?: string } | null;
@@ -85,19 +85,14 @@ async function readTwilioIntegration(
         LIMIT 1`,
       [tenantId],
     );
-    await client.query('COMMIT');
-    if (rows.length === 0) return null;
-    return {
-      subaccountSid: rows[0].subaccount_sid,
-      authTokenEnc: rows[0].auth_token_primary_enc,
-      phoneNumberSid: rows[0].provider_data?.phoneNumberSid ?? null,
-    };
-  } catch (err) {
-    await client.query('ROLLBACK').catch(() => {});
-    throw err;
-  } finally {
-    client.release();
-  }
+    return result.rows;
+  });
+  if (rows.length === 0) return null;
+  return {
+    subaccountSid: rows[0].subaccount_sid,
+    authTokenEnc: rows[0].auth_token_primary_enc,
+    phoneNumberSid: rows[0].provider_data?.phoneNumberSid ?? null,
+  };
 }
 
 /**

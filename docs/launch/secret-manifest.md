@@ -116,8 +116,11 @@ gateway. (Owned by the voice-gate agent; listed for completeness.)
 
 No provisioned secrets — spins up a local `redis:7-alpine` service and sets
 `TEST_REDIS_URL=redis://localhost:6379` itself. Hard-fails if Redis is
-unreachable. **This gate must be GREEN before `numReplicas > 1` ships in
-`railway.toml`** (see that file's `numReplicas` comment and
+unreachable. **This gate must be GREEN before the worker service runs more
+than one replica** (`numReplicas > 1` in `railway.worker.toml` or its service
+settings). It does not make a second call-answering replica safe: every
+`PROCESS_ROLE` except `worker` stays at one replica until session state is
+externalized (LCR-05; see `railway.toml`'s `numReplicas` comment and
 `docs/runbooks/scaling.md`).
 
 ---
@@ -151,5 +154,11 @@ operator task — see `docs/deployment.md` → "Deploy topology (web + worker)"
    migrations run exactly once via `railway.toml`'s `preDeployCommand`
    (`railway.worker.toml` has none).
 
-Scaling past one replica additionally requires `REDIS_URL` + `NUM_REPLICAS` +
-PgBouncer (see `railway.toml` and the `redis-multi-instance.yml` gate above).
+Only the worker service scales past one replica: every call-answering process
+(every `PROCESS_ROLE` except `worker`) stays at one replica until session state
+is externalized (LCR-05). Scaling the worker past one replica additionally
+requires `REDIS_URL` + PgBouncer and the `redis-multi-instance.yml` gate above.
+On every service, set `NUM_REPLICAS` to the real replica count: it is the only
+count the boot guard (`validateFeatureRequiredConfig`) sees, so it cannot refuse
+a scale-out it is not told about (see `railway.toml` and
+`docs/runbooks/scaling.md`).

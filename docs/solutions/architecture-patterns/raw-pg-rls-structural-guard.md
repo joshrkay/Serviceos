@@ -33,14 +33,18 @@ grow silently. It lives in:
   `pool[K]` with a literal-typed `K` are all caught). It also follows every
   checked-out client (see "Checkouts and callbacks" below), reads `pool.on(…)`
   listeners, finds a Pool reaching SQL through a structural type, and reports
-  `any`-typed receivers, non-call references and policy-GUC literals.
+  `any`-typed receivers, non-call references, policy-GUC literals and role
+  switches (R-role, below).
 - `packages/api/test/invariants/raw-pool-rls.allowlist.ts` — the reviewed
   entries (`RAW_PG_SITES`) and the sanctioned context helpers
   (`SANCTIONED_HELPERS`).
 - `packages/api/test/invariants/raw-pool-rls.structural.test.ts` — the rules,
   the negative controls and the SQL-reader tests. Runs in the default unit lane
-  (no DB). Measured solo after the round-6 review fixes (69 tests): 67.4 s and
-  65.5 s (vitest Duration) at load average ~16–17, against 60.0 s for the
+  (no DB). Measured solo with R-role reading the helpers' calls (78 tests, its
+  controls planted in the round-3 tree): 14.5 s and 14.1 s (vitest
+  Duration) at load average ~0.4–1.0; 12.8 s and 12.9 s at ~0.1–0.9 with
+  the literals only (76 tests). After the round-6 review fixes (69 tests):
+  67.4 s and 65.5 s at load average ~16–17, against 60.0 s for the
   round-5 fixes' 66 tests timed back to back at the same load (39.4 s and
   37.3 s at load ~9–12 when they landed), 27.1 s and 26.5 s at load ~2–3 for
   the round-4 fixes' 63 tests, 28.5 s and 30.4 s at load ~4 for round 4's 59
@@ -66,8 +70,18 @@ silent.**
   transactional: true })` before the first statement that touches a table.
   Never `set_config('app.current_tenant_id', …)` on its own — that sets the
   GUC without the role, which looks scoped and is not.
+- Never switch the role by hand, and never inside a tenant session's
+  callback: taking a role is `applyTenantContext` / `applyCrossTenantRole`'s
+  and resetting it `clearTenantContext`'s, and those last two run only on a
+  client the function checked out itself. A role-switch literal and a call to
+  `clearTenantContext` / `applyCrossTenantRole` are both `role-switch` sites
+  (R-role, below): a call on the caller's own checkout is a sanctioned entry
+  added in review; inside a tenant session the one honest entry is a drop
+  back to the principal, for statements on tables without tenant RLS.
 - An intentional cross-tenant sweep: `withCrossTenantSweep` in a repository,
-  or `BEGIN` + `applyCrossTenantRole(client, { transactional: true })`.
+  or `BEGIN` + `applyCrossTenantRole(client, { transactional: true })` on the
+  function's own checkout and `clearTenantContext` before release (a
+  sanctioned `role-switch` entry, like the two worker enumerations').
 
 **When the guard fails**, the message prints `file:line [access] fn — snippet`.
 The fix is almost always to move the SQL onto one of the helpers above. Only
@@ -103,9 +117,9 @@ deliberate cross-tenant sweep, a platform-constant write) add an entry:
   verbatim (`queueStatement(c, sql, tenantId)`) is readable only where the
   call binds that parameter to readable SQL. Then `tables` is by review.
   Today the listed ones are `claimLease` and `PgVerticalPackRegistry.update`
-  (its `SET` list is joined at runtime), plus `cleanSeed`,
-  `deprovisionTenant`, `purgeTenantRows` and `deleteBatch` (also
-  substituted table names); the sanctioned `tenantQuery`,
+  (its `SET` list is joined at runtime), plus `deprovisionTenant`,
+  `purgeTenantRows` and `deleteBatch` (also substituted table names); the
+  sanctioned `tenantQuery`,
   `PgTenantTransactionRunner.run` (`SAVEPOINT ${name}`) and
   `verifyRlsRuntimeRole` (`SET ROLE ${role}`) are exempt from the tables
   check.
@@ -144,9 +158,24 @@ deliberate cross-tenant sweep, a platform-constant write) add an entry:
   `applyTenantContext((flag ? [client] : [other])[0], …)`, which may be
   another client), the helper is an unread delegate like any other, a
   required `applyTenantContext` handoff and the first effect.
-- `tenant_filtered_no_rls` is debt: it needs `migrateBy` (the audit item or an
-  issue) and raises `TFNR_CEILING`, which is visible in review. Migrating one
-  means deleting the entry and lowering the ceiling — a stale entry fails.
+- `tenant_filtered_no_rls` was debt, and it is cleared: batches 1–4 of the
+  audit (§4 P1–P2) took all 41 entries out of the category, and
+  `TFNR_CEILING` is 0. 39 were deleted, every statement in them now under
+  `rls_app_runtime` but one: `cleanSeed`'s tenants registry DELETE, which
+  drops to the connection principal after `SET LOCAL ROLE NONE` (its
+  role-switch entry, `principal_inside_tenant_session`). Two stayed,
+  re-categorised `global_table` on evidence once their tenant statements had
+  moved: POST /stripe (the AI-model seed
+  moved, P1.10; its four remaining `pool.query` calls touch only the tenants
+  registry) and the demo reset's `runSteps` (the drain's executing-proposals
+  count and the stored-object files read moved into `fencedTenant`, P1.12;
+  its six remaining checkout-callbacks run no SQL on an RLS table: the
+  `_queue_messages` cancel and purge — no RLS, no policies, no tenant_id —
+  the drain's in-flight registry read, a stored-object batch, the walk's
+  per-batch fence and the re-seed). The ceiling now only stops new debt: an
+  entry in this category needs `migrateBy` (the audit item or an issue) and
+  raises `TFNR_CEILING`, which is visible in review; migrating it means
+  deleting the entry and lowering the ceiling again — a stale entry fails.
   Prove each migration at real Postgres under `RLS_RUNTIME_ROLE=true` the way
   the voice-path batch did (`test/integration/{ai-skills,telephony,
   voice-path}-tenant-context.test.ts`): `probeStatementRoles` shows every
@@ -173,7 +202,12 @@ deliberate cross-tenant sweep, a platform-constant write) add an entry:
   lifecycle_emails claim/release ledger, batch 3, P2.4, the same way in
   `test/integration/lifecycle-email-tenant-context.test.ts`). The same holds
   for a write the owner has not yet decided should join the request: the
-  `/api/me/mode` switch (P2.1) keeps its own session.
+  `/api/me/mode` switch (P2.1) keeps its own session. So does a best-effort
+  write after a network call: the Google OAuth callback's availability seed
+  (P2.5) fetches free/busy with no connection held, then UPDATEs in a
+  `withTenantSession` of its own, so a failed seed never touches the
+  credential and audit rows written before it
+  (`test/integration/availability-seed-tenant-context.test.ts`).
 - An INSERT has no `tenant_id = $n` pin to widen; its backstop is the
   policy's WITH CHECK. Probe it by re-stamping the VALUES tenant with the
   other tenant (`restampClaims` in the same suite): refused under the role,
@@ -198,6 +232,23 @@ deliberate cross-tenant sweep, a platform-constant write) add an entry:
   two connections; and await the session's own reads one after another: a
   pg client runs one query at a time, so a `Promise.all` on it gains nothing
   and pg 8 deprecates it (loadOnboardingFacts, P1.11).
+- A page that reads several of one tenant's rows through different modules
+  (a repository's settings read, then `resolvePublicBusinessPhone`, then its
+  own reads) takes `withTenantScope(pool, tenantId, fn)`: the request
+  transaction when it is for that tenant, otherwise one
+  `PgTenantTransactionRunner` session published to `tenantContextStore`, so
+  the repository and every `withTenantClient` inside join it. One checkout and
+  one BEGIN / context / COMMIT for the page, fewer round trips than the
+  repository's own session plus the bare reads (a repository session also
+  runs `clearTenantContext`'s two RESETs). Run a global read that takes its
+  own checkout (the pack catalog's `withClient`) after the scope, never inside
+  it or beside it (the public intake header and the tenant site view, P2.6,
+  `test/integration/public-intake-tenant-context.test.ts`). A sweep's
+  per-tenant reads take one scope per tenant, inside the per-tenant try and
+  closed before any external call: the overage reconciliation's covering
+  read, metered usage and overage cap (P2.7,
+  `test/integration/overage-reconciliation-tenant-context.test.ts`) end
+  their session before `settlePeriod` posts to Stripe.
 - A bare `pool.query` READ on an /api request path is a second connection
   held next to the request's. Find where it runs relative to the
   `withTenantTransaction` middleware first: route gates such as
@@ -220,7 +271,42 @@ deliberate cross-tenant sweep, a platform-constant write) add an entry:
   `WHERE NOT EXISTS (… tenant_id = $1 …)` by widening it: as the principal it
   sees the subject's membership in another tenant and silently skips the
   insert (the Clerk owner row, P2.2,
-  `test/integration/clerk-webhook-tenant-context.test.ts`).
+  `test/integration/clerk-webhook-tenant-context.test.ts`). The same swap on
+  a read whose answer drives an external side effect: deprovision's Twilio
+  credential read (P2.8) picks the subaccount to close, and widened as the
+  principal it hands another tenant's SID to `closeSubaccount`
+  (`test/integration/deprovision-tenant-context.test.ts`). A session-level
+  `set_config(…, false)` with no `BEGIN` (the seed CLI's owner INSERT, P2.9)
+  takes the same swap: one more round trip (BEGIN and COMMIT in place of the
+  RESET), and nothing left on the connection.
+- A transaction that must keep a global-table statement beside its tenant
+  ones keeps them in one `withTenantSession` and drops back to the
+  principal for the global one, last: `cleanSeed` (P2.9) deletes each seeded
+  tenant's child rows under the role and then, after `SET LOCAL ROLE NONE`
+  (transaction-local, ended by the COMMIT like the role), the tenants
+  registry row (no tenant_id, no RLS), so children and registry row still go
+  together or not at all. The switch is a `role-switch` site listed as
+  `principal_inside_tenant_session`, with the tables of the SQL after it
+  (`tenants`), so a FORCE-RLS statement added after it fails the guard (R-role,
+  below). Pin which statement runs as whom with `probeStatementRoles`, and the
+  atomicity with a registry DELETE that fails
+  (`test/integration/seed-runner-tenant-context.test.ts`).
+- The other way round — a read of an RLS-exempt table the role holds no
+  grant on, then the tenant's rows, in one transaction — puts the exempt
+  read first, on the principal, and the context after it: the demo reset's
+  drain (P1.12) counts the in-flight registry, then `fencedTenant` applies
+  the lease tenant's context and counts its executing proposals. Its fence
+  (`FOR SHARE` on the lease row, also ungranted to the role) stays first and
+  on the principal; a row lock belongs to the transaction, so it holds
+  through the tenant reads whatever role they take (a takeover UPDATE times
+  out on the lock while they run). Statements on a table with no tenant RLS
+  stay where they are and are `global_table` on evidence (`pg_class.
+  relrowsecurity`, `pg_policies`, the column list), not forced under the
+  role: the reset's `_queue_messages` cancel and purge (no tenant_id; the
+  tenant is in the server-built payload). Pin the roles, a widened predicate
+  per tenant read, the grants after 219, the fence under the role, and a
+  fault and a dead backend inside a tenant step
+  (`test/integration/demo-reset-tenant-context.test.ts`).
 
 ### Checkouts and callbacks: who gets the client
 
@@ -293,11 +379,12 @@ not itself an argument; `<return>`.
 
 `SANCTIONED_HELPERS` lists the context helpers themselves (the
 `withTenantTransaction` family, `applyTenantContext`'s GUC, `setTenantContext`,
-the migrator, `tenantQuery`, the request middleware) by (file, fn, access) with
-an exact count and `handsOffTo`. They are exempt from the tables/category
-checks only: a second raw function in one of their files is unlisted, a
-second checkout in one of them is a count failure, a removed one is stale, and
-`contextFirst: true` re-checks R-order on each.
+the migrator, `tenantQuery`, the request middleware, and the role switches
+R-role reads in them and in their callers' own checkouts) by (file, fn,
+access) with an exact count and `handsOffTo`. They are exempt from the
+tables/category checks only: a second raw function in one of their files is
+unlisted, a second checkout in one of them is a count failure, a removed one
+is stale, and `contextFirst: true` re-checks R-order on each.
 
 ### Pool escapes are frozen
 
@@ -311,6 +398,103 @@ today: the five there were (`routes/onboarding.ts`'s phone routes passing their
 `currentTenantContext()?.client ?? pool` to `isBillingLive` /
 `markPickPending`) went when those routes moved onto `withTenantClient` to
 enqueue their provisioning job on the request client.
+
+### Role switches (R-role)
+
+A session helper's callback (`withTenantSession`, `withTenantClient`, a
+repository's `withTenant`) is not a site: it runs after the context, so the
+guard trusts it. SQL in it that switches the role takes the client off
+`rls_app_runtime` with nothing to notice — `cleanSeed`'s `SET LOCAL ROLE NONE`
+was such a blind spot, and so was a call in it to `clearTenantContext` (its
+`RESET ROLE`: the FORCE-RLS reads after it run as the principal) or
+`applyCrossTenantRole` (`SET LOCAL ROLE rls_cross_tenant`, BYPASSRLS). So every
+string or template literal in the scanned tree that switches or resets the
+role, and every call to one of those two helpers, is a `role-switch` site:
+
+- **What is read.** `SET [LOCAL|SESSION] ROLE …` (also `TO` / `=`, a quoted
+  `"role"`), `RESET ROLE`, `set_config('role', …)` (any case, `"set_config"`,
+  `pg_catalog.`, an `E''` / `U&''` or `"role"` name), `SET [LOCAL|SESSION]
+  SESSION AUTHORIZATION …`, `RESET SESSION AUTHORIZATION` and `DISCARD ALL`;
+  in any case, read with SQL comments stripped and raw, in a template literal
+  too (a substitution is `${…}`). `SET` / `RESET` / `DISCARD` count only at a
+  statement start (the literal's start, after `;`, a quote, a dollar quote, or
+  PL/pgSQL `BEGIN` / `THEN` / `ELSE` / `LOOP`), so the SET of an UPDATE
+  (`UPDATE users SET role = $1`, `ON CONFLICT … DO UPDATE SET role = …`: a
+  column) is not one. `RESET ALL` is not one either: `role` is
+  `GUC_NO_RESET_ALL`.
+- **The helpers' calls.** A call to a `ROLE_HELPERS` helper
+  (`pg-access-scan.ts`) that resolves by symbol to `db/rls-runtime-role.ts`
+  (the declared-in check `CONTEXT_HELPERS` uses) is a `role-switch` site at
+  the call, its SQL the queries after the call, read as for a literal:
+  `clearTenantContext` drops to the principal (`RESET ROLE`, then `RESET
+  app.current_tenant_id`), `applyCrossTenantRole` takes `rls_cross_tenant`.
+  The call is found directly, through an import alias or a re-export, a
+  namespace import (`rls.clearTenantContext(c)`), a literal key
+  (`rls['applyCrossTenantRole'](c)`), a destructured dynamic import, and
+  behind parentheses or a cast; a same-named local function is not one. Taken
+  without a call (`const f = clearTenantContext`,
+  `clearTenantContext.call(…)`, `[c].map(clearTenantContext)`, `{
+  applyCrossTenantRole }`, a key of several names) it is `indirect`, never
+  allowlistable: what runs after it cannot be read. `applyTenantContext` is
+  not one: the role it takes is `rls_app_runtime`, the one a tenant session
+  is meant to be on.
+- **Who may.** The helpers that manage the role are `SANCTIONED_HELPERS`
+  entries, keyed and counted like the rest: `applyTenantContext` (2: the
+  transactional context statement's `set_config('role', 'rls_app_runtime',
+  true)`, the session path's `SET ROLE`), `applyCrossTenantRole` (2: `SET
+  LOCAL ROLE` / `SET ROLE rls_cross_tenant`), `clearTenantContext` (1: `RESET
+  ROLE` before release) and `probeRoleAssumable` (2: the boot probe's `SET
+  ROLE` / `RESET ROLE` on `verifyRlsRuntimeRole`'s own checkout). Every
+  function that calls `clearTenantContext` / `applyCrossTenantRole` today is
+  sanctioned the same way, each calling them on its own `pool.connect()`
+  checkout (whose entry hands the client to `clearTenantContext`) and none
+  inside a tenant session: `PgBaseRepository.withTenantTransaction` (1:
+  `clearTenantContext` in the finally, after `fn(client)` and the COMMIT /
+  ROLLBACK), `PgBaseRepository.withCrossTenantSweep` (2: `applyCrossTenantRole`
+  after `BEGIN`, `clearTenantContext` before release), the demo reset's
+  `fenced` step (1: `clearTenantContext` before release, after the step's
+  COMMIT / ROLLBACK), the demo pool seeder `seedDemoTenantPool` (1:
+  `clearTenantContext` before each slot's release), and the two worker
+  enumerations, `listPendingLocations` (`workers/geocode-locations-sweep.ts`)
+  and `listCollectOnSiteTenantIds`
+  (`workers/payment-link-reconciliation-sweep.ts`) (2 each:
+  `applyCrossTenantRole` after `BEGIN`, `clearTenantContext` before release).
+  `withTenantSession`, `withTenantConnection` and the request middleware take
+  `rls_app_runtime` through `applyTenantContext` only (transaction-local), so
+  they hold no switch. A new caller is unlisted until review sanctions it.
+- **Anywhere else** the switch needs an entry, and the guard checks its claim
+  (the `roles` report): the category must be `principal_inside_tenant_session`
+  (and that category is for `role-switch` entries only); every switch in the
+  literal must drop to the connection principal (`ROLE NONE`, `TO DEFAULT`,
+  `'none'`, `RESET`, `SESSION AUTHORIZATION DEFAULT`, `DISCARD ALL`, a
+  `clearTenantContext` call) — a switch into a role (an `applyCrossTenantRole`
+  call among them), or to one the scan cannot read (`SET ROLE ${r}`), is never
+  allowlistable; and the site's SQL is every query after the switch in the
+  function that holds it (positional, from the start of the outermost loop
+  around it, since a loop runs its earlier statements again), so its tables
+  must be in the entry and, as for `global_table`, none may be FORCE-RLS or an
+  un-exempt tenant_id table. A switch outside any function (a module-level
+  `const`) has no "after" to read: its SQL is opaque, so the entry must set
+  `dynamicSql` and its tables are by review.
+- **Today** there is one entry: `cleanSeed`'s `SET LOCAL ROLE NONE` before
+  the tenants registry DELETE (`tables: ['tenants']`).
+
+The negative controls plant every spelling above into a tenant session (each
+unlisted fails; listed, each drop passes and each switch into a role fails),
+the forms that are not switches, and `cleanSeed` itself at its real path
+(passes with its real entries; fails unlisted, with a `customers` DELETE after
+the drop, with the drop inside a loop after a `customers` DELETE, and with
+`SET LOCAL ROLE rls_cross_tenant` instead). They plant each helper's call
+inside a `withTenantSession` callback and a repository's `withTenant`
+callback, and through each spelling above: unlisted, each call fails and each
+reference without a call is forbidden; listed as
+`principal_inside_tenant_session`, `clearTenantContext` passes with the
+tenants registry DELETE after it and fails with a FORCE-RLS
+`tenant_integrations` read after it, and `applyCrossTenantRole` fails in any
+category. A same-named local function and property are no site. The round-1
+stand-in for `db/pg-base.ts` has the real file's `withTenantTransaction` and
+`withCrossTenantSweep`, so their sanctioned `role-switch` entries are pinned
+against it.
 
 ## Known limits
 
@@ -352,7 +536,9 @@ Function.prototype.
   alias's own queries are not read for SQL or R-order. Only the first effect
   is checked: context that a later `COMMIT` / `ROLLBACK` ends
   (`applyTenantContext` is transaction-local) still counts for the SQL after
-  it.
+  it, and so does context a later role switch drops; the switch itself is a
+  `role-switch` site whose following SQL R-role checks (cleanSeed's registry
+  DELETE, which is meant to run as the principal).
 - **R-order evasions it does not read** (a delegate's own SQL is read through
   its named parameters, from its declared body): a rest-parameter delegate
   (`peek(...cs)` running `cs[0].query(…)`); a reassigned `let` delegate
@@ -470,6 +656,36 @@ Function.prototype.
   whitespace, a newline or a SQL comment before `(` or after `SET`, a
   `pg_catalog.` prefix, a quoted `"set_config"`, `SET [LOCAL|SESSION]`,
   `"app.name"` and `"app"."name"` quoting, and spaces around the dot.)
+- **R-role reads one function, positionally, and literal SQL only.** The SQL
+  after a switch is read in the function that holds the literal or the
+  helper's call: a switch in a local helper of its own (`dropRole(client)`,
+  then a `customers` DELETE in the caller; also a wrapper around
+  `clearTenantContext`, whose call is the site) reads nothing after its call,
+  and neither SQL a named delegate runs after the switch nor a closure
+  declared before it and run after it is read. A switch is keyed where its
+  literal or call is written, not where it runs. The sanctioned callers are
+  keyed and counted, not placed: `withTenantTransaction`'s `clearTenantContext`
+  moved above `fn(client)` keeps its count of 1, and every repository callback
+  would then run as the principal; review holds where each sits. A
+  `ROLE_HELPERS` call is read through the spellings listed under Role
+  switches only: a key the checker cannot narrow to one name (`rls[k]`, `k:
+  string`) and a destructuring of a re-export under its new name (`const {
+  dropContext } = await import('./reexports')`) are no site. A call to
+  `applyTenantContext` inside a tenant session is not a site either, though
+  with another tenant's id it moves the session to that tenant. Not read as a
+  switch: the statement split across literals (`'SET LOCAL ' + 'ROLE
+  NONE'`), a substitution where the verb is (`` `${VERB} LOCAL ROLE NONE` ``)
+  or right before `SET` (left out so `UPDATE ${table} SET role = …` is not
+  read as one), `set_config($1, …)` with `'role'` as a parameter value, the
+  name concatenated in SQL or built at runtime, a function's `SET role`
+  clause, `ALTER ROLE … SET`, and `SECURITY DEFINER` functions (which run as
+  their owner). The round-3 tree's controls pin the helper, the module-level
+  `const`, the split literal and the substituted verb. Prose that starts like
+  the statement (`'Set role to admin'`) would read as one; none is in the
+  tree. A drop is not checked to sit inside a tenant session (outside one it
+  changes nothing, and the statements around it are sites of their own), and
+  `'NONE'` reads as a drop in any case, though `set_config('role', 'NONE',
+  …)` names a role and fails at runtime.
 - **A pool listener registered through Function.prototype or `Reflect.apply`**
   (`pool.on.call(pool, 'connect', cb)`, `pool.on.apply(pool, ['connect', cb])`,
   `pool.on.bind(pool)('connect', cb)`, `Reflect.apply(pool.on, pool, ['connect',

@@ -10,6 +10,7 @@
  */
 import { Pool } from 'pg';
 import { v4 as uuidv4 } from 'uuid';
+import { withTenantSession } from '../db/rls-runtime-role';
 import { PgTenantRepository } from '../auth/pg-tenant';
 import { PgCustomerRepository } from '../customers/pg-customer';
 import { PgLocationRepository } from '../locations/pg-location';
@@ -32,10 +33,10 @@ export interface SeedResult {
 }
 
 /**
- * Insert the owner user on a dedicated tenant-scoped connection. There is no
- * PgUserRepository.create, so this is the one raw insert; setting
- * app.current_tenant_id (transaction-free, session-local) satisfies the
- * users RLS policy on the off chance the connecting role is RLS-enforced.
+ * Insert the owner user. There is no PgUserRepository.create, so this is the
+ * one raw insert: a tenant session of its own (BEGIN, the tenant GUC and the
+ * RLS runtime role, both transaction-local, COMMIT), so the users policy's
+ * WITH CHECK binds the VALUES tenant.
  */
 async function insertOwnerUser(
   pool: Pool,
@@ -44,18 +45,13 @@ async function insertOwnerUser(
   email: string,
 ): Promise<string> {
   const userId = uuidv4();
-  const client = await pool.connect();
-  try {
-    await client.query("SELECT set_config('app.current_tenant_id', $1, false)", [tenantId]);
-    await client.query(
+  await withTenantSession(pool, tenantId, (client) =>
+    client.query(
       `INSERT INTO users (id, tenant_id, clerk_user_id, email, role, first_name, last_name)
        VALUES ($1, $2, $3, $4, 'owner', 'Seed', 'Owner')`,
       [userId, tenantId, clerkUserId, email],
-    );
-  } finally {
-    await client.query('RESET app.current_tenant_id').catch(() => undefined);
-    client.release();
-  }
+    ),
+  );
   return userId;
 }
 
@@ -157,11 +153,30 @@ async function seedTenant(
  *  `cleanSeed` uses to find (only) demo tenants to remove. */
 const SEED_OWNER_EMAIL_LIKE = 'owner@seed-tenant-%';
 
+/** FK order: leaves → root. audit_events is defensive (the seeder writes none,
+ *  but a full tenant teardown should leave nothing referencing the tenant). */
+const SEED_CHILD_TABLES = [
+  'appointments',
+  'estimates',
+  'jobs',
+  'service_locations',
+  'customers',
+  'audit_events',
+  'users',
+] as const;
+
 /**
  * Remove every tenant this seeder created (identified by its owner_email
  * marker), child rows first so the tenant delete can't trip a foreign key.
- * Scoped per-tenant with app.current_tenant_id set, so RLS-enforced roles can
- * still delete their own rows. Real tenants are never matched.
+ * Real tenants are never matched.
+ *
+ * Each tenant is one transaction: its child rows and its registry row go
+ * together or not at all. The child DELETEs run in a tenant session (the
+ * tenant GUC and the RLS runtime role, transaction-local), so the policies
+ * bind them. `tenants` is the registry (no tenant_id, no RLS), so the role
+ * adds nothing there: the session drops back to the connection principal
+ * for that last DELETE (SET LOCAL ROLE NONE, ended by the COMMIT like the
+ * role itself), which is how the registry row has always been deleted.
  */
 export async function cleanSeed(
   pool: Pool,
@@ -176,34 +191,14 @@ export async function cleanSeed(
     log('No seeded tenants found.');
     return { tenantsRemoved: 0 };
   }
-  // FK order: leaves → root. audit_events is defensive (the seeder writes none,
-  // but a full tenant teardown should leave nothing referencing the tenant).
-  const childTables = [
-    'appointments',
-    'estimates',
-    'jobs',
-    'service_locations',
-    'customers',
-    'audit_events',
-    'users',
-  ];
   for (const tenantId of tenantIds) {
-    const client = await pool.connect();
-    try {
-      await client.query("SELECT set_config('app.current_tenant_id', $1, false)", [tenantId]);
-      await client.query('BEGIN');
-      for (const table of childTables) {
+    await withTenantSession(pool, tenantId, async (client) => {
+      for (const table of SEED_CHILD_TABLES) {
         await client.query(`DELETE FROM ${table} WHERE tenant_id = $1`, [tenantId]);
       }
+      await client.query('SET LOCAL ROLE NONE');
       await client.query('DELETE FROM tenants WHERE id = $1', [tenantId]);
-      await client.query('COMMIT');
-    } catch (err) {
-      await client.query('ROLLBACK').catch(() => undefined);
-      throw err;
-    } finally {
-      await client.query('RESET app.current_tenant_id').catch(() => undefined);
-      client.release();
-    }
+    });
     log(`  removed tenant ${tenantId}`);
   }
   return { tenantsRemoved: tenantIds.length };

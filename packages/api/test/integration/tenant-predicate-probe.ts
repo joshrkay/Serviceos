@@ -141,6 +141,8 @@ export interface PoolTraffic {
   statements(): string[];
   /** The most clients this pool had out at once (2+ = a checkout nested inside another). */
   maxOpen(): number;
+  /** Clients out right now (0 once the code under test has released everything). */
+  open(): number;
 }
 
 /**
@@ -192,5 +194,5 @@ export function countPoolTraffic(real: Pool): PoolTraffic {
       return typeof value === 'function' ? value.bind(target_) : value;
     },
   });
-  return { pool, checkouts: () => checkouts, statements: () => [...statements], maxOpen: () => maxOpen };
+  return { pool, checkouts: () => checkouts, statements: () => [...statements], maxOpen: () => maxOpen, open: () => open };
 }

@@ -21,7 +21,9 @@
  *     sweep retries it later; it never throws.
  *
  * Callers: the recording webhook (after the S3 PUT and the row insert), the
- * voicemail-status route (after its whole at-least-once pipeline), and the
+ * voicemail-status route (after its whole at-least-once pipeline; its
+ * notify-only branch, which has no row, calls the bare deleter and audits the
+ * same event), and the
  * recording-retention sweep (horizon purge, card-number audio purge, and the
  * retry phase for legacy and failed rows). `recording_url` is never nulled: it
  * is the per-recording idempotency key in `recordInboundCall`.
@@ -139,11 +141,17 @@ export interface DeleteTwilioCopyDeps {
   now?: () => Date;
 }
 
+/**
+ * `metadata.reason` on `voice_recording.twilio_copy_deleted`. `notify_only` is
+ * the voicemail route's notify-only branch, which has no row: it calls the bare
+ * deleter and writes the same event itself (entityId = the RecordingSid).
+ */
 export type TwilioCopyDeleteReason =
   | 'stored_in_own_storage'
   | 'past_retention'
   | 'card_number_detected'
-  | 'retry';
+  | 'retry'
+  | 'notify_only';
 
 /**
  * Delete one recording's Twilio copy, stamp it and audit it. Resolves true

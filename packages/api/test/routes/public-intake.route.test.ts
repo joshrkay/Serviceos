@@ -9,6 +9,7 @@ import { InMemoryAuditRepository } from '../../src/audit/audit';
 import { DevInMemoryTenantRepository } from '../../src/auth/dev-auth-bypass';
 import { InMemorySettingsRepository } from '../../src/settings/settings';
 import { InMemoryVerticalPackRegistry } from '../../src/shared/vertical-pack-registry';
+import { fakeTenantPool } from '../helpers/fake-tenant-pool';
 
 describe('public-intake route', () => {
   let app: Express;
@@ -211,24 +212,21 @@ describe('public-intake route', () => {
   // yield businessPhone null (the web's honest empty state), real
   // provisioned numbers still serve.
   describe('GET /public/intake/:tenantId — Twilio fallback phone (#880)', () => {
-    /** Minimal pool stub for the GET route's three raw queries. */
+    /** A fake pool answering the GET route's three tenant-row reads. */
     function fallbackPool(
       integrationRow: { phone: string | null; stub?: string | null } | null,
     ): Pool {
-      return {
-        query: vi.fn(async (sql: string) => {
-          if (/FROM tenant_integrations/i.test(sql)) {
-            return {
-              rows: integrationRow
-                ? [{ phone: integrationRow.phone, stub: integrationRow.stub ?? null }]
-                : [],
-            };
-          }
-          if (/FROM tenant_settings/i.test(sql)) return { rows: [] };
-          if (/FROM google_reviews/i.test(sql)) return { rows: [{ avg: null, c: '0' }] };
-          return { rows: [] };
-        }),
-      } as unknown as Pool;
+      return fakeTenantPool((sql) => {
+        if (/FROM tenant_integrations/i.test(sql)) {
+          return {
+            rows: integrationRow
+              ? [{ phone: integrationRow.phone, stub: integrationRow.stub ?? null }]
+              : [],
+          };
+        }
+        if (/FROM google_reviews/i.test(sql)) return { rows: [{ avg: null, c: '0' }] };
+        return undefined;
+      }).pool;
     }
 
     function buildAppWithPool(pool: Pool): Express {
@@ -284,6 +282,77 @@ describe('public-intake route', () => {
       const res = await request(pooledApp).get(`/public/intake/${tenantId}`);
       expect(res.status).toBe(200);
       expect(res.body.businessPhone).toBeNull();
+    });
+  });
+
+  // Raw-pg audit 2026-10-23 §4 P2.6 — the page's tenant rows (the phone
+  // fallback, business hours, the review summary) are read in ONE tenant
+  // transaction under the RLS runtime role, not as three bare pool.query
+  // calls on the principal. Real Postgres: public-intake-tenant-context.test.ts.
+  describe('GET /public/intake/:tenantId — one tenant session for the tenant rows', () => {
+    const HOURS = { mon: { open: '08:00', close: '17:00' }, tue: { open: '08:00', close: '17:00' } };
+
+    function headerPool() {
+      return fakeTenantPool((sql) => {
+        if (/FROM tenant_integrations/.test(sql)) return { rows: [{ phone: '+15125550177', stub: null }] };
+        if (/SELECT business_hours FROM tenant_settings/.test(sql)) return { rows: [{ business_hours: HOURS }] };
+        if (/FROM google_reviews/.test(sql)) return { rows: [{ avg: 4.66, c: 3 }] };
+        return undefined;
+      });
+    }
+
+    function appOn(pool: Pool): Express {
+      const a = express();
+      a.use('/public/intake', createPublicIntakeRouter(leadRepo, tenantRepo, auditRepo, settingsRepo, packRegistry, pool));
+      return a;
+    }
+
+    it('reads the phone fallback, business hours and the reviews on one checkout: BEGIN, the GUC + role, three reads, COMMIT', async () => {
+      const fake = headerPool();
+
+      const res = await request(appOn(fake.pool)).get(`/public/intake/${tenantId}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        businessPhone: '+15125550177',
+        businessHoursSummary: 'Mon–Tue 8 AM – 5 PM',
+        averageRating: 4.7,
+        reviewCount: 3,
+      });
+      expect(fake.checkouts()).toBe(1);
+      expect(fake.open()).toBe(0);
+      expect(fake.statements.map((s) => s.sql.replace(/\s+/g, ' ').trim())).toEqual([
+        'BEGIN',
+        expect.stringMatching(/^SELECT set_config\('app\.current_tenant_id'/),
+        expect.stringMatching(/^SELECT provider_data->>'phoneE164' .* FROM tenant_integrations/),
+        'SELECT business_hours FROM tenant_settings WHERE tenant_id=$1',
+        expect.stringMatching(/^SELECT AVG\(rating\).* FROM google_reviews WHERE tenant_id = \$1$/),
+        'COMMIT',
+      ]);
+      expect(fake.statements[1].values).toEqual([tenantId]);
+      for (const s of fake.work()) expect(s.values).toEqual([tenantId]);
+    });
+
+    it('a 404 or a malformed tenant id opens no session', async () => {
+      const fake = headerPool();
+
+      expect((await request(appOn(fake.pool)).get('/public/intake/00000000-0000-4000-8000-000000000000')).status).toBe(404);
+      expect((await request(appOn(fake.pool)).get('/public/intake/not-a-uuid')).status).toBe(400);
+
+      expect(fake.checkouts()).toBe(0);
+    });
+
+    it('a failed read rolls the session back and answers 500, with the client released', async () => {
+      const fake = fakeTenantPool((sql) => {
+        if (/FROM google_reviews/.test(sql)) throw new Error('reviews read failed');
+        return undefined;
+      });
+      const res = await request(appOn(fake.pool)).get(`/public/intake/${tenantId}`);
+
+      expect(res.status).toBe(500);
+      expect(fake.statements.map((s) => s.sql)).toContain('ROLLBACK');
+      expect(fake.statements.map((s) => s.sql)).not.toContain('COMMIT');
+      expect(fake.open()).toBe(0);
     });
   });
 

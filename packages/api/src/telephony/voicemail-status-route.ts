@@ -36,6 +36,10 @@
  *      re-FETCHES the recording, so deleting right after the insert would
  *      turn that retry into a permanent 404. Failure-soft; an unconfirmed
  *      delete is retried by the retention sweep. `recording_url` is kept.
+ *      The notify-only branch (storage, pool or Twilio credentials not
+ *      wired) has no row for either to act on: it deletes the copy itself
+ *      when credentials exist, and otherwise records it durably in
+ *      `webhook_events` (`TWILIO_ORPHANED_COPY_PROVIDER`) for later deletion.
  *
  * Caller identity / tenant resolution
  * ───────────────────────────────────
@@ -77,7 +81,13 @@ import {
   scrubAuthToken,
 } from './recording-webhook';
 import { recordInboundCall } from '../voice/voice-service';
-import type { TwilioCopyRemover } from './twilio-recording-deleter';
+import {
+  TWILIO_COPY_DELETED_EVENT,
+  type TwilioCopyDeleteReason,
+  type TwilioCopyRemover,
+  type TwilioRecordingDeleter,
+} from './twilio-recording-deleter';
+import { voicemailTwilioCopyOrphanedTotal } from '../monitoring/metrics';
 import { v4 as uuidv4 } from 'uuid';
 
 const logger = createLogger({
@@ -172,6 +182,13 @@ export interface VoicemailStatusHandlerOptions {
    * deletes it.
    */
   twilioCopyRemover?: TwilioCopyRemover;
+  /**
+   * PRIV-2 — the deleter `twilioCopyRemover` wraps (platform Twilio
+   * credentials), for the notify-only branch: no voice_recordings row exists
+   * there for the remover to stamp or the sweep to retry. Absent → no
+   * credentials, so the copy is recorded as orphaned instead.
+   */
+  twilioRecordingDeleter?: TwilioRecordingDeleter;
 }
 
 export interface VoicemailStatusRouterDeps {
@@ -220,6 +237,152 @@ export interface VoicemailStatusRouterDeps {
    * redelivery and answered 200; see voicemail-redelivery.ts.
    */
   redelivery?: VoicemailRedelivery;
+}
+
+/**
+ * PRIV-2 — `webhook_events` source for a voicemail whose Twilio-hosted copy the
+ * notify-only branch could not delete. One row per recording, keyed like the
+ * leg receipts (`<tenantId>:<RecordingSid>`); the payload names the recording
+ * so it can be deleted once credentials exist.
+ */
+export const TWILIO_ORPHANED_COPY_PROVIDER = 'twilio_voicemail_orphaned_copy';
+
+type OrphanedCopyReason = 'no_credentials' | 'no_recording_url' | 'delete_failed';
+
+interface NotifyOnlyRecording {
+  tenantId: string;
+  callSid: string;
+  recordingSid: string;
+  recordingUrl: string | undefined;
+  leadId: string | undefined;
+}
+
+/** `metadata.reason` on a notify-only delete (`voice_recording.twilio_copy_deleted`). */
+const NOTIFY_ONLY_DELETE_REASON: TwilioCopyDeleteReason = 'notify_only';
+
+/**
+ * Best-effort audit of what happened to the Twilio copy (never blocks the ack).
+ * A delete is the same `voice_recording.twilio_copy_deleted` event, on the same
+ * `voice_recording` entity type, that `deleteTwilioCopy` writes, so whatever
+ * counts Twilio-copy deletions counts these too. There is no voice_recordings
+ * row here, so the entity id is the RecordingSid.
+ */
+async function auditTwilioCopy(
+  auditRepo: AuditRepository | undefined,
+  rec: NotifyOnlyRecording,
+  eventType: typeof TWILIO_COPY_DELETED_EVENT | 'voicemail.twilio_copy_orphaned',
+  extra: Record<string, unknown>,
+): Promise<void> {
+  if (!auditRepo) return;
+  try {
+    await auditRepo.create(
+      createAuditEvent({
+        tenantId: rec.tenantId,
+        actorId: 'voicemail_webhook',
+        actorRole: 'system',
+        eventType,
+        entityType: 'voice_recording',
+        entityId: rec.recordingSid,
+        correlationId: uuidv4(),
+        metadata: {
+          callSid: rec.callSid,
+          recordingSid: rec.recordingSid,
+          ...(rec.leadId ? { leadId: rec.leadId } : {}),
+          ...extra,
+        },
+      }),
+    );
+  } catch (err) {
+    logger.warn('voicemail-status: Twilio copy audit failed', {
+      tenantId: rec.tenantId,
+      recordingSid: rec.recordingSid,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
+/**
+ * PRIV-2 — the Twilio copy on the notify-only branch. That branch stores no
+ * audio and writes no voice_recordings row, so neither the ingest-time copy
+ * remover (which stamps the row) nor the retention sweep's retry phase (which
+ * reads it) ever sees this recording, and nothing in the app reads the copy:
+ * left alone, the audio stays at Twilio past every retention horizon. With
+ * credentials (the deleter is wired) it is deleted here, after the lead leg.
+ * Without them, or when the delete fails, it is recorded durably for later
+ * deletion, logged and counted (`voicemail_twilio_copy_orphaned_total`).
+ * Never throws.
+ */
+async function settleNotifyOnlyTwilioCopy(
+  rec: NotifyOnlyRecording,
+  deps: Pick<VoicemailStatusRouterDeps, 'auditRepo' | 'webhookEventRepo'>,
+  deleter: TwilioRecordingDeleter | undefined,
+): Promise<void> {
+  let reason: OrphanedCopyReason;
+  if (!rec.recordingUrl) {
+    reason = 'no_recording_url';
+  } else if (!deleter) {
+    reason = 'no_credentials';
+  } else {
+    try {
+      const outcome = await deleter.deleteRecording(rec.recordingUrl);
+      await auditTwilioCopy(deps.auditRepo, rec, TWILIO_COPY_DELETED_EVENT, {
+        reason: NOTIFY_ONLY_DELETE_REASON,
+        alreadyGone: outcome === 'already_gone',
+      });
+      return;
+    } catch (err) {
+      logger.warn('voicemail-status: notify-only Twilio copy delete failed', {
+        tenantId: rec.tenantId,
+        callSid: rec.callSid,
+        recordingSid: rec.recordingSid,
+        // The deleter's messages are already scrubbed of credentials.
+        error: err instanceof Error ? err.message : String(err),
+      });
+      reason = 'delete_failed';
+    }
+  }
+
+  // A replayed callback finds its record already there: nothing new to count.
+  let recorded = false;
+  if (deps.webhookEventRepo) {
+    try {
+      const receipt = await deps.webhookEventRepo.recordReceipt(
+        TWILIO_ORPHANED_COPY_PROVIDER,
+        `${rec.tenantId}:${rec.recordingSid}`,
+        'voicemail_twilio_copy_orphaned',
+        {
+          tenantId: rec.tenantId,
+          callSid: rec.callSid,
+          recordingSid: rec.recordingSid,
+          ...(rec.recordingUrl ? { recordingUrl: rec.recordingUrl } : {}),
+          reason,
+        },
+      );
+      if (!receipt.inserted) {
+        logger.info('voicemail-status: orphaned Twilio copy already recorded', {
+          tenantId: rec.tenantId,
+          recordingSid: rec.recordingSid,
+        });
+        return;
+      }
+      recorded = true;
+    } catch (err) {
+      logger.error('voicemail-status: orphaned Twilio copy record failed', {
+        tenantId: rec.tenantId,
+        recordingSid: rec.recordingSid,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+  voicemailTwilioCopyOrphanedTotal.inc({ reason });
+  logger.error('voicemail-status: Twilio copy left at Twilio (notify-only) — delete it once credentials exist', {
+    tenantId: rec.tenantId,
+    callSid: rec.callSid,
+    recordingSid: rec.recordingSid,
+    reason,
+    recorded,
+  });
+  await auditTwilioCopy(deps.auditRepo, rec, 'voicemail.twilio_copy_orphaned', { reason, recorded });
 }
 
 /** First string value of a possibly-array express query param. */
@@ -481,6 +644,11 @@ export function createVoicemailStatusRouter(
         recordingSid,
         hasRecordingUrl: Boolean(recordingUrl),
       });
+      await settleNotifyOnlyTwilioCopy(
+        { tenantId, callSid, recordingSid, recordingUrl, leadId },
+        deps,
+        options.twilioRecordingDeleter,
+      );
       res.status(200).send('OK');
       return;
     }
