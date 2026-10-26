@@ -45,7 +45,7 @@ function makeHarness(delta?: Record<string, unknown>) {
       findByTenant: async () => ({ ownerPhone: '+15125550100', escalationSettings: {} }),
     } as unknown as SettingsRepository,
     smsEventRepo: new InMemoryProposalSmsEventRepository(),
-    ...(delta ? { editInterpreter: async () => delta } : {}),
+    ...(delta ? { editInterpreter: async () => ({ delta }) } : {}),
   };
   return { deps, proposalRepo, auditRepo };
 }

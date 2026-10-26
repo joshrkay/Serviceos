@@ -205,12 +205,12 @@ describe('Postgres integration — 9.4 Google reviews: customer matching against
       lastFetchedAt: new Date(),
     };
 
-    const proposal = await buildReviewResponseProposal(review, {
+    const { payload: proposal } = await buildReviewResponseProposal(review, {
       llmGateway: {} as unknown as LLMGateway,
       customerLoader,
       brandVoiceLoader: new NoopBrandVoiceLoader(),
       serviceCreditRepo: new InMemoryServiceCreditRepository(),
-      draftPublic: async () => 'PUBLIC_DRAFT',
+      draftPublic: async () => ({ text: 'PUBLIC_DRAFT' }),
       draftPrivate: async () => 'PRIVATE_DRAFT',
     });
 

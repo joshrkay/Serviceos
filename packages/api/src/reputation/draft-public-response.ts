@@ -42,6 +42,18 @@ export interface DraftPublicResponseInput {
 
 export interface DraftPublicResponseDeps {
   llmGateway: LLMGateway;
+  /** OBS-2 — the run's join keys; see `ClassifyReviewDeps.runMetadata`. */
+  runMetadata?: Record<string, unknown>;
+}
+
+export interface DraftPublicResponseResult {
+  /** The redacted reply text. */
+  text: string;
+  /**
+   * OBS-2 — the ai_runs row that authored `text`, when the gateway persisted
+   * one. The review response proposal links it (`proposals.ai_run_id`).
+   */
+  aiRunId?: string;
 }
 
 const CLASSIFICATION_GUIDANCE: Record<Classification, string> = {
@@ -94,12 +106,12 @@ function buildUserPrompt(
 /**
  * Compose a public-facing reply draft. Returns the redacted draft text
  * (already safe to display + safe to POST to Google verbatim, modulo
- * the owner's edits at approval time).
+ * the owner's edits at approval time) and the run that wrote it.
  */
 export async function draftPublicResponse(
   input: DraftPublicResponseInput,
   deps: DraftPublicResponseDeps,
-): Promise<string> {
+): Promise<DraftPublicResponseResult> {
   const rawComment = (input.review.commentText ?? '').trim();
   // INPUT redaction. Strip PII before the model sees it so the
   // provider's context never holds raw personal data — even on a
@@ -126,6 +138,7 @@ export async function draftPublicResponse(
       { role: 'user', content: userPrompt },
     ],
     tenantId: input.review.tenantId,
+    ...(deps.runMetadata ? { metadata: deps.runMetadata } : {}),
   });
 
   // OUTPUT redaction. Defense in depth: even if the model leaked PII
@@ -133,9 +146,9 @@ export async function draftPublicResponse(
   // redactor catches it before the text reaches the owner-review
   // pane. `preserveKnownFirstNames` intentionally empty — the public
   // reply must NEVER address the customer by first name.
-  const draft = redactPiiRepeatedly(response.content.trim(), {
+  const text = redactPiiRepeatedly(response.content.trim(), {
     preserveKnownFirstNames: [],
   });
 
-  return draft;
+  return { text, ...(response.aiRunId ? { aiRunId: response.aiRunId } : {}) };
 }

@@ -1267,7 +1267,7 @@ describe('InAppVoiceAdapter', () => {
         classifier: async () =>
           ({ classification: 'vague_complaint', confidence: 1, source: 'regex' }) as never,
         matcher: async () => null,
-        draftPublic: vi.fn(async () => publicText),
+        draftPublic: vi.fn(async () => ({ text: publicText })),
       };
     }
 
@@ -1289,11 +1289,8 @@ describe('InAppVoiceAdapter', () => {
       };
       await reviewRepo.upsert(theReview);
 
-      const respondToReviewTaskHandler = new RespondToReviewTaskHandler(
-        proposalRepo,
-        reviewRepo,
-        draftDeps('We are sorry to hear this — please reach out so we can make it right.'),
-      );
+      const deps = draftDeps('We are sorry to hear this — please reach out so we can make it right.');
+      const respondToReviewTaskHandler = new RespondToReviewTaskHandler(proposalRepo, reviewRepo, deps);
 
       const gateway = scriptedGateway([
         JSON.stringify({
@@ -1310,7 +1307,9 @@ describe('InAppVoiceAdapter', () => {
         onCallRepo,
         respondToReviewTaskHandler,
       });
-      const { sessionId } = await adapter.startSession(TENANT, USER);
+      // A session opened from a conversation: the draft still rides the
+      // CALL's key (the classifier's), and the card keeps the conversation.
+      const { sessionId } = await adapter.startSession(TENANT, USER, 'conv-a46');
       // Turn 1: intent resolves and parks at the readback (intent_confirm) —
       // no proposal without caller confirmation, same as every other intent.
       const readback = await adapter.handleInput(sessionId, 'Reply to the 1-star review from yesterday');
@@ -1326,6 +1325,13 @@ describe('InAppVoiceAdapter', () => {
       expect(publicResponse?.text).toBe(
         'We are sorry to hear this — please reach out so we can make it right.',
       );
+      // OBS-2 — the draft's runs are keyed to this call (the classifier's key
+      // on a call), not the conversation and not a random correlation id.
+      expect(deps.draftPublic).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ runMetadata: { correlationId: sessionId, sessionId } }),
+      );
+      expect(stored?.sourceContext?.conversationId).toBe('conv-a46');
     });
 
     it('gates honestly to a voice_clarification (never a broken review_response_proposal) when the drafting dep is not wired', async () => {

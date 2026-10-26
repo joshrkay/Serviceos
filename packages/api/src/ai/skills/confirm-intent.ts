@@ -18,6 +18,7 @@
  */
 
 import { LLMGateway } from '../gateway/gateway';
+import { classifierRunMetadata } from '../orchestration/intent-classifier';
 import { TtsProvider } from '../tts/tts-provider';
 import { t, type Language } from '../i18n/i18n';
 import { buildUntrustedContentSection, UNTRUSTED_FENCE_MARKERS_DESCRIPTION } from '../untrusted-content';
@@ -48,6 +49,13 @@ export interface ConfirmIntentInput {
   ttsProvider?: TtsProvider;
   /** P11-002: spoken-readback language. Defaults to 'en'. */
   language?: Language;
+  /**
+   * OBS-2 — the voice session (and Twilio CallSid) this answer was given on.
+   * The yes/no run is keyed to it (`classifierRunMetadata`) like the call's
+   * classify and drafting runs. Metadata only — never in the prompt.
+   */
+  sessionId?: string;
+  callSid?: string;
 }
 
 export interface ConfirmIntentResult {
@@ -140,7 +148,10 @@ ${buildUntrustedContentSection(callerResponse, "Caller's response to the readbac
     ],
     responseFormat: 'json',
     temperature: 0,
-    metadata: { tenantId, skill: 'confirm_intent' },
+    metadata: {
+      ...classifierRunMetadata({ tenantId, sessionId: input.sessionId, callSid: input.callSid }),
+      skill: 'confirm_intent',
+    },
   });
 
   const classification = parseYesNo(response.content);

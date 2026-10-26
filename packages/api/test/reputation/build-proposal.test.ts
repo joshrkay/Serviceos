@@ -43,7 +43,7 @@ function fakeClassifier(result: ClassificationResult) {
 }
 
 function fakeDraftPublic(text: string) {
-  return vi.fn(async () => text);
+  return vi.fn(async () => ({ text }));
 }
 
 function fakeDraftPrivate(body: string) {
@@ -60,7 +60,7 @@ const stubCustomerLoader = {
 describe('P7-026 buildReviewResponseProposal', () => {
   describe('public response is ALWAYS drafted', () => {
     it('praise + no match → public only', async () => {
-      const result = await buildReviewResponseProposal(
+      const { payload: result } = await buildReviewResponseProposal(
         makeReview({ rating: 5, commentText: 'Great service!' }),
         {
           llmGateway: stubGateway,
@@ -90,7 +90,7 @@ describe('P7-026 buildReviewResponseProposal', () => {
   describe('match + complaint → 3 components, cap allows', () => {
     it('specific 1★ + match + zero prior credit → all 3 components, credit $100', async () => {
       const repo = new InMemoryServiceCreditRepository();
-      const result = await buildReviewResponseProposal(makeReview({ rating: 1 }), {
+      const { payload: result } = await buildReviewResponseProposal(makeReview({ rating: 1 }), {
         llmGateway: stubGateway,
         customerLoader: stubCustomerLoader,
         brandVoiceLoader: new NoopBrandVoiceLoader(),
@@ -119,7 +119,7 @@ describe('P7-026 buildReviewResponseProposal', () => {
     });
 
     it('vague 1★ + match → public + private + $50 credit', async () => {
-      const result = await buildReviewResponseProposal(
+      const { payload: result } = await buildReviewResponseProposal(
         makeReview({ rating: 1, commentText: 'Bad.' }),
         {
           llmGateway: stubGateway,
@@ -154,7 +154,7 @@ describe('P7-026 buildReviewResponseProposal', () => {
         proposalId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
       });
 
-      const result = await buildReviewResponseProposal(makeReview({ rating: 1 }), {
+      const { payload: result } = await buildReviewResponseProposal(makeReview({ rating: 1 }), {
         llmGateway: stubGateway,
         customerLoader: stubCustomerLoader,
         brandVoiceLoader: new NoopBrandVoiceLoader(),
@@ -185,7 +185,7 @@ describe('P7-026 buildReviewResponseProposal', () => {
         reviewId: null,
         proposalId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
       });
-      const result = await buildReviewResponseProposal(makeReview({ rating: 3 }), {
+      const { payload: result } = await buildReviewResponseProposal(makeReview({ rating: 3 }), {
         llmGateway: stubGateway,
         customerLoader: stubCustomerLoader,
         brandVoiceLoader: new NoopBrandVoiceLoader(),
@@ -206,7 +206,7 @@ describe('P7-026 buildReviewResponseProposal', () => {
 
   describe('no matched customer → public only', () => {
     it('1★ complaint with NO match → public only (no private, no credit)', async () => {
-      const result = await buildReviewResponseProposal(makeReview({ rating: 1 }), {
+      const { payload: result } = await buildReviewResponseProposal(makeReview({ rating: 1 }), {
         llmGateway: stubGateway,
         customerLoader: stubCustomerLoader,
         brandVoiceLoader: new NoopBrandVoiceLoader(),
@@ -247,7 +247,7 @@ describe('P7-026 buildReviewResponseProposal', () => {
 
   describe('default approved flags', () => {
     it('all approved flags default to false (owner must explicitly approve)', async () => {
-      const result = await buildReviewResponseProposal(makeReview({ rating: 1 }), {
+      const { payload: result } = await buildReviewResponseProposal(makeReview({ rating: 1 }), {
         llmGateway: stubGateway,
         customerLoader: stubCustomerLoader,
         brandVoiceLoader: new NoopBrandVoiceLoader(),
@@ -270,7 +270,7 @@ describe('P7-026 buildReviewResponseProposal', () => {
   describe('praise + matched customer → public + private, no credit', () => {
     it('5★ praise + match → public + private, credit is null (praise tier is $0)', async () => {
       const repo = new InMemoryServiceCreditRepository();
-      const result = await buildReviewResponseProposal(makeReview({ rating: 5 }), {
+      const { payload: result } = await buildReviewResponseProposal(makeReview({ rating: 5 }), {
         llmGateway: stubGateway,
         customerLoader: stubCustomerLoader,
         brandVoiceLoader: new NoopBrandVoiceLoader(),
@@ -293,7 +293,7 @@ describe('P7-026 buildReviewResponseProposal', () => {
   describe('payload shape passes shared Zod schema', () => {
     it('produced payload is valid against reviewResponseProposalPayloadSchema', async () => {
       const { reviewResponseProposalPayloadSchema } = await import('@ai-service-os/shared');
-      const payload = await buildReviewResponseProposal(makeReview({ rating: 1 }), {
+      const { payload } = await buildReviewResponseProposal(makeReview({ rating: 1 }), {
         llmGateway: stubGateway,
         customerLoader: stubCustomerLoader,
         brandVoiceLoader: new NoopBrandVoiceLoader(),

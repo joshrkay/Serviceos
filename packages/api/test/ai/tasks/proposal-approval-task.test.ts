@@ -1343,7 +1343,7 @@ function makeEditHarness(opts: {
   const sent: { to: string; body: string }[] = [];
   const interpreter: ProposalEditInterpreter = async ({ proposal, instruction }) => {
     interpreterCalls.push({ proposalId: proposal.id, instruction });
-    return opts.delta ?? null;
+    return opts.delta ? { delta: opts.delta } : null;
   };
   const deps: VoiceApprovalDeps = {
     proposalRepo,
@@ -1869,7 +1869,7 @@ describe('R2-2 — a voice edit recorded as a note keeps what landed while it ra
     });
     h.deps.editInterpreter = async () => {
       await pickLands(h.proposalRepo, proposal.id);
-      return { invoiceId: 'INV-1024' };
+      return { delta: { invoiceId: 'INV-1024' } };
     };
 
     const result = await startVoiceEdit(h.deps, { ...ref, reference: 'it', instruction: 'issue invoice 1024 instead' });
@@ -1902,7 +1902,7 @@ function makeBatchHarness(
   const auditRepo = new InMemoryAuditRepository();
   const smsEvents = new InMemoryProposalSmsEventRepository();
   const sent: { to: string; body: string }[] = [];
-  const interpreter: ProposalEditInterpreter = async () => opts.delta ?? null;
+  const interpreter: ProposalEditInterpreter = async () => (opts.delta ? { delta: opts.delta } : null);
   const deps: VoiceApprovalDeps = {
     proposalRepo,
     auditRepo,

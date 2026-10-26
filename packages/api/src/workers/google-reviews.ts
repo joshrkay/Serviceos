@@ -68,6 +68,7 @@ import {
   buildReviewResponseProposal,
 } from '../reputation/build-proposal';
 import { AuditRepository, createAuditEvent } from '../audit/audit';
+import { draftingRunLink } from '../ai/tasks/task-handlers';
 
 /** Actor recorded on this sweep's audit rows — no human is in the loop. */
 const GOOGLE_REVIEWS_ACTOR = 'system:google-reviews-worker';
@@ -341,14 +342,20 @@ export async function runGoogleReviewsSweep(
             // wiring site logs a one-shot "ingestion-only" warning).
             if (deps.proposalEmission) {
               try {
-                const payload = await buildReviewResponseProposal(
+                const draft = await buildReviewResponseProposal(
                   persistedReview,
                   deps.proposalEmission.buildProposalDeps,
+                  // OBS-2 — no call or conversation behind a polled review:
+                  // every run in its draft is keyed to the review row's id,
+                  // which the proposal carries as targetEntityId and
+                  // payload.reviewId. "Every AI run behind this review
+                  // response" is then one keyed query from the proposal.
+                  { runMetadata: { correlationId: persistedReview.id } },
                 );
                 const proposal = createProposal({
                   tenantId: persistedReview.tenantId,
                   proposalType: 'review_response_proposal',
-                  payload: payload as unknown as Record<string, unknown>,
+                  payload: draft.payload as unknown as Record<string, unknown>,
                   summary: summarizeReviewProposal(persistedReview),
                   createdBy: 'system:google-reviews-worker',
                   targetEntityType: 'review',
@@ -361,6 +368,9 @@ export async function runGoogleReviewsSweep(
                   // suspenders against duplicate proposal creation
                   // via any future retry path.
                   idempotencyKey: `review-response:${persistedReview.id}`,
+                  // The run that wrote the public reply (none when the
+                  // gateway persisted no row — the FK needs a real one).
+                  ...draftingRunLink(draft),
                 });
                 await deps.proposalEmission.proposalRepo.create(proposal);
                 proposalsEmitted++;

@@ -75,7 +75,7 @@ describe('P7-026 draft-public-response', () => {
     const { gateway } = makeMockGateway(
       'Thanks! Reach me at owner@example.com if you have questions.',
     );
-    const out = await draftPublicResponse(
+    const { text: out } = await draftPublicResponse(
       {
         review: makeReview(),
         classification: 'praise',
@@ -91,7 +91,7 @@ describe('P7-026 draft-public-response', () => {
     const { gateway } = makeMockGateway(
       'Sorry — call us at (555) 123-4567 to make this right.',
     );
-    const out = await draftPublicResponse(
+    const { text: out } = await draftPublicResponse(
       {
         review: makeReview({ rating: 1 }),
         classification: 'specific_complaint',
@@ -217,7 +217,7 @@ describe('P7-026 draft-public-response — abutting PII survives a single redact
     const { gateway } = makeMockGateway(
       'Thanks! Reach me at x@y.io4155552671foo@bar.com or call.',
     );
-    const out = await draftPublicResponse(
+    const { text: out } = await draftPublicResponse(
       {
         review: makeReview(),
         classification: 'praise',

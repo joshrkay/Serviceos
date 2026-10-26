@@ -2,7 +2,7 @@ import { WorkerHandler, QueueMessage } from '../queues/queue';
 import type { FeasibilityDependencies } from '../scheduling/feasibility-types';
 import { Logger } from '../logging/logger';
 import { LLMGateway } from '../ai/gateway/gateway';
-import { Proposal, ProposalRepository, createProposal, CreateProposalInput, ProposalType, actionClassForProposalType } from '../proposals/proposal';
+import { Proposal, ProposalRepository, createProposal, ProposalType, actionClassForProposalType } from '../proposals/proposal';
 import { assertValidProposalPayload } from '../proposals/contracts';
 import { INTENT_TO_PROPOSAL_TYPE } from '../proposals/voice-intent-map';
 import { isSupervisorPresent } from '../ai/supervisor-presence';
@@ -1307,6 +1307,9 @@ async function processSegment(
       // U10 — the memo's conversation groups its segment classifies as one
       // trace session (metadata only; prompt unchanged).
       ...(conversationId ? { sessionId: conversationId } : {}),
+      // OBS-2 — a memo with no conversation keys its classify run to the
+      // recording, as `draftingRunMetadata` keys the memo's drafting run.
+      ...(!conversationId && recordingId ? { correlationId: recordingId } : {}),
       ...(params.verticalPromptSection ? { verticalPromptSection: params.verticalPromptSection } : {}),
       // Owner extended lookups — opt-in only (cassette stability).
       ...(params.extendedIntents ? { extendedIntents: true } : {}),
