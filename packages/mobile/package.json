@@ -18,7 +18,7 @@
     "e2e:viewport": "EXPO_PUBLIC_API_URL=${EXPO_PUBLIC_API_URL:-http://api.e2e.invalid} EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY=${EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY:-pk_test_Y2xlcmsuZTJlLmludmFsaWQk} npm run export:web -- --clear && playwright test --config playwright.config.ts"
   },
   "dependencies": {
-    "@clerk/expo": "^4.14.0",
+    "@clerk/expo": "^4.14.4",
     "@expo-google-fonts/bricolage-grotesque": "^0.4.1",
     "@expo-google-fonts/hanken-grotesk": "^0.4.3",
     "@expo/metro-runtime": "~57.0.17",
@@ -35,7 +35,7 @@
     "expo-font": "~57.0.4",
     "expo-linking": "~57.0.13",
     "expo-location": "~57.0.22",
-    "expo-notifications": "~57.0.23",
+    "expo-notifications": "~57.0.24",
     "expo-router": "~57.0.29",
     "expo-secure-store": "~57.0.4",
     "expo-splash-screen": "~57.0.10",
