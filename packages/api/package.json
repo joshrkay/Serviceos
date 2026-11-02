@@ -62,7 +62,7 @@
     "ioredis": "^6.0.0",
     "langfuse": "^3.39.2",
     "luxon": "^3.7.2",
-    "openai": "^4.0.0",
+    "openai": "6.7.0",
     "pg": "^8.23.1",
     "posthog-node": "^5.55.0",
     "prom-client": "^15.1.3",
