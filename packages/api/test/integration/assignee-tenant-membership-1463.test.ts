@@ -101,9 +101,12 @@ describe('Postgres integration — assignee must be an active tenant member (#14
     return jobId;
   }
 
-  /** A fresh, non-overlapping one-hour window per call. */
+  /**
+   * Future, non-overlapping one-hour windows keep the past-start guard from
+   * masking the membership checks this suite exercises.
+   */
   function nextWindow(): { scheduledStart: string; scheduledEnd: string } {
-    const start = new Date(Date.UTC(2026, 10, 2, 0, 0) + slot++ * 2 * 3600_000);
+    const start = new Date(Date.now() + (24 + slot++ * 2) * 3600_000);
     return {
       scheduledStart: start.toISOString(),
       scheduledEnd: new Date(start.getTime() + 3600_000).toISOString(),
