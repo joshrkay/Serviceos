@@ -77,6 +77,7 @@ import {
   TWILIO_MEDIA_STREAMS_SURFACE,
   type ConnectionRegistry,
 } from '../ws/connection-registry';
+import { demoLimitReachedTwiml, type DemoInboundGuard } from '../demo/inbound-limits';
 
 const logger = createLogger({
   service: 'routes.telephony',
@@ -237,6 +238,16 @@ export interface TelephonyRouterDeps {
    * behavior: the global flag alone decides).
    */
   realtimePrerequisitesMet?: () => boolean;
+  /**
+   * The public demo line's caps (`demo/inbound-limits.ts`), asked right
+   * before the voice gate. A call to a demo tenant over a cap hears the
+   * "demo limit reached" message and is hung up; one inside the caps skips
+   * the voice gate (a demo tenant has no billing for it to check, so it
+   * would send every call to voicemail) and is answered. Every other
+   * tenant's call is untouched and goes through the gate exactly as before.
+   * When unset, /voice behaves as it did before the demo line existed.
+   */
+  demoInbound?: Pick<DemoInboundGuard, 'check'>;
   /**
    * §10 onboarding — optional pre-flight gate run after tenant
    * resolution and before AI routing. Composes the subscription
@@ -572,6 +583,32 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
       }
     }
 
+    // The public demo line: its own caps stand in for the voice gate below,
+    // for demo tenants only. A failure of the guard itself is not a pass — the
+    // call carries on as an ordinary one, and the gate blocks an unbilled
+    // demo tenant (no_billing → voicemail), so it can never grant the bypass.
+    let demoCall = false;
+    if (deps.demoInbound) {
+      try {
+        const verdict = await deps.demoInbound.check({ tenantId, from });
+        if (verdict.demo && !verdict.allowed) {
+          logger.info('telephony/voice: demo line cap reached — playing the limit message', {
+            callSid,
+            tenantId,
+            reason: verdict.reason,
+          });
+          res.status(200).type('text/xml').send(demoLimitReachedTwiml());
+          return;
+        }
+        demoCall = verdict.demo;
+      } catch (err) {
+        logger.warn('telephony/voice: demo guard failed — treating as an ordinary call', {
+          callSid,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
     // §10 voice gates — subscription, go-live, usage caps. Voicemail on a
     // setup block; usage caps ring the owner first (forwardToOwnerTwiml).
     // An answer carries the business hours and the after-hours mode from the
@@ -579,7 +616,7 @@ export function createTelephonyRouter(deps: TelephonyRouterDeps): Router {
     // after-hours fork below.
     let gateBusinessHours: BusinessHoursConfig | null | undefined;
     let gateAfterHoursVoiceMode: EscalationSettings['after_hours_voice_mode'];
-    if (deps.voiceGate) {
+    if (deps.voiceGate && !demoCall) {
       // Point at /recording, NOT /voicemail-status. Only /recording actually
       // persists: it downloads RecordingUrl, uploads to storage and inserts
       // the files + voice_recordings rows, which is what makes the audio

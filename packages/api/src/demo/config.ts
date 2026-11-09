@@ -112,6 +112,53 @@ export function loadDemoConfig(
 }
 
 /**
+ * The public demo line's caps (inbound calls to a demo tenant's number; see
+ * `inbound-limits.ts`). Separate from {@link DemoSettings} on purpose: a bad
+ * value here closes only the inbound demo line, never the outbound demo call.
+ */
+export interface DemoInboundLimits {
+  /** `DEMO_INBOUND_PER_CALLER_DAILY`: calls one caller (Twilio `From`) gets per trailing 24 h (default 3). */
+  perCallerDaily: number;
+  /** `DEMO_INBOUND_DAILY_TOTAL`: calls the whole line takes per trailing 24 h (default 50). */
+  dailyTotal: number;
+  /** `DEMO_INBOUND_MAX_SECONDS`: the longest one call may run (default 180). */
+  maxCallSeconds: number;
+}
+
+export type DemoInboundConfig =
+  | Readonly<{ open: true; limits: Readonly<DemoInboundLimits> }>
+  | Readonly<{ open: false; reason: string }>;
+
+/** The default per-call limit, also what a demo tenant gets if the config is malformed. */
+export const DEFAULT_DEMO_INBOUND_MAX_SECONDS = 180;
+
+/**
+ * Read the inbound caps once, at boot. A missing value takes its default; a
+ * malformed, zero, negative or fractional one closes the inbound demo line
+ * (every demo call is refused with the "demo limit reached" message) with one
+ * error log, and the rest of the app boots normally. Real tenants are never
+ * affected either way.
+ */
+export function loadDemoInboundConfig(
+  env: Record<string, string | undefined> = process.env,
+  logger?: { error(msg: string, ctx?: Record<string, unknown>): void },
+): DemoInboundConfig {
+  let limits: DemoInboundLimits;
+  try {
+    limits = {
+      perCallerDaily: positiveInt('DEMO_INBOUND_PER_CALLER_DAILY', env.DEMO_INBOUND_PER_CALLER_DAILY, 3),
+      dailyTotal: positiveInt('DEMO_INBOUND_DAILY_TOTAL', env.DEMO_INBOUND_DAILY_TOTAL, 50),
+      maxCallSeconds: positiveInt('DEMO_INBOUND_MAX_SECONDS', env.DEMO_INBOUND_MAX_SECONDS, DEFAULT_DEMO_INBOUND_MAX_SECONDS),
+    };
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    logger?.error('demo inbound line closed: bad configuration', { reason });
+    return Object.freeze({ open: false as const, reason });
+  }
+  return Object.freeze({ open: true as const, limits: Object.freeze(limits) });
+}
+
+/**
  * `shared/config.ts` accepts both `production` and `prod` as the production
  * environment; the seed script refuses in either unless the switch is on.
  */

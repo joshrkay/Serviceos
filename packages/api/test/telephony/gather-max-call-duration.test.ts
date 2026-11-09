@@ -37,7 +37,12 @@ function makeGateway(): LLMGateway {
   } as unknown as LLMGateway;
 }
 
-function makeHarness(opts: { maxCallDurationMs?: number } = {}) {
+function makeHarness(
+  opts: {
+    maxCallDurationMs?: number;
+    maxCallDurationMsForTenant?: (tenantId: string) => Promise<number | undefined>;
+  } = {},
+) {
   const store = new VoiceSessionStore({ startInterval: false });
   const gateway = makeGateway();
   const adapter = new TwilioGatherAdapter({
@@ -46,6 +51,9 @@ function makeHarness(opts: { maxCallDurationMs?: number } = {}) {
     businessName: 'Acme Plumbing',
     publicBaseUrl: 'https://example.com',
     ...(opts.maxCallDurationMs !== undefined ? { maxCallDurationMs: opts.maxCallDurationMs } : {}),
+    ...(opts.maxCallDurationMsForTenant
+      ? { maxCallDurationMsForTenant: opts.maxCallDurationMsForTenant }
+      : {}),
   });
   return { adapter, store, gateway };
 }
@@ -54,12 +62,13 @@ async function startCall(
   h: ReturnType<typeof makeHarness>,
   callSid: string,
   ageMs: number,
+  tenantId: string = TENANT,
 ): Promise<string> {
   await h.adapter.handleInbound({
     callSid,
     from: '+15125557788',
     to: '+15125550000',
-    tenantId: TENANT,
+    tenantId,
   });
   const session = h.store.findByCallSid(callSid)!;
   // Backdate the session so the next Gather turn sees a call of age `ageMs`.
@@ -215,6 +224,99 @@ describe('U5 Gather max call duration', () => {
       expect(session.terminalReason).toBe('low_stt_confidence_max_retries');
       expect(runSummary).toHaveBeenCalledTimes(1);
       expect(runSummary).toHaveBeenCalledWith(session);
+    });
+  });
+
+  // The public demo line: a per-tenant limit tightens the process-wide cap for
+  // the demo tenant only. A real tenant on the same adapter keeps the cap it
+  // always had.
+  describe('per-tenant limit (demo line)', () => {
+    const DEMO_TENANT = 't-demo-line';
+    const DEMO_LIMIT_MS = 3 * MINUTE_MS;
+    const forTenant = async (tenantId: string) => (tenantId === DEMO_TENANT ? DEMO_LIMIT_MS : undefined);
+
+    it('ends a demo-tenant call at its own limit, well under the 15-minute default', async () => {
+      const h = makeHarness({ maxCallDurationMsForTenant: forTenant });
+      spyRunSummary(h.adapter);
+      const sessionId = await startCall(h, 'CA-demo-g1', DEMO_LIMIT_MS + 1_000, DEMO_TENANT);
+
+      const twiml = await h.adapter.handleGather({
+        sessionId,
+        callSid: 'CA-demo-g1',
+        speechResult: 'one more question',
+        confidence: 0.9,
+        tenantId: DEMO_TENANT,
+      });
+
+      expect(twiml).toContain('<Hangup/>');
+      expect(h.store.get(sessionId)!.terminalReason).toBe('max_call_duration');
+    });
+
+    it('lets a demo-tenant call continue until its limit', async () => {
+      const h = makeHarness({ maxCallDurationMsForTenant: forTenant });
+      const sessionId = await startCall(h, 'CA-demo-g2', DEMO_LIMIT_MS - 5_000, DEMO_TENANT);
+
+      const twiml = await h.adapter.handleGather({
+        sessionId,
+        callSid: 'CA-demo-g2',
+        speechResult: 'hello again',
+        confidence: 0.9,
+        tenantId: DEMO_TENANT,
+      });
+
+      expect(twiml).toContain('<Gather');
+      expect(h.store.get(sessionId)!.ended).toBe(false);
+    });
+
+    it('does not cut a real tenant at the demo limit', async () => {
+      const h = makeHarness({ maxCallDurationMsForTenant: forTenant });
+      const sessionId = await startCall(h, 'CA-demo-g3', DEMO_LIMIT_MS + 60_000, TENANT);
+
+      const twiml = await h.adapter.handleGather({
+        sessionId,
+        callSid: 'CA-demo-g3',
+        speechResult: 'still here',
+        confidence: 0.9,
+        tenantId: TENANT,
+      });
+
+      expect(twiml).toContain('<Gather');
+      expect(h.store.get(sessionId)!.ended).toBe(false);
+    });
+
+    it('never loosens the process-wide cap', async () => {
+      const h = makeHarness({ maxCallDurationMs: MINUTE_MS, maxCallDurationMsForTenant: forTenant });
+      spyRunSummary(h.adapter);
+      const sessionId = await startCall(h, 'CA-demo-g4', MINUTE_MS + 1_000, DEMO_TENANT);
+
+      const twiml = await h.adapter.handleGather({
+        sessionId,
+        callSid: 'CA-demo-g4',
+        speechResult: 'hi',
+        confidence: 0.9,
+        tenantId: DEMO_TENANT,
+      });
+
+      expect(twiml).toContain('<Hangup/>');
+    });
+
+    it('falls back to the process-wide cap when the resolver throws', async () => {
+      const resolver = vi.fn(async (_tenantId: string): Promise<number | undefined> => {
+        throw new Error('db down');
+      });
+      const h = makeHarness({ maxCallDurationMsForTenant: resolver });
+      const sessionId = await startCall(h, 'CA-demo-g5', 10 * MINUTE_MS, DEMO_TENANT);
+
+      const twiml = await h.adapter.handleGather({
+        sessionId,
+        callSid: 'CA-demo-g5',
+        speechResult: 'hi',
+        confidence: 0.9,
+        tenantId: DEMO_TENANT,
+      });
+
+      expect(resolver).toHaveBeenCalledWith(DEMO_TENANT);
+      expect(twiml).toContain('<Gather');
     });
   });
 });

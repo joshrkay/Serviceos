@@ -185,6 +185,12 @@ export interface TwilioAdapterDeps {
    */
   maxCallDurationMs?: number;
   /**
+   * A per-tenant limit (ms) that can only TIGHTEN `maxCallDurationMs`: the
+   * public demo line's 3 minutes (`demo/inbound-limits.ts`). Undefined = no
+   * override for this tenant. Failure-soft: a throw leaves the process-wide cap.
+   */
+  maxCallDurationMsForTenant?: (tenantId: string) => Promise<number | undefined>;
+  /**
    * U4 — per-turn vulnerability triage on the Gather/PSTN path. Fired
    * fire-and-forget after the deterministic safety scan, symmetric to the
    * media-streams adapter. Gated inside the hook by the per-tenant
@@ -3237,7 +3243,17 @@ export class TwilioGatherAdapter {
     // #1601 step 2 — limit, lead, copy and terminal reason are the shared
     // cap's (`ai/voice-turn/shared/max-call-duration.ts`); Gather owns the
     // per-turn age check, the TwiML and the terminal finalize.
-    const limitMs = resolveMaxCallDurationMs(this.deps.maxCallDurationMs);
+    // A tenant limit that cannot be read leaves the process-wide cap in force.
+    // (Event-name log, not a sentence: this file's spoken-copy guard reads any
+    // 3-word literal with punctuation as copy.)
+    const tenantLimitMs = await this.deps.maxCallDurationMsForTenant?.(session.tenantId).catch((err: unknown) => {
+      logger.warn('handleGather.tenant_max_call_duration_unavailable', {
+        sessionId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return undefined;
+    });
+    const limitMs = resolveMaxCallDurationMs(this.deps.maxCallDurationMs, tenantLimitMs);
     const now = Date.now();
     if (!hasReachedMaxCallDuration(session, limitMs, now)) return null;
 

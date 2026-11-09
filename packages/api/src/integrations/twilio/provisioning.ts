@@ -21,6 +21,11 @@ const STATE_AREA_CODE: Record<string, string> = {
   VA: '703', WA: '206', WV: '304', WI: '414', WY: '307', DC: '202',
 };
 
+/** The area code normal provisioning searches first for a US state, or undefined for an unknown region. */
+export function areaCodeForRegion(region: string): string | undefined {
+  return STATE_AREA_CODE[region.toUpperCase()];
+}
+
 function basicAuth(sid: string, token: string): string {
   return 'Basic ' + Buffer.from(`${sid}:${token}`).toString('base64');
 }
@@ -212,7 +217,7 @@ export async function purchasePhoneNumber(
   let phoneToOrder: string | null = preferredNumber ?? null;
 
   if (!phoneToOrder) {
-    const areaCode = region ? STATE_AREA_CODE[region.toUpperCase()] : null;
+    const areaCode = region ? areaCodeForRegion(region) : null;
     const firstAvailable = async (ac?: string): Promise<string | null> => {
       const found = await searchAvailableNumbers(subaccountSid, authToken, {
         ...(ac ? { areaCode: ac } : {}),

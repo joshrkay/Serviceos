@@ -33,6 +33,16 @@ describe('max call duration (shared)', () => {
     expect(resolveMaxCallDurationMs(2 * MINUTE_MS)).toBe(2 * MINUTE_MS);
   });
 
+  it('a per-tenant limit tightens the cap, and never loosens it', () => {
+    // The demo line's 3 minutes under the default 15-minute cap...
+    expect(resolveMaxCallDurationMs(undefined, 3 * MINUTE_MS)).toBe(3 * MINUTE_MS);
+    // ...and under a configured cap shorter than the tenant's own.
+    expect(resolveMaxCallDurationMs(MINUTE_MS, 3 * MINUTE_MS)).toBe(MINUTE_MS);
+    // No tenant limit leaves the process-wide cap exactly as it was.
+    expect(resolveMaxCallDurationMs(2 * MINUTE_MS, undefined)).toBe(2 * MINUTE_MS);
+    expect(resolveMaxCallDurationMs(undefined, undefined)).toBe(15 * MINUTE_MS);
+  });
+
   it('a call is capped once its age reaches the limit', () => {
     const now = Date.now();
     const limit = 2 * MINUTE_MS;

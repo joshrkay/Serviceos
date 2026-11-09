@@ -258,6 +258,15 @@ export interface MediaStreamAdapterDeps {
    * ({@link DEFAULT_MAX_CALL_DURATION_MS}).
    */
   maxCallDurationMs?: number;
+  /**
+   * A per-tenant limit (ms) that can only TIGHTEN `maxCallDurationMs`: the
+   * public demo line's 3 minutes (`demo/inbound-limits.ts`). The cap above is
+   * armed when the socket opens, before the Twilio `start` frame names the
+   * tenant, so this is resolved at `handleStart` and re-arms the timers,
+   * measured from the socket opening. Undefined = no override for this
+   * tenant. Failure-soft: a throw leaves the process-wide cap in place.
+   */
+  maxCallDurationMsForTenant?: (tenantId: string) => Promise<number | undefined>;
   /** T2-F05 — caller-silence reprompt window after an agent turn ends (ms). Default 8 s. */
   silenceRepromptTimeoutMs?: number;
   /**
@@ -663,6 +672,8 @@ interface RuntimeState {
    */
   maxCallDurationWarnTimer: NodeJS.Timeout | null;
   maxCallDurationTimer: NodeJS.Timeout | null;
+  /** When the cap was first armed (the socket opening): a per-tenant limit counts from here. */
+  maxCallDurationOpenedAt: number;
   /**
    * U5 / PR #975 F3 — where the wrap-up line is in its lifecycle on this leg:
    *   'idle'     — not spoken yet (initial; also after the caller talked over it),
@@ -1261,6 +1272,7 @@ export class TwilioMediaStreamAdapter {
       audioIdleTimer: null,
       maxCallDurationWarnTimer: null,
       maxCallDurationTimer: null,
+      maxCallDurationOpenedAt: Date.now(),
       maxCallDurationWrapUp: 'idle',
       maxCallDurationWrapUpInFlight: null,
       maxCallDurationReached: false,
@@ -1512,6 +1524,7 @@ export class TwilioMediaStreamAdapter {
     this.state.callSid = callSid;
     this.state.accountSid = frame.start.accountSid ?? null;
     this.state.tenantId = session.tenantId;
+    this.applyTenantMaxCallDuration(session.tenantId);
 
     // Per-tenant connection cap. The /voice route already sends a tenant at
     // the cap to Gather; this is the backstop for the count-then-acquire race
@@ -4269,7 +4282,16 @@ export class TwilioMediaStreamAdapter {
   private armMaxCallDurationTimers(): void {
     // #1601 step 2 — limit and warning lead are the shared cap's; the leg
     // owns its two timers.
-    const limitMs = resolveMaxCallDurationMs(this.deps.maxCallDurationMs);
+    this.state.maxCallDurationOpenedAt = Date.now();
+    this.scheduleMaxCallDurationTimers(resolveMaxCallDurationMs(this.deps.maxCallDurationMs), 0);
+  }
+
+  /**
+   * Set the warn and cut timers for a `limitMs` cap of which `elapsedMs` has
+   * already run (0 when first armed). A warning point already passed speaks
+   * the wrap-up at once; a cut already due ends the leg at once.
+   */
+  private scheduleMaxCallDurationTimers(limitMs: number, elapsedMs: number): void {
     const unref = (t: NodeJS.Timeout) => {
       if (typeof t.unref === 'function') t.unref();
     };
@@ -4278,14 +4300,39 @@ export class TwilioMediaStreamAdapter {
       this.state.maxCallDurationWarnTimer = setTimeout(() => {
         this.state.maxCallDurationWarnTimer = null;
         void this.speakMaxCallDurationWrapUp();
-      }, warnDelayMs);
+      }, Math.max(0, warnDelayMs - elapsedMs));
       unref(this.state.maxCallDurationWarnTimer);
     }
     this.state.maxCallDurationTimer = setTimeout(() => {
       this.state.maxCallDurationTimer = null;
       void this.endForMaxCallDuration(limitMs);
-    }, limitMs);
+    }, Math.max(0, limitMs - elapsedMs));
     unref(this.state.maxCallDurationTimer);
+  }
+
+  /**
+   * The per-tenant limit (the public demo line's), applied once the tenant is
+   * known. Never awaited by `handleStart` — call setup must not wait on a
+   * tenant read — and never loosens the process-wide cap: it re-arms only
+   * when the tenant's limit is tighter.
+   */
+  private applyTenantMaxCallDuration(tenantId: string): void {
+    const resolve = this.deps.maxCallDurationMsForTenant;
+    if (!resolve) return;
+    void resolve(tenantId)
+      .then((tenantLimitMs) => {
+        if (tenantLimitMs === undefined || this.state.closed) return;
+        const limitMs = resolveMaxCallDurationMs(this.deps.maxCallDurationMs, tenantLimitMs);
+        if (limitMs >= resolveMaxCallDurationMs(this.deps.maxCallDurationMs)) return;
+        this.clearMaxCallDurationTimers();
+        this.scheduleMaxCallDurationTimers(limitMs, Date.now() - this.state.maxCallDurationOpenedAt);
+      })
+      .catch((err: unknown) => {
+        logger.warn('mediastream: tenant call-duration limit unavailable — using the process-wide cap', {
+          callSid: this.state.callSid,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
   }
 
   private clearMaxCallDurationTimers(): void {
