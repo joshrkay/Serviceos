@@ -3,10 +3,22 @@ on:
   push:
     branches: [main]
 
-# Serial pipeline: never cancel an in-flight deploy for a race to start a
-# new one. cancel-in-progress: false so a fast second push queues behind the
-# first instead of tearing down a deploy already underway (a cancelled
-# `railway up` mid-flight is a bad place to leave a service).
+# CI gate for pushes to main — this workflow does NOT deploy anything.
+#
+# Railway deploys main itself: the api and web services are attached to the
+# repo and auto-deploy on every push to main, with "Wait for CI" holding each
+# deploy until the GitHub checks pass. So the `test` and `voice-quality-gate`
+# jobs below are what stand between a push to main and a Railway deploy.
+# Deploy mechanics (build, preDeployCommand migration, healthcheck, rollout)
+# live in railway.toml / packages/web/railway.toml and docs/deployment.md.
+#
+# The workflow is still named "Deploy" on purpose: deploy-retry.yml triggers
+# on workflow_run of "Deploy" and would silently stop firing if it were
+# renamed.
+
+# Serial pipeline: never cancel an in-flight run for a race to start a new
+# one. cancel-in-progress: false so a fast second push queues behind the
+# first instead of tearing down a run already underway.
 concurrency:
   group: deploy-${{ github.ref }}
   cancel-in-progress: false
@@ -79,11 +91,11 @@ jobs:
   #
   # pr-checks.yml runs Layer 1 on PRs and voice-quality-pre-deploy.yml runs
   # Layer 2 on release/* branches, but a direct push to `main` (the branch
-  # that actually deploys to Railway) previously deployed with NO voice gate
-  # at all. This job closes that hole: it runs the same corpus suite with the
+  # Railway auto-deploys) previously deployed with NO voice gate at all.
+  # This job closes that hole: it runs the same corpus suite with the
   # launch-gate ENFORCED (VOICE_QUALITY_ENFORCE_LAUNCH_GATE=true makes
   # scripts/merge-voice-quality-report.ts exit non-zero when the launch gate
-  # fails), and every Railway deploy job below `needs:` it.
+  # fails), and Railway's "Wait for CI" holds main's deploy until it passes.
   voice-quality-gate:
     needs: [test]
     runs-on: ubuntu-latest
@@ -111,163 +123,3 @@ jobs:
         with:
           name: deploy-voice-quality-report
           path: packages/api/voice-quality-report.json
-
-  # Railway deployment pipeline
-  deploy-railway-dev:
-    needs: [test, voice-quality-gate]
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    environment: dev
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
-        with:
-          node-version-file: '.nvmrc'
-          cache: 'npm'
-      # npm ci is needed for the post-deploy smoke script (scripts/smoke-test.ts
-      # runs via ts-node) — the health poll below only needs curl.
-      - run: npm ci
-      # Pinned to the verified interface (deployment-tracking fix,
-      # 2026-09-08): `railway up --json --detach` prints
-      # {"deploymentId":...} and `railway deployment list --json` returns
-      # `id`/`status`/`createdAt` per entry — both confirmed against
-      # @railway/cli v5.49.6 source. See
-      # docs/plans/2026-09-08-deployment-tracking.md.
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli@5.49.6
-      # railway-deploy.sh runs `railway up --json --detach` and prints ONLY
-      # the exact deployment ID Railway assigned this invocation — never the
-      # "newest" deployment for the service, which can belong to an
-      # unrelated deploy (e.g. this service's own GitHub auto-deploy
-      # integration reacting to the same push). Fails closed if no unique
-      # ID comes back.
-      - name: Deploy API to Railway (Development)
-        id: deploy-dev-api
-        run: |
-          id="$(bash scripts/ci/railway-deploy.sh "@serviceos/api" Development)"
-          echo "deployment_id=$id" >> "$GITHUB_OUTPUT"
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-      - name: Deploy Web to Railway (Development)
-        id: deploy-dev-web
-        run: |
-          id="$(bash scripts/ci/railway-deploy.sh "@serviceos/web" Development)"
-          echo "deployment_id=$id" >> "$GITHUB_OUTPUT"
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-
-      # --- Post-deploy verification (WS7) --------------------------------
-      # `railway up --detach` returns at upload time; the build, the rollout
-      # (preDeployCommand migration + container swap) and Railway's own
-      # healthcheck all continue afterward, and on failure Railway keeps the
-      # OLD container serving — so a public-URL poll alone can green against
-      # the previous deploy. wait-for-deployment.sh closes that race by
-      # polling the EXACT deployment id captured above until it reaches a
-      # terminal status (hard-fail on FAILED/CRASHED/REMOVED, including a
-      # build failure); only then do the health poll + smoke verify the new
-      # deploy is serving.
-      #
-      - name: Wait for dev API deployment to reach SUCCESS
-        run: bash scripts/ci/wait-for-deployment.sh "@serviceos/api" Development "${{ steps.deploy-dev-api.outputs.deployment_id }}"
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-      - name: Wait for dev Web deployment to reach SUCCESS
-        run: bash scripts/ci/wait-for-deployment.sh "@serviceos/web" Development "${{ steps.deploy-dev-web.outputs.deployment_id }}"
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-      #
-      # DEV_HEALTHCHECK_URL must point at the dev API's public base URL (no
-      # trailing path). If it is unset we FAIL LOUD rather than skip — a
-      # missing URL means we have NO deploy verification, which must not read
-      # as a green deploy. See docs/launch/secret-manifest.md.
-      - name: Verify DEV_HEALTHCHECK_URL is configured
-        run: |
-          if [ -z "$DEV_HEALTHCHECK_URL" ]; then
-            echo "::error::DEV_HEALTHCHECK_URL secret is not set. Post-deploy verification cannot run."
-            echo "A deploy with no health verification is NOT a green deploy. Set DEV_HEALTHCHECK_URL to the dev API base URL."
-            exit 1
-          fi
-          echo "DEV_HEALTHCHECK_URL configured."
-        env:
-          DEV_HEALTHCHECK_URL: ${{ secrets.DEV_HEALTHCHECK_URL }}
-      - name: Wait for dev deploy to become healthy
-        # Poll /health until it returns {"status":"ok"} or ~5 min elapses.
-        # /health degrades (not 200-with-status-ok) while the DB is
-        # unreachable, so this waits out the preDeployCommand migration +
-        # container swap and fails if the new deploy never becomes healthy.
-        run: bash scripts/ci/wait-for-healthy.sh "$DEV_HEALTHCHECK_URL"
-        env:
-          DEV_HEALTHCHECK_URL: ${{ secrets.DEV_HEALTHCHECK_URL }}
-      - name: Post-deploy smoke (dev)
-        # Critical-workflow smoke: /health (status ok), /ready (200, 503 if a
-        # critical dep is down), /api/telephony/health (ok:true). Reuses the
-        # rollback-runbook smoke script (packages/api/scripts/smoke-test.ts).
-        run: npm run smoke-test --workspace=packages/api -- --base="$DEV_HEALTHCHECK_URL"
-        env:
-          DEV_HEALTHCHECK_URL: ${{ secrets.DEV_HEALTHCHECK_URL }}
-
-  deploy-railway-prod:
-    # Depends on the full dev job — which now includes dev post-deploy health +
-    # smoke — so prod never ships behind a dev deploy that failed verification.
-    needs: [deploy-railway-dev]
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
-    environment: prod
-    steps:
-      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
-        with:
-          node-version-file: '.nvmrc'
-          cache: 'npm'
-      - run: npm ci
-      # Pinned to the verified interface — see the dev job's install step
-      # above and docs/plans/2026-09-08-deployment-tracking.md.
-      - name: Install Railway CLI
-        run: npm install -g @railway/cli@5.49.6
-      - name: Deploy API to Railway (production)
-        id: deploy-prod-api
-        run: |
-          id="$(bash scripts/ci/railway-deploy.sh "@serviceos/api" production)"
-          echo "deployment_id=$id" >> "$GITHUB_OUTPUT"
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-      - name: Deploy Web to Railway (production)
-        id: deploy-prod-web
-        run: |
-          id="$(bash scripts/ci/railway-deploy.sh "@serviceos/web" production)"
-          echo "deployment_id=$id" >> "$GITHUB_OUTPUT"
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-
-      # --- Post-deploy verification (WS7) --------------------------------
-      # Same rationale as dev: wait for the EXACT deployment captured above
-      # to reach a terminal status (a public-URL poll alone can green
-      # against the old container; "newest deployment" can be an unrelated
-      # one), then verify health + smoke. PROD_HEALTHCHECK_URL must be the
-      # prod API base URL; unset ⇒ hard fail (no false green).
-      - name: Wait for prod API deployment to reach SUCCESS
-        run: bash scripts/ci/wait-for-deployment.sh "@serviceos/api" production "${{ steps.deploy-prod-api.outputs.deployment_id }}"
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-      - name: Wait for prod Web deployment to reach SUCCESS
-        run: bash scripts/ci/wait-for-deployment.sh "@serviceos/web" production "${{ steps.deploy-prod-web.outputs.deployment_id }}"
-        env:
-          RAILWAY_TOKEN: ${{ secrets.RAILWAY_TOKEN }}
-      - name: Verify PROD_HEALTHCHECK_URL is configured
-        run: |
-          if [ -z "$PROD_HEALTHCHECK_URL" ]; then
-            echo "::error::PROD_HEALTHCHECK_URL secret is not set. Post-deploy verification cannot run."
-            echo "A deploy with no health verification is NOT a green deploy. Set PROD_HEALTHCHECK_URL to the prod API base URL."
-            exit 1
-          fi
-          echo "PROD_HEALTHCHECK_URL configured."
-        env:
-          PROD_HEALTHCHECK_URL: ${{ secrets.PROD_HEALTHCHECK_URL }}
-      - name: Wait for prod deploy to become healthy
-        run: bash scripts/ci/wait-for-healthy.sh "$PROD_HEALTHCHECK_URL"
-        env:
-          PROD_HEALTHCHECK_URL: ${{ secrets.PROD_HEALTHCHECK_URL }}
-      - name: Post-deploy smoke (prod)
-        run: npm run smoke-test --workspace=packages/api -- --base="$PROD_HEALTHCHECK_URL"
-        env:
-          PROD_HEALTHCHECK_URL: ${{ secrets.PROD_HEALTHCHECK_URL }}

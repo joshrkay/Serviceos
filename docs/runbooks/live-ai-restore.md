@@ -34,7 +34,7 @@ after Dev.
 | `Development` | `@serviceos/api` | `https://serviceosapi-development.up.railway.app` |
 | `production` | `@serviceos/api` | `https://serviceosapi-production.up.railway.app` |
 
-Names match `.github/workflows/deploy.yml` (`--environment Development` /
+Names are Railway's own environment names (`--environment Development` /
 `--environment production`).
 
 **Live state as of last probe (still broken until vars applied):**
