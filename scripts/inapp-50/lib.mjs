@@ -124,7 +124,7 @@ export function loadRuns(dir) {
     try {
       run = JSON.parse(fs.readFileSync(filePath, 'utf8'));
     } catch (err) {
-      throw new Error(`loadRuns: failed to parse ${filePath}: ${err.message}`);
+      throw new Error(`loadRuns: failed to parse ${filePath}: ${err.message}`, { cause: err });
     }
     return {
       fileName,
