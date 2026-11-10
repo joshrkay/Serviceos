@@ -14,7 +14,7 @@
 | Unit tests | `pr-checks.yml`, `deploy.yml` | `npm test` |
 | API integration (testcontainers) | `pr-checks.yml`, `deploy.yml` | `npm run test:integration` — image `pgvector/pgvector:pg16`, plus `redis:7-alpine` for the real-Redis cases (dispatch presence, and the Redis quota store's RELEASE_LUA token-debt cases in `test/integration/redis-tenant-quota-debt.test.ts`) |
 | Coverage + per-module thresholds | `pr-checks.yml`, `deploy.yml` | `npm run test:coverage` + `scripts/check-coverage.ts` |
-| Voice quality Layer 1 | `pr-checks.yml`, `voice-quality-nightly.yml`, `deploy.yml` | `npm run voice-quality` with `VOICE_QUALITY_ENFORCE_LAUNCH_GATE=true` (merge step exits non-zero on any launch-gate blocker); on deploy it blocks both Railway jobs |
+| Voice quality Layer 1 | `pr-checks.yml`, `voice-quality-nightly.yml`, `deploy.yml` | `npm run voice-quality` with `VOICE_QUALITY_ENFORCE_LAUNCH_GATE=true` (merge step exits non-zero on any launch-gate blocker); on `deploy.yml` it gates Railway's auto-deploy of `main` (Railway "Wait for CI") |
 | Voice quality Layer 2 (LLM judge) | `voice-quality-pre-deploy.yml` | Push to `release/*`; hard-fails when `ANTHROPIC_API_KEY`/`OPENAI_API_KEY` absent |
 | FK-path coverage guard | `pr-checks.yml` | `scripts/check-fk-path-coverage.sh` |
 | Mobile typecheck | `pr-checks.yml` | `mobile-typecheck` job — root + mobile `npm ci`, then `tsc --noEmit` |
@@ -22,9 +22,14 @@
 | Playwright job | `e2e.yml` | `npm run e2e` — **job** must pass |
 | Owner-loop + voice smoke | `deploy.yml` only | `owner-loop-critical-path`, `voice-smoke.synthetic` (duplicate owner-loop step removed 2026-07-12) |
 | Migration dry-run | `deploy.yml` only | `npm run migrate:dryrun` |
-| Post-deploy health + smoke | `deploy.yml` only | `scripts/ci/wait-for-healthy.sh` + `npm run smoke-test` against `DEV_/PROD_HEALTHCHECK_URL`; missing URL secrets hard-fail (no false green) |
 
 Per-module coverage (`check-coverage.ts`) is **gating** — there is no `continue-on-error` on PR checks.
+
+`deploy.yml` is a CI gate only: Railway auto-deploys `main` (Wait for CI), so CI
+no longer runs a post-deploy health + smoke step. Railway's own healthcheck
+(`/health` for the API, `/` for web — see `railway.toml`) gates each rollout;
+run `npm run smoke-test --workspace=packages/api -- --base=<url>` or
+`scripts/smoke.sh` by hand for deeper verification (`docs/runbooks/rollback.md`).
 
 ## Advisory / nightly-only
 

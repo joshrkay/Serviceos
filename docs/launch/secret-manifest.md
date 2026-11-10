@@ -25,18 +25,20 @@ from the per-secret tables below (nothing to provision).
 
 ## By workflow
 
-### `deploy.yml` — Deploy (push to `main` → Railway)
+### `deploy.yml` — Deploy (push to `main`; CI gate only)
+
+No provisioned secrets. Railway auto-deploys `main` itself (with **Wait for
+CI**), so this workflow only runs the gates (`test`, `voice-quality-gate`); it no
+longer runs `railway up` or a post-deploy health/smoke step. As a result it no
+longer reads `RAILWAY_TOKEN`, `DEV_HEALTHCHECK_URL` or `PROD_HEALTHCHECK_URL`.
+The two `*_HEALTHCHECK_URL` secrets are now read by no workflow and can be
+deleted; `RAILWAY_TOKEN` is still read by `release-verification.yml` (below).
+
+### `release-verification.yml` — Release verification (manual `workflow_dispatch`)
 
 | Secret | Purpose | Blocking? | How to obtain |
 |---|---|---|---|
-| `RAILWAY_TOKEN` | Auth for `railway up` (dev + prod deploy jobs). | Blocking — deploy step errors without it. | Railway dashboard → Account/Project → Tokens. |
-| `DEV_HEALTHCHECK_URL` | Base URL of the **dev** API for post-deploy health poll + smoke. | **Blocking (WS7)** — the job hard-fails with an explicit message if unset. No URL ⇒ no deploy verification ⇒ not a green deploy. | Railway dev API service public domain (e.g. `https://api-dev.up.railway.app`). No trailing path. |
-| `PROD_HEALTHCHECK_URL` | Base URL of the **prod** API for post-deploy health poll + smoke. | **Blocking (WS7)** — same as dev. | Railway prod API service public domain. No trailing path. |
-
-Post-deploy flow (both envs): `railway up --detach` → `scripts/ci/wait-for-healthy.sh`
-polls `/health` for `"status":"ok"` (≤5 min) → `npm run smoke-test` hits
-`/health` + `/ready` + `/api/telephony/health`. Prod deploy `needs:` the dev job,
-so a failed dev post-deploy check blocks prod promotion.
+| `RAILWAY_TOKEN` | Project access token that `scripts/release/load-development-clerk.mjs` uses to load the Development Clerk test keys. | Blocking — the script throws without it. | Railway dashboard → Project → Tokens (Development environment). |
 
 ### `pr-checks.yml` — PR Checks
 
@@ -133,7 +135,6 @@ set of coverage that is unavailable until an operator provisions secrets.
 
 | Gate | Missing-credential behavior | Unblocked by |
 |---|---|---|
-| Post-deploy smoke (`deploy.yml`) | **Hard fail** — `DEV_/PROD_HEALTHCHECK_URL` unset ⇒ deploy job errors. | `DEV_HEALTHCHECK_URL`, `PROD_HEALTHCHECK_URL` |
 | Real outbound call (`voice-smoke-real.yml`) | **Hard fail (WS7 guard).** | 6 Twilio/staging secrets above |
 | MMS vision real model (`mms-vision-smoke.yml`) | **Hard fail (existing guard).** | `AI_PROVIDER_API_KEY` |
 | QA matrix gate (`qa-matrix-gate.yml`) | **Hard fail (WS7 guard + `qa:doctor`).** | 11 `E2E_*` secrets |
@@ -142,9 +143,10 @@ set of coverage that is unavailable until an operator provisions secrets.
 
 ## Railway operator cutover (deploy topology)
 
-The deploy pipeline in `deploy.yml` deploys the **api + web** services only.
-The **worker** (and optional **voice**) service cutover is a documented manual
-operator task — see `docs/deployment.md` → "Deploy topology (web + worker)"
+Railway auto-deploys the **api + web** services from `main`; `deploy.yml` is
+only the CI gate that Railway's "Wait for CI" waits on. The **worker** (and
+optional **voice**) service cutover is a documented manual operator task —
+see `docs/deployment.md` → "Deploy topology (web + worker)"
 (setup steps at `docs/deployment.md` §Setup, lines ~103–126):
 
 1. Create the second Railway service on the same repo/image.

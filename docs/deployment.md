@@ -4,8 +4,10 @@
 
 Railway is the **only** deployment target. The deployed services are
 `packages/api` (Dockerfile target `api`) and `packages/web` (nginx stage),
-configured by `/railway.toml` and `/Dockerfile` and shipped by
-`.github/workflows/deploy.yml` (`railway up`).
+configured by `/railway.toml` and `/Dockerfile`. Railway auto-deploys `main`
+itself, with **Wait for CI** holding each deploy until the GitHub checks pass;
+`.github/workflows/deploy.yml` is only the CI gate (tests + voice-quality
+gate) and no longer runs `railway up`.
 
 A prior AWS CDK deployment path (D-001) and two non-deployed prototypes
 (a Next.js app, a Python LangGraph agent) were quarantined under
