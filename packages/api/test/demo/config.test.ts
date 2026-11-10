@@ -1,5 +1,11 @@
 import { describe, it, expect, afterEach } from 'vitest';
-import { isDemoCallsEnabled, demoPoolPerTrade, isProductionEnv } from '../../src/demo/config';
+import {
+  isDemoCallsEnabled,
+  demoPoolPerTrade,
+  isProductionEnv,
+  loadDemoConfig,
+  loadDemoInboundConfig,
+} from '../../src/demo/config';
 
 const saved = { ...process.env };
 afterEach(() => {
@@ -174,5 +180,45 @@ describe('demo config — loadDemoConfig (S6-2: read once at boot, a bad value c
   it('does not read the kill switch: DEMO_CALLS_ENABLED stays a per-request read', async () => {
     const { loadDemoConfig } = await import('../../src/demo/config');
     expect(loadDemoConfig({ DEMO_CALLS_ENABLED: 'false' }, logger).open).toBe(true);
+  });
+});
+
+describe('demo config — inbound line caps (DEMO_INBOUND_*)', () => {
+  it('defaults to 3 calls per caller per day, 50 calls a day in total, and 180 s per call', () => {
+    const cfg = loadDemoInboundConfig({});
+    expect(cfg).toEqual({
+      open: true,
+      limits: { perCallerDaily: 3, dailyTotal: 50, maxCallSeconds: 180 },
+    });
+  });
+
+  it('reads every cap from its own environment variable', () => {
+    const cfg = loadDemoInboundConfig({
+      DEMO_INBOUND_PER_CALLER_DAILY: '2',
+      DEMO_INBOUND_DAILY_TOTAL: '10',
+      DEMO_INBOUND_MAX_SECONDS: '120',
+    });
+    expect(cfg).toEqual({
+      open: true,
+      limits: { perCallerDaily: 2, dailyTotal: 10, maxCallSeconds: 120 },
+    });
+  });
+
+  it.each(['0', '-1', '2.5', 'abc', '1e3', ''])('closes the inbound demo on a bad value %j (fail closed, names the variable)', (bad) => {
+    const cfg = loadDemoInboundConfig({ DEMO_INBOUND_MAX_SECONDS: bad });
+    expect(cfg.open).toBe(false);
+    if (!cfg.open) expect(cfg.reason).toContain('DEMO_INBOUND_MAX_SECONDS');
+  });
+
+  it('logs the reason once when it closes', () => {
+    const errors: string[] = [];
+    loadDemoInboundConfig({ DEMO_INBOUND_DAILY_TOTAL: 'nope' }, { error: (m) => errors.push(m) });
+    expect(errors).toHaveLength(1);
+  });
+
+  it('a bad inbound value does not touch the outbound demo call config', () => {
+    const env = { DEMO_INBOUND_PER_CALLER_DAILY: 'nope' };
+    expect(loadDemoInboundConfig(env).open).toBe(false);
+    expect(loadDemoConfig(env).open).toBe(true);
   });
 });

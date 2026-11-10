@@ -3902,6 +3902,8 @@ describe('U5 absolute per-call duration cap', () => {
     callSid: string,
     opts: {
       maxCallDurationMs?: number;
+      /** The demo line's per-tenant limit (see src/demo/inbound-limits.ts). */
+      maxCallDurationMsForTenant?: (tenantId: string) => Promise<number | undefined>;
       ttsFails?: boolean;
       language?: 'en' | 'es';
       /**
@@ -3950,6 +3952,9 @@ describe('U5 absolute per-call duration cap', () => {
         // out of these serialization scenarios.
         ttsAttemptTimeoutMs: 120_000,
         ...(opts.maxCallDurationMs !== undefined ? { maxCallDurationMs: opts.maxCallDurationMs } : {}),
+        ...(opts.maxCallDurationMsForTenant
+          ? { maxCallDurationMsForTenant: opts.maxCallDurationMsForTenant }
+          : {}),
       },
       ws,
     );
@@ -4094,6 +4099,116 @@ describe('U5 absolute per-call duration cap', () => {
     expect(ws.closed).toBe(true);
     expect(circuit.recordSuccess).not.toHaveBeenCalled();
     expect(circuit.recordFailure).not.toHaveBeenCalled();
+  });
+
+  // The public demo line: the demo tenant's own, shorter limit replaces the
+  // process-wide cap for that tenant's legs only. The cap is armed when the
+  // socket opens, before the Twilio `start` frame names the tenant, so the
+  // tenant's limit re-arms it (measured from the socket opening, not from the
+  // `start` frame).
+  describe('per-tenant limit (demo line)', () => {
+    // The re-arm measures elapsed time with Date.now(), which the parent
+    // suite leaves real (it fakes only the timers): fake the clock too, so
+    // advancing timers advances the elapsed time the adapter reads.
+    beforeEach(() => {
+      vi.useRealTimers();
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    });
+
+    it('cuts a demo-tenant call at its own limit: wrap-up at limit-30s, hang-up at the limit', async () => {
+      const resolver = vi.fn(async (tenantId: string) => (tenantId === 't' ? 90_000 : undefined));
+      const { ws, texts, finalizeOnClose } = await setupCappedCall('CA-demo-1', {
+        maxCallDurationMsForTenant: resolver,
+      });
+      expect(resolver).toHaveBeenCalledWith('t');
+
+      await vi.advanceTimersByTimeAsync(59_000);
+      await flush();
+      expect(texts).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await settle();
+      expect(texts).toEqual([WRAP_UP_EN]);
+      expect(ws.closed).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      await settle();
+      expect(ws.closed).toBe(true);
+      expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+      expect(finalizeOnClose.mock.calls[0][2]).toEqual(MAX_DURATION_EFFECTS);
+    });
+
+    it('measures the limit from the socket opening, not from the start frame', async () => {
+      // The resolver itself takes 20 s (a slow tenant read): the call must
+      // still end 90 s after the socket opened, not 110 s after it.
+      const resolver = vi.fn(async () => {
+        await new Promise((r) => setTimeout(r, 20_000));
+        return 90_000;
+      });
+      const { ws, texts, finalizeOnClose } = await setupCappedCall('CA-demo-2', {
+        maxCallDurationMsForTenant: resolver,
+      });
+      expect(resolver).toHaveBeenCalledWith('t');
+
+      await vi.advanceTimersByTimeAsync(20_000); // t=20: the tenant limit lands and re-arms
+      await settle();
+      await vi.advanceTimersByTimeAsync(39_999); // t=59.999: just before limit-30s
+      await settle();
+      expect(texts).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1); // t=60: the wrap-up, at limit-30s from the OPENING
+      await settle();
+      expect(texts).toEqual([WRAP_UP_EN]);
+      expect(ws.closed).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(30_000); // t=90: the cut
+      await settle();
+      expect(ws.closed).toBe(true);
+      expect(finalizeOnClose).toHaveBeenCalledTimes(1);
+    });
+
+    it('leaves a real tenant on the process-wide cap', async () => {
+      const resolver = vi.fn(async () => undefined);
+      const { ws, texts } = await setupCappedCall('CA-demo-3', {
+        maxCallDurationMs: 300_000,
+        maxCallDurationMsForTenant: resolver,
+      });
+      expect(resolver).toHaveBeenCalledWith('t');
+
+      await vi.advanceTimersByTimeAsync(200_000);
+      await settle();
+      expect(ws.closed).toBe(false);
+      expect(texts).toEqual([]);
+
+      await vi.advanceTimersByTimeAsync(100_000);
+      await settle();
+      expect(ws.closed).toBe(true);
+    });
+
+    it('never loosens the process-wide cap', async () => {
+      const { ws } = await setupCappedCall('CA-demo-4', {
+        maxCallDurationMs: 45_000,
+        maxCallDurationMsForTenant: async () => 90_000,
+      });
+      await vi.advanceTimersByTimeAsync(45_000);
+      await settle();
+      expect(ws.closed).toBe(true);
+    });
+
+    it('keeps the process-wide cap when the tenant limit cannot be resolved', async () => {
+      const resolver = vi.fn(async (): Promise<number | undefined> => {
+        throw new Error('db down');
+      });
+      const { ws } = await setupCappedCall('CA-demo-5', {
+        maxCallDurationMs: 120_000,
+        maxCallDurationMsForTenant: resolver,
+      });
+      expect(resolver).toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(100_000);
+      await settle();
+      expect(ws.closed).toBe(false);
+      await vi.advanceTimersByTimeAsync(20_000);
+      await settle();
+      expect(ws.closed).toBe(true);
+    });
   });
 
   // PR #975 review finding 3 — the pre-limit wrap-up used to be spoken from a

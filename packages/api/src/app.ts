@@ -223,7 +223,8 @@ import {
   LLM_CALL_IN_TRANSACTION_CHECK_INTERVAL_MS,
 } from './monitoring/llm-call-in-transaction-alert';
 import { createDemoCallsRouter } from './demo/routes';
-import { isDemoCallsEnabled, loadDemoConfig } from './demo/config';
+import { isDemoCallsEnabled, loadDemoConfig, loadDemoInboundConfig } from './demo/config';
+import { createDemoInboundGuard } from './demo/inbound-limits';
 import { createDemoLeaseResetter } from './demo/reset';
 import { scheduleDemoLeaseReaper } from './workers/demo-lease-reaper';
 import { recordSweepSuccess, sweepLastSuccessMs } from './monitoring/sweep-heartbeats';
@@ -4239,6 +4240,31 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
   // call_summaries through the tenant RLS context, not a raw pool.query.
   const callSummaryRepo = pool ? new PgCallSummaryRepository(pool) : undefined;
 
+  // The public demo line — inbound caps for a demo tenant's published number
+  // (per-caller and daily-total counters on the platform tenant, a 3-minute
+  // call limit; src/demo/inbound-limits.ts). Demo tenants only: every other
+  // tenant's call is untouched. Needs the database and the demo secret (it
+  // keys the caller hash; explicit in prod / staging, so unset there leaves no
+  // guard and a demo tenant's calls fall to the voice gate, which blocks an
+  // unbilled tenant to voicemail — the line stays closed, never uncapped).
+  const demoInboundLogger = createLogger({
+    service: 'demo-inbound',
+    environment: process.env.NODE_ENV || 'development',
+  });
+  const demoInboundGuard =
+    pool && demoLeaseTokenSecret
+      ? createDemoInboundGuard({
+          config: loadDemoInboundConfig(process.env, demoInboundLogger),
+          isDemoTenant: createHiddenTenantCheck(pool),
+          limiter: new PhoneRateLimiter(pool),
+          phoneKeySecret: demoLeaseTokenSecret,
+          logger: demoInboundLogger,
+        })
+      : undefined;
+  const demoMaxCallDurationMsForTenant = demoInboundGuard
+    ? { maxCallDurationMsForTenant: (tenantId: string) => demoInboundGuard.maxCallDurationMsFor(tenantId) }
+    : {};
+
   // WS18d — assembled as a VARIABLE (not an inline literal) deliberately: the
   // adapter spreads its deps into createVoiceTurnProcessor, and the processor-
   // only WS18 keys below (consentEventRepo, autonomousClose) are not part of
@@ -4251,6 +4277,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     gateway: llmGateway,
     // U5 — absolute per-call duration cap, checked on every Gather turn.
     maxCallDurationMs: config.VOICE_MAX_CALL_DURATION_MS,
+    // The demo line's tighter per-tenant limit (demo tenants only).
+    ...demoMaxCallDurationMsForTenant,
     ...(pool ? { pool } : {}),
     ...(callSummaryRepo ? { callSummaryRepo } : {}),
     proposalRepo,
@@ -4959,6 +4987,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       ...(pool && auditRepo
         ? { voiceGate: createVoiceGate({ pool, auditRepo }) }
         : {}),
+      // The public demo line's caps, asked just before the gate (demo tenants only).
+      ...(demoInboundGuard ? { demoInbound: demoInboundGuard } : {}),
       ...(pool ? { pool } : {}),
       settingsRepo,
       leadRepo,
@@ -5319,6 +5349,8 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
             // at start() and never re-armed by media frames (the audio-idle
             // timer is, so it never fires on a live call).
             maxCallDurationMs: config.VOICE_MAX_CALL_DURATION_MS,
+            // The demo line's tighter per-tenant limit (demo tenants only).
+            ...demoMaxCallDurationMsForTenant,
             speechTurn: async ({ session, speechResult, callSid, tenantId, callerTiming, onCallerText }) =>
               twilioAdapter.processCallerUtterance({
                 sessionId: session.id,

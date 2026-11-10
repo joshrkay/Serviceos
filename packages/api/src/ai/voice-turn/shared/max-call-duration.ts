@@ -37,9 +37,16 @@ export const MAX_CALL_DURATION_WRAP_UP_LEAD_MS = 30_000;
 /** The `end_session` reason (and `voice_sessions.terminal_reason`) at the cap. */
 export const MAX_CALL_DURATION_TERMINAL_REASON = 'max_call_duration' as const;
 
-/** The configured limit, else the default. */
-export function resolveMaxCallDurationMs(configured: number | undefined): number {
-  return configured ?? DEFAULT_MAX_CALL_DURATION_MS;
+/**
+ * The configured limit, else the default; a per-tenant limit (the public demo
+ * line's, see `demo/inbound-limits.ts`) can only tighten it, never loosen it.
+ */
+export function resolveMaxCallDurationMs(
+  configured: number | undefined,
+  tenantLimitMs?: number,
+): number {
+  const base = configured ?? DEFAULT_MAX_CALL_DURATION_MS;
+  return tenantLimitMs === undefined ? base : Math.min(base, tenantLimitMs);
 }
 
 /** The session's age in ms — the same elapsed-time basis `runSummary` uses. */
