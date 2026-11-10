@@ -180,6 +180,8 @@ export async function pollFor<T extends Record<string, unknown>>(
     const { rows } = await pool.query<T>(sql, params);
     if (rows.length > 0) return rows;
     if (Date.now() >= deadline) return rows;
-    await new Promise((r) => setTimeout(r, intervalMs));
+    await new Promise((r) => {
+      setTimeout(r, intervalMs);
+    });
   }
 }

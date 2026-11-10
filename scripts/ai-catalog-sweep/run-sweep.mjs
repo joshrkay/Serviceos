@@ -319,7 +319,9 @@ async function approveAndAwaitExecution(token, proposalId) {
   let status = 'pending';
   let iterations = 0;
   for (let i = 0; i < POLL_MAX_ITERATIONS; i++) {
-    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+    await new Promise((r) => {
+      setTimeout(r, POLL_INTERVAL_MS);
+    });
     iterations = i + 1;
     const res = await api('GET', `/api/proposals/${proposalId}`, { token });
     if (res.status === 200) {
@@ -994,7 +996,7 @@ async function runRow(corpusCase, ctx) {
   const token = corpusCase.actorRole === 'technician' ? techToken : ownerToken;
 
   let httpStatus;
-  let chatFields = {};
+  let chatFields;
   let voiceOutcome;
   let sessionId;
 

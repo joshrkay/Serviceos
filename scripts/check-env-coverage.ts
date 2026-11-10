@@ -134,7 +134,7 @@ const READ_PATTERNS: RegExp[] = [
  * then takes each SCREAMING_SNAKE member as a read.
  */
 const DESTRUCTURE_PATTERN =
-  /\{([^{}]*)\}\s*=\s*(?:process\.env|env|processEnv|rawEnv|envVars)\b(?![.\[])/g;
+  /\{([^{}]*)\}\s*=\s*(?:process\.env|env|processEnv|rawEnv|envVars)\b(?![\[.])/g;
 
 /** Env var names destructured in `text`, with the offset of each in `text`. */
 function destructuredEnvReads(text: string): Array<{ name: string; index: number }> {

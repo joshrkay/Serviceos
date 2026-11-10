@@ -117,7 +117,9 @@ async function provisionTwilioIntegration(
     if (Date.now() > deadline) {
       throw new Error(`no product-provisioned twilio stub row for tenant ${tenantId} within 15s`);
     }
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => {
+      setTimeout(r, 250);
+    });
   }
 }
 
@@ -287,7 +289,9 @@ test.describe('negotiation guardrail — SMS discount ask never concedes (7.12) 
              FROM proposals WHERE tenant_id = $1 AND proposal_type = 'callback'`,
           [tenantA.tenantId],
         );
-        if (proposalsA.length === 0) await new Promise((r) => setTimeout(r, 150));
+        if (proposalsA.length === 0) await new Promise((r) => {
+      setTimeout(r, 150);
+    });
       }
       logRows('7.12 tenant A proposals (callback)', proposalsA);
       expect(proposalsA, '#1133-style poll for the async-dispatched callback proposal').toHaveLength(1);
@@ -320,7 +324,9 @@ test.describe('negotiation guardrail — SMS discount ask never concedes (7.12) 
              FROM proposals WHERE tenant_id = $1 AND proposal_type = 'callback'`,
           [tenantB.tenantId],
         );
-        if (proposalsB.length === 0) await new Promise((r) => setTimeout(r, 150));
+        if (proposalsB.length === 0) await new Promise((r) => {
+      setTimeout(r, 150);
+    });
       }
       logRows('7.12 tenant B proposals (callback)', proposalsB);
       expect(proposalsB).toHaveLength(1);

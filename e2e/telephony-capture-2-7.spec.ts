@@ -224,7 +224,9 @@ test.describe('#1014 row 2.7 — a dropped call gets exactly one recovery SMS, s
       if (a.rows.length > 0) sentA = a.rows[0];
       if (c.rows.length > 0) sentC = c.rows[0];
       if (sentA && sentC) break;
-      await new Promise((r) => setTimeout(r, 3000));
+      await new Promise((r) => {
+      setTimeout(r, 3000);
+    });
     }
 
     expect(sentA, 'tenant A (flag ON) should have a sent recovery row within the sweep window').toBeDefined();

@@ -36,7 +36,9 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  */
 async function waitForNextMinuteBoundary(): Promise<void> {
   const ms = 60_000 - (Date.now() % 60_000) + 250;
-  await new Promise((r) => setTimeout(r, ms));
+  await new Promise((r) => {
+      setTimeout(r, ms);
+    });
 }
 
 /**
@@ -185,7 +187,9 @@ test.describe('estimate-reminder sweep chases unviewed quotes automatically (7.1
           `SELECT first_viewed_at FROM estimates WHERE id = $1`,
           [estimateB.id],
         );
-        if (!viewedRow[0]?.first_viewed_at) await new Promise((r) => setTimeout(r, 100));
+        if (!viewedRow[0]?.first_viewed_at) await new Promise((r) => {
+      setTimeout(r, 100);
+    });
       }
       expect(viewedRow[0]?.first_viewed_at, 'B was viewed by its customer').toBeTruthy();
 

@@ -64,7 +64,7 @@ export function loadServiceosJwtFromFile(jwtFile) {
 async function fetchJson(url, opts = {}) {
   const res = await fetch(url, opts);
   const text = await res.text();
-  let json = null;
+  let json;
   try {
     json = text ? JSON.parse(text) : null;
   } catch {
@@ -147,7 +147,9 @@ async function waitForAiClosed(baseUrl, { timeoutMs = 180_000, pollMs = 5_000 } 
     }
     const summary = providers.map((p) => `${p.name}:${p.breakerState}`).join(',') || 'none';
     console.log(`waiting for AI closed… (${summary})`);
-    await new Promise((r) => setTimeout(r, pollMs));
+    await new Promise((r) => {
+      setTimeout(r, pollMs);
+    });
   }
   console.warn(`AI breaker not closed within ${timeoutMs}ms — continuing anyway`);
   return false;

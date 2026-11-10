@@ -210,7 +210,9 @@ async function waitUntilReadable(
     });
     if (res.status() === 200) return;
     if (Date.now() >= deadline) return; // let the dependent call surface the real (or now-resolved) error
-    await new Promise((r) => setTimeout(r, intervalMs));
+    await new Promise((r) => {
+      setTimeout(r, intervalMs);
+    });
   }
 }
 
@@ -329,7 +331,9 @@ export async function getAppointmentIdForJob(
     expect(res.status(), `GET /api/appointments?jobId= failed: ${await res.text()}`).toBe(200);
     appointments = (await res.json()) as Array<{ id: string }>;
     if (appointments.length > 0 || Date.now() >= deadline) break;
-    await new Promise((r) => setTimeout(r, intervalMs));
+    await new Promise((r) => {
+      setTimeout(r, intervalMs);
+    });
   }
   expect(appointments.length, `no appointment synced for job ${jobId}`).toBeGreaterThan(0);
   return appointments[0]!.id;
