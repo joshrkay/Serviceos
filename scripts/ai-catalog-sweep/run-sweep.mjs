@@ -996,7 +996,7 @@ async function runRow(corpusCase, ctx) {
   const token = corpusCase.actorRole === 'technician' ? techToken : ownerToken;
 
   let httpStatus;
-  let chatFields = {};
+  let chatFields;
   let voiceOutcome;
   let sessionId;
 
