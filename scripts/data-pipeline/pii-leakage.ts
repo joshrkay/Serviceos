@@ -14,7 +14,7 @@ const EMAIL = /[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}/gi;
 const SSN = /\b\d{3}-\d{2}-\d{4}\b/g;
 const CARD = /\b\d{13,16}\b/g;
 // Phone-like: 10 digits (optionally separated) or 7 digits separated.
-const PHONE = /\b(?:\d[\s.\-]?){9,10}\d\b/g;
+const PHONE = /\b(?:\d[\s.-]?){9,10}\d\b/g;
 
 const violations: string[] = [];
 
