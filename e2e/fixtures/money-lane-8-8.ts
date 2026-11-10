@@ -223,7 +223,9 @@ export async function pollUntilOk(
     if (Date.now() - start > timeoutMs) {
       throw new Error(`#1133 poll timed out: ${url} never 200'd (last ${res.status()})`);
     }
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => {
+      setTimeout(r, 100);
+    });
   }
 }
 
@@ -281,6 +283,8 @@ export async function pollRows(
     const rows = await queryAsTenant(tenantId, sql, params);
     if (rows.length >= minRows) return rows;
     if (Date.now() - start > timeoutMs) return rows;
-    await new Promise((r) => setTimeout(r, 300));
+    await new Promise((r) => {
+      setTimeout(r, 300);
+    });
   }
 }

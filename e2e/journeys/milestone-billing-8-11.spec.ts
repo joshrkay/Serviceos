@@ -91,7 +91,9 @@ test.describe('bill in stages — the real stop point (8.11) — real Postgres',
 
     // Give the (synchronous) drafting path a moment, then confirm the honest
     // negative: no schedule proposal, no schedule row, ever.
-    await new Promise((r) => setTimeout(r, 500));
+    await new Promise((r) => {
+      setTimeout(r, 500);
+    });
     const scheduleProposals = await queryAsTenant(
       tenant.tenantId,
       `SELECT id FROM proposals WHERE tenant_id = $1 AND proposal_type = 'create_invoice_schedule'`,

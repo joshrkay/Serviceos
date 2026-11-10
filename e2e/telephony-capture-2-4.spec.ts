@@ -188,7 +188,9 @@ test.describe('#1014 row 2.4 — a stranger cannot reach owner-only capability; 
 
     // Give any (absent) audit write the same poll window the intercepted
     // case gets, then confirm the count did not move.
-    await new Promise((r) => setTimeout(r, 1500));
+    await new Promise((r) => {
+      setTimeout(r, 1500);
+    });
     const after = await auditRows(pool, tenantA.tenantId, 'voice.intent_off_surface');
     expect(after.length).toBe(before);
   });
@@ -211,7 +213,9 @@ test.describe('#1014 row 2.4 — a stranger cannot reach owner-only capability; 
     // never intercepted.
     const beforeB = (await auditRows(pool, tenantB.tenantId, 'voice.intent_off_surface')).length;
     await speakInvoiceRequest(request, B_OWNER_PHONE, B_DID, B_SUBACCOUNT, B_TOKEN);
-    await new Promise((r) => setTimeout(r, 1500));
+    await new Promise((r) => {
+      setTimeout(r, 1500);
+    });
     const afterB = await auditRows(pool, tenantB.tenantId, 'voice.intent_off_surface');
     expect(afterB.length).toBe(beforeB);
   });

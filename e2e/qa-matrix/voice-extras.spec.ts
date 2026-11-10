@@ -210,7 +210,9 @@ matrixTest('VOX-03', 'DNC suppression of outbound SMS', async (h) => {
     return;
   }
 
-  await new Promise((r) => setTimeout(r, 3000));
+  await new Promise((r) => {
+      setTimeout(r, 3000);
+    });
   const sent = await h.db.query({
     label: '03-no-dispatch',
     tenantId: h.tenantA.tenantId,

@@ -76,7 +76,9 @@ async function chain(
 async function pollDispatchCount(h: RowHarness, appointmentId: string, label: string): Promise<number> {
   let count = 0;
   for (let i = 0; i < 6; i++) {
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => {
+      setTimeout(r, 2000);
+    });
     const res = await h.db.query({
       label: `${label}-poll-${i}`,
       tenantId: h.tenantA.tenantId,

@@ -141,7 +141,9 @@ async function draftTieredEstimateViaOwnerUi(
     expect(listRes.ok()).toBeTruthy();
     rows = (await listRes.json()) as Array<{ id: string }>;
     if (rows.length > 0 || Date.now() > deadline) break;
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => {
+      setTimeout(r, 100);
+    });
   }
   expect(rows, 'the owner-drafted tiered estimate must persist').toHaveLength(1);
   return rows[0].id;

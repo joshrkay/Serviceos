@@ -442,7 +442,9 @@ test.describe('§8.7 rows 7.1 + 7.3 — quote drafted from what the customer sai
         [tenant.tenantId],
       );
       proposalRow = rows[0];
-      if (!proposalRow) await new Promise((r) => setTimeout(r, 100));
+      if (!proposalRow) await new Promise((r) => {
+      setTimeout(r, 100);
+    });
     }
     logRows('7.1 photo leg — proposals row drafted from the uploaded photo', proposalRow);
     expect(proposalRow, '#1133 workaround: polled for the photo-drafted proposal').toBeTruthy();
@@ -459,7 +461,9 @@ test.describe('§8.7 rows 7.1 + 7.3 — quote drafted from what the customer sai
           WHERE tenant_id = $1 AND event_type = 'assistant.photo_estimate_drafted' AND entity_id = $2`,
         [tenant.tenantId, proposalRow!.id],
       );
-      if (auditRows.length === 0) await new Promise((r) => setTimeout(r, 100));
+      if (auditRows.length === 0) await new Promise((r) => {
+      setTimeout(r, 100);
+    });
     }
     logRows('7.1 photo leg — audit_events assistant.photo_estimate_drafted', auditRows);
     expect(auditRows).toHaveLength(1);
