@@ -102,11 +102,17 @@ describe('Postgres integration — assignee must be an active tenant member (#14
   }
 
   /**
-   * Future, non-overlapping one-hour windows keep the past-start guard from
-   * masking the membership checks this suite exercises.
+   * Windows are anchored to the clock, never a calendar date. POST
+   * /api/appointments refuses a start in the past (#1402), so a hard-coded
+   * date silently expires into that guard: every makeAppointment() 400s
+   * before any membership check runs, and a 400 expected from a membership
+   * refusal can no longer tell the two causes apart.
    */
+  const WINDOWS_FROM_MS = Math.ceil((Date.now() + 24 * 3600_000) / 3600_000) * 3600_000;
+
+  /** A fresh, non-overlapping one-hour window per call, always in the future. */
   function nextWindow(): { scheduledStart: string; scheduledEnd: string } {
-    const start = new Date(Date.now() + (24 + slot++ * 2) * 3600_000);
+    const start = new Date(WINDOWS_FROM_MS + slot++ * 2 * 3600_000);
     return {
       scheduledStart: start.toISOString(),
       scheduledEnd: new Date(start.getTime() + 3600_000).toISOString(),
