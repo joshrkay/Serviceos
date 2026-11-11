@@ -7306,7 +7306,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
       },
       compose: createRecoveryComposer({
         composerDeps: { gateway: llmGateway, settingsRepo, standingInstructionRepo },
-        businessName: process.env.TWILIO_BUSINESS_NAME ?? 'our team',
+        // The tenant's own business name is resolved per send from settingsRepo;
+        // the platform env value is only the fallback for a tenant with no name
+        // (then 'our team'). Never a boot-time capture of the primary name.
+        fallbackBusinessName: process.env.TWILIO_BUSINESS_NAME,
         // Brand-voice only with a real provider key — the mock gateway's
         // canned output must never reach a customer (digest precedent).
         aiEnabled: Boolean(config.AI_PROVIDER_API_KEY),

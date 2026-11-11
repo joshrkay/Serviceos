@@ -44,6 +44,7 @@ import { PgFeatureFlagRepository } from '../../src/flags/pg-feature-flags';
 import { PgTenantFeatureFlagRepository } from '../../src/flags/pg-tenant-feature-flags';
 import { PgDncRepository } from '../../src/compliance/dnc';
 import { PgSettingsRepository } from '../../src/settings/pg-settings';
+import { resolveBootstrapAiModel } from '../../src/settings/settings';
 import { PgConversationRepository } from '../../src/conversations/pg-conversation';
 import { PgConversationLinkRepository } from '../../src/conversations/pg-conversation-link';
 import { PgCustomerRepository } from '../../src/customers/pg-customer';
@@ -682,7 +683,8 @@ describe('dropped-call recovery — end-to-end wiring (flag gate + production ad
           gateway: { complete: async () => ({ content: 'unused', model: 'x', provider: 'x', tokenUsage: { input: 0, output: 0, total: 0 }, latencyMs: 0 }) } as never,
           settingsRepo: new PgSettingsRepository(pool),
         },
-        businessName: 'Itest Shop',
+        // Platform fallback only — a tenant with a settings row is named from it.
+        fallbackBusinessName: 'Itest Shop',
         aiEnabled: false, // deterministic template — no LLM in integration
         logger,
       }),
@@ -744,7 +746,41 @@ describe('dropped-call recovery — end-to-end wiring (flag gate + production ad
     // the row-derived idempotency key for Twilio-side dedupe.
     expect(smsCalls[0].tenantId).toBe(tenant.tenantId);
     expect(smsCalls[0].idempotencyKey).toMatch(/^dropped_call_recovery:/);
+    // No tenant_settings row for this tenant → the real PgSettingsRepository
+    // returns null → the platform fallback name is used.
     expect(smsCalls[0].body).toContain('Itest Shop');
+  });
+
+  it("names each tenant's own business per send (real tenant_settings), platform name only as fallback", async () => {
+    // Tenant A has a settings row with its own business name; tenant B has
+    // none. ONE sweep (one composer instance) must name each from its own
+    // data — the pre-fix composer captured a single name at boot.
+    const tenantB = await createTestTenant(pool);
+    await new PgSettingsRepository(pool).upsertIdentityFields(tenant.tenantId, {
+      businessName: 'Tenant Own Plumbing',
+      bootstrapAiModel: resolveBootstrapAiModel(),
+    });
+    await scheduleRow(pool, tenant.tenantId, '+15556660005');
+    await scheduleRow(pool, tenantB.tenantId, '+15556660006');
+    const tenantFlags = new PgTenantFeatureFlagRepository(pool, platformFlags);
+    await tenantFlags.setTenantFlag(tenant.tenantId, DROPPED_CALL_RECOVERY_FLAG, true);
+    await tenantFlags.setTenantFlag(tenantB.tenantId, DROPPED_CALL_RECOVERY_FLAG, true);
+
+    const smsCalls: CapturedSms[] = [];
+    const result = await runDroppedCallRecoverySweep({
+      repo,
+      handlerDeps: productionDeps(smsCalls),
+      logger,
+      isEnabledForTenant: flagGate(),
+      now: () => DUE_AT,
+    });
+
+    expect(result.sent).toBe(2);
+    const bodyFor = (tenantId: string) =>
+      smsCalls.find((c) => c.tenantId === tenantId)?.body ?? '';
+    expect(bodyFor(tenant.tenantId)).toContain('this is Tenant Own Plumbing.');
+    expect(bodyFor(tenant.tenantId)).not.toContain('Itest Shop');
+    expect(bodyFor(tenantB.tenantId)).toContain('this is Itest Shop.');
   });
 
   it('tenant override OFF wins over an enabled platform flag (kill switch)', async () => {
