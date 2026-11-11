@@ -37,7 +37,9 @@ and `docs/prod-env-checklist.md`. Deploy target: Railway (`railway.toml`)._
    - Events to enable (handled in `webhooks/routes.ts`):
      - `customer.subscription.created`, `customer.subscription.updated`,
        `customer.subscription.deleted` _(:1399 — mirrors `subscription_status`
-       + `trial_ends_at`; emits `trial_to_paid` on trialing→active :1581 and
+       + `trial_ends_at`; emits `trial_to_paid` the first time a subscription
+       becomes `active` — trialing→active, or past_due/unpaid/incomplete→active
+       when the first charge failed first (`isFirstConversionToPaid`) — and
        `subscription_canceled` on delete)._
      - `checkout.session.completed`, `checkout.session.expired` _(:916/:902 —
        invoice payment + pending-checkout cleanup)._
@@ -189,8 +191,11 @@ after it passes), using card `4242 4242 4242 4242`, any future expiry/CVC:
    `derive-status.ts:72`); voice gate opens.
 5. **Trial → paid:** in Stripe (test clock or by ending the trial) advance past
    the trial, or hit the in-app upgrade nudge (`POST /api/billing/end-trial-now`).
-   On `trialing → active`, `trial_to_paid` is emitted (`routes.ts:1581`) and
-   `subscription_status = 'active'`.
+   The first time the subscription becomes `active` — `trialing → active`, or
+   `past_due → active` if the first charge failed and the card then recovered —
+   `trial_to_paid` is emitted once (`from_status` records which;
+   `routes.ts` `isFirstConversionToPaid`) and `subscription_status = 'active'`.
+   A later renewal failure + recovery does not emit it again.
 6. **Manage:** Settings → Billing → "Manage subscription" opens the Stripe
    customer portal (`SettingsPage.tsx`, `routes/billing.ts:73`).
 7. **Past-due:** simulate a failed renewal → `PastDueBanner` shows

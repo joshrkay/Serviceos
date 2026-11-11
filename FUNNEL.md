@@ -36,7 +36,7 @@ stamps the four fields uniformly. The server activation event passes them in
 | 9 | `test_call_initiated` | `web/.../onboarding/v2/steps/TestCallStep.tsx`; v3: `v3/TestCallTurn.tsx` | client | user taps the number / copies it (call intent) | — |
 | 10 | `test_call_succeeded` | `TestCallStep.tsx`; v3: `v3/AfterApproval.tsx` | client | test_call step flips to `done` (inbound detected) | — |
 | 11 | `first_real_call_received` **[ACTIVATION]** | `api/.../voice/activation.ts` (called from `app.ts onSessionEnded`) | server | first real inbound call after go-live (idempotent once/tenant) | `inbound_call_count` |
-| 12 | `trial_to_paid` **[CONVERSION]** | `api/.../webhooks/routes.ts` (Stripe `customer.subscription.updated`, trialing→active) | server | trial converts to a paid subscription | `priorStatus` |
+| 12 | `trial_to_paid` **[CONVERSION]** | `api/.../webhooks/routes.ts` (Stripe `customer.subscription.updated`: trialing→active, or past_due / unpaid / incomplete→active the first time that subscription is active) | server | a subscription's first paid period begins — once per subscription, including a trial whose first charge failed and later recovered | `priorStatus`, `from_status` |
 
 ### Pricing events (software + metered AI minutes — `docs/plans/per-call-pricing.md`)
 
@@ -191,7 +191,14 @@ docs/archive/2026-07-cleanup/root/BLOCKED.md).
 ## Conversion + payment health
 
 - `trial_to_paid` (existing, server) fires from the Stripe
-  `customer.subscription.updated` handler on trialing→active.
+  `customer.subscription.updated` handler the first time a subscription becomes
+  `active`. `from_status` says how: `trialing` (clean conversion) or
+  `past_due` / `unpaid` / `incomplete` (the first charge failed, then
+  recovered — previously uncounted). The event name and `priorStatus` are
+  unchanged, so existing funnels keep working. A later renewal failure +
+  recovery (a tenant that was already paid) does **not** fire it again: the
+  handler checks the subscription's `webhook_events` receipts for an earlier
+  `active` report before counting a non-`trialing` recovery.
 - Past-due state is **not** a funnel event; it's surfaced as the in-app
   `PastDueBanner`, driven off `tenants.subscription_status === 'past_due'`
   (mirrored by the Stripe `customer.subscription.*` webhook). Stripe stays the

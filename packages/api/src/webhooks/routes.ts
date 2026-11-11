@@ -321,6 +321,67 @@ async function enqueueTwilioNumberRelease(
   }
 }
 
+/**
+ * Is a `priorStatus → active` move the subscription's FIRST paid period — the
+ * funnel's `trial_to_paid` conversion?
+ *
+ *   trialing → active   Always: the trial converted cleanly.
+ *   past_due | unpaid → active
+ *                       Only when Stripe has never reported this subscription
+ *                       active. A card-required trial whose first charge fails
+ *                       goes trialing → past_due → active, and that recovery IS
+ *                       the conversion. The same move after a later renewal
+ *                       failure is a paying tenant recovering — counting it
+ *                       would double-count.
+ *   incomplete → active The first payment of a subscription with no trial
+ *                       (`incomplete` exists only before the first payment);
+ *                       same never-reported-active check, for uniformity.
+ *
+ * "Reported active before" comes from the `webhook_events` receipts, the only
+ * durable per-subscription status history there is (the tenants row mirrors the
+ * latest status only, and `past_due_grace_until` is cleared on recovery). A
+ * `customer.subscription.*` receipt keeps `object.id` and `object.status`
+ * (webhook-payload-allowlist.ts); the delivery being handled already has its own
+ * receipt, so that one is excluded by id. The lookup runs only on the
+ * dunning → active moves, never on every event.
+ *
+ * Never throws — an analytics lookup must not 500 a billing webhook after its
+ * status mirror committed (the Twilio / AI-verification enqueues below it would
+ * be skipped). On failure it counts nothing.
+ */
+async function isFirstConversionToPaid(
+  deps: Pick<WebhookRouterDeps, 'pool'>,
+  subscriptionId: string,
+  priorStatus: string | null,
+  currentReceiptId: string,
+): Promise<boolean> {
+  if (priorStatus === 'trialing') return true;
+  if (priorStatus !== 'past_due' && priorStatus !== 'unpaid' && priorStatus !== 'incomplete') {
+    return false;
+  }
+  if (!deps.pool) return false;
+  try {
+    const reportedActive = await deps.pool.query(
+      `SELECT 1
+         FROM webhook_events
+        WHERE source = 'stripe'
+          AND event_type IN ('customer.subscription.created', 'customer.subscription.updated')
+          AND id <> $2
+          AND payload->'object'->>'id' = $1
+          AND payload->'object'->>'status' = 'active'
+        LIMIT 1`,
+      [subscriptionId, currentReceiptId],
+    );
+    return reportedActive.rows.length === 0;
+  } catch (err) {
+    logger.warn('trial_to_paid funnel check failed — conversion not counted', {
+      subscriptionId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return false;
+  }
+}
+
 export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps = {}): Router {
   const router = Router();
 
@@ -2639,11 +2700,18 @@ export function createWebhookRouter(config: AppConfig, deps: WebhookRouterDeps =
                 event: 'trial_started',
                 properties,
               });
-            } else if (sub.status === 'active' && priorStatus === 'trialing') {
+            } else if (
+              sub.status === 'active' &&
+              (await isFirstConversionToPaid(deps, sub.id, priorStatus, webhookEvent.id))
+            ) {
+              // `from_status` says how the conversion happened: 'trialing'
+              // (clean) or 'past_due' / 'unpaid' / 'incomplete' (the first
+              // charge failed first). The event name and `priorStatus` are
+              // unchanged so existing PostHog funnels keep working.
               recordFunnelEvent({
                 distinctId: ownerClerkId,
                 event: 'trial_to_paid',
-                properties,
+                properties: { ...properties, from_status: priorStatus },
               });
             } else if (sub.status === 'canceled' && priorStatus !== 'canceled') {
               recordFunnelEvent({

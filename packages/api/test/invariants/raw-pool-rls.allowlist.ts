@@ -952,6 +952,11 @@ export const RAW_PG_SITES: readonly RawPgSite[] = [
     why: "Resolves the tenant from the signed Stripe event's customer id on the tenants registry (no RLS), only to enqueue a release of that tenant's own Twilio number.",
   },
   {
+    file: 'src/webhooks/routes.ts', fn: 'isFirstConversionToPaid', access: 'pool.query', count: 1,
+    category: 'global_table', tables: ['webhook_events'],
+    why: "The trial_to_paid funnel check: has another receipt (not this delivery's own) already reported this Stripe subscription id active? Read-only, keyed by the signed event's subscription id on the global webhook_events table (no tenant_id, no RLS); runs only on past_due / unpaid / incomplete → active moves.",
+  },
+  {
     file: 'src/webhooks/routes.ts', fn: 'resolveTenantConnectAccountId', access: 'pool.query', count: 1,
     category: 'global_table', tables: ['tenants'],
     why: 'Fallback read of tenants.stripe_connect_account_id (isValidTenantId-gated) for the #1102 event.account binding check; an unknown tenant fails closed.',

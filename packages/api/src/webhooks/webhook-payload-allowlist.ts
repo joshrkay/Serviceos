@@ -19,6 +19,12 @@
  *     object.amount_total, object.payment_intent (an id, or an expanded
  *     object's id), object.payment_status and object.metadata.{tenant_id,
  *     invoice_id, deposit_for_job_id}.
+ *   - webhooks/routes.ts (isFirstConversionToPaid), Stripe
+ *     `customer.subscription.created` / `.updated`: object.id and
+ *     object.status — whether another receipt already reported this
+ *     subscription active, so the trial_to_paid funnel event counts a
+ *     subscription's first paid period once (a trial whose first charge
+ *     failed converts on its recovery, not again on a later renewal failure).
  *   - Nothing else. The repositories map the column, but their callers read
  *     only the row's existence, id, status, processed_at and created_at
  *     (handleWebhookEvent's dedup and retry claim, the Twilio/Vapi/LSA

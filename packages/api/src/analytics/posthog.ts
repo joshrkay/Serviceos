@@ -6,7 +6,10 @@
  *   Funnel events (the browser never sees these) — recordFunnelEvent():
  *   - signup_completed    (Clerk user.created → bootstrapTenant)
  *   - trial_started       (Stripe subscription.* with status='trialing')
- *   - trial_to_paid       (Stripe subscription.updated: trialing → active)
+ *   - trial_to_paid       (Stripe subscription.updated: a subscription's first
+ *                          move to active — trialing → active, or past_due /
+ *                          unpaid / incomplete → active when the first charge
+ *                          failed first; `from_status` says which)
  *   - subscription_canceled  (Stripe subscription.deleted)
  *   - first_real_call_received  (voice/activation.ts)
  *
