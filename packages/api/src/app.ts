@@ -4586,6 +4586,10 @@ export function createApp(overrides: Partial<Repositories> = {}): AppWithLifecyc
     //    createVoiceTurnProcessor; see the variable-assembly note above) ──
     // WS18b — on-call SMS consent capture (ledger + customers.sms_consent).
     consentEventRepo,
+    // On-call booking confirmation: with customerRepo + consentEventRepo, the
+    // DNC list lets the processor tell whether the confirmation text would pass
+    // the customer-SMS gate before it promises one.
+    dncRepo,
     // QUALITY-2026-07-12 WS2 — on-call close PREPARATION (supersedes the D-018
     // autonomous close): both platform kill switches and the owner SMS/one-tap
     // approve wiring for the staged owner-approval chain. No executor — nothing

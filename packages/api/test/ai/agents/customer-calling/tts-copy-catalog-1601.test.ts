@@ -293,6 +293,20 @@ const SNAPSHOT: Record<string, Pinned> = {
     en: "Great — I'll have the owner confirm your booking, and you'll get the quote by text shortly.",
     es: 'Muy bien — haré que el propietario confirme su reserva, y recibirá el presupuesto por mensaje de texto en breve.',
   },
+  // On-call booking confirmation vs SMS consent: the ask, and the booked line
+  // that makes no text promise (no consent / declined / capture failed / DNC).
+  booking_sms_consent_ask: {
+    en: "Okay to text your confirmation to the number you're calling from?",
+    es: '¿Le parece bien que le enviemos la confirmación por mensaje de texto al número desde el que llama?',
+  },
+  booking_confirmed_no_text: {
+    en: "You're booked for {{time}}.",
+    es: 'Su cita está reservada para {{time}}.',
+    sample: {
+      vars: { time: 'Tuesday, November 17 at 2:00 PM' },
+      en: "You're booked for Tuesday, November 17 at 2:00 PM.",
+    },
+  },
   no_detail_yet: {
     en: "I don't have that detail on this one yet.",
     es: 'Todavía no tengo ese dato para esta solicitud.',

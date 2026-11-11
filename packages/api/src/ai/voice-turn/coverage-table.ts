@@ -313,14 +313,14 @@ export const COVERAGE_TABLE: Readonly<Record<IntentFamilyId, CoverageRow>> = {
       module:
         'telephony/twilio-adapter.ts#_handleGatherLocked (runs handlePendingVoiceApproval but NOT handlePendingConsentCapture)',
       copy:
-        'A pending SMS-consent capture is never consumed on a Gather turn: the caller\'s yes/no is classified as a fresh intent and session.pendingConsentCapture stays set. (Gather also never ASKS — the WS18b ask originates in the post-quote close flow this transport lacks.) Only the media-streams silence timer reaches Gather\'s handlePendingDialogueSilence.',
+        'A pending SMS-consent capture is never consumed on a Gather turn: the caller\'s yes/no is classified as a fresh intent and session.pendingConsentCapture stays set. (Gather also never ASKS — the WS18b ask originates in the post-quote close flow this transport lacks, and an autonomous booking (speakAutonomousBooked) skips its confirmation-text ask here and speaks "You\'re booked for {time}." with no text promise.) Only the media-streams silence timer reaches Gather\'s handlePendingDialogueSilence.',
     },
     media_streams: {
       status: 'reachable',
       module:
-        'ai/voice-turn/create-voice-turn-processor.ts#speechTurn → handlePendingConsentCapture (ask: handlePostQuoteClose, WS18b)',
+        'ai/voice-turn/create-voice-turn-processor.ts#speechTurn → handlePendingConsentCapture (ask: handlePostQuoteClose, WS18b; speakAutonomousBooked for an autonomous booking with no SMS consent on file)',
       notes:
-        'Consumes the turn before the FSM-state branch; silence parity via handlePendingDialogueSilence. Grant writes the consent ledger via recordSmsConsentFromVoice; decline/unwired persistence hands the send to the owner.',
+        'Consumes the turn before the FSM-state branch; silence parity via handlePendingDialogueSilence. Grant writes the consent ledger via recordSmsConsentFromVoice; decline/unwired persistence hands the send to the owner (close flow) or drops the text promise ("You\'re booked for {time}.") for an autonomous booking.',
     },
     inapp: {
       status: 'n/a',

@@ -13,10 +13,33 @@ import {
   type AutonomousLaneSettings,
 } from '../../proposals/autonomous-lane';
 import { formatForReadback } from '../scheduling/resolve-datetime';
+import { ttsCopy, type SessionLanguage } from '../agents/customer-calling/tts-copy';
 
-/** Spoken when D-015 auto-confirms the slot (customer is booked). */
+/**
+ * Spoken when D-015 auto-confirms the slot (customer is booked). It promises a
+ * text, so the live path speaks it only when the customer-SMS gate will let
+ * that text through (see booking-text-consent.ts); otherwise it speaks
+ * {@link spokenBookedWithoutTextPromise}.
+ */
 export function spokenAutonomousBookConfirm(timeReadback: string): string {
   return `You're booked for ${timeReadback}. I'll text you a confirmation — reply if you need to change it.`;
+}
+
+/** Asked before the text promise when the caller has no SMS consent on file. */
+export function spokenBookingConsentAsk(lang: SessionLanguage = 'en'): string {
+  return ttsCopy('booking_sms_consent_ask', lang);
+}
+
+/**
+ * Spoken when the slot is booked but no confirmation text can be promised
+ * (caller declined or gave an unclear answer, consent capture failed, DNC, or
+ * a transport that cannot take the answer).
+ */
+export function spokenBookedWithoutTextPromise(
+  timeReadback: string,
+  lang: SessionLanguage = 'en',
+): string {
+  return ttsCopy('booking_confirmed_no_text', lang, { time: timeReadback });
 }
 
 /**

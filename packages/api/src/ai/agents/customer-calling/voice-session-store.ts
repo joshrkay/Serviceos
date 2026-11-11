@@ -710,11 +710,20 @@ export interface VoiceSession {
    * instead of the plain acknowledgment. `strictConfirmed` records that the
    * authoritative confirmIntent gate already passed on the affirmative turn (an
    * input to evaluateAutonomousCloseLane).
+   *
+   * `booking` is set when the capture was initiated by an autonomous on-call
+   * booking confirmation (no quote close): the caller has no SMS consent on
+   * file, so the confirmation's text promise waits on this answer. A grant
+   * speaks the existing "I'll text you a confirmation" line; anything else
+   * speaks "You're booked for {time}." with no promise. The booking itself is
+   * never touched by the answer. `timeReadback` is the held time as the caller
+   * heard it.
    */
   pendingConsentCapture?: {
     customerId: string;
     phone: string;
     close?: { proposalId: string; strictConfirmed: boolean };
+    booking?: { timeReadback: string };
   };
   /**
    * WS2 — terminal close-flow state for this session. 'fallback' after the

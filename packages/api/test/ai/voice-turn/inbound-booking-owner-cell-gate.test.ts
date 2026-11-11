@@ -27,6 +27,9 @@ import { autonomousLaneEvaluationFor } from '../../../src/proposals/autonomous-l
 import { InMemoryVoiceSessionRepository } from '../../../src/voice/voice-session';
 import { InMemorySettingsRepository } from '../../../src/settings/settings';
 import { InMemoryAppointmentRepository } from '../../../src/appointments/in-memory-appointment';
+import { InMemoryCustomerRepository, type Customer } from '../../../src/customers/customer';
+import { InMemoryConsentEventRepository } from '../../../src/compliance/consent-events';
+import { InMemoryDncRepository } from '../../../src/compliance/dnc';
 import {
   spokenAutonomousBookConfirm,
   spokenBookingPendingOwner,
@@ -126,6 +129,25 @@ async function bookOnLiveCall(opts: {
   const auditRepo = new InMemoryAuditRepository();
   const appointmentRepo = new InMemoryAppointmentRepository();
   const settingsRepo = new InMemorySettingsRepository();
+  // The caller has SMS consent on file (and is not on the DNC list), so the
+  // autonomous "you're booked … I'll text you a confirmation" line is spoken
+  // as-is with no consent question — these tests are about the lane gates and
+  // the owner UNDO, not the consent ask (inbound-booking-sms-consent.test.ts).
+  const customerRepo = new InMemoryCustomerRepository();
+  await customerRepo.create({
+    id: CUSTOMER_ID,
+    tenantId: TENANT,
+    firstName: 'Dana',
+    lastName: 'Lee',
+    // Empty → the owner's UNDO text names only the time, as before.
+    displayName: opts.customerDisplayName ?? '',
+    primaryPhone: CALLER_PHONE,
+    smsConsent: true,
+    preferredChannel: 'sms',
+    isArchived: false,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  } as unknown as Customer);
   await settingsRepo.create({
     id: 'settings-owner-cell-gate',
     tenantId: TENANT,
@@ -150,6 +172,7 @@ async function bookOnLiveCall(opts: {
   session.machine.dispatch({ type: 'greeted_ok' });
   session.machine.dispatch({ type: 'caller_known', customerId: CUSTOMER_ID });
   session.customerId = CUSTOMER_ID;
+  session.callerPhone = CALLER_PHONE;
   const verstat = opts.stirVerstat === undefined ? STIR_VERSTAT_FULL_ATTESTATION : opts.stirVerstat;
   if (verstat) session.stirVerstat = verstat;
   if (opts.language) session.language = opts.language;
@@ -180,14 +203,9 @@ async function bookOnLiveCall(opts: {
     entityResolver: jobResolver,
     ...(laneUndo ? { laneUndo } : {}),
     ...(checker ? { slotConflictChecker: checker as never } : {}),
-    ...(opts.customerDisplayName
-      ? {
-          customerRepo: {
-            findById: async (_t: string, id: string) =>
-              id === CUSTOMER_ID ? ({ id, displayName: opts.customerDisplayName } as never) : null,
-          } as never,
-        }
-      : {}),
+    customerRepo,
+    consentEventRepo: new InMemoryConsentEventRepository(),
+    dncRepo: new InMemoryDncRepository(),
   });
 
   let fx: SideEffect[] = [];

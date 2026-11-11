@@ -430,6 +430,19 @@ export const TTS_COPY = {
     en: "No problem — I'll have the owner send that over, and you'll get a text shortly.",
     es: 'No hay problema — haré que el propietario se lo envíe, y recibirá un mensaje de texto en breve.', // es: new 1601
   },
+  // On-call booking confirmation vs SMS consent. A caller with no consent on
+  // file is asked before the autonomous "I'll text you a confirmation" line;
+  // the no-promise line is spoken whenever the gate would suppress that text
+  // (answered no / unclear / capture failed / DNC / not askable on this
+  // transport). Neither side may promise a text.
+  booking_sms_consent_ask: {
+    en: "Okay to text your confirmation to the number you're calling from?",
+    es: '¿Le parece bien que le enviemos la confirmación por mensaje de texto al número desde el que llama?', // es: new (booking consent)
+  },
+  booking_confirmed_no_text: {
+    en: "You're booked for {{time}}.",
+    es: 'Su cita está reservada para {{time}}.', // es: new (booking consent)
+  },
   close_fallback: {
     en: "Great — I'll have the owner confirm your booking, and you'll get the quote by text shortly.",
     es: 'Muy bien — haré que el propietario confirme su reserva, y recibirá el presupuesto por mensaje de texto en breve.', // es: new 1601

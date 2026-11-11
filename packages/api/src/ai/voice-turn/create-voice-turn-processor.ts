@@ -171,6 +171,8 @@ import {
 } from './post-quote-precheck';
 import { recordSmsConsentFromVoice } from '../../voice/outbound-consent';
 import type { ConsentEventRepository } from '../../compliance/consent-events';
+import type { DncRepository } from '../../compliance/dnc';
+import { decideBookingTextConsent } from './booking-text-consent';
 import {
   evaluateAutonomousCloseLane,
   type AutonomousCloseEvaluation,
@@ -201,6 +203,9 @@ import { updateAppointment } from '../../appointments/appointment';
 import type { TenantSettings } from '../../settings/settings';
 import {
   bookingSpeechForLane,
+  spokenAutonomousBookConfirm,
+  spokenBookedWithoutTextPromise,
+  spokenBookingConsentAsk,
   spokenBookingDraftForTime,
   buildLaneInputFromSettings,
   laneStampIfPresent,
@@ -860,6 +865,13 @@ export interface VoiceTurnProcessorDeps {
    * legitimately for the deposit/quote text.
    */
   consentEventRepo?: ConsentEventRepository;
+  /**
+   * Tenant DNC list. With `customerRepo` + `consentEventRepo` it lets an
+   * autonomous on-call booking tell whether the confirmation text would pass
+   * the customer-SMS gate: a caller on the list is never asked for consent and
+   * never promised a text. Absent → the promise is withheld (unverifiable).
+   */
+  dncRepo?: Pick<DncRepository, 'isOnDnc'>;
   /**
    * QUALITY-2026-07-12 WS2 — on-call close PREPARATION (supersedes the D-018
    * autonomous close). When wired, a caller's strict-confirmed, consent-gated
@@ -3088,6 +3100,14 @@ export function createVoiceTurnProcessor(
         // supervisor's cap, an executability hold): never "you're booked".
         bookingUtterance = bookingPendingUtterance;
       }
+      // The lane approved and the booking is stored approved: the caller hears
+      // the autonomous "you're booked" line. That line promises a text, so it
+      // waits on the caller's SMS consent — ask for it, or drop the promise.
+      // `laneUndoWhen` is the held time exactly as the caller heard it. The
+      // booking above is already stored; nothing below can undo or block it.
+      if (autonomousLaneForCreate && stored.status === 'approved' && laneUndoWhen) {
+        bookingUtterance = await speakAutonomousBooked(session, tenantId, laneUndoWhen);
+      }
       // D-015 — every live lane verdict is audited, as the router does. A
       // slot the conflict check found busy never reaches the lane: its hold
       // is refused and the booking is drafted without a verdict.
@@ -4777,14 +4797,83 @@ export function createVoiceTurnProcessor(
   }
 
   /**
+   * The line spoken for a booking the autonomous lane approved on this call.
+   * The existing line promises "I'll text you a confirmation", but the
+   * customer-SMS gate (block mode) suppresses that text without consent — so:
+   *
+   *   consent on file (and no DNC / revocation) → the existing line, no extra turn;
+   *   no consent, transport can take the answer  → ASK ("Okay to text your
+   *     confirmation…?") and arm `pendingConsentCapture` with `booking`; the
+   *     NEXT turn's answer picks the promise or the no-promise line
+   *     (handlePendingConsentCapture);
+   *   DNC / revoked / not askable / unverifiable → "You're booked for {time}."
+   *     with no promise.
+   *
+   * Never throws and never touches the booking: the proposal, hold and lane
+   * verdict are already stored when this runs.
+   */
+  async function speakAutonomousBooked(
+    session: VoiceSession,
+    tenantId: string,
+    timeReadback: string,
+  ): Promise<string> {
+    const lang = sessionLanguage(session);
+    try {
+      const customerId = session.customerId;
+      const phone = deps.callerPhoneResolver?.(session) ?? session.callerPhone;
+      const decision = await decideBookingTextConsent(
+        {
+          customerRepo: deps.customerRepo,
+          consentEventRepo: deps.consentEventRepo,
+          dncRepo: deps.dncRepo,
+        },
+        {
+          tenantId,
+          customerId,
+          phone,
+          // A transport whose coverage cell refuses ws18_consent_capture
+          // (Gather) would leave the question pending forever, and a pending
+          // close/approval dialogue must not be overwritten.
+          canAsk:
+            servesFamilyHere('ws18_consent_capture') && !session.pendingConsentCapture,
+        },
+      );
+      if (decision.action === 'promise') return spokenAutonomousBookConfirm(timeReadback);
+      logger.info('autonomous booking: no unconditional text promise', {
+        sessionId: session.id,
+        tenantId,
+        action: decision.action,
+        reason: decision.reason,
+      });
+      if (decision.action === 'ask' && customerId && phone) {
+        session.pendingConsentCapture = {
+          customerId,
+          phone,
+          booking: { timeReadback },
+        };
+        return spokenBookingConsentAsk(lang);
+      }
+    } catch (err) {
+      logger.warn('autonomous booking: text consent check failed', {
+        error: err instanceof Error ? err.message : String(err),
+        sessionId: session.id,
+        outcome: 'no_text_promise',
+      });
+    }
+    return spokenBookedWithoutTextPromise(timeReadback, lang);
+  }
+
+  /**
    * WS18 — consume an in-flight on-call SMS consent capture. Modeled on
    * handlePendingVoiceApproval: when session.pendingConsentCapture is set, the
-   * caller's utterance is the answer to "is it okay to text you the quote?".
-   * Strict confirmIntent (ambiguous → no). A GRANT writes the consent (ledger +
-   * customers.sms_consent) via the recordSmsConsentFromVoice seam so the
-   * GatedMessageDelivery gate later passes legitimately; a DECLINE / ambiguous /
-   * unwired-persistence hands the send to the owner. Returns the turn's side
-   * effects, or null when no capture is pending.
+   * caller's utterance is the answer to "is it okay to text you the quote?"
+   * (close flow) or "okay to text your confirmation?" (autonomous booking,
+   * `pending.booking`). Strict confirmIntent (ambiguous → no). A GRANT writes
+   * the consent (ledger + customers.sms_consent) via the recordSmsConsentFromVoice
+   * seam so the GatedMessageDelivery gate later passes legitimately; a DECLINE /
+   * ambiguous / unwired-persistence hands the send to the owner (close flow) or
+   * drops the text promise (booking). Returns the turn's side effects, or null
+   * when no capture is pending.
    */
   async function handlePendingConsentCapture(
     session: VoiceSession,
@@ -4797,7 +4886,9 @@ export function createVoiceTurnProcessor(
     let granted = false;
     try {
       const confirmation = await confirmIntent({
-        intentSummary: 'text you the full quote and a link to book',
+        intentSummary: pending.booking
+          ? 'text you a confirmation of this appointment'
+          : 'text you the full quote and a link to book',
         callerResponse: speechResult,
         tenantId,
         gateway: deps.gateway,
@@ -4882,6 +4973,27 @@ export function createVoiceTurnProcessor(
         {
           type: 'tts_play',
           payload: { text: SMS_CONSENT_DECLINE_FALLBACK, source: 'sms_consent_capture' },
+        },
+      ];
+    }
+
+    // An autonomous on-call booking's text promise. The booking was stored
+    // (and approved) before the question was asked and is untouched here: a
+    // recorded grant speaks the existing "I'll text you a confirmation" line;
+    // a decline, an unclear answer, silence or a failed capture speaks the
+    // booked line with no promise (granted is already false on every failure).
+    if (pending.booking) {
+      const { timeReadback } = pending.booking;
+      return [
+        captureAudit,
+        {
+          type: 'tts_play',
+          payload: {
+            text: granted
+              ? spokenAutonomousBookConfirm(timeReadback)
+              : spokenBookedWithoutTextPromise(timeReadback, sessionLanguage(session)),
+            source: 'sms_consent_capture',
+          },
         },
       ];
     }
