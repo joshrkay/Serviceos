@@ -15,12 +15,15 @@
  * the known parity holes — so the drift is visible, testable, and closable
  * on purpose instead of silently.
  *
- * WHAT THIS IS NOT. Not a routing table: nothing in production reads it.
- * The consumers are the structural test (every cell must be declared —
+ * WHO READS IT. Production does: `create-voice-turn-processor.ts` gates each
+ * per-family turn branch on the (family, surface) cell (`PORTED_BRANCH_TOKENS`
+ * there), so flipping a cell changes what `speechTurn` does on that surface.
+ * The other consumers are the structural test (every cell must be declared —
  * silence is impossible), the behavioral anchors (the declared cell must
  * match the observed behavior at each surface's seam), and the humans
  * closing #963/#966. When a surface gains or loses a branch, the matching
- * cell MUST change in the same PR — the anchors fail otherwise.
+ * cell MUST change in the same PR — the anchors fail otherwise. D-047 records
+ * the consolidation this table exists to drive.
  *
  * CELL SEMANTICS.
  *  - `reachable` — the family is served on this surface; `module` names the

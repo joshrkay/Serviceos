@@ -9,7 +9,10 @@ terms float.
 
 - **Surface** — a way a person reaches the product: the live phone, a recorded
   memo, in-app chat (mic or typed). Web and mobile UI are surfaces too, but
-  "surface" in voice docs means one of the three voice surfaces.
+  "surface" in voice docs means one of the three voice surfaces. Webchat (the
+  embedded site chat) is a fourth live surface for the turn pipeline: it runs
+  `speechTurn` today under the realtime phone's configuration and gets its own
+  coverage-table column under D-047.
 - **Transport** — an implementation of the phone surface: Twilio Gather,
   Twilio Media Streams (ConversationRelay is a third, not yet used). A
   capability targets "the phone", never a transport.
@@ -61,11 +64,21 @@ terms float.
   surface runs through; the guard-ladder order and intent-family precedence
   live here and nowhere else. Today it is being consolidated onto
   `ai/voice-turn/create-voice-turn-processor.ts#speechTurn`; until parity is
-  structural, the coverage table declares what runs where.
+  structural, the coverage table declares what runs where. Target shape
+  (D-047): four entry points (establish a session, run a caller turn, handle
+  an out-of-turn event such as silence expiry or the duration cap, end a
+  session); it takes the session lock itself, reads the surface from the
+  session, is the only writer of turn-level session state, and has one exit
+  that always finalizes and records the agent's line. A transport keeps audio,
+  barge-in, timers, reply-gap timing and how a terminal state is rendered.
+  Recorded memos are not a live turn and stay outside it.
 - **Coverage table** — the declared cell per (intent family, surface):
   reachable, or refuse with the honest copy
   (`ai/voice-turn/coverage-table.ts`). A structural test forbids undeclared
-  cells, so refusals happen on purpose and silence is impossible.
+  cells, so refusals happen on purpose and silence is impossible. The turn
+  pipeline reads it at runtime to decide whether a family's branch runs on a
+  surface, so flipping a cell changes behaviour and is done on purpose, in the
+  same change as the code it describes.
 - **Graded call** (#1602, D-041) — a production phone call the nightly
   sampler judged with the SAME Layer 2 graders the CI harness uses
   (`voice/quality/grade-voice-session.ts` over `ai/voice-quality/graders/*`),

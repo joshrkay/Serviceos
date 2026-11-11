@@ -2047,3 +2047,82 @@ interface changes. Choose it when connected domains approach the Railway per-ser
 **Alternatives rejected.** A TLS-for-SaaS provider first (a second vendor account, and DNS and
 billing to set up before one owner has connected a domain); our own ACME client (certificate
 storage, renewal and rate limits are exactly the work a provider removes).
+
+---
+
+## D-047 — One turn pipeline owns the guard ladder for every live voice surface; Gather moves onto it behind a per-tenant flag, in-app voice second
+
+**Date:** 2026-11-11
+**Status:** Accepted (owner decision, architecture review session); not yet implemented
+
+**Context.** `packages/api/CONTEXT.md` says the guard-ladder order lives "in the turn pipeline
+and nowhere else". It is written four times: `speechTurn` (realtime phone, and webchat), the
+Gather adapter's `_handleGatherLocked`, the in-app adapter's `_handleInputLocked`, and the memo
+router's `processSegment`. Gather calls 27 of the processor's 31 exported steps in a hand-kept
+order, so the step bodies are shared and only the ordering is duplicated. A read of the code on
+2026-11-11 found the classified-intent guards in the same relative order on Gather and
+`speechTurn`; the differences are before classification and at the exits. Guards exist on one
+surface and not another (the archived-caller hand-off is `speechTurn`-only and undeclared;
+farewell handling is in-app only; the keyword safety scan does not run in the in-app adapter).
+
+**Decision.**
+
+1. **Scope.** The two phone transports, webchat, then in-app voice. Recorded memos are not a
+   live turn and are out: they belong to the drafting consolidation (D-045 point 8).
+2. **Goal: safety parity.** Done means every guard has one definition and every coverage-table
+   cell is reachable or a declared refusal. Faster change and a single test surface follow.
+3. **When ladders disagree, converge on `speechTurn`.** Only differences a transport forces
+   survive, as cells. Two convergences run the other way because Gather is right: the pipeline
+   gets one exit that always finalizes and records the agent's line (today `speechTurn` skips
+   the transcript append on three early returns), and approval and edit intents take the in-app
+   confidence threshold on every surface.
+4. **Shape.** Four entry points: establish a session, run a caller turn, handle an out-of-turn
+   event (silence expiry, duration cap, interim emergency hit), end a session. The pipeline
+   takes the session lock itself, reads the surface from the session (set at establishment, so
+   it survives a realtime-to-Gather degrade), and is the only writer of turn-level session
+   state. The low-confidence streak moves onto the session; the state machine's own retry cap
+   is not unified with it (#965 stays a separate decision).
+5. **Pre-turn order, on every surface:** owner-line re-check, safety scan, duration cap,
+   frustration, pending approval, silence, low-confidence gate, vulnerability triage, classify.
+   This is Gather's order. It moves the safety scan ahead of the confidence gate on realtime.
+6. **What a transport keeps.** Audio, barge-in, timers, the interim-transcript emergency scan
+   and latch, reply-gap timing (D-043), and how a terminal state is rendered (Gather's voicemail
+   recording, realtime's call-back line).
+7. **Sequence.** (a) Declare webchat as a coverage-table surface. (b) Route Gather through the
+   pipeline, behaviour-neutral except: Gather gains the archived-caller hand-off and the early
+   existing-customer reply; realtime gets point 5's order and point 3's single exit. (c) Open
+   the three declared Gather holes one at a time: consent capture, post-quote assent, emergency
+   immediate dial. (d) Add the ladder-shaped gaps once: farewell on every surface, silent
+   states, emergencies phrased as answers. (e) In-app voice: first a line-by-line comparison of
+   the two proposal-minting copies; then the shared side-effect executors, with the adapter
+   declaring what it can render; the phone path's classifier-failure behaviour with in-app
+   wording; duplicate-turn, noise and bare-yes guards as cells open for in-app first; entity
+   confirmation stays in-app only.
+8. **Rollout.** A per-tenant flag selects the old or new Gather ladder. Entry gate: the
+   voice-quality harness passing on the Gather surface. Order: demo tenant, a small set of real
+   tenants, everyone, advancing on call count. The old ladder and the flag are deleted two weeks
+   after reaching 100%. No shadow mode: a turn has side effects and there is no dry run.
+9. **Tests.** The Gather-adapter suites stay unchanged as the safety net and run in both flag
+   states; ladder-behaviour tests move to the pipeline only after the old ladder is deleted.
+
+**Not part of this decision.** The emergency keyword fixes (keyword-free emergencies classified
+as routine; negated or device mentions classified as emergencies) are in the shared classifier,
+not in any ladder, and go first on their own.
+
+**Open.**
+- The call-count threshold and the size of the real-tenant step (needs live tenant numbers).
+- The LLM sentiment check stays realtime-only as a declared cell; extending it to Gather is a
+  cost and latency decision.
+- Gather's direction is fallback behind realtime (D-043), but it is first-class for this work.
+
+**Unverified at decision time.** Whether `speechTurn` discarding accumulated side effects when a
+service-area or identity check "proceeds" is a bug (the plan keeps them once confirmed); whether
+webchat runs any safety scan before `speechTurn`; what each `gather-*` suite asserts.
+
+**Alternatives rejected.** Preserving every current Gather difference as a cell (moves the
+duplication into the table); a single cutover with no flag (no one-step rollback on the default
+transport); restructuring session state first (a second large change in the same files);
+including memos (a different problem with a different owner module).
+
+**Relates to.** D-034 (the table stays hand-maintained), D-036, D-042 (each behaviour lives in
+the shared pipeline, never in a transport adapter), D-043, D-045.
