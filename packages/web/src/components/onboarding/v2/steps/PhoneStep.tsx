@@ -8,6 +8,7 @@ import {
   buildCallForwardingInstructions,
   CALL_FORWARDING_CARRIERS,
   CALL_FORWARDING_CARRIER_LABELS,
+  type CallForwardingInstructions,
 } from '@ai-service-os/shared';
 
 interface PhoneStepProps {
@@ -28,6 +29,40 @@ const BLOCKER_COPY: Record<string, string> = {
   rate_limited:
     'Too many provisioning attempts. Hit Retry in a minute and we will try again.',
 };
+
+/**
+ * A carrier with one code per condition (T-Mobile, missed calls): one tappable
+ * code per line to dial in turn, then the codes that turn each one off.
+ */
+function MultiCodes({
+  instructions,
+}: {
+  instructions: Extract<CallForwardingInstructions, { kind: 'multi-codes' }>;
+}) {
+  const off = instructions.offCodes.map((c) => `${c.dial} (${c.label.toLowerCase()})`).join(', ');
+  return (
+    <div className="min-w-0 space-y-2 sm:text-right">
+      <p className="text-xs text-slate-500">Dial each in turn:</p>
+      <ol className="space-y-1">
+        {instructions.codes.map((c) => (
+          <li key={c.dial} className="flex min-w-0 flex-col sm:items-end">
+            <span className="text-xs text-slate-500">{c.label}</span>
+            <a
+              href={c.dialHref}
+              aria-label={`${c.label}: ${c.dial}`}
+              className="inline-flex min-h-11 items-center break-all font-mono text-sm text-slate-900 underline"
+            >
+              {c.dial}
+            </a>
+          </li>
+        ))}
+      </ol>
+      <p className="text-xs text-slate-500">
+        To turn off, dial {off}, or {instructions.resetAll.dial} to {instructions.resetAll.label.toLowerCase()}.
+      </p>
+    </div>
+  );
+}
 
 export function PhoneStep({ status, onAdvance, onRetryComplete }: PhoneStepProps) {
   const apiFetch = useApiClient();
@@ -233,9 +268,13 @@ export function PhoneStep({ status, onAdvance, onRetryComplete }: PhoneStepProps
                 <span className="text-sm font-medium text-slate-700">
                   {CALL_FORWARDING_CARRIER_LABELS[carrier]}
                 </span>
-                <span className="font-mono text-sm text-slate-600">
-                  {instructions?.kind === 'codes' ? instructions.dial : 'Ask your carrier'}
-                </span>
+                {instructions?.kind === 'multi-codes' ? (
+                  <MultiCodes instructions={instructions} />
+                ) : (
+                  <span className="font-mono text-sm text-slate-600">
+                    {instructions?.kind === 'codes' ? instructions.dial : 'Ask your carrier'}
+                  </span>
+                )}
               </li>
             );
           })}

@@ -34,9 +34,24 @@ export function isCallForwardingMode(v: unknown): v is CallForwardingMode {
 
 type CodeBuilder = (national: string) => string;
 
+/** One code that turns forwarding on, and the one that turns it back off. */
+interface SingleCode {
+  on: CodeBuilder;
+  off: string;
+}
+
+/**
+ * A carrier with no single "missed calls" code: one code per condition, dialed
+ * in turn, plus a reset that clears them all.
+ */
+interface MultiCode {
+  steps: Array<SingleCode & { label: string }>;
+  resetAll: string;
+}
+
 interface CarrierCodes {
-  missed: { on: CodeBuilder; off: string };
-  all: { on: CodeBuilder; off: string };
+  missed: SingleCode | MultiCode;
+  all: SingleCode | MultiCode;
 }
 
 /** `national` is the 10-digit US number without the country code. */
@@ -50,11 +65,28 @@ const CODES: Record<Exclude<CallForwardingCarrier, 'other'>, CarrierCodes> = {
     all: { on: (n) => `**21*${n}#`, off: '##21#' },
   },
   tmobile: {
-    // **004* sets forwarding for busy, no-answer and unreachable together.
-    missed: { on: (n) => `**004*1${n}#`, off: '##004#' },
+    // T-Mobile publishes no combined **004* turn-on code. It lists ##004# only
+    // as "Resets call forwarding to default" and publishes one code per
+    // condition (checked 2026-11-11):
+    // https://www.t-mobile.com/support/plans-features/self-service-short-codes
+    missed: {
+      steps: [
+        { label: 'No answer', on: (n) => `**61*1${n}#`, off: '##61#' },
+        { label: 'Busy', on: (n) => `**67*1${n}#`, off: '##67#' },
+        { label: 'Unreachable', on: (n) => `**62*1${n}#`, off: '##62#' },
+      ],
+      resetAll: '##004#',
+    },
     all: { on: (n) => `**21*1${n}#`, off: '##21#' },
   },
 };
+
+/** A dialable code with the label that says what it covers. */
+export interface CallForwardingCode {
+  label: string;
+  dial: string;
+  dialHref: string;
+}
 
 export type CallForwardingInstructions =
   | {
@@ -65,6 +97,15 @@ export type CallForwardingInstructions =
       off: string;
       dialHref: string;
       offHref: string;
+    }
+  | {
+      kind: 'multi-codes';
+      /** Dial each, in this order, from the business phone. */
+      codes: CallForwardingCode[];
+      /** One off code per entry in `codes`, in the same order. */
+      offCodes: CallForwardingCode[];
+      /** Clears every forward at once. */
+      resetAll: CallForwardingCode;
     }
   | { kind: 'generic'; steps: string[] };
 
@@ -79,6 +120,10 @@ export function nationalDigits(e164: string | null | undefined): string {
 /** `#` must be percent-encoded in a tel: URI or the dialer drops it. */
 function telHref(code: string): string {
   return `tel:${code.replace(/#/g, '%23')}`;
+}
+
+function codeFor(label: string, dial: string): CallForwardingCode {
+  return { label, dial, dialHref: telHref(dial) };
 }
 
 export function buildCallForwardingInstructions(input: {
@@ -102,6 +147,14 @@ export function buildCallForwardingInstructions(input: {
   const national = nationalDigits(input.rivetNumber);
   if (!national) return null;
   const entry = CODES[input.carrier][input.mode];
+  if ('steps' in entry) {
+    return {
+      kind: 'multi-codes',
+      codes: entry.steps.map((s) => codeFor(s.label, s.on(national))),
+      offCodes: entry.steps.map((s) => codeFor(s.label, s.off)),
+      resetAll: codeFor('Reset all', entry.resetAll),
+    };
+  }
   const dial = entry.on(national);
   return { kind: 'codes', dial, off: entry.off, dialHref: telHref(dial), offHref: telHref(entry.off) };
 }

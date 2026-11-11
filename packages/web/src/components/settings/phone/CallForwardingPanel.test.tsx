@@ -2,7 +2,7 @@
  * D-044 / #1765 — the carrier + mode picker and the codes it shows.
  * Seam: the rendered panel, with the API client stubbed.
  */
-import { render, screen, fireEvent, waitFor } from '@testing-library/react';
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const apiFetchMock = vi.fn();
@@ -80,6 +80,57 @@ describe('CallForwardingPanel', () => {
       '/api/get-found-online/forwarding',
       expect.objectContaining({ body: JSON.stringify({ carrier: 'verizon', mode: 'all' }) }),
     );
+  });
+
+  // T-Mobile publishes one code per condition rather than a single missed-calls
+  // code, so the panel lists them to dial in turn.
+  it('T-Mobile missed calls: three codes to dial in turn, then the off codes and a reset, one link per line', async () => {
+    route(view({ carrier: 'tmobile' }));
+    render(<CallForwardingPanel />);
+    const codes = await screen.findByTestId('call-forwarding-codes');
+
+    expect(codes).toHaveTextContent(/dial each in turn/i);
+    const links = within(codes).getAllByRole('link');
+    expect(links.map((a) => a.getAttribute('href'))).toEqual([
+      // dial, in order
+      'tel:**61*15125550123%23',
+      'tel:**67*15125550123%23',
+      'tel:**62*15125550123%23',
+      // off, same order
+      'tel:%23%2361%23',
+      'tel:%23%2367%23',
+      'tel:%23%2362%23',
+      // reset all
+      'tel:%23%23004%23',
+    ]);
+    expect(links.map((a) => a.textContent)).toEqual([
+      '**61*15125550123#',
+      '**67*15125550123#',
+      '**62*15125550123#',
+      '##61#',
+      '##67#',
+      '##62#',
+      '##004#',
+    ]);
+    expect(codes).toHaveTextContent(/reset all/i);
+    expect(codes).not.toHaveTextContent('**004*');
+    for (const a of links) expect(a.className).toContain('break-all');
+  });
+
+  it.each([
+    ['att', 'missed', '**61*5125550123#', '##61#'],
+    ['verizon', 'missed', '*715125550123', '*73'],
+    ['tmobile', 'all', '**21*15125550123#', '##21#'],
+  ])('%s %s keeps one dial code and one off code (two links, no sequence guidance)', async (carrier, mode, dial, off) => {
+    route(view({ carrier, mode }));
+    render(<CallForwardingPanel />);
+    const codes = await screen.findByTestId('call-forwarding-codes');
+
+    expect(codes).toHaveTextContent(dial);
+    expect(codes).toHaveTextContent(off);
+    expect(within(codes).getAllByRole('link')).toHaveLength(2);
+    expect(codes).not.toHaveTextContent(/dial each in turn/i);
+    expect(codes).not.toHaveTextContent(/reset all/i);
   });
 
   it('gives generic instructions for Other', async () => {

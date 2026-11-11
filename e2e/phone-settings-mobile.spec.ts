@@ -222,7 +222,10 @@ test.describe('Settings → Phone — mobile layout', () => {
         await expectGloveTarget(page, name);
       }
       await page.getByRole('button', { name: 'T-Mobile' }).click();
-      await expect(page.getByTestId('call-forwarding-codes')).toContainText('**004*15125550123#');
+      // T-Mobile has no single missed-calls code: three per-condition codes, dialed in turn.
+      for (const code of ['**61*15125550123#', '**67*15125550123#', '**62*15125550123#']) {
+        await expect(page.getByTestId('call-forwarding-codes')).toContainText(code);
+      }
       await expectGloveTarget(page, /All calls/);
       await expectGloveTarget(page, /Missed calls only/);
       for (const link of await page.getByTestId('call-forwarding-codes').getByRole('link').all()) {

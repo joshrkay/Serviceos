@@ -1,4 +1,4 @@
-import { render, fireEvent, screen, waitFor } from '@testing-library/react';
+import { render, fireEvent, screen, waitFor, within } from '@testing-library/react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const apiFetchMock = vi.fn();
@@ -184,5 +184,75 @@ describe('PhoneStep — awaiting the owner\'s pick (#1563)', () => {
       />,
     );
     expect(screen.getByText(/claiming \(512\) 555-0123/i)).toBeInTheDocument();
+  });
+});
+
+// D-044 / #1765 — the ready view lists each carrier's missed-call code. T-Mobile
+// has no single code, so its row lists one tappable code per condition.
+describe('PhoneStep — forwarding codes', () => {
+  function renderReady() {
+    return render(
+      <PhoneStep
+        status={makeStatus({ status: 'done', metadata: { phoneNumber: '+15125550123' } })}
+        onAdvance={() => {}}
+      />,
+    );
+  }
+
+  function carrierRow(name: string): HTMLElement {
+    return screen.getByText(name, { selector: 'span' }).closest('li') as HTMLElement;
+  }
+
+  it('lists T-Mobile as three tappable codes in dial order, 44px tall and wrapping', () => {
+    renderReady();
+    const row = carrierRow('T-Mobile');
+
+    expect(within(row).getByText(/dial each in turn/i)).toBeInTheDocument();
+    const links = within(row).getAllByRole('link');
+    expect(links.map((a) => a.textContent)).toEqual([
+      '**61*15125550123#',
+      '**67*15125550123#',
+      '**62*15125550123#',
+    ]);
+    expect(links.map((a) => a.getAttribute('href'))).toEqual([
+      'tel:**61*15125550123%23',
+      'tel:**67*15125550123%23',
+      'tel:**62*15125550123%23',
+    ]);
+    for (const a of links) {
+      expect(a.className).toContain('min-h-11');
+      expect(a.className).toContain('break-all');
+    }
+    // Each code is labelled with the condition it covers, in order.
+    expect(within(row).getAllByText(/^(No answer|Busy|Unreachable)$/).map((el) => el.textContent)).toEqual([
+      'No answer',
+      'Busy',
+      'Unreachable',
+    ]);
+  });
+
+  it('shows the T-Mobile off codes and the reset, and never the old **004* code', () => {
+    const { container } = renderReady();
+    const row = carrierRow('T-Mobile');
+
+    expect(row).toHaveTextContent('##61#');
+    expect(row).toHaveTextContent('##67#');
+    expect(row).toHaveTextContent('##62#');
+    expect(row).toHaveTextContent(/reset all/i);
+    expect(row).toHaveTextContent('##004#');
+    expect(container.textContent).not.toContain('**004*');
+  });
+
+  it.each([
+    ['Verizon', '*715125550123'],
+    ['AT&T', '**61*5125550123#'],
+    ['Other', 'Ask your carrier'],
+  ])('%s still shows its single code as plain text, with no links or sequence guidance', (name, code) => {
+    renderReady();
+    const row = carrierRow(name);
+
+    expect(within(row).getByText(code)).toBeInTheDocument();
+    expect(within(row).queryAllByRole('link')).toHaveLength(0);
+    expect(within(row).queryByText(/dial each in turn/i)).toBeNull();
   });
 });

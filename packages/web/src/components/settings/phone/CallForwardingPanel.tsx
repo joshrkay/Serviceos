@@ -6,6 +6,7 @@ import {
   CALL_FORWARDING_CARRIER_LABELS,
   buildCallForwardingInstructions,
   type CallForwardingCarrier,
+  type CallForwardingCode,
   type CallForwardingMode,
 } from '@ai-service-os/shared';
 
@@ -63,6 +64,24 @@ function choiceClass(selected: boolean): string {
       ? 'border-slate-900 bg-slate-900 text-white'
       : 'border-slate-200 bg-white text-slate-800 hover:bg-slate-50'
   }`;
+}
+
+/** One labelled, tappable code on its own line (full width, >=44px, wraps). */
+function CodeLine({ code, tone }: { code: CallForwardingCode; tone: 'dial' | 'off' }) {
+  return (
+    <li className="min-w-0 space-y-1">
+      <p className="text-xs text-slate-600">{code.label}</p>
+      <a
+        href={code.dialHref}
+        aria-label={`${code.label}: ${code.dial}`}
+        className={`inline-flex min-h-11 w-full items-center break-all rounded-lg px-4 font-mono text-sm font-medium ${
+          tone === 'dial' ? 'bg-slate-900 text-white' : 'border border-slate-300 text-slate-800'
+        }`}
+      >
+        {code.dial}
+      </a>
+    </li>
+  );
 }
 
 export function CallForwardingPanel() {
@@ -263,6 +282,37 @@ export function CallForwardingPanel() {
             >
               Tap to dial
             </a>
+          </div>
+        </div>
+      )}
+
+      {instructions?.kind === 'multi-codes' && (
+        <div data-testid="call-forwarding-codes" className="min-w-0 space-y-4 rounded-xl bg-slate-50 p-4">
+          <div className="space-y-2">
+            <p className="text-xs uppercase tracking-widest text-slate-500">
+              From your business phone, dial each in turn
+            </p>
+            <ol className="space-y-2">
+              {instructions.codes.map((code) => (
+                <CodeLine key={code.dial} code={code} tone="dial" />
+              ))}
+            </ol>
+          </div>
+          <div className="space-y-2">
+            <p className="text-xs uppercase tracking-widest text-slate-500">
+              To turn forwarding off, dial
+            </p>
+            <ol className="space-y-2">
+              {instructions.offCodes.map((code) => (
+                <CodeLine key={code.dial} code={code} tone="off" />
+              ))}
+            </ol>
+          </div>
+          <div className="space-y-2">
+            <p className="text-xs uppercase tracking-widest text-slate-500">Or clear every forward at once</p>
+            <ul className="space-y-2">
+              <CodeLine code={instructions.resetAll} tone="off" />
+            </ul>
           </div>
         </div>
       )}
