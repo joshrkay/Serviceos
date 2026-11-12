@@ -505,8 +505,14 @@ describe('Postgres integration — demo tenant reset and release (S6-4)', () => 
       },
     }).resetAndRelease(lease.id, { source: 'callback' });
     await paused.promise;
-    await pool.query(`UPDATE demo_tenant_leases SET reset_heartbeat_at = now() - interval '30 seconds' WHERE id = $1`, [lease.id]);
-    const aged = await pool.query<{ age: number }>(`SELECT extract(epoch FROM now() - reset_heartbeat_at)::float AS age FROM demo_tenant_leases WHERE id = $1`, [lease.id]);
+    // Backdate and read the age in ONE statement. The running reset renews the
+    // heartbeat every 40 ms from its own connection, so a separate SELECT can
+    // land after a renewal and see an age near zero (seen in CI: 0.15 s).
+    const aged = await pool.query<{ age: number }>(
+      `UPDATE demo_tenant_leases SET reset_heartbeat_at = now() - interval '30 seconds' WHERE id = $1
+       RETURNING extract(epoch FROM now() - reset_heartbeat_at)::float AS age`,
+      [lease.id],
+    );
     expect(aged.rows[0].age).toBeGreaterThanOrEqual(29);
     await new Promise((r) => {
       setTimeout(r, 250);
