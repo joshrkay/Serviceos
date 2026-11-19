@@ -5,9 +5,13 @@ import { createServer } from 'node:net';
 
 test('requested real database failure aborts global setup instead of silently skipping', async () => {
   const listener = createServer(socket => socket.destroy());
-  await new Promise(resolve => listener.listen(0, '127.0.0.1', resolve));
+  await new Promise(resolve => {
+    listener.listen(0, '127.0.0.1', resolve);
+  });
   const { port } = listener.address();
-  await new Promise(resolve => listener.close(resolve));
+  await new Promise(resolve => {
+    listener.close(resolve);
+  });
   const result = spawnSync(process.execPath, ['node_modules/tsx/dist/cli.mjs', '-e',
     "import setup from './e2e/global-setup'; setup().then(()=>console.log('SETUP_RETURNED_SUCCESS')).catch(()=>process.exit(1))"], {
     encoding: 'utf8', timeout: 15000,

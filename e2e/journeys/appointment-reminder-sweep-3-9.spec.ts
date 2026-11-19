@@ -210,7 +210,9 @@ async function seedDueAppointment(
     const apptRes = await request.get(`${API_URL}/api/appointments?jobId=${job.id}`, { headers: tenant.authHeaders });
     const list = (await apptRes.json()) as Array<{ id: string }>;
     if (list.length > 0) appointmentId = list[0].id;
-    else await new Promise((r) => setTimeout(r, 200));
+    else await new Promise((r) => {
+      setTimeout(r, 200);
+    });
   }
   expect(appointmentId, `job ${job.id} must have a linked appointment`).toMatch(UUID_RE);
   return { appointmentId, jobId: job.id, scheduledStart };

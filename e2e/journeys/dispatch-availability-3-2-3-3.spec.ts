@@ -275,7 +275,9 @@ test.describe('dispatch availability (3.2 business hours/buffer/isolation + 3.3 
       availA = await getAvailability(page.request, tenantA.authHeaders, FUTURE_DAY);
       const blocks10 = availA.slots.some((s) => s.start === `${FUTURE_DAY}T10:00:00.000Z`);
       if (!blocks10) break;
-      await new Promise((r) => setTimeout(r, 200));
+      await new Promise((r) => {
+      setTimeout(r, 200);
+    });
     }
     expect(availA, 'tenant A availability must have loaded').toBeTruthy();
 

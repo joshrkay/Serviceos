@@ -215,7 +215,9 @@ export async function pollFor<T>(fn: () => Promise<T | null | undefined>, messag
     const value = await fn();
     if (value !== null && value !== undefined) return value;
     if (Date.now() > deadline) throw new Error(`timed out: ${message}`);
-    await new Promise((r) => setTimeout(r, 250));
+    await new Promise((r) => {
+      setTimeout(r, 250);
+    });
   }
 }
 

@@ -253,7 +253,9 @@ matrixTest('INV-05', 'Mark paid via webhook', async (h) => {
     });
     row = db.rows[0] as { status: string; amount_paid_cents: number };
     if (row?.status === 'paid') break;
-    await new Promise((r) => setTimeout(r, 1000));
+    await new Promise((r) => {
+      setTimeout(r, 1000);
+    });
   }
 
   await gotoUi(h, `/invoices/${id}`, '05-detail');
@@ -372,7 +374,9 @@ matrixTest('INV-07', 'Overdue lifecycle', async (h) => {
 
   let moneyState = 'unknown';
   for (let i = 0; i < 10; i++) {
-    await new Promise((r) => setTimeout(r, 2500));
+    await new Promise((r) => {
+      setTimeout(r, 2500);
+    });
     const res = await h.db.query({
       label: `07-money-state-${i}`,
       tenantId: h.tenantA.tenantId,

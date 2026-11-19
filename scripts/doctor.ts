@@ -349,7 +349,7 @@ export async function runDoctor(
     readFileSync(path.join(root, 'package.json'), 'utf8'),
   ) as { engines?: { npm?: string } };
 
-  let npmVersion = '';
+  let npmVersion;
   try {
     npmVersion = execFileSync('npm', ['--version'], {
       stdio: 'pipe',

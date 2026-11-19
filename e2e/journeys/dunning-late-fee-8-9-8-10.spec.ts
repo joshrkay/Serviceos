@@ -226,7 +226,9 @@ test.describe('dunning cadence sweeps for real; the owner-set late fee is drafte
     ).toEqual(['14:sms', '3:sms', '7:sms']);
 
     // ── Wait for a SECOND real sweep tick, then confirm no duplicates ────
-    await new Promise((r) => setTimeout(r, sweepIntervalMs * 2));
+    await new Promise((r) => {
+      setTimeout(r, sweepIntervalMs * 2);
+    });
     const afterSecondPass = await queryAsTenant(
       tenantA.tenantId,
       `SELECT step_key FROM invoice_dunning_events WHERE tenant_id = $1 AND invoice_id = $2 AND kind = 'reminder'`,

@@ -61,7 +61,9 @@ async function dbStatus(h: RowHarness, label: string, jobId: string, want?: stri
     expect(row.rowCount, `${label}: job row must exist`).toBe(1);
     status = (row.rows[0] as { status: string }).status;
     if (want === undefined || status === want) break;
-    await new Promise((r) => setTimeout(r, 150));
+    await new Promise((r) => {
+      setTimeout(r, 150);
+    });
   }
   return status;
 }

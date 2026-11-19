@@ -212,7 +212,9 @@ test.describe('the arithmetic is exactly right, every time (8.13) — real Postg
         navigated = true;
       } catch (err) {
         lastErr = err;
-        await new Promise((r) => setTimeout(r, 2_000));
+        await new Promise((r) => {
+      setTimeout(r, 2_000);
+    });
       }
     }
     expect(navigated, `page.goto never succeeded: ${lastErr}`).toBeTruthy();

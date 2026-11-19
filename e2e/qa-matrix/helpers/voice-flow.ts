@@ -204,7 +204,9 @@ export async function approveAndAwaitExecution(
   // Poll silently past the undo window for the execution worker.
   let status = 'pending';
   for (let i = 0; i < 15; i++) {
-    await new Promise((r) => setTimeout(r, 2000));
+    await new Promise((r) => {
+      setTimeout(r, 2000);
+    });
     try {
       const res = await fetch(`${apiBase()}/api/proposals/${proposalId}`, {
         headers: { authorization: `Bearer ${token}` },

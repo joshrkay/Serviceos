@@ -237,7 +237,9 @@ test.describe('held-slot reaper (3.5) — real Postgres', () => {
     for (let i = 0; i < 10; i++) {
       apptABefore = await getAppointment(page.request, tenantA.authHeaders, apptAId);
       if (apptABefore.holdPendingApproval === true) break;
-      await new Promise((r) => setTimeout(r, 200));
+      await new Promise((r) => {
+      setTimeout(r, 200);
+    });
     }
     expect(apptABefore!.status).toBe('scheduled');
     expect(apptABefore!.holdPendingApproval).toBe(true);

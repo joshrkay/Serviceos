@@ -626,6 +626,8 @@ export async function pollForRow<T>(
     if (Date.now() - start > timeoutMs) {
       throw new Error(`pollForRow timed out after ${timeoutMs}ms (#1133 workaround)`);
     }
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise((r) => {
+      setTimeout(r, 100);
+    });
   }
 }

@@ -195,7 +195,7 @@ export async function apiFetch(
 
   // 401 — single retry with a force-refreshed token before giving up.
   // Covers the normal token-expiry case without bouncing the user.
-  let fresh: string | null = null;
+  let fresh: string | null;
   try {
     fresh = await getToken({ forceRefresh: true });
   } catch {

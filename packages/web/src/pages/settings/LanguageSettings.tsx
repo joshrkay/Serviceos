@@ -76,9 +76,11 @@ export function LanguageSettingsPage() {
           className="mt-1 block w-48 rounded border px-2 py-1"
           value={settings.defaultLanguage}
           disabled={saving}
-          onChange={(e) =>
-            handleSave({ defaultLanguage: e.target.value as Language })
-          }
+          onChange={(e) => {
+            handleSave({ defaultLanguage: e.target.value as Language }).catch(
+              (e) => console.error('Language change failed:', e)
+            );
+          }}
         >
           <option value="en">English</option>
           <option value="es">Español</option>
@@ -92,11 +94,11 @@ export function LanguageSettingsPage() {
           aria-label="Enable Spanish"
           checked={settings.supportedLanguages?.includes('es') ?? false}
           disabled={saving}
-          onChange={(e) =>
+          onChange={(e) => {
             handleSave({
               supportedLanguages: e.target.checked ? ['en', 'es'] : ['en'],
-            })
-          }
+            }).catch((e) => console.error('Spanish enable failed:', e));
+          }}
         />
         <span>
           Enable Spanish
@@ -114,9 +116,11 @@ export function LanguageSettingsPage() {
           aria-label="Auto-detect caller language"
           checked={settings.autoDetectLanguage}
           disabled={saving}
-          onChange={(e) =>
-            handleSave({ autoDetectLanguage: e.target.checked })
-          }
+          onChange={(e) => {
+            handleSave({ autoDetectLanguage: e.target.checked }).catch((e) =>
+              console.error('Auto-detect toggle failed:', e)
+            );
+          }}
         />
         <span>Auto-detect caller language</span>
       </label>

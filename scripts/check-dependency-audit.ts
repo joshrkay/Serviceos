@@ -269,6 +269,7 @@ function runAudit(includeDev: boolean): string {
     if (stdout && stdout.trim().length > 0) return stdout;
     throw new Error(
       `npm audit failed with no output: ${err instanceof Error ? err.message : err}`,
+      { cause: err },
     );
   }
 }

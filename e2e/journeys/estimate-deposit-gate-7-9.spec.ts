@@ -300,7 +300,9 @@ test.describe('deposit-before-approval gate + fixed-amount cap (7.9) — real Po
     for (let i = 0; i < 100; i++) {
       const probe = await request.get(`${API_URL}/public/estimates/${target.viewToken}`);
       if (probe.ok()) break;
-      await new Promise((r) => setTimeout(r, 100));
+      await new Promise((r) => {
+      setTimeout(r, 100);
+    });
     }
     const checkoutRes = await request.post(
       `${API_URL}/public/estimates/${target.viewToken}/deposit-checkout`,
